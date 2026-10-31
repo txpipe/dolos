@@ -6,8 +6,8 @@
 //! supervises. A [`ServiceBackend`] keeps a manager's files under a directory
 //! it is given and runs the manager's commands through a [`CommandRunner`], so
 //! tests install over fixture directories and register nothing. An install or
-//! uninstall holds an exclusive lock on that directory throughout, so that two
-//! installs cannot both pass the conflict check.
+//! uninstall holds an exclusive lock on that directory from its checks to its
+//! last change, so that two installs cannot both pass the conflict check.
 //!
 //! Configurations are read from their files alone: a service starts without
 //! the installing shell's `DOLOS_` variables.
@@ -25,6 +25,7 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use dolos_cardano::networks::ResolvedNetwork;
 use dolos_core::config::{Protocol, RootConfig, DEFAULT_CONFIG_FILE};
@@ -216,13 +217,13 @@ impl fmt::Display for Commands {
 
 /// Runs the service manager's commands.
 pub trait CommandRunner {
-    /// Runs `program` with `args`; `Err` with what it reported when it does
-    /// not exit 0.
-    fn run(&self, program: &str, args: &[&str]) -> Result<(), String>;
+    /// Runs `program` with `args`: what it printed, or `Err` with what it
+    /// reported when it does not exit 0.
+    fn run(&self, program: &str, args: &[&str]) -> Result<String, String>;
 }
 
 impl<R: CommandRunner + ?Sized> CommandRunner for &R {
-    fn run(&self, program: &str, args: &[&str]) -> Result<(), String> {
+    fn run(&self, program: &str, args: &[&str]) -> Result<String, String> {
         (**self).run(program, args)
     }
 }
@@ -232,17 +233,17 @@ impl<R: CommandRunner + ?Sized> CommandRunner for &R {
 pub struct SystemRunner;
 
 impl CommandRunner for SystemRunner {
-    fn run(&self, program: &str, args: &[&str]) -> Result<(), String> {
+    fn run(&self, program: &str, args: &[&str]) -> Result<String, String> {
         let output = std::process::Command::new(program)
             .args(args)
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .output()
             .map_err(|error| format!("could not run {program}: {error}"))?;
 
         if output.status.success() {
-            return Ok(());
+            return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
         }
 
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -320,7 +321,8 @@ pub trait ServiceBackend {
     /// Refuses when this process may not change the scope.
     fn check_access(&self) -> Result<(), ServiceError>;
 
-    /// Whether the manager runs `name`'s service, or keeps it loaded.
+    /// Whether the manager runs `name`'s service, will restart it, or keeps
+    /// it loaded.
     fn active(&self, name: &Name) -> bool;
 
     /// Registers the service in `name`'s written file to start on its own,
@@ -379,6 +381,13 @@ pub enum ServiceError {
 
     #[error("{} cannot be written into a service file", .0.display())]
     UnsupportedPath(PathBuf),
+
+    #[error(
+        "another process has held {} locked for {}s; run this again once it is done",
+        .0.display(),
+        PATIENCE.as_secs()
+    )]
+    Busy(PathBuf),
 
     #[error("registering {identity} failed: {failure}; the install was undone{}", also(.cleanup))]
     Register {
@@ -522,11 +531,9 @@ pub fn install(
 ) -> Result<Installed, ServiceError> {
     backend.check_access()?;
 
-    // The file exists, since it was just read; its canonical path has no
-    // `.`, `..` or symlink, which systemd refuses or the daemon resolves
-    // differently.
-    let config_file =
-        fs::canonicalize(&request.config_file).map_err(io_error(&request.config_file))?;
+    // systemd refuses a working directory with `..`. Links stay, so that the
+    // service follows one the operator moves.
+    let config_file = without_dots(&request.config_file).map_err(io_error(&request.config_file))?;
     let working_dir = config_file
         .parent()
         .map_or_else(|| PathBuf::from("/"), Path::to_path_buf);
@@ -539,12 +546,13 @@ pub fn install(
     };
     let contents = backend.render(&unit)?;
 
-    let created = create_dirs(backend.dir())?;
-    let installed = lock(backend.dir())
-        .and_then(|_lock| write_and_register(backend, request, &unit, &contents));
+    let dir = backend.dir();
+    let lock = Lock::take(dir, PATIENCE, true)?
+        .ok_or_else(|| io_error(dir)(io::ErrorKind::NotFound.into()))?;
+    let installed = write_and_register(backend, request, &unit, &contents);
 
     if installed.is_err() {
-        remove_dirs(&created);
+        lock.undo();
     }
 
     installed
@@ -664,7 +672,11 @@ pub fn uninstall(backend: &dyn ServiceBackend, name: &Name) -> Result<Uninstalle
     let identity = backend.identity(name);
     let file = backend.file(name);
 
-    if fs::symlink_metadata(&file).is_err() {
+    // Checked under the lock, which another uninstall may hold while it
+    // removes this file.
+    let lock = Lock::take(backend.dir(), PATIENCE, false)?;
+
+    if lock.is_none() || fs::symlink_metadata(&file).is_err() {
         return Err(if backend.active(name) {
             ServiceError::Orphaned {
                 identity,
@@ -675,8 +687,6 @@ pub fn uninstall(backend: &dyn ServiceBackend, name: &Name) -> Result<Uninstalle
             ServiceError::NotInstalled { identity, file }
         });
     }
-
-    let _lock = lock(backend.dir())?;
 
     if !ours(&file) {
         return Err(ServiceError::Foreign { identity, file });
@@ -748,12 +758,92 @@ fn ours(file: &Path) -> bool {
         && fs::read_to_string(file).is_ok_and(|contents| contents.contains(MARKER))
 }
 
-/// Holds an exclusive lock on `dir` until the returned handle is dropped.
-fn lock(dir: &Path) -> Result<fs::File, ServiceError> {
-    let handle = fs::File::open(dir).map_err(io_error(dir))?;
-    handle.lock().map_err(io_error(dir))?;
+/// How long an install or uninstall waits for another to release the scope.
+/// Any user who can open the directory can lock it.
+const PATIENCE: Duration = Duration::from_secs(30);
 
-    Ok(handle)
+/// An exclusive lock on a scope's directory, held until dropped.
+struct Lock {
+    _handle: fs::File,
+    /// The directories made to take it, outermost first.
+    created: Vec<PathBuf>,
+}
+
+impl Lock {
+    /// Waits up to `patience` for `dir`, made first with its missing
+    /// ancestors when `create`; `None` when it is missing and not made.
+    /// Failing, it leaves what it made: only the lock's holder removes them.
+    fn take(dir: &Path, patience: Duration, create: bool) -> Result<Option<Self>, ServiceError> {
+        let deadline = Instant::now() + patience;
+        let mut created = Vec::new();
+
+        loop {
+            if create {
+                created.extend(create_dirs(dir)?);
+            }
+
+            let handle = match fs::File::open(dir) {
+                Ok(handle) => handle,
+                Err(error) if error.kind() == io::ErrorKind::NotFound && !create => {
+                    return Ok(None)
+                }
+                // Removed by a failed install since it was made.
+                Err(error)
+                    if error.kind() == io::ErrorKind::NotFound && Instant::now() < deadline =>
+                {
+                    continue
+                }
+                Err(error) => return Err(io_error(dir)(error)),
+            };
+
+            loop {
+                match handle.try_lock() {
+                    Ok(()) => break,
+                    Err(fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    Err(fs::TryLockError::WouldBlock) => {
+                        return Err(ServiceError::Busy(dir.to_path_buf()))
+                    }
+                    Err(fs::TryLockError::Error(error)) => return Err(io_error(dir)(error)),
+                }
+            }
+
+            // A failed install removes the directory it made, perhaps while
+            // this one waited on it: then this lock holds nothing.
+            if still_at(&handle, dir).map_err(io_error(dir))? {
+                return Ok(Some(Self {
+                    _handle: handle,
+                    created,
+                }));
+            }
+        }
+    }
+
+    /// Removes the directories it made, when they are still empty, and only
+    /// then releases the lock: an install waiting on them makes them again.
+    fn undo(self) {
+        remove_dirs(&self.created);
+    }
+}
+
+/// Whether `handle` is still the directory at `dir`.
+#[cfg(unix)]
+fn still_at(handle: &fs::File, dir: &Path) -> io::Result<bool> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let held = handle.metadata()?;
+
+    match fs::metadata(dir) {
+        Ok(current) => Ok(held.dev() == current.dev() && held.ino() == current.ino()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(unix))]
+fn still_at(_handle: &fs::File, dir: &Path) -> io::Result<bool> {
+    Ok(dir.is_dir())
 }
 
 /// Creates `dir` and its missing ancestors, returning those it created,
@@ -819,32 +909,48 @@ pub fn shell_quote(word: &str) -> Cow<'_, str> {
     }
 }
 
-/// The `dolos` binary a service runs, by an absolute path naming it as it was
-/// run: `invoked` (`argv[0]`), against `cwd` or found on `path` (`PATH`), when
-/// it leads to `exe`, the running binary. Otherwise `exe`, then `exe` with its
-/// symlinks resolved. Linux reports the running binary through its symlinks,
-/// into a versioned directory a package manager's upgrade removes (Homebrew's
+/// The `dolos` binary a `scope` service runs, by an absolute path naming it
+/// as it was run: `invoked` (`argv[0]`), against `cwd` or found on `path`
+/// (`PATH`), when it leads to `exe`, the running binary. Otherwise `exe`.
+/// Linux reports the running binary through its symlinks, into a versioned
+/// directory a package manager's upgrade removes (Homebrew's
 /// `Cellar/dolos/<version>`), while the name it was run by stays.
+///
+/// A system service runs the binary by its canonical path instead: under
+/// `sudo`, the name it was run by may be a link its invoker owns, which root
+/// would then follow at every start.
 pub fn locate_binary(
+    scope: Scope,
     invoked: Option<&OsStr>,
     path: Option<&OsStr>,
-    cwd: &Path,
+    cwd: Option<&Path>,
     exe: &Path,
 ) -> io::Result<PathBuf> {
-    let exe = cwd.join(exe);
+    let absolute = |path: &Path| match cwd {
+        _ if path.is_absolute() => Some(path.to_path_buf()),
+        Some(cwd) => Some(cwd.join(path)),
+        None => None,
+    };
+
+    let exe = absolute(exe).ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
     let real = fs::canonicalize(&exe)?;
+
+    if scope == Scope::System {
+        return Ok(real);
+    }
 
     let invoked = invoked
         .map(Path::new)
         .filter(|word| !word.as_os_str().is_empty());
     let candidates: Vec<PathBuf> = match invoked {
         Some(word) if word.parent().is_some_and(|dir| !dir.as_os_str().is_empty()) => {
-            vec![cwd.join(word)]
+            absolute(word).into_iter().collect()
         }
         Some(word) => path
             .map(|path| {
                 std::env::split_paths(path)
-                    .map(|dir| cwd.join(dir).join(word))
+                    .filter_map(|dir| absolute(&dir))
+                    .map(|dir| dir.join(word))
                     .collect()
             })
             .unwrap_or_default(),
@@ -854,20 +960,30 @@ pub fn locate_binary(
     let found = candidates
         .into_iter()
         .chain([exe])
-        .filter_map(normal)
+        .filter_map(|candidate| without_dots(&candidate).ok())
         .find(|candidate| fs::canonicalize(candidate).is_ok_and(|found| found == real));
 
     Ok(found.unwrap_or(real))
 }
 
-/// `path` without `.` components, when it is absolute and has no `..`, which
-/// only the file system can resolve.
-fn normal(path: PathBuf) -> Option<PathBuf> {
-    let parent = path
-        .components()
-        .any(|component| component == Component::ParentDir);
+/// `path`, absolute, without `.` and `..`: each `..` steps out of where the
+/// part before it leads, as the kernel steps, and the rest stays as written,
+/// symlinks included.
+fn without_dots(path: &Path) -> io::Result<PathBuf> {
+    let mut resolved = PathBuf::new();
 
-    (path.is_absolute() && !parent).then(|| path.components().collect())
+    for component in std::path::absolute(path)?.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                resolved = resolved.canonicalize()?;
+                resolved.pop();
+            }
+            other => resolved.push(other),
+        }
+    }
+
+    Ok(resolved)
 }
 
 /// The user's home directory, under which user services live.
@@ -877,4 +993,55 @@ fn home() -> Result<PathBuf, ServiceError> {
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)
         .ok_or(ServiceError::NoHome)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn dots_go_as_the_kernel_resolves_them_and_links_stay() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("real/x")).unwrap();
+        std::fs::create_dir_all(root.join("other")).unwrap();
+        std::os::unix::fs::symlink(root.join("real/x"), root.join("link")).unwrap();
+
+        let resolve = |path: &str| without_dots(&root.join(path)).unwrap();
+
+        assert_eq!(resolve("link/./dolos.toml"), root.join("link/dolos.toml"));
+        assert_eq!(resolve("other/../link/x"), root.join("link/x"));
+        // `link/..` is `real`, where the kernel steps out of the link's target.
+        assert_eq!(resolve("link/../y"), root.join("real/y"));
+        assert_eq!(resolve("link/../x/../../link"), root.join("link"));
+    }
+
+    #[test]
+    fn a_held_scope_is_waited_for_then_given_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let held = fs::File::open(dir.path()).unwrap();
+
+        // An exclusive lock waits even for a shared one.
+        held.lock_shared().unwrap();
+
+        let started = Instant::now();
+        let error = Lock::take(dir.path(), Duration::from_millis(300), false)
+            .err()
+            .unwrap();
+
+        assert!(matches!(error, ServiceError::Busy(_)), "{error}");
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        assert!(error.to_string().contains("30s"), "{error}");
+
+        drop(held);
+        assert!(Lock::take(dir.path(), Duration::ZERO, false)
+            .unwrap()
+            .is_some());
+        assert!(
+            Lock::take(&dir.path().join("missing"), Duration::ZERO, false)
+                .unwrap()
+                .is_none()
+        );
+    }
 }

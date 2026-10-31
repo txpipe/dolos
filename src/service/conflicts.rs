@@ -2,6 +2,7 @@
 //! neither files nor listeners, so each instance needs its own stores, ports
 //! and socket.
 
+use std::borrow::Cow;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Component, Path, PathBuf};
 
@@ -95,7 +96,9 @@ impl Resources {
     pub fn clash(&self, other: &Self) -> Option<String> {
         for (key, ours) in &self.paths {
             for (their_key, theirs) in &other.paths {
-                if ours.starts_with(theirs) || theirs.starts_with(ours) {
+                let (a, b) = (folded(ours), folded(theirs));
+
+                if a.starts_with(&b) || b.starts_with(&a) {
                     return Some(format!(
                         "{key} {} overlaps its {their_key} {}",
                         ours.display(),
@@ -117,7 +120,7 @@ impl Resources {
 
         for (key, ours) in &self.sockets {
             for (their_key, theirs) in &other.sockets {
-                if ours == theirs {
+                if folded(ours) == folded(theirs) {
                     return Some(format!("{key} {} is also its {their_key}", ours.display()));
                 }
             }
@@ -150,6 +153,16 @@ fn comparable(path: &Path, working_dir: &Path) -> PathBuf {
     }
 
     resolved
+}
+
+/// `path` as the file system compares it, including the part that does not
+/// exist yet. macOS volumes ignore case unless formatted otherwise; on one
+/// that does not, two paths differing only in case are refused all the same.
+fn folded(path: &Path) -> Cow<'_, Path> {
+    match path.to_str() {
+        Some(text) if cfg!(target_os = "macos") => Cow::Owned(text.to_lowercase().into()),
+        _ => Cow::Borrowed(path),
+    }
 }
 
 fn host_and_port(address: &str) -> Option<(Option<IpAddr>, u16)> {

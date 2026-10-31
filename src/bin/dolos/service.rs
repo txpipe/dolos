@@ -116,9 +116,10 @@ fn refused(error: ServiceError) -> miette::Report {
     }
 }
 
-/// This command line under `sudo`, naming the binary by its path.
+/// This command line under `sudo`, naming the binary by the path its system
+/// unit records.
 fn as_root() -> String {
-    let binary = binary()
+    let binary = binary(service::Scope::System)
         .map(PathBuf::into_os_string)
         .unwrap_or_else(|_| "dolos".into());
 
@@ -147,16 +148,23 @@ fn load(config_file: &Path) -> miette::Result<RootConfig> {
         .context("loading configuration")
 }
 
-/// The running binary, by the path it was run as.
-fn binary() -> miette::Result<PathBuf> {
+/// The running binary, by the path a `scope` service runs it as.
+fn binary(scope: service::Scope) -> miette::Result<PathBuf> {
     let exe = std::env::current_exe().into_diagnostic()?;
-    let cwd = std::env::current_dir().into_diagnostic()?;
+    // Only a relative path needs it, and it may have been removed.
+    let cwd = std::env::current_dir().ok();
     let invoked = std::env::args_os().next();
     let path = std::env::var_os("PATH");
 
-    service::locate_binary(invoked.as_deref(), path.as_deref(), &cwd, &exe)
-        .into_diagnostic()
-        .context("locating the dolos binary")
+    service::locate_binary(
+        scope,
+        invoked.as_deref(),
+        path.as_deref(),
+        cwd.as_deref(),
+        &exe,
+    )
+    .into_diagnostic()
+    .context("locating the dolos binary")
 }
 
 fn install(config_file: &Path, args: &InstallArgs) -> miette::Result<()> {
@@ -169,7 +177,7 @@ fn install(config_file: &Path, args: &InstallArgs) -> miette::Result<()> {
         None => derived(&config)?,
     };
 
-    let binary = binary()?;
+    let binary = binary(backend.scope())?;
 
     let request = service::Install {
         name,

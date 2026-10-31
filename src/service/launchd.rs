@@ -45,7 +45,7 @@ impl<R: CommandRunner> Launchd<R> {
         self.logs.join(format!("dolos-{name}.log"))
     }
 
-    fn launchctl(&self, args: &[&str]) -> Result<(), Failure> {
+    fn launchctl(&self, args: &[&str]) -> Result<String, Failure> {
         self.runner
             .run("launchctl", args)
             .map_err(|detail| Failure::of("launchctl", args, detail))
@@ -173,6 +173,7 @@ impl<R: CommandRunner> ServiceBackend for Launchd<R> {
         let file = self.file(name);
 
         self.launchctl(&["bootstrap", &self.domain(), &file.to_string_lossy()])
+            .map(drop)
             .map_err(|failure| RegisterError {
                 failure,
                 loaded: false,

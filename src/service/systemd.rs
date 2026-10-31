@@ -48,7 +48,7 @@ impl<R: CommandRunner> Systemd<R> {
         format!("dolos-{name}.service")
     }
 
-    fn systemctl(&self, args: &[&str]) -> Result<(), Failure> {
+    fn systemctl(&self, args: &[&str]) -> Result<String, Failure> {
         let mut all = Vec::with_capacity(args.len() + 1);
 
         if self.scope == Scope::User {
@@ -185,8 +185,15 @@ impl<R: CommandRunner> ServiceBackend for Systemd<R> {
     }
 
     fn active(&self, name: &Name) -> bool {
-        self.systemctl(&["is-active", "--quiet", &Self::unit(name)])
-            .is_ok()
+        // `is-active` says no while a crashed service waits to restart; a
+        // failed one is not restarted.
+        self.systemctl(&[
+            "show",
+            "--property=ActiveState",
+            "--value",
+            &Self::unit(name),
+        ])
+        .is_ok_and(|state| !matches!(state.trim(), "" | "inactive" | "failed"))
     }
 
     fn register(&self, name: &Name, start: bool) -> Result<(), RegisterError> {
@@ -228,10 +235,11 @@ impl<R: CommandRunner> ServiceBackend for Systemd<R> {
 
     fn unregister(&self, name: &Name) -> Result<(), Failure> {
         self.systemctl(&["disable", "--now", &Self::unit(name)])
+            .map(drop)
     }
 
     fn forget(&self) -> Result<(), Failure> {
-        self.systemctl(&["daemon-reload"])
+        self.systemctl(&["daemon-reload"]).map(drop)
     }
 
     fn autostart(&self) -> Autostart {

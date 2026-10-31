@@ -16,19 +16,24 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 
 use dolos::service::{
-    install, locate_binary, uninstall, CommandRunner, Install, Launchd, Name, Recorded,
+    install, locate_binary, uninstall, CommandRunner, Install, Launchd, Name, Recorded, Scope,
     ServiceBackend, ServiceError, SystemRunner, Systemd, Unit,
 };
 use dolos_core::config::{load_file, Compatibility, RootConfig};
 
 /// Records each command it is asked to run and fails those containing a
-/// pattern in `fail`. Asked whether a service runs (`is-active`, `print`), it
-/// says yes only for the identities in `active`.
+/// pattern in `fail`. Asked about a service (`show`, `print`), it reports the
+/// state `states` gives its identity, else `inactive`; launchd's `print`
+/// fails for an inactive one.
 #[derive(Default)]
 struct Recorder {
     calls: RefCell<Vec<String>>,
-    fail: RefCell<Vec<&'static str>>,
-    active: RefCell<Vec<String>>,
+    /// Each pattern, with how many matching calls still pass before they fail.
+    fail: RefCell<Vec<(&'static str, usize)>>,
+    states: RefCell<Vec<(String, &'static str)>>,
+    /// A file, and whether it existed at each call.
+    watched: RefCell<Option<PathBuf>>,
+    present: RefCell<Vec<bool>>,
 }
 
 impl Recorder {
@@ -39,49 +44,73 @@ impl Recorder {
     }
 
     fn fail_on(&self, pattern: &'static str) {
-        self.fail.borrow_mut().push(pattern);
+        self.fail_after(pattern, 0);
+    }
+
+    /// Fails the calls containing `pattern` after the first `passing`.
+    fn fail_after(&self, pattern: &'static str, passing: usize) {
+        self.fail.borrow_mut().push((pattern, passing));
     }
 
     /// Has the manager run the service `identity` names.
     fn activate(&self, identity: String) {
-        self.active.borrow_mut().push(identity);
+        self.set_state(identity, "active");
+    }
+
+    fn set_state(&self, identity: String, state: &'static str) {
+        self.states.borrow_mut().push((identity, state));
+    }
+
+    fn watch(&self, file: PathBuf) {
+        *self.watched.borrow_mut() = Some(file);
     }
 
     fn calls(&self) -> Vec<String> {
         self.calls.borrow().clone()
     }
+
+    /// Whether the watched file existed at each call.
+    fn present(&self) -> Vec<bool> {
+        self.present.borrow().clone()
+    }
 }
 
 impl CommandRunner for Recorder {
-    fn run(&self, program: &str, args: &[&str]) -> Result<(), String> {
+    fn run(&self, program: &str, args: &[&str]) -> Result<String, String> {
         let call = std::iter::once(program)
             .chain(args.iter().copied())
             .collect::<Vec<_>>()
             .join(" ");
         self.calls.borrow_mut().push(call.clone());
 
-        if args.contains(&"is-active") || args.first() == Some(&"print") {
-            let active = self
-                .active
+        if let Some(file) = &*self.watched.borrow() {
+            self.present.borrow_mut().push(file.exists());
+        }
+
+        if args.contains(&"show") || args.first() == Some(&"print") {
+            let state = self
+                .states
                 .borrow()
                 .iter()
-                .any(|identity| call.ends_with(identity.as_str()));
+                .rev()
+                .find(|(identity, _)| call.ends_with(identity.as_str()))
+                .map_or("inactive", |(_, state)| *state);
 
-            return if active {
-                Ok(())
-            } else {
-                Err("not running".into())
+            return match args.first() {
+                Some(&"print") if state == "inactive" => Err("not loaded".into()),
+                _ => Ok(format!("{state}\n")),
             };
         }
 
-        match self
-            .fail
-            .borrow()
-            .iter()
-            .find(|pattern| call.contains(**pattern))
-        {
-            Some(pattern) => Err(format!("{pattern}: simulated failure")),
-            None => Ok(()),
+        let mut fail = self.fail.borrow_mut();
+
+        match fail.iter_mut().find(|(pattern, _)| call.contains(*pattern)) {
+            Some((_, passing)) if *passing > 0 => {
+                *passing -= 1;
+                Ok(String::new())
+            }
+            Some((pattern, _)) => Err(format!("{pattern}: simulated failure")),
+            None => Ok(String::new()),
         }
     }
 }
@@ -244,7 +273,10 @@ fn systemctl(kind: Kind) -> &'static str {
 fn query(kind: Kind, name: &str) -> String {
     match kind {
         Kind::Launchd => format!("launchctl print gui/{UID}/io.txpipe.dolos.{name}"),
-        _ => format!("{} is-active --quiet dolos-{name}.service", systemctl(kind)),
+        _ => format!(
+            "{} show --property=ActiveState --value dolos-{name}.service",
+            systemctl(kind)
+        ),
     }
 }
 
@@ -468,17 +500,22 @@ fn the_unit_runs_absolute_paths_in_the_config_directory() {
     }
 }
 
-/// systemd refuses a working directory with `..`, and the daemon resolves
-/// `..` in its storage path from where a symlink leads, so the unit records
-/// the configuration by its canonical path.
+/// systemd refuses a working directory with `..`, so the unit records the
+/// configuration without `.` and `..`, stepping out of where a link leads as
+/// the kernel does. Links stay, so that the service follows one the operator
+/// moves: a dotfiles link, or a release switch such as `current`.
 #[test]
-fn the_configuration_is_recorded_by_its_canonical_path() {
+fn the_configuration_is_recorded_without_dots_through_its_links() {
     let machine = Machine::new();
     let preview = machine.instance("preview", "data", 3000);
     let dir = preview.file.parent().unwrap();
+    let srv = machine.root().join("srv");
 
-    std::fs::create_dir_all(machine.root().join("srv/other")).unwrap();
-    std::os::unix::fs::symlink(dir, machine.root().join("srv/linked")).unwrap();
+    std::fs::create_dir_all(srv.join("other")).unwrap();
+    std::fs::create_dir_all(srv.join("node")).unwrap();
+    std::os::unix::fs::symlink(dir, srv.join("current")).unwrap();
+    std::os::unix::fs::symlink(&preview.file, srv.join("node/dolos.toml")).unwrap();
+    std::os::unix::fs::symlink(dir.join("data"), srv.join("hop")).unwrap();
 
     // Relative to this process's working directory, as `--config` may be.
     let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
@@ -489,11 +526,22 @@ fn the_configuration_is_recorded_by_its_canonical_path() {
         .collect::<PathBuf>()
         .join(preview.file.strip_prefix("/").unwrap());
 
-    for config_file in [
-        machine.root().join("srv/other/../preview/dolos.toml"),
-        machine.root().join("srv/linked/dolos.toml"),
-        relative,
+    for (config_file, expected) in [
+        (
+            srv.join("other/../preview/./dolos.toml"),
+            preview.file.clone(),
+        ),
+        (relative, preview.file.clone()),
+        (
+            srv.join("current/dolos.toml"),
+            srv.join("current/dolos.toml"),
+        ),
+        (srv.join("node/dolos.toml"), srv.join("node/dolos.toml")),
+        // `hop/..` is `preview`, where the link leads.
+        (srv.join("hop/../dolos.toml"), preview.file.clone()),
     ] {
+        let working_dir = expected.parent().unwrap();
+
         for kind in KINDS {
             let runner = Recorder::default();
             let backend = machine.backend(kind, &runner);
@@ -505,11 +553,20 @@ fn the_configuration_is_recorded_by_its_canonical_path() {
             let installed = install(backend.as_ref(), &request).unwrap();
             let contents = std::fs::read_to_string(&installed.file).unwrap();
 
-            assert_eq!(installed.config, preview.file, "{kind:?}: {config_file:?}");
-            assert_eq!(installed.working_directory, dir, "{kind:?}");
+            assert_eq!(installed.config, expected, "{kind:?}: {config_file:?}");
+            assert_eq!(installed.working_directory, working_dir, "{kind:?}");
+            assert_eq!(installed.storage, working_dir.join("data"), "{kind:?}");
             assert!(
-                !contents.contains("..") && !contents.contains("linked"),
+                !contents.contains("..") && !contents.contains("/./"),
                 "{kind:?}: {contents}"
+            );
+            assert_eq!(
+                backend.read(&contents),
+                Some(Recorded {
+                    config: expected.clone(),
+                    working_dir: working_dir.to_path_buf(),
+                }),
+                "{kind:?}"
             );
 
             uninstall(backend.as_ref(), &installed.name).unwrap();
@@ -830,6 +887,24 @@ fn a_file_dolos_did_not_write_is_left_alone() {
             "[Service]\nExecStart=/usr/local/bin/dolos daemon\n",
         )
         .unwrap();
+
+        // As `systemctl link` leaves it, to a file Dolos wrote elsewhere.
+        let elsewhere = machine.root().join("units/written");
+        std::fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
+        std::fs::write(
+            &elsewhere,
+            backend
+                .render(&Unit {
+                    name: name("linked"),
+                    binary: machine.binary(),
+                    config: preview.file.clone(),
+                    working_dir: preview.file.parent().unwrap().to_path_buf(),
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        let linked = backend.file(&name("linked"));
+        std::os::unix::fs::symlink(&elsewhere, &linked).unwrap();
         let before = machine.files();
 
         let error = install(backend.as_ref(), &machine.request(&preview, None, true)).unwrap_err();
@@ -838,7 +913,17 @@ fn a_file_dolos_did_not_write_is_left_alone() {
             "{kind:?}: {error}"
         );
 
-        for foreign in ["cardano-preview", "by-hand"] {
+        let error = install(
+            backend.as_ref(),
+            &machine.request(&preview, Some("linked"), true),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, ServiceError::Foreign { .. }),
+            "{kind:?}: {error}"
+        );
+
+        for foreign in ["cardano-preview", "by-hand", "linked"] {
             let error = uninstall(backend.as_ref(), &name(foreign)).unwrap_err();
             assert!(
                 matches!(error, ServiceError::Foreign { .. }),
@@ -846,51 +931,76 @@ fn a_file_dolos_did_not_write_is_left_alone() {
             );
         }
 
-        assert!(mask.is_symlink(), "{kind:?}");
+        assert!(mask.is_symlink() && linked.is_symlink(), "{kind:?}");
         assert_eq!(machine.files(), before, "{kind:?}");
         assert!(runner.calls().is_empty(), "{:?}", runner.calls());
     }
 }
 
-/// A service whose file was removed by hand still runs; installing over it
-/// would leave the old process running, and only the manager can stop it.
+/// A service whose file was removed by hand still runs, or is restarted
+/// after each crash; installing over it would leave the old process running,
+/// and only the manager can stop it. A failed one is no longer restarted.
 #[test]
 fn a_service_running_without_its_file_is_reported() {
     for kind in KINDS {
-        let machine = Machine::new();
-        let preview = machine.instance("preview", "data", 3000);
-        let runner = Recorder::default();
-        let backend = machine.backend(kind, &runner);
-        let name = name("cardano-preview");
-
-        runner.activate(backend.identity(&name));
-        let before = machine.files();
-
-        let error = install(backend.as_ref(), &machine.request(&preview, None, true)).unwrap_err();
-        assert!(
-            matches!(&error, ServiceError::Orphaned { stop, .. }
-                if *stop == backend.commands(&name).stop),
-            "{kind:?}: {error}"
-        );
-        assert!(error.to_string().contains(&backend.commands(&name).stop));
-
-        let error = uninstall(backend.as_ref(), &name).unwrap_err();
-        assert!(
-            matches!(&error, ServiceError::Orphaned { stop, .. }
-                if *stop == backend.commands(&name).stop),
-            "{kind:?}: {error}"
-        );
-
-        assert_eq!(machine.files(), before, "{kind:?}");
-        assert!(!backend.dir().exists(), "{kind:?}");
-        assert_eq!(
-            runner.calls(),
-            [
-                query(kind, "cardano-preview"),
-                query(kind, "cardano-preview")
+        let states: &[(&str, bool)] = match kind {
+            Kind::Launchd => &[("active", true), ("inactive", false)],
+            _ => &[
+                ("active", true),
+                ("activating", true),
+                ("deactivating", true),
+                ("reloading", true),
+                ("failed", false),
+                ("inactive", false),
             ],
-            "{kind:?}"
-        );
+        };
+
+        for &(state, orphaned) in states {
+            let machine = Machine::new();
+            let preview = machine.instance("preview", "data", 3000);
+            let runner = Recorder::default();
+            let backend = machine.backend(kind, &runner);
+            let name = name("cardano-preview");
+
+            runner.set_state(backend.identity(&name), state);
+            let before = machine.files();
+
+            let error = uninstall(backend.as_ref(), &name).unwrap_err();
+
+            if !orphaned {
+                assert!(
+                    matches!(error, ServiceError::NotInstalled { .. }),
+                    "{kind:?} {state}: {error}"
+                );
+                continue;
+            }
+
+            assert!(
+                matches!(&error, ServiceError::Orphaned { stop, .. }
+                    if *stop == backend.commands(&name).stop),
+                "{kind:?} {state}: {error}"
+            );
+
+            let error =
+                install(backend.as_ref(), &machine.request(&preview, None, true)).unwrap_err();
+            assert!(
+                matches!(&error, ServiceError::Orphaned { stop, .. }
+                    if *stop == backend.commands(&name).stop),
+                "{kind:?} {state}: {error}"
+            );
+            assert!(error.to_string().contains(&backend.commands(&name).stop));
+
+            assert_eq!(machine.files(), before, "{kind:?}");
+            assert!(!backend.dir().exists(), "{kind:?}");
+            assert_eq!(
+                runner.calls(),
+                [
+                    query(kind, "cardano-preview"),
+                    query(kind, "cardano-preview")
+                ],
+                "{kind:?}"
+            );
+        }
     }
 }
 
@@ -1002,6 +1112,33 @@ fn a_shared_socket_is_refused() {
     }
 }
 
+/// macOS volumes ignore case, so paths differing only in case lead to one
+/// store or socket, even before either exists.
+#[cfg(target_os = "macos")]
+#[test]
+fn paths_differing_in_case_clash_on_macos() {
+    for kind in KINDS {
+        let machine = Machine::new();
+        let with = |storage: &str, socket: &str, port| {
+            format!(
+                "{}\n[serve.ouroboros]\nlisten_path = \"{socket}\"\n",
+                config("preview", storage, port)
+            )
+        };
+        let a = machine.instance_with("a", "data", &with("../store/Mainnet", "../A.socket", 3000));
+        let b = machine.instance_with("b", "data", &with("../store/mainnet", "../B.socket", 3001));
+        let c = machine.instance_with("c", "data", &with("../store/other", "../a.socket", 3002));
+
+        let (identity, reason) = refusal(kind, &machine, &[(&a, "a")], (&b, "b"));
+        assert_eq!(identity, self::identity(kind, "a"));
+        assert!(reason.contains("storage.path"), "{reason}");
+
+        let (identity, reason) = refusal(kind, &machine, &[], (&c, "c"));
+        assert_eq!(identity, self::identity(kind, "a"));
+        assert!(reason.contains("serve.ouroboros.listen_path"), "{reason}");
+    }
+}
+
 #[test]
 fn every_neighbour_is_checked() {
     for kind in KINDS {
@@ -1095,8 +1232,9 @@ fn concurrent_installs_take_turns() {
             .to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
 
+        // A shared lock, which only an exclusive one waits for.
         let held = std::fs::File::open(&dir).unwrap();
-        held.lock().unwrap();
+        held.lock_shared().unwrap();
 
         let (sender, receiver) = mpsc::channel();
 
@@ -1136,6 +1274,169 @@ fn concurrent_installs_take_turns() {
             assert!(
                 matches!(&error, ServiceError::Conflict { identity, .. }
                     if *identity == self::identity(kind, "first")),
+                "{kind:?}: {error}"
+            );
+        });
+    }
+}
+
+/// An install that fails removes the directories it made before it lets
+/// another in, and one that waited on a directory since removed makes it
+/// again: otherwise it would write into nothing, or a third install could
+/// check its conflicts beside it.
+#[test]
+fn a_directory_removed_under_a_waiting_install_is_made_again() {
+    for kind in KINDS {
+        let machine = Machine::new();
+        let preview = machine.instance("preview", "data", 3000);
+        let dir = machine
+            .backend(kind, &Recorder::default())
+            .dir()
+            .to_path_buf();
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let held = std::fs::File::open(&dir).unwrap();
+        held.lock_shared().unwrap();
+
+        let (sender, receiver) = mpsc::channel();
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let runner = Recorder::default();
+                let backend = machine.backend(kind, &runner);
+                let result = install(backend.as_ref(), &machine.request(&preview, None, false));
+
+                sender.send(result.map(|installed| installed.file)).unwrap();
+            });
+
+            assert!(
+                matches!(
+                    receiver.recv_timeout(Duration::from_millis(500)),
+                    Err(RecvTimeoutError::Timeout)
+                ),
+                "{kind:?}: the install did not wait for the scope"
+            );
+
+            // As the failed install that made it does, before unlocking.
+            std::fs::remove_dir(&dir).unwrap();
+            drop(held);
+
+            let file = receiver.recv().unwrap().unwrap();
+            assert!(file.is_file() && file.starts_with(&dir), "{kind:?}");
+        });
+    }
+}
+
+/// Fails its registration command, after having another process wait for the
+/// scope's directory, which it reports as there or not once it gets it.
+struct Contender {
+    fail: &'static str,
+    dir: PathBuf,
+    waiter: RefCell<Option<std::thread::JoinHandle<bool>>>,
+}
+
+impl CommandRunner for Contender {
+    fn run(&self, _program: &str, args: &[&str]) -> Result<String, String> {
+        if args.contains(&"show") {
+            return Ok("inactive\n".into());
+        }
+
+        if args.first() == Some(&"print") {
+            return Err("not loaded".into());
+        }
+
+        if !args.contains(&self.fail) {
+            return Ok(String::new());
+        }
+
+        let handle = std::fs::File::open(&self.dir).unwrap();
+        let dir = self.dir.clone();
+        *self.waiter.borrow_mut() = Some(std::thread::spawn(move || {
+            handle.lock().unwrap();
+            dir.exists()
+        }));
+
+        Err("simulated failure".into())
+    }
+}
+
+#[test]
+fn a_failed_install_removes_its_directory_before_unlocking() {
+    for kind in KINDS {
+        let machine = Machine::new();
+        let preview = machine.instance("preview", "data", 3000);
+        let dir = machine
+            .backend(kind, &Recorder::default())
+            .dir()
+            .to_path_buf();
+        let runner = Contender {
+            fail: match kind {
+                Kind::Launchd => "bootstrap",
+                _ => "daemon-reload",
+            },
+            dir: dir.clone(),
+            waiter: RefCell::default(),
+        };
+        let backend: Box<dyn ServiceBackend + '_> = match kind {
+            Kind::SystemdUser => Box::new(Systemd::user(&machine.home(), &runner)),
+            Kind::SystemdSystem => Box::new(Systemd::system(machine.root(), true, &runner)),
+            Kind::Launchd => Box::new(Launchd::new(&machine.home(), UID, &runner)),
+        };
+
+        let error = install(backend.as_ref(), &machine.request(&preview, None, true)).unwrap_err();
+        assert!(
+            matches!(error, ServiceError::Register { .. }),
+            "{kind:?}: {error}"
+        );
+
+        let waiter = runner.waiter.take().unwrap();
+        assert!(
+            !waiter.join().unwrap(),
+            "{kind:?}: the lock was released first"
+        );
+        assert!(!dir.exists(), "{kind:?}");
+    }
+}
+
+/// An uninstall waits for the scope, then finds the file another uninstall
+/// removed meanwhile gone.
+#[test]
+fn an_uninstall_waits_and_checks_again() {
+    for kind in KINDS {
+        let machine = Machine::new();
+        let preview = machine.instance("preview", "data", 3000);
+        let runner = Recorder::default();
+        let backend = machine.backend(kind, &runner);
+        let installed = install(backend.as_ref(), &machine.request(&preview, None, false)).unwrap();
+
+        let held = std::fs::File::open(backend.dir()).unwrap();
+        held.lock_shared().unwrap();
+
+        let (sender, receiver) = mpsc::channel();
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let runner = Recorder::default();
+                let backend = machine.backend(kind, &runner);
+                let result = uninstall(backend.as_ref(), &installed.name);
+
+                sender.send(result.map(|_| ())).unwrap();
+            });
+
+            assert!(
+                matches!(
+                    receiver.recv_timeout(Duration::from_millis(500)),
+                    Err(RecvTimeoutError::Timeout)
+                ),
+                "{kind:?}: the uninstall did not wait for the scope"
+            );
+
+            std::fs::remove_file(&installed.file).unwrap();
+            drop(held);
+
+            let error = receiver.recv().unwrap().unwrap_err();
+            assert!(
+                matches!(error, ServiceError::NotInstalled { .. }),
                 "{kind:?}: {error}"
             );
         });
@@ -1267,6 +1568,7 @@ fn a_failing_enable_reloads_after_removing_the_file() {
         let preview = machine.instance("preview", "data", 3000);
         let runner = Recorder::failing(" enable ");
         let backend = machine.backend(kind, &runner);
+        runner.watch(backend.file(&name("cardano-preview")));
         let before = machine.files();
 
         let error = install(backend.as_ref(), &machine.request(&preview, None, false)).unwrap_err();
@@ -1282,6 +1584,30 @@ fn a_failing_enable_reloads_after_removing_the_file() {
         let mut expected = registration(kind, "cardano-preview");
         expected.push(format!("{} daemon-reload", systemctl(kind)));
         assert_eq!(runner.calls(), expected, "{kind:?}");
+        assert_eq!(runner.present(), [false, true, true, false], "{kind:?}");
+    }
+}
+
+#[test]
+fn a_failing_reload_after_a_failing_enable_is_reported() {
+    for kind in SYSTEMD {
+        let machine = Machine::new();
+        let preview = machine.instance("preview", "data", 3000);
+        let runner = Recorder::failing(" enable ");
+        runner.fail_after("daemon-reload", 1);
+        let backend = machine.backend(kind, &runner);
+        let before = machine.files();
+
+        let error = install(backend.as_ref(), &machine.request(&preview, None, false)).unwrap_err();
+        let message = error.to_string();
+
+        let ServiceError::Register { cleanup, .. } = &error else {
+            panic!("{kind:?}: {error}");
+        };
+        assert_eq!(cleanup.len(), 1, "{cleanup:?}");
+        assert!(cleanup[0].contains("daemon-reload"), "{cleanup:?}");
+        assert!(message.contains("except: "), "{message}");
+        assert_eq!(machine.files(), before, "{kind:?}");
     }
 }
 
@@ -1487,7 +1813,11 @@ fn reports_print_the_native_commands() {
 
 #[test]
 fn the_system_runner_reports_what_failed() {
-    assert_eq!(SystemRunner.run("true", &[]), Ok(()));
+    assert_eq!(SystemRunner.run("true", &[]), Ok(String::new()));
+    assert_eq!(
+        SystemRunner.run("sh", &["-c", "echo active"]),
+        Ok("active\n".to_string())
+    );
     assert_eq!(
         SystemRunner.run("sh", &["-c", "echo refused >&2; exit 3"]),
         Err("refused".to_string())
@@ -1504,7 +1834,7 @@ fn the_system_runner_reports_what_failed() {
 }
 
 /// Linux reports the running binary through its symlinks, as Homebrew's
-/// versioned `Cellar` path; the unit names it as it was run.
+/// versioned `Cellar` path; a user unit names it as it was run.
 #[test]
 fn the_binary_is_recorded_by_the_path_it_was_run_as() {
     let machine = Machine::new();
@@ -1520,9 +1850,10 @@ fn the_binary_is_recorded_by_the_path_it_was_run_as() {
     std::fs::write(&real, "dolos 1.0").unwrap();
     std::fs::write(&other, "another dolos").unwrap();
     std::os::unix::fs::symlink(&real, &link).unwrap();
+    std::os::unix::fs::symlink(real.parent().unwrap(), root.join("hop")).unwrap();
 
     let locate = |invoked: Option<&str>, path: Option<&OsStr>, exe: &Path| {
-        locate_binary(invoked.map(OsStr::new), path, root, exe).unwrap()
+        locate_binary(Scope::User, invoked.map(OsStr::new), path, Some(root), exe).unwrap()
     };
     let path = std::env::join_paths([other.parent().unwrap(), link.parent().unwrap()]).unwrap();
 
@@ -1530,15 +1861,43 @@ fn the_binary_is_recorded_by_the_path_it_was_run_as() {
     assert_eq!(locate(Some("./bin/./dolos"), None, &real), link);
     assert_eq!(locate(Some("dolos"), Some(&path), &real), link);
 
-    // A name leading to another file, or through `..`, is not taken.
+    // Without `..`, stepping out of where the part before it leads.
+    assert_eq!(locate(Some("other/../bin/dolos"), None, &real), link);
+    assert_eq!(locate(Some("hop/../bin/dolos"), None, &real), real);
+
+    // A name leading to another file is not taken.
     assert_eq!(locate(other.to_str(), None, &real), real);
-    assert_eq!(locate(Some("bin/../bin/dolos"), None, &real), real);
     assert_eq!(locate(Some("dolos"), None, &real), real);
     assert_eq!(locate(None, None, &real), real);
 
-    // As macOS reports it, through the link.
+    // As macOS reports it: through the link, and through `..` as invoked.
     assert_eq!(locate(None, None, &link), link);
     assert_eq!(locate(None, None, Path::new("bin/dolos")), link);
+    assert_eq!(locate(None, None, &root.join("other/../bin/dolos")), link);
+
+    // Without a working directory, a relative name is passed over.
+    let without_cwd = |invoked: Option<&str>, path: Option<&OsStr>| {
+        locate_binary(Scope::User, invoked.map(OsStr::new), path, None, &real).unwrap()
+    };
+    assert_eq!(without_cwd(Some("dolos"), Some(&path)), link);
+    assert_eq!(without_cwd(Some("./bin/dolos"), None), real);
+    assert!(locate_binary(Scope::User, None, None, None, Path::new("bin/dolos")).is_err());
+
+    // Root runs a system unit's binary by its canonical path, never through
+    // a link its invoker may own.
+    for exe in [&real, &link] {
+        assert_eq!(
+            locate_binary(
+                Scope::System,
+                link.to_str().map(OsStr::new),
+                Some(&path),
+                Some(root),
+                exe
+            )
+            .unwrap(),
+            real
+        );
+    }
 }
 
 /// The binary refuses these before it reads anything, so no service manager is
@@ -1606,7 +1965,7 @@ mod command_line {
     /// Records its arguments, and reports every service as not running.
     const STAND_IN: &str = "#!/bin/sh\n\
         echo \"${0##*/} $*\" >> \"$SERVICE_CALLS\"\n\
-        case \" $* \" in *\" print \"*|*\" is-active \"*) exit 3 ;; esac\n";
+        case \" $* \" in *\" print \"*) exit 3 ;; *\" show \"*) echo inactive ;; esac\n";
 
     const KIND: Kind = if cfg!(target_os = "macos") {
         Kind::Launchd
@@ -1654,10 +2013,15 @@ mod command_line {
 
         /// `dolos` with `args`, run by name in `dir` under umask 002.
         fn dolos(&self, dir: &Path, args: &[&str]) -> Command {
+            self.shell(dir, "exec dolos \"$@\"", args)
+        }
+
+        /// `script` with `args`, run in `dir` under umask 002.
+        fn shell(&self, dir: &Path, script: &str, args: &[&str]) -> Command {
             let mut command = Command::new("/bin/sh");
 
             command
-                .args(["-c", "umask 002 && exec dolos \"$@\"", "sh"])
+                .args(["-c", &format!("umask 002 && {script}"), "sh"])
                 .args(args)
                 .env_clear()
                 .env("PATH", self.machine.root().join("bin"))
@@ -1680,14 +2044,19 @@ mod command_line {
         flat(&String::from_utf8_lossy(&output.stderr))
     }
 
-    /// What installing `name` runs, with the user's id unknown.
-    fn assert_installing(calls: &[String], name: &str) {
+    /// What installing `name` runs, as this user.
+    fn assert_installing(sandbox: &Sandbox, name: &str) {
+        let calls = sandbox.calls();
+
         match KIND {
-            Kind::Launchd => assert!(
-                matches!(calls, [print] if print.starts_with("launchctl print gui/")
-                    && print.ends_with(&format!("/io.txpipe.dolos.{name}"))),
-                "{calls:?}"
-            ),
+            Kind::Launchd => {
+                let uid = std::fs::metadata(sandbox.machine.root()).unwrap().uid();
+
+                assert_eq!(
+                    calls,
+                    [format!("launchctl print gui/{uid}/io.txpipe.dolos.{name}")]
+                );
+            }
             _ => assert_eq!(calls, registration(KIND, name)),
         }
     }
@@ -1726,7 +2095,7 @@ mod command_line {
         assert!(std::fs::read_to_string(&file)
             .unwrap()
             .contains(binary.to_str().unwrap()));
-        assert_installing(&sandbox.calls(), "cardano-preview");
+        assert_installing(&sandbox, "cardano-preview");
 
         // Under umask 002, nothing it writes is writable by group or others.
         assert_eq!(std::fs::metadata(&file).unwrap().mode() & 0o777, 0o644);
@@ -1778,13 +2147,14 @@ mod command_line {
             "{output:?}"
         );
 
-        // `inside` stores in `preview/data` by its file.
+        // `inside` stores in `preview/data` by its file, which `preview` does
+        // by its own.
         let output = sandbox
             .dolos(
                 inside.file.parent().unwrap(),
                 &["service", "install", "inside"],
             )
-            .env("DOLOS_STORAGE__PATH", "data")
+            .env("DOLOS_STORAGE__PATH", "elsewhere")
             .output()
             .unwrap();
 
@@ -1794,6 +2164,116 @@ mod command_line {
                 && stderr(&output).contains("storage.path"),
             "{output:?}"
         );
+    }
+
+    /// Without a name, uninstall derives the one its file gives, as install
+    /// did.
+    #[test]
+    fn uninstall_derives_its_name_from_the_file_alone() {
+        let sandbox = Sandbox::new();
+        let preview = sandbox.machine.instance("preview", "data", 3000);
+        let preprod =
+            sandbox
+                .machine
+                .instance_with("preprod", "data", &config("preprod", "data", 3001));
+
+        for instance in [&preview, &preprod] {
+            let output = sandbox
+                .dolos(instance.file.parent().unwrap(), &["service", "install"])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
+
+        let output = sandbox
+            .dolos(
+                preview.file.parent().unwrap(),
+                &["service", "uninstall", "--format", "json"],
+            )
+            .env("DOLOS_CHAIN__NETWORK", "preprod")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+
+        let uninstalled: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(uninstalled["name"], "cardano-preview");
+
+        let left: Vec<_> = std::fs::read_dir(sandbox.services())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(left.len(), 1, "{left:?}");
+        assert!(
+            left[0].to_string_lossy().contains("cardano-preprod"),
+            "{left:?}"
+        );
+    }
+
+    /// A custom network's genesis files are read before anything is written,
+    /// as the service would read them at its first start.
+    #[test]
+    fn a_custom_network_without_its_genesis_is_refused() {
+        let sandbox = Sandbox::new();
+        let custom = sandbox.machine.instance_with(
+            "custom",
+            "data",
+            &format!(
+                "compatibility = \"{}\"\n\n\
+                 [chain]\nprotocol = \"cardano\"\nnetwork = \"custom\"\n\n\
+                 [chain.cardano]\nmagic = 42\nis_testnet = true\n\n\
+                 [chain.cardano.genesis]\n\
+                 byron_path = \"genesis/byron.json\"\n\
+                 shelley_path = \"genesis/shelley.json\"\n\
+                 alonzo_path = \"genesis/alonzo.json\"\n\
+                 conway_path = \"genesis/conway.json\"\n\n\
+                 [upstream]\npeer_address = \"127.0.0.1:3001\"\n\n\
+                 [storage]\npath = \"data\"\n",
+                Compatibility::current()
+            ),
+        );
+
+        let output = sandbox
+            .dolos(custom.file.parent().unwrap(), &["service", "install"])
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(stderr(&output).contains("genesis"), "{output:?}");
+        assert!(sandbox.calls().is_empty(), "{:?}", sandbox.calls());
+        assert!(!sandbox.services().exists());
+    }
+
+    /// The working directory matters only for a relative path, and may have
+    /// been removed.
+    #[test]
+    fn installs_from_a_removed_working_directory() {
+        let sandbox = Sandbox::new();
+        let preview = sandbox.machine.instance("preview", "data", 3000);
+        let gone = sandbox.machine.root().join("gone");
+        std::fs::create_dir(&gone).unwrap();
+
+        let output = sandbox
+            .shell(
+                &gone,
+                "/bin/rmdir \"$PWD\" && exec dolos \"$@\"",
+                &[
+                    "--config",
+                    preview.file.to_str().unwrap(),
+                    "service",
+                    "install",
+                    "--format",
+                    "json",
+                ],
+            )
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(!gone.exists());
+
+        let installed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(installed["binary"], sandbox.binary().to_str().unwrap());
+        assert_eq!(installed["config"], preview.file.to_str().unwrap());
+        assert_installing(&sandbox, "cardano-preview");
     }
 
     #[cfg(target_os = "linux")]
@@ -1815,11 +2295,14 @@ mod command_line {
             .output()
             .unwrap();
 
+        // The path the unit would record, which root never follows a link to.
+        let binary = std::fs::canonicalize(env!("CARGO_BIN_EXE_dolos")).unwrap();
+
         assert_eq!(output.status.code(), Some(1), "{output:?}");
         assert!(
             stderr(&output).contains(&flat(&format!(
                 "sudo {} service install --system",
-                sandbox.binary().display()
+                binary.display()
             ))),
             "{output:?}"
         );
