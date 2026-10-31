@@ -16,9 +16,9 @@
 //! the one namespace whose value this profile builds rather than carries.
 //!
 //! Beside them, the variant table of every reachable enum ([`enums`]), the
-//! encoding of every Pallas struct the records embed ([`structs`]), and the
-//! walk that holds every golden to PROFILE.md's value encoding
-//! ([`value_encoding`]).
+//! encoding of every Pallas struct the records embed and of the
+//! `ProtocolVersion` tuple ([`structs`]), and the walk that holds every golden
+//! to PROFILE.md's value encoding ([`value_encoding`]).
 //!
 //! ## Append-only history
 //!

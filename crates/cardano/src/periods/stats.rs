@@ -648,8 +648,9 @@ fn fold_account<D: Domain>(
 /// The cache namespace of lifetime totals (decision 0059): a credential's
 /// sums over its sealed epochs, built once and extended as epochs seal.
 ///
-/// An entry is kept once its fold read 100,000 unit entries.
-pub const TOTALS: CacheNamespace = CacheNamespace::immutable("totals", 1).with_admission(100_000);
+/// An entry is kept once its fold read 100,000 unit entries. Version 2
+/// encodes `AddressStats.units` in encoded-key order.
+pub const TOTALS: CacheNamespace = CacheNamespace::immutable("totals", 2).with_admission(100_000);
 
 /// A credential is worth warming once its fold over one sealed epoch reads
 /// this many unit entries.

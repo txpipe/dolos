@@ -221,8 +221,8 @@ pub fn join_payment(payment: &Hash<28>, tail: &[u8]) -> Vec<u8> {
 /// A sum of unit quantities, wider than u64: one epoch's sums overflow it.
 ///
 /// A CBOR unsigned integer, or a positive bignum past u64. Decode refuses a
-/// bignum that fits in u64 or has leading zeros, so each sum has one
-/// encoding.
+/// bignum that fits in u64 or has leading zeros, so no sum takes both forms.
+/// It reads any head width: shortest form is checked on the goldens.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]

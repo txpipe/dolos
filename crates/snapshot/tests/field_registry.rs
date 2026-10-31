@@ -251,7 +251,7 @@ fn every_golden_follows_the_value_encoding() {
         let path = file.expect("a goldens entry reads").path();
         let name = path.file_name().unwrap().to_string_lossy().to_string();
 
-        let Some(ns) = name.strip_suffix(".rev1.hex") else {
+        let Some(ns) = golden_namespace(&name) else {
             continue;
         };
 
@@ -286,6 +286,24 @@ fn every_golden_follows_the_value_encoding() {
     }
 }
 
+/// The namespace of a golden named `{ns}.rev{N}.hex`.
+fn golden_namespace(file: &str) -> Option<&str> {
+    let (ns, rev) = file.strip_suffix(".hex")?.rsplit_once(".rev")?;
+    (!rev.is_empty() && rev.bytes().all(|b| b.is_ascii_digit())).then_some(ns)
+}
+
+#[test]
+fn every_revision_of_a_golden_is_walked() {
+    assert_eq!(golden_namespace("gov.rev1.hex"), Some("gov"));
+    assert_eq!(
+        golden_namespace("pool-epochs.rev12.hex"),
+        Some("pool-epochs")
+    );
+    assert_eq!(golden_namespace("gov.rev.hex"), None);
+    assert_eq!(golden_namespace("gov.revx.hex"), None);
+    assert_eq!(golden_namespace("gov.rev1.txt"), None);
+}
+
 /// The value-encoding walk flags each rule it checks, at the place it breaks,
 /// and nothing in a value that keeps them all.
 #[test]
@@ -302,6 +320,9 @@ fn the_value_encoding_walk_flags_each_rule() {
         ("a2020001 00", &[("${1}", Rule::KeyOrder)]),
         ("a2010001 00", &[("${1}", Rule::KeyOrder)]),
         ("a2410001 4000", &[("${1}", Rule::KeyOrder)]),
+        ("a1181700", &[("${0}", Rule::NotShortest)]),
+        ("a101fb3ff0000000000000", &[("${0}:", Rule::Float)]),
+        ("bf0000ff", &[("$", Rule::Indefinite)]),
         ("fb3ff0000000000000", &[("$", Rule::Float)]),
         ("f93c00", &[("$", Rule::Float)]),
         ("f7", &[("$", Rule::Simple)]),

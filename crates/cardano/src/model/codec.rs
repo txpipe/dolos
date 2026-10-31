@@ -78,7 +78,11 @@ pub mod canonical_map {
             previous = Some(encoded);
 
             let value = V::decode(d, ctx)?;
-            map.insert(key, value);
+
+            // One key spelled under a longer head passes the byte comparison.
+            if map.insert(key, value).is_some() {
+                return Err(minicbor::decode::Error::message("map key repeated").at(start));
+            }
         }
 
         Ok(map)
@@ -282,16 +286,43 @@ mod tests {
         assert!(err.to_string().contains("order"), "{err}");
     }
 
+    fn refusal<T: for<'b> Decode<'b, ()> + std::fmt::Debug>(bytes: &[u8]) -> String {
+        minicbor::decode::<T>(bytes).unwrap_err().to_string()
+    }
+
+    /// A key spelled twice is refused, also when the second spelling uses a
+    /// longer head and so sorts after the first.
     #[test]
     fn repeated_keys_are_refused() {
-        let mut bytes = vec![0x81, 0xa2];
-        bytes.extend(minicbor::to_vec(key(1)).unwrap());
-        bytes.push(0x01);
-        bytes.extend(minicbor::to_vec(key(1)).unwrap());
-        bytes.push(0x02);
+        use crate::model::{AddressStats, Committee, PParamValue};
 
-        let err = minicbor::decode::<Credentials>(&bytes).unwrap_err();
-        assert!(err.to_string().contains("repeated"), "{err}");
+        let mut identical = vec![0x81, 0xa2];
+        identical.extend(minicbor::to_vec(key(1)).unwrap());
+        identical.push(0x01);
+        identical.extend(minicbor::to_vec(key(1)).unwrap());
+        identical.push(0x02);
+
+        let hash = hex::encode([7u8; 28]);
+        let member = format!("8200581c{hash}");
+        let threshold = "d81e820203";
+        let bytes = |hex: &str| hex::decode(hex.replace(' ', "")).unwrap();
+
+        let refusals = [
+            refusal::<Credentials>(&identical),
+            refusal::<MaybeMap>(&bytes("82 a2 01 01 1801 02 f5")),
+            refusal::<Committee>(&bytes(&format!(
+                "82 a2 {member} 01 821800581c{hash} 02 {threshold}"
+            ))),
+            refusal::<Committee>(&bytes(&format!(
+                "82 a2 {member} 01 820059001c{hash} 02 {threshold}"
+            ))),
+            refusal::<PParamValue>(&bytes("82 1827 a2 01 8101 1801 8102")),
+            refusal::<AddressStats>(&bytes("82 a2 40 820102 5800 820304 05")),
+        ];
+
+        for err in refusals {
+            assert!(err.contains("repeated"), "{err}");
+        }
     }
 
     #[test]
@@ -389,6 +420,242 @@ mod tests {
         assert!(minicbor::decode::<Committee>(&pallas_order).is_err());
     }
 
+    /// A field routed through `canonical_map`: a value whose map holds two
+    /// entries, and those entries' bytes, each `key ‖ value`, in encoded-key
+    /// order.
+    struct Routed {
+        field: &'static str,
+        bytes: Vec<u8>,
+        entries: [Vec<u8>; 2],
+        decodes: fn(&[u8]) -> bool,
+    }
+
+    fn decodes<T: for<'b> Decode<'b, ()>>(bytes: &[u8]) -> bool {
+        minicbor::decode::<T>(bytes).is_ok()
+    }
+
+    fn routed<T, K, V>(
+        field: &'static str,
+        a: (K, V),
+        b: (K, V),
+        build: impl FnOnce(BTreeMap<K, V>) -> T,
+    ) -> Routed
+    where
+        T: Encode<()> + for<'b> Decode<'b, ()>,
+        K: Encode<()> + Ord,
+        V: Encode<()>,
+    {
+        let mut entries = [(cbor(&a.0), cbor(&a.1)), (cbor(&b.0), cbor(&b.1))];
+        entries.sort();
+
+        Routed {
+            field,
+            bytes: cbor(build(BTreeMap::from([a, b]))),
+            entries: entries.map(|(key, value)| [key, value].concat()),
+            decodes: decodes::<T>,
+        }
+    }
+
+    fn every_routed_field() -> Vec<Routed> {
+        use crate::model::{
+            AddressStats, Committee, CommitteeAuthorization, DRepSnapshot, DRepSnapshotEntry,
+            DissolvedCommittee, EpochState, GovDistr, GovState, PParamValue, PoolHash, PoolTally,
+            ProposalAction, ProposalState, UnitSums, VoteEntry,
+        };
+        use pallas::{
+            codec::utils::Bytes,
+            ledger::primitives::{
+                conway::{GovActionId, Vote},
+                RationalNumber,
+            },
+        };
+
+        let threshold = || RationalNumber {
+            numerator: 2,
+            denominator: 3,
+        };
+        let pool = |byte: u8| PoolHash::from([byte; 28]);
+        let resigned = |slot: u64| vec![(slot, CommitteeAuthorization::Resigned(None))];
+        let snapshot = |expiry: u64| DRepSnapshotEntry {
+            expiry: Some(expiry),
+            unregistered_at: None,
+        };
+        let vote = |slot: u64| VoteEntry {
+            newest: (slot, Vote::Yes),
+            standing: None,
+            newest_order: 0,
+            standing_order: 0,
+        };
+        let distr = || GovDistr {
+            closing_epoch: 0,
+            committed_shards: 0,
+            total_shards: 0,
+            drep_distr: BTreeMap::new(),
+            pool_distr: BTreeMap::new(),
+            pool_total: 0,
+        };
+        let proposal = || ProposalState {
+            slot: 0,
+            tx: [0x60; 32].into(),
+            idx: 0,
+            action: ProposalAction::Info,
+            max_epoch: None,
+            ratified_epoch: None,
+            canceled_epoch: None,
+            deposit: None,
+            reward_account: None,
+            proposed_in: None,
+            parent: None,
+            purpose: None,
+            anchor: None,
+            cc_votes: BTreeMap::new(),
+            drep_votes: BTreeMap::new(),
+            spo_votes: BTreeMap::new(),
+        };
+
+        vec![
+            routed(
+                "PParamValue::CostModelsUnknown",
+                (24u64, vec![3i64]),
+                (1, vec![2]),
+                PParamValue::CostModelsUnknown,
+            ),
+            routed(
+                "EpochState.estart_tally",
+                (pool(0xa1), PoolTally::default()),
+                (pool(0xa2), PoolTally::default()),
+                |map| EpochState {
+                    estart_tally: Some(map),
+                    ..Default::default()
+                },
+            ),
+            routed(
+                "Committee.members",
+                (script(0x11), 600u64),
+                (key(0x12), 500),
+                |members| Committee {
+                    members,
+                    threshold: threshold(),
+                },
+            ),
+            routed(
+                "GovDistr.drep_distr",
+                (DRep::Key([0x21; 28].into()), 1u64),
+                (DRep::Abstain, 2),
+                |drep_distr| GovDistr {
+                    drep_distr,
+                    ..distr()
+                },
+            ),
+            routed(
+                "GovDistr.pool_distr",
+                (pool(0x22), 3u64),
+                (pool(0x23), 4),
+                |pool_distr| GovDistr {
+                    pool_distr,
+                    ..distr()
+                },
+            ),
+            routed(
+                "DRepSnapshot.dreps",
+                (script(0x31), snapshot(1)),
+                (key(0x32), snapshot(2)),
+                |dreps| DRepSnapshot {
+                    closing_epoch: 0,
+                    dreps,
+                },
+            ),
+            routed(
+                "DissolvedCommittee.auths",
+                (script(0x41), resigned(1)),
+                (key(0x42), resigned(2)),
+                |auths| DissolvedCommittee {
+                    committee: Committee {
+                        members: BTreeMap::new(),
+                        threshold: threshold(),
+                    },
+                    auths,
+                    action: GovActionId {
+                        transaction_id: [0x43; 32].into(),
+                        action_index: 0,
+                    },
+                    epoch: 0,
+                    seated_by: None,
+                },
+            ),
+            routed(
+                "GovState.committee_auths",
+                (script(0x51), resigned(3)),
+                (key(0x52), resigned(4)),
+                |committee_auths| GovState {
+                    committee_auths,
+                    ..Default::default()
+                },
+            ),
+            routed(
+                "ProposalState.cc_votes",
+                (script(0x61), vote(1)),
+                (key(0x62), vote(2)),
+                |cc_votes| ProposalState {
+                    cc_votes,
+                    ..proposal()
+                },
+            ),
+            routed(
+                "ProposalState.drep_votes",
+                (script(0x63), vote(3)),
+                (key(0x64), vote(4)),
+                |drep_votes| ProposalState {
+                    drep_votes,
+                    ..proposal()
+                },
+            ),
+            routed(
+                "ProposalState.spo_votes",
+                (pool(0x65), vote(5)),
+                (pool(0x66), vote(6)),
+                |spo_votes| ProposalState {
+                    spo_votes,
+                    ..proposal()
+                },
+            ),
+            routed(
+                "AddressStats.units",
+                (Bytes::from(vec![0x71; 28]), UnitSums::default()),
+                (Bytes::from(vec![]), UnitSums::default()),
+                |units| AddressStats { units, tx_count: 1 },
+            ),
+        ]
+    }
+
+    /// Every field routed through `canonical_map` refuses its entries swapped
+    /// or one entry repeated, which a plain `BTreeMap` field would accept.
+    #[test]
+    fn every_canonical_map_refuses_swapped_and_repeated_entries() {
+        for Routed {
+            field,
+            bytes,
+            entries: [first, second],
+            decodes,
+        } in every_routed_field()
+        {
+            let pair = [first.as_slice(), &second].concat();
+            let found: Vec<usize> = (0..bytes.len())
+                .filter(|at| bytes[*at..].starts_with(&pair))
+                .collect();
+            assert_eq!(found.len(), 1, "{field}: {}", hex::encode(&bytes));
+
+            let with = |entries: [&[u8]; 2]| {
+                let (head, tail) = (&bytes[..found[0]], &bytes[found[0] + pair.len()..]);
+                [head, entries[0], entries[1], tail].concat()
+            };
+
+            assert!(decodes(&bytes), "{field}");
+            assert!(!decodes(&with([&second, &first])), "{field}: swapped");
+            assert!(!decodes(&with([&first, &first])), "{field}: repeated");
+        }
+    }
+
     #[test]
     fn pparams_encode_by_kind_and_refuse_any_other_order() {
         use crate::model::{PParamKind, PParamValue, PParamsSet};
@@ -466,7 +733,7 @@ mod tests {
     }
 
     #[test]
-    fn a_sum_has_one_encoding() {
+    fn a_sum_is_a_bignum_only_past_u64() {
         use crate::model::Sum;
 
         let past_u64 = u64::MAX as u128 + 1;
