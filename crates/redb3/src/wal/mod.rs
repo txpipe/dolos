@@ -193,6 +193,39 @@ const WAL_METADATA: TableDefinition<&str, u32> = TableDefinition::new("wal_metad
 
 const WAL_METADATA_VERSION_KEY: &str = "version";
 
+/// What [`probe`] found in a WAL file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalProbe {
+    Empty,
+    Entries,
+    /// Another process holds the file open, so what it holds can't be read.
+    InUse,
+}
+
+/// Whether the WAL file at `path` holds an entry, read without writing to it.
+///
+/// Opening the file as a [`RedbWalStore`] stamps its version, and wipes one
+/// of another version, so a caller deciding whether to touch the WAL at all
+/// reads it here instead. A file that needs repair is an error.
+pub fn probe(path: impl AsRef<Path>) -> Result<WalProbe, RedbWalError> {
+    use redb::ReadableDatabase as _;
+
+    let db = match redb::ReadOnlyDatabase::open(path) {
+        Ok(db) => db,
+        Err(redb::DatabaseError::DatabaseAlreadyOpen) => return Ok(WalProbe::InUse),
+        Err(error) => return Err(error.into()),
+    };
+
+    let rx = db.begin_read()?;
+
+    match rx.open_table(WAL) {
+        Ok(table) if table.is_empty()? => Ok(WalProbe::Empty),
+        Ok(_) => Ok(WalProbe::Entries),
+        Err(redb::TableError::TableDoesNotExist(_)) => Ok(WalProbe::Empty),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Current WAL on-disk schema version.
 ///
 /// Bump this whenever the serialized format of WAL entries changes in a way
@@ -951,6 +984,60 @@ mod tests {
     /// simulate legacy on-disk state that predates the metadata table.
     fn open_raw_db(path: &Path) -> redb::Database {
         redb::Database::builder().create(path).unwrap()
+    }
+
+    /// An entry is seen whatever version the file records, and reading it
+    /// leaves the file as it was.
+    #[test]
+    fn probe_reads_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.redb");
+
+        open_test_store(&path).unwrap();
+        assert_eq!(probe(&path).unwrap(), WalProbe::Empty);
+
+        {
+            let db = open_raw_db(&path);
+            let wx = db.begin_write().unwrap();
+            {
+                let mut metadata = wx.open_table(WAL_METADATA).unwrap();
+                metadata.insert(WAL_METADATA_VERSION_KEY, 1).unwrap();
+
+                let mut table = wx.open_table(WAL).unwrap();
+                let key = DbChainPoint::from(ChainPoint::Specific(42, [1u8; 32].into()));
+                table.insert(key, vec![0xDEu8, 0xAD, 0xBE, 0xEF]).unwrap();
+            }
+            wx.commit().unwrap();
+        }
+
+        let before = std::fs::read(&path).unwrap();
+        assert_eq!(probe(&path).unwrap(), WalProbe::Entries);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    /// A file with no WAL table, as a fresh redb file is, holds no entry.
+    #[test]
+    fn probe_without_a_table_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.redb");
+
+        drop(open_raw_db(&path));
+
+        assert_eq!(probe(&path).unwrap(), WalProbe::Empty);
+    }
+
+    /// A file a store holds open is in use, not data, and is still in use
+    /// until the store closes.
+    #[test]
+    fn probe_under_an_open_store_is_in_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.redb");
+
+        let store = open_test_store(&path).unwrap();
+        assert_eq!(probe(&path).unwrap(), WalProbe::InUse);
+
+        drop(store);
+        assert_eq!(probe(&path).unwrap(), WalProbe::Empty);
     }
 
     #[test]

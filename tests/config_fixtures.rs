@@ -477,7 +477,7 @@ fn plant_store_markers(dir: &Path) -> Vec<PathBuf> {
 /// Commands that clear or rewrite storage before they need genesis, and one
 /// that only reads.
 const STORE_COMMANDS: [&[&str]; 4] = [
-    &["bootstrap", "relay", "--force"],
+    &["bootstrap", "immutabledb", "--force", "--source", "db"],
     &["data", "rebuild", "--yes"],
     &["doctor", "reset-wal"],
     &["data", "summary"],

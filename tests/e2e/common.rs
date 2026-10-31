@@ -269,26 +269,6 @@ pub fn write_custom_genesis(workspace: &ScenarioWorkspace) {
     );
 }
 
-pub fn reset_and_bootstrap(workspace: &ScenarioWorkspace) {
-    write_custom_genesis(workspace);
-
-    let mut cmd = prepare_scenario_process(workspace);
-
-    let bootstrap = cmd
-        .args(["bootstrap", "relay", "--force"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .expect("failed to bootstrap data");
-
-    assert!(
-        bootstrap.status.success(),
-        "bootstrap relay failed for scenario {}: {}",
-        workspace.name(),
-        String::from_utf8_lossy(&bootstrap.stderr)
-    );
-}
-
 pub fn fetch_summary(workspace: &ScenarioWorkspace) -> dolos::cli::DataSummary {
     let mut cmd = prepare_scenario_process(workspace);
 

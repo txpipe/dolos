@@ -55,22 +55,26 @@ configuration file. A version marks a binary that predates v2 configuration,
 such as v1 or v2.0.0-alpha.0, and gives it the older file with that
 `storage.version`; the baseline above is one, at v4. Each binary is asked
 which `data` commands it has: one whose `data --help` lists no `rebuild`,
-whatever configuration it reads, gets the commands before the v2 `data` group
-(`doctor rebuild-state`, `data dump-blocks`). `doctor rebuild-state` arrived
-in v1.7.0-alpha.1, so an older binary cannot seed an instance before
-serving it. Historical raw revision `9165dbd8` needs `:v3`; that is a compression baseline, not a redb comparison.
+whatever configuration it reads, scans with the command before the v2 `data`
+group (`data dump-blocks`). Historical raw revision `9165dbd8` needs `:v3`; that is a compression baseline, not a redb comparison.
 The network magic defaults to the `networkMagic` of the genesis in `--genesis`;
 `--magic` overrides it.
 
-`import` uses 500-block batches; `live` models one-block commits through offline
-import, **not** daemon sync. `read` uses `data dump blocks` and UTxO RPC point/page
-queries; `mixed` combines RPC point/page reads. This runner does not append while
-serving: use the store's `concurrent` preset or [minibf live replay](minibf.md#live-replay).
+`import` runs `dolos bootstrap immutabledb` in 500-block batches: a ledger
+replay that writes the state and the archive, so every binary must have that
+command, and its records do not pair with the archive-only `data
+import-archive` records of earlier binaries. `live` models one-block commits
+through the same replay over the corpus's first `--live-blocks` blocks, **not**
+daemon sync. `read` uses `data dump blocks` and UTxO RPC point/page queries;
+`mixed` combines RPC point/page reads. This runner does not append while serving: use
+the store's `concurrent` preset or [minibf live replay](minibf.md#live-replay).
 
-The immutable corpus must include chunks `00000` and `00001`; its final chunk
-is excluded. Before serving, the runner replays the first Byron epoch to seed
-the era summary. Ambiguous boundary slots are excluded from RPC queries; scans
-cover the contiguous tail. An arbitrary copied window is insufficient.
+The immutable corpus must be a contiguous chain from chunk `00000`, which a
+ledger replay reads from its first block; its final chunk is excluded. The
+runner stages it as a node database under `--work`, linked in beside a
+`protocolMagicId` holding the network magic. Ambiguous boundary slots are
+excluded from RPC queries; scans cover the contiguous tail. An arbitrary copied
+window is insufficient.
 
 Reports pair against the `baseline` label: import throughput must be ≥90% and
 point-read p95 ≤110% of baseline. Pages/scans have ratios but no verdict.

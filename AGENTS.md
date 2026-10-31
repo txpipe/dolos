@@ -70,7 +70,7 @@ The project follows a modular workspace architecture with clear separation of co
   - `relay`: Upstream relay connection handling
   - `mempool`: Transaction mempool implementation
   - `facade`: High-level domain operations (extends `dolos-core` facade)
-- **CLI Commands**: daemon, sync, serve, bootstrap (relay/mithril/snapshot), data, doctor
+- **CLI Commands**: daemon, sync, serve, bootstrap (mithril/stelae/immutabledb), data, doctor
 - **Features**: Configurable service compilation (grpc, minibf, trp, mithril, utils)
 
 #### `dolos-core` (Foundation)

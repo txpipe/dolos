@@ -8,10 +8,8 @@ mod compute_spdd;
 mod copy_wal;
 mod dump;
 mod dump_wal;
-mod export;
 mod find_seq;
 mod housekeeping;
-mod import_archive;
 mod inspect;
 mod rebuild;
 mod reset;
@@ -46,12 +44,8 @@ pub enum Command {
     ComputeNonce(compute_nonce::Args),
     /// finds the WAL seq for a block
     FindSeq(find_seq::Args),
-    /// exports a snapshot from the current data
-    Export(export::Args),
     /// copies a range of slots from the WAL into a new db
     CopyWal(copy_wal::Args),
-    /// imports blocks from immutable DB into archive store only
-    ImportArchive(import_archive::Args),
 }
 
 #[derive(Debug, Parser)]
@@ -79,9 +73,7 @@ pub fn run(
         Command::ComputeSpdd(x) => compute_spdd::run(config, x)?,
         Command::ComputeNonce(x) => compute_nonce::run(config, x)?,
         Command::FindSeq(x) => find_seq::run(config, x)?,
-        Command::Export(x) => export::run(config, x, feedback)?,
         Command::CopyWal(x) => copy_wal::run(config, x)?,
-        Command::ImportArchive(x) => import_archive::run(config, x, feedback)?,
     }
 
     Ok(())
