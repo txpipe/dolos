@@ -17,11 +17,11 @@
 
 use dolos_cardano::model::{
     AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
-    AddressStats, AssetMintChunk, AssetMintSet, AssetState, DRepEpochLog, DRepSightingState,
-    DRepState, DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
+    AddressStats, AssetMintChunk, AssetMintSet, DRepEpochLog, DRepSightingState, DRepState,
+    DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
     FirstScriptSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressChunk,
     PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk,
-    PoolEpochLog, PoolState, ProposalState, ScriptState,
+    PoolEpochLog, PoolState, ProposalState, PrunedAccountState,
 };
 use dolos_core::{KeyCodec, KeyError, LogEntity, Namespace, StateEntity};
 
@@ -40,7 +40,7 @@ pub const UTXOS: Namespace = "utxos";
 /// Sorted because a state layer's records are ordered by `(ns, key)` and the
 /// coverage test compares this list against the schemas directly;
 /// `namespaces_are_sorted` keeps it that way.
-pub const NAMESPACES: [Namespace; 32] = [
+pub const NAMESPACES: [Namespace; 31] = [
     AccountAddressChunk::NS,
     AccountAddressSet::NS,
     AccountEpochLog::NS,
@@ -49,7 +49,6 @@ pub const NAMESPACES: [Namespace; 32] = [
     AddressStats::NS,
     AssetMintChunk::NS,
     AssetMintSet::NS,
-    AssetState::NS,
     DatumState::NS,
     DRepEpochLog::NS,
     DRepSightingState::NS,
@@ -71,7 +70,7 @@ pub const NAMESPACES: [Namespace; 32] = [
     PoolEpochLog::NS,
     PoolState::NS,
     ProposalState::NS,
-    ScriptState::NS,
+    PrunedAccountState::NS,
     UTXOS,
 ];
 
@@ -86,18 +85,11 @@ pub const NAMESPACES: [Namespace; 32] = [
 /// `crates/snapshot/tests/field_registry.rs`, which fails the build when a
 /// record's field table moves without its revision, or the other way round.
 ///
-/// `epochs` reached 2 when `RollingStats::registered_pools` stopped being a
-/// `HashSet`, whose per-instance iteration order made the namespace's bytes
-/// irreproducible across publishers of identical state. The keys of `dreps`,
-/// `epochs`, `eras`, `first-mint-chunks`, `first-mints`, `gov`,
-/// `metadata-labels`, `pool-epochs`, `pools` and `proposals` stopped being
-/// padded or truncated to a fixed width (decision 0051), and each of those
-/// moved one revision for it. `epochs` (4) and `pools` (3) then gained the
-/// active-stake distribution ESTART freezes: `EpochState.active_stake` and
-/// `estart_tally`, and the frozen tally on each `PoolSnapshot`. Kept beside
+/// The v2 freeze restarted every revision at 1 (decision 0063); from it on,
+/// every encoding change moves its namespace's revision again. Kept beside
 /// [`NAMESPACES`], in the same order, and held to it by
 /// `every_namespace_has_a_schema_rev` below.
-pub const SCHEMA_REVS: [(Namespace, u64); 32] = [
+pub const SCHEMA_REVS: [(Namespace, u64); 31] = [
     (AccountAddressChunk::NS, 1),
     (AccountAddressSet::NS, 1),
     (AccountEpochLog::NS, 1),
@@ -106,29 +98,28 @@ pub const SCHEMA_REVS: [(Namespace, u64); 32] = [
     (AddressStats::NS, 1),
     (AssetMintChunk::NS, 1),
     (AssetMintSet::NS, 1),
-    (AssetState::NS, 1),
     (DatumState::NS, 1),
     (DRepEpochLog::NS, 1),
     (DRepSightingState::NS, 1),
-    (DRepState::NS, 2),
-    (EpochState::NS, 4),
-    (EraState::NS, 2),
-    (FirstMintChunk::NS, 2),
-    (FirstMintSet::NS, 2),
+    (DRepState::NS, 1),
+    (EpochState::NS, 1),
+    (EraState::NS, 1),
+    (FirstMintChunk::NS, 1),
+    (FirstMintSet::NS, 1),
     (FirstScriptChunk::NS, 1),
     (FirstScriptSet::NS, 1),
-    (GovState::NS, 4),
-    (MetadataLabelState::NS, 2),
+    (GovState::NS, 1),
+    (MetadataLabelState::NS, 1),
     (PaymentAddressChunk::NS, 1),
     (PaymentAddressSet::NS, 1),
     (PaymentStats::NS, 1),
     (PendingMirState::NS, 1),
     (PendingRewardState::NS, 1),
     (PolicyMintChunk::NS, 1),
-    (PoolEpochLog::NS, 2),
-    (PoolState::NS, 3),
-    (ProposalState::NS, 4),
-    (ScriptState::NS, 1),
+    (PoolEpochLog::NS, 1),
+    (PoolState::NS, 1),
+    (ProposalState::NS, 1),
+    (PrunedAccountState::NS, 1),
     (UTXOS, 1),
 ];
 
@@ -151,7 +142,6 @@ pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         AccountStats::NS => exact::<<AccountStats as StateEntity>::Key>(key),
         AddressStats::NS => exact::<<AddressStats as StateEntity>::Key>(key),
         AssetMintSet::NS => exact::<<AssetMintSet as StateEntity>::Key>(key),
-        AssetState::NS => exact::<<AssetState as StateEntity>::Key>(key),
         DatumState::NS => exact::<<DatumState as StateEntity>::Key>(key),
         DRepSightingState::NS => exact::<<DRepSightingState as StateEntity>::Key>(key),
         DRepState::NS => exact::<<DRepState as StateEntity>::Key>(key),
@@ -163,7 +153,7 @@ pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         PendingRewardState::NS => exact::<<PendingRewardState as StateEntity>::Key>(key),
         PoolState::NS => exact::<<PoolState as StateEntity>::Key>(key),
         ProposalState::NS => exact::<<ProposalState as StateEntity>::Key>(key),
-        ScriptState::NS => exact::<<ScriptState as StateEntity>::Key>(key),
+        PrunedAccountState::NS => exact::<<PrunedAccountState as StateEntity>::Key>(key),
         FirstMintSet::NS => exact::<<FirstMintSet as StateEntity>::Key>(key),
         FirstScriptSet::NS => exact::<<FirstScriptSet as StateEntity>::Key>(key),
         PaymentAddressSet::NS => exact::<<PaymentAddressSet as StateEntity>::Key>(key),
@@ -196,12 +186,14 @@ pub fn check_log_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         AddressStats::NS => exact::<<AddressStats as LogEntity>::Key>(key),
         AssetMintChunk::NS => exact::<<AssetMintChunk as LogEntity>::Key>(key),
         DRepEpochLog::NS => exact::<<DRepEpochLog as LogEntity>::Key>(key),
+        DRepState::NS => exact::<<DRepState as LogEntity>::Key>(key),
         EpochState::NS => exact::<<EpochState as LogEntity>::Key>(key),
         FirstMintChunk::NS => exact::<<FirstMintChunk as LogEntity>::Key>(key),
         FirstScriptChunk::NS => exact::<<FirstScriptChunk as LogEntity>::Key>(key),
         PaymentAddressChunk::NS => exact::<<PaymentAddressChunk as LogEntity>::Key>(key),
         PolicyMintChunk::NS => exact::<<PolicyMintChunk as LogEntity>::Key>(key),
         PoolEpochLog::NS => exact::<<PoolEpochLog as LogEntity>::Key>(key),
+        PoolState::NS => exact::<<PoolState as LogEntity>::Key>(key),
         ProposalState::NS => exact::<<ProposalState as LogEntity>::Key>(key),
         _ => return Err(Error::UnknownNamespace(ns.to_owned())),
     };
@@ -218,7 +210,7 @@ pub const RETIRED_SCHEMA_REV: u64 = 0;
 
 /// The namespaces this profile version once defined and no longer does.
 ///
-/// They stay in `parameters.schemas` at [`RETIRED_SCHEMA_REV`] rather than
+/// Each stays in `parameters.schemas` at [`RETIRED_SCHEMA_REV`] rather than
 /// being dropped from it, because **removing a kind is not made safe by
 /// `required: true`** (ADR-0027). The compatibility rule decision 0026 sets
 /// covers a kind a reader does not *know*: the layer is there, the reader can
@@ -226,26 +218,12 @@ pub const RETIRED_SCHEMA_REV: u64 = 0;
 /// is the opposite shape — its layers are simply not there, and absence
 /// already means something else entirely: `write_logs` omits an empty log
 /// layer by rule, and [`crate::restore`]'s epoch grouping passes over a kind it
-/// does not recognise. A reader that models `member-rewards`, finds no such
-/// layer and restores happily has no mechanism to notice that it has just
-/// built a node with no reward history in it.
-///
-/// So the retirement is declared instead of inferred, and
-/// [`crate::restore::plan`] fails closed on it. The declaration only binds
-/// readers from the version that reads it forward; what protects the ones
-/// already deployed is that every namespace retired here is also a *state*
-/// namespace, and the state tip's completeness check refuses a stele
-/// missing any kind it expects. A log-only namespace would have had no such
-/// backstop, which is the case this rule exists for.
+/// does not recognise. So the retirement is declared instead of inferred, and
+/// [`crate::restore::plan`] fails closed on it.
 ///
 /// One-way, like `required`: a namespace named here constrains every reader
 /// older than the retirement, forever. Naming one is an ADR-level act.
-pub const RETIRED_NAMESPACES: [Namespace; 4] = [
-    "account-stakes",
-    "leader-rewards",
-    "member-rewards",
-    "pool-deposit-refunds",
-];
+pub const RETIRED_NAMESPACES: &[Namespace] = &[];
 
 /// Resolve a namespace read off the wire to the `&'static str` the stores use.
 ///

@@ -1,5 +1,5 @@
 //! Node-level workloads: a `dolos` binary driven through the paths an
-//! operator's node takes — `data import-archive` over a node immutable
+//! operator's node takes — `bootstrap immutabledb` over a node immutable
 //! directory for ingestion, and `serve` with minibf for reads — so two
 //! revisions can be measured on the same host, corpus, durability and
 //! concurrency. The binaries are given as `LABEL=PATH[:STORAGE_VERSION]`,
@@ -15,14 +15,13 @@
 //! `FetchBlock` for one slot, a page is `DumpHistory` from a slot with
 //! `page_len` items, both measured by this process's own threads over one
 //! HTTP/2 connection each, with the server's counters sampled around every
-//! workload. An archive-only import writes neither the hash index nor the
-//! era summary the block mappers need, so before the server starts the
-//! state is seeded by `doctor rebuild-state --stop-epoch 1`: a replay of
-//! the first Byron epoch, which is why the immutable directory has to
-//! begin with chunk 00000. The scan is `dolos data
-//! dump-blocks` over the corpus's contiguous tail, the node's own iterator
-//! over every frame, run while the server is down because the store is
-//! exclusively locked.
+//! workload. The import is a ledger replay, which writes the hash index
+//! and the era summary the block mappers need along with the archive, and
+//! reads the chain from its first block, which is why the immutable
+//! directory has to be a contiguous chain from chunk 00000. The scan is
+//! `dolos data dump-blocks` over the corpus's contiguous tail, the node's own
+//! iterator over every frame, run while the server is down because the store
+//! is exclusively locked.
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};
@@ -925,16 +924,75 @@ impl Selection {
     }
 }
 
-/// One measured `import-archive` over an immutable directory: its shape
+/// One measured `bootstrap immutabledb` over a staged database: its shape
 /// and what the corpus says about the blocks it covers.
 #[derive(Clone, Copy)]
 struct ImportJob<'a> {
-    immutable: &'a Path,
+    database: &'a Path,
     chunk: usize,
-    to: Option<u64>,
     blocks: u64,
     raw_bytes: u64,
     name: &'a str,
+}
+
+/// A Cardano node database over the corpus at `immutable`, as `bootstrap
+/// immutabledb` reads one: the corpus linked in as `immutable/`, beside the
+/// `magic` it is for.
+fn stage_database(dir: &Path, immutable: &Path, magic: u64) -> io::Result<()> {
+    if dir.exists() {
+        std::fs::remove_dir_all(dir)?;
+    }
+    std::fs::create_dir_all(dir)?;
+    link_dir(immutable, &dir.join("immutable"))?;
+    std::fs::write(dir.join("protocolMagicId"), magic.to_string())
+}
+
+/// [`stage_database`] over the corpus's blocks up to slot `to` alone,
+/// written out as one chunk.
+fn stage_prefix(dir: &Path, immutable: &Path, to: u64, magic: u64) -> io::Result<()> {
+    if dir.exists() {
+        std::fs::remove_dir_all(dir)?;
+    }
+    let chunks = dir.join("immutable");
+    std::fs::create_dir_all(&chunks)?;
+    let mut blocks = Vec::new();
+    for block in pallas::interop::hardano::storage::immutable::read_blocks(immutable)
+        .map_err(|e| invalid(format!("{}: {e:?}", immutable.display())))?
+    {
+        let block = block.map_err(|e| invalid(format!("{}: {e:?}", immutable.display())))?;
+        let slot = MultiEraBlock::decode(&block)
+            .map_err(|e| invalid(format!("decoding a corpus block: {e}")))?
+            .slot();
+        if slot > to {
+            break;
+        }
+        blocks.push(std::sync::Arc::new(block));
+    }
+    dolos_testing::blocks::write_immutable_fixture(&chunks, &blocks);
+    std::fs::write(dir.join("protocolMagicId"), magic.to_string())
+}
+
+#[cfg(unix)]
+fn link_dir(target: &Path, link: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+/// The corpus files hard-linked one by one, or copied where the volume can't
+/// link them: a directory symlink needs Developer Mode or admin rights here.
+#[cfg(windows)]
+fn link_dir(target: &Path, link: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(link)?;
+    for entry in std::fs::read_dir(target)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let to = link.join(entry.file_name());
+        if std::fs::hard_link(entry.path(), &to).is_err() {
+            std::fs::copy(entry.path(), &to)?;
+        }
+    }
+    Ok(())
 }
 
 struct Instance {
@@ -971,12 +1029,11 @@ impl Instance {
         cmd
     }
 
-    /// `dolos data import-archive`, measured.
+    /// `dolos bootstrap immutabledb`, measured.
     fn import(&self, bin: &Bin, job: &ImportJob) -> io::Result<Value> {
         let ImportJob {
-            immutable,
+            database,
             chunk,
-            to,
             blocks,
             raw_bytes,
             name,
@@ -984,20 +1041,17 @@ impl Instance {
         let mut cmd = self.command(bin);
         let metrics_path = self.dir.join("import-metrics.json");
         cmd.env("DOLOS_ARCHIVE_BENCH_METRICS", &metrics_path);
-        cmd.args(["data", "import-archive", "--source"])
-            .arg(immutable)
+        cmd.args(["bootstrap", "immutabledb", "--source"])
+            .arg(database)
             .arg("--chunk-size")
             .arg(chunk.to_string());
-        if let Some(to) = to {
-            cmd.arg("--to").arg(to.to_string());
-        }
         let started = Instant::now();
         let mut child = cmd.spawn()?;
         let usage = wait_child(&mut child)?;
         let wall = started.elapsed().as_secs_f64();
         if usage.status != 0 {
             return Err(io::Error::other(format!(
-                "{} import-archive exited with {}",
+                "{} bootstrap immutabledb exited with {}",
                 bin.label, usage.status
             )));
         }
@@ -1053,29 +1107,6 @@ fn read_import_metrics(path: &Path) -> io::Result<Option<Value>> {
 }
 
 impl Instance {
-    /// Seed the state store with the era summary the block mappers need:
-    /// `doctor rebuild-state` into the instance's own state path, stopping
-    /// at epoch 1, so it replays exactly the first Byron epoch. Unmeasured.
-    fn seed_state(&self, bin: &Bin) -> io::Result<()> {
-        let state = self.dir.join("data").join("state");
-        if state.exists() {
-            std::fs::remove_dir_all(&state)?;
-        }
-        let mut cmd = self.command(bin);
-        cmd.args(["doctor", "rebuild-state", "--target"])
-            .arg(&state)
-            .args(["--stop-epoch", "1", "--chunk", "500"]);
-        let mut child = cmd.spawn()?;
-        let usage = wait_child(&mut child)?;
-        if usage.status != 0 {
-            return Err(io::Error::other(format!(
-                "{} rebuild-state exited with {}",
-                bin.label, usage.status
-            )));
-        }
-        Ok(())
-    }
-
     /// `dolos data dump-blocks` over the whole corpus, measured: the node's
     /// own iterator over every frame, with its output discarded.
     fn scan(&self, bin: &Bin, keys: &Keys, params: &ReadParams) -> io::Result<Value> {
@@ -1257,6 +1288,12 @@ pub fn run(args: NodeArgs) -> anyhow::Result<()> {
         .filter(|k| k.slot <= live_to)
         .map(|k| k.bytes as u64)
         .sum();
+    let database = args.work.join(".database");
+    stage_database(&database, &immutable, magic)?;
+    let live_database = args.work.join(".live-database");
+    if selection.live {
+        stage_prefix(&live_database, &immutable, live_to, magic)?;
+    }
 
     let identities: Vec<Value> = bins
         .iter()
@@ -1283,9 +1320,8 @@ pub fn run(args: NodeArgs) -> anyhow::Result<()> {
                 let metrics = instance.import(
                     bin,
                     &ImportJob {
-                        immutable: &immutable,
+                        database: &database,
                         chunk: args.chunk_size,
-                        to: None,
                         blocks: keys.keys.len() as u64,
                         raw_bytes: keys.raw_bytes(),
                         name: &format!("import-{}", args.chunk_size),
@@ -1318,7 +1354,6 @@ pub fn run(args: NodeArgs) -> anyhow::Result<()> {
                             rec.record(node, repeat, Some(&cache), metrics)?;
                         }
                     }
-                    instance.seed_state(bin)?;
                     let mut serve = instance.command(bin);
                     serve.arg("serve");
                     let mut server = serve.spawn()?;
@@ -1385,9 +1420,8 @@ pub fn run(args: NodeArgs) -> anyhow::Result<()> {
                 let metrics = instance.import(
                     bin,
                     &ImportJob {
-                        immutable: &immutable,
+                        database: &live_database,
                         chunk: 1,
-                        to: Some(live_to),
                         blocks: live_count,
                         raw_bytes: live_bytes,
                         name: "import-1",
@@ -1398,6 +1432,12 @@ pub fn run(args: NodeArgs) -> anyhow::Result<()> {
                     std::fs::remove_dir_all(&instance.dir)?;
                 }
             }
+        }
+    }
+    if !args.keep {
+        std::fs::remove_dir_all(&database)?;
+        if live_database.exists() {
+            std::fs::remove_dir_all(&live_database)?;
         }
     }
     eprintln!(
@@ -1478,10 +1518,14 @@ mod tests {
     #[test]
     fn the_instance_config_selects_the_dialect_and_only_the_grpc_service() {
         let grpc = "127.0.0.1:3900".parse().unwrap();
-        let byron = Path::new("/g").join("byron.json");
+        // `/g` has no drive on Windows, so the loader would anchor it. The
+        // genesis lives apart from the config, so a relative path can't pass.
+        let genesis_dir = tempfile::tempdir().unwrap();
+        let genesis = genesis_dir.path();
+        let byron = genesis.join("byron.json");
 
         let legacy = Bin::parse("baseline=/tmp/dolos-old:v3").unwrap();
-        let toml = config_toml(&legacy, Path::new("/g"), 42, true, grpc);
+        let toml = config_toml(&legacy, genesis, 42, true, grpc);
         assert!(toml.contains("version = \"v3\""));
         assert!(toml.contains(&format!("byron_path = {:?}", byron.display().to_string())));
         assert!(toml.contains("[serve.grpc]\nlisten_address = \"127.0.0.1:3900\""));
@@ -1489,7 +1533,7 @@ mod tests {
         assert!(!toml.contains("minibf"));
 
         let current = Bin::parse("candidate=target/release/dolos").unwrap();
-        let toml = config_toml(&current, Path::new("/g"), 42, true, grpc);
+        let toml = config_toml(&current, genesis, 42, true, grpc);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dolos.toml");
         std::fs::write(&path, &toml).unwrap();

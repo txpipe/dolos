@@ -14,6 +14,7 @@
 //!   the exact lookups that project the blocks
 //! - [`keys`]: Shared key encoding utilities
 //! - [`preset`]: The named tunings both stores open with
+//! - [`view`]: A read-only open, over a mirror of a database beside it
 
 use dolos_core::{ArchiveError, StateError};
 
@@ -21,6 +22,7 @@ pub mod archive;
 pub mod keys;
 pub mod preset;
 pub mod state;
+pub mod view;
 
 /// The segment file crate the archive's locations belong to.
 pub use dolos_flatfiles as flatfiles;
@@ -52,6 +54,31 @@ pub enum Error {
 
     #[error("configuration error: {0}")]
     Config(String),
+
+    /// A read-only open could not mirror the database beside its store.
+    #[error("cannot mirror {} for a read-only open: {reason}", .path.display())]
+    View {
+        path: std::path::PathBuf,
+        reason: String,
+    },
+
+    /// A write on a store opened read-only.
+    #[error("the store is open read-only")]
+    ReadOnly,
+}
+
+impl Error {
+    /// Whether another handle, in this process or another, holds the
+    /// database's lock.
+    pub fn is_locked(&self) -> bool {
+        matches!(self, Error::Fjall(fjall::Error::Locked))
+    }
+}
+
+/// Whether a fjall database lives at `path`: fjall recovers a directory that
+/// holds its version marker and creates a new database anywhere else.
+pub fn database_exists(path: &std::path::Path) -> bool {
+    path.join("version").is_file()
 }
 
 impl From<Error> for StateError {

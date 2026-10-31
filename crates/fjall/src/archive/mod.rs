@@ -78,6 +78,7 @@ use dolos_flatfiles::{decode_locations, encode_locations, BlockLocation, FlatFil
 
 use crate::keys::{dim_prefix, hash_dimension, DIM_HASH_SIZE};
 use crate::preset::{Preset, Tuning};
+use crate::view::{View, Viewed};
 use crate::Error;
 
 pub mod entity;
@@ -180,6 +181,9 @@ pub struct ArchiveStore {
     /// material.
     index_sweep: Arc<Mutex<IndexSweepState>>,
     _tempdir: Option<Arc<tempfile::TempDir>>,
+    /// The mirror a read-only store opened over, dropped after the database
+    /// and every iterator over it.
+    view: Option<Arc<View>>,
 }
 
 impl ArchiveStore {
@@ -187,7 +191,8 @@ impl ArchiveStore {
     ///
     /// `path` is the archive **directory** (e.g. `<storage.path>/archive/`).
     /// The fjall database is stored at `<path>/index`. Segment files are
-    /// stored in `blocks_path` if set, otherwise in `<path>/`.
+    /// stored in `blocks_path` if set, otherwise in `<path>/`. The views
+    /// beside the archive that killed observers left are removed.
     pub fn open(
         schema: StateSchema,
         path: impl AsRef<Path>,
@@ -200,9 +205,49 @@ impl ArchiveStore {
         let segments_dir = blocks_path.unwrap_or(path).to_path_buf();
         let flatfiles = FlatFileStore::new(segments_dir).map_err(|e| Error::Io(e.to_string()))?;
 
-        let store = Self::from_database(&path.join("index"), schema, flatfiles, preset, None)?;
+        let store =
+            Self::from_database(&path.join("index"), schema, flatfiles, preset, None, None)?;
+        crate::view::remove_views(path);
 
         tracing::info!(tuning = %store.tuning(), "archive store opened");
+
+        Ok(store)
+    }
+
+    /// Open the archive store at `path` without writing to it: its index
+    /// over a [`View`] beside the archive, and its segment files where they
+    /// are. Both have to exist. The store refuses writers, prunes and
+    /// truncation, which would cut the real segment files.
+    pub fn open_view(
+        schema: StateSchema,
+        path: impl AsRef<Path>,
+        blocks_path: Option<&Path>,
+        preset: Preset,
+    ) -> Result<Self, Error> {
+        let path = path.as_ref();
+        let view = Arc::new(View::of(&path.join("index"), path)?);
+
+        let segments_dir = blocks_path.unwrap_or(path);
+
+        if !segments_dir.is_dir() {
+            return Err(Error::Io(format!(
+                "{} does not exist",
+                segments_dir.display()
+            )));
+        }
+
+        let flatfiles = FlatFileStore::new(segments_dir).map_err(|e| Error::Io(e.to_string()))?;
+
+        let store = Self::from_database(
+            view.path(),
+            schema,
+            flatfiles,
+            preset,
+            None,
+            Some(Arc::clone(&view)),
+        )?;
+
+        tracing::info!(tuning = %store.tuning(), "archive store opened read-only");
 
         Ok(store)
     }
@@ -223,6 +268,7 @@ impl ArchiveStore {
             flatfiles,
             Preset::Standard,
             Some(Arc::new(dir)),
+            None,
         )
     }
 
@@ -232,6 +278,7 @@ impl ArchiveStore {
         flatfiles: FlatFileStore,
         preset: Preset,
         tempdir: Option<Arc<tempfile::TempDir>>,
+        view: Option<Arc<View>>,
     ) -> Result<Self, Error> {
         let tuning = preset.archive();
         let db = tuning.database.builder(index_path).open()?;
@@ -249,6 +296,7 @@ impl ArchiveStore {
             preset,
             index_sweep: Arc::new(Mutex::new(IndexSweepState::default())),
             _tempdir: tempdir,
+            view,
         })
     }
 
@@ -289,6 +337,7 @@ impl ArchiveStore {
 
     /// Record the compatibility identity, synced to disk before it returns.
     pub fn record_identity(&self, identity: &str) -> Result<(), Error> {
+        self.writable()?;
         self.meta.insert(IDENTITY_KEY, identity.as_bytes())?;
         self.db.persist(PersistMode::SyncAll)?;
 
@@ -332,6 +381,7 @@ impl ArchiveStore {
     /// of redb's pre-export compaction — so an exported database directory
     /// carries settled segments rather than journal backlog and stale levels.
     pub fn compact(&self) -> Result<(), Error> {
+        self.writable()?;
         self.blocks.major_compact()?;
         self.logs.major_compact()?;
         self.tags.major_compact()?;
@@ -372,6 +422,18 @@ impl ArchiveStore {
 
         tracing::info!("archive store: graceful shutdown complete");
         Ok(())
+    }
+
+    /// Refuse a write on a store opened read-only.
+    fn writable(&self) -> Result<(), Error> {
+        match self.view {
+            Some(_) => Err(Error::ReadOnly),
+            None => Ok(()),
+        }
+    }
+
+    fn viewed<I>(&self, iter: I) -> Viewed<I> {
+        Viewed::new(iter, self.view.as_ref())
     }
 
     fn check_namespace(&self, ns: Namespace) -> Result<(), ArchiveError> {
@@ -644,6 +706,15 @@ impl CoreArchiveWriter for ArchiveWriter {
             build_log_key(ns, key).as_slice(),
             value.as_slice(),
         );
+
+        Ok(())
+    }
+
+    fn delete_log(&self, ns: Namespace, key: &LogKey) -> Result<(), ArchiveError> {
+        self.store.check_namespace(ns)?;
+
+        let mut batch = self.batch.lock().unwrap();
+        batch.remove(&self.store.logs, build_log_key(ns, key).as_slice());
 
         Ok(())
     }
@@ -1014,16 +1085,18 @@ impl dolos_core::archive::Skippable for BlockIter {
 }
 
 impl CoreArchiveStore for ArchiveStore {
-    type BlockIter<'a> = BlockIter;
+    type BlockIter<'a> = Viewed<BlockIter>;
     type Writer = ArchiveWriter;
-    type LogIter = LogIter;
+    type LogIter = Viewed<LogIter>;
     type EntityValueIter = EmptyEntityValueIter;
-    type SlotIter = SlotIter;
-    type TagIter = TagIter;
-    type ExactIter = ExactIter;
-    type EntityRecordIter = EntityRecordIter;
+    type SlotIter = Viewed<SlotIter>;
+    type TagIter = Viewed<TagIter>;
+    type ExactIter = Viewed<ExactIter>;
+    type EntityRecordIter = Viewed<EntityRecordIter>;
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
+        self.writable()?;
+
         Ok(ArchiveWriter::new(self))
     }
 
@@ -1053,7 +1126,7 @@ impl CoreArchiveStore for ArchiveStore {
         let snapshot = self.db.snapshot();
         let inner = snapshot.range(&self.logs, build_range(ns, &range));
 
-        Ok(LogIter { inner, done: false })
+        Ok(self.viewed(LogIter { inner, done: false }))
     }
 
     fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ArchiveError> {
@@ -1095,12 +1168,12 @@ impl CoreArchiveStore for ArchiveStore {
         let snapshot = self.db.snapshot();
         let inner = snapshot.range(&self.blocks, (start, end));
 
-        Ok(BlockIter {
+        Ok(self.viewed(BlockIter {
             inner,
             front: VecDeque::new(),
             back: VecDeque::new(),
             flatfiles: self.flatfiles.clone(),
-        })
+        }))
     }
 
     fn find_intersect(&self, intersect: &[ChainPoint]) -> Result<Option<ChainPoint>, ArchiveError> {
@@ -1152,6 +1225,8 @@ impl CoreArchiveStore for ArchiveStore {
         max_prune_slots: Option<u64>,
         max_prune_index_rows: Option<u64>,
     ) -> Result<bool, ArchiveError> {
+        self.writable()?;
+
         let snapshot = self.db.snapshot();
         let max_entries =
             max_prune_index_rows.map(|rows| usize::try_from(rows).unwrap_or(usize::MAX));
@@ -1251,6 +1326,8 @@ impl CoreArchiveStore for ArchiveStore {
     /// the cut — the exact boundary redb's `remove_after` draws by comparing
     /// full log keys against the bare 8-byte temporal prefix.
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError> {
+        self.writable()?;
+
         let slot = after.slot();
         let snapshot = self.db.snapshot();
 
@@ -1350,8 +1427,9 @@ impl CoreArchiveStore for ArchiveStore {
 
         let snapshot = self.db.snapshot();
 
-        SlotIter::new(&snapshot, &self.tags, dimension, hash, start, end)
-            .map_err(ArchiveError::from)
+        let iter = SlotIter::new(&snapshot, &self.tags, dimension, hash, start, end)?;
+
+        Ok(self.viewed(iter))
     }
 
     fn iter_archive_tags(
@@ -1364,13 +1442,13 @@ impl CoreArchiveStore for ArchiveStore {
         // concurrent writes.
         let snapshot = self.db.snapshot();
 
-        Ok(TagIter::new(snapshot, &self.tags, dimensions, slots))
+        Ok(self.viewed(TagIter::new(snapshot, &self.tags, dimensions, slots)))
     }
 
     fn iter_exact_records(&self, slots: Range<BlockSlot>) -> Result<Self::ExactIter, ArchiveError> {
         let snapshot = self.db.snapshot();
 
-        Ok(ExactIter::new(snapshot, &self.exact, slots))
+        Ok(self.viewed(ExactIter::new(snapshot, &self.exact, slots)))
     }
 
     fn iter_entity_records(
@@ -1380,7 +1458,7 @@ impl CoreArchiveStore for ArchiveStore {
     ) -> Result<Self::EntityRecordIter, ArchiveError> {
         let snapshot = self.db.snapshot();
 
-        Ok(EntityRecordIter::new(snapshot, &self.entity, kinds, slots))
+        Ok(self.viewed(EntityRecordIter::new(snapshot, &self.entity, kinds, slots)))
     }
 }
 
@@ -1664,6 +1742,187 @@ mod tests {
         let store = open().unwrap();
         crate::preset::assert_fjall_holds(store.database(), &store.tuning());
         crate::preset::assert_memtables_hold(store.database(), &store.tuning());
+    }
+
+    fn files(dir: &Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+        let mut found = Vec::new();
+
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+
+            if path.is_dir() {
+                found.extend(files(&path));
+            } else {
+                found.push((path.clone(), std::fs::read(&path).unwrap()));
+            }
+        }
+
+        found.sort();
+        found
+    }
+
+    const TAGGED: [u8; 28] = [1; 28];
+
+    fn schema() -> StateSchema {
+        let mut schema = StateSchema::default();
+        schema.insert("logs", dolos_core::NamespaceType::KeyValue);
+        schema
+    }
+
+    /// An archive holding, at each of `slots`, a block, a log row, a tag and
+    /// a block number, its index flushed to tables, shut down by its writer.
+    fn archived(path: &Path, slots: std::ops::Range<BlockSlot>) {
+        let store = ArchiveStore::open(schema(), path, None, Preset::Standard).unwrap();
+        let blocks: Vec<_> = slots.clone().map(|slot| (slot, body(slot, 0))).collect();
+
+        write(&store, &blocks);
+
+        let deltas: Vec<_> = slots
+            .clone()
+            .map(|slot| ArchiveIndexDelta {
+                tags: vec![dolos_core::Tag::new("address", TAGGED.to_vec())],
+                ..number_delta(slot, slot)
+            })
+            .collect();
+
+        let writer = store.start_writer().unwrap();
+        writer.apply_index(&deltas).unwrap();
+        for slot in slots {
+            writer
+                .write_log("logs", &LogKey::of(slot, &1u32), &vec![1])
+                .unwrap();
+        }
+        writer.commit().unwrap();
+
+        for keyspace in [&store.blocks, &store.logs, &store.tags, &store.exact] {
+            keyspace.rotate_memtable_and_wait().unwrap();
+        }
+        store.shutdown().unwrap();
+    }
+
+    fn open_view(path: &Path) -> ArchiveStore {
+        ArchiveStore::open_view(schema(), path, None, Preset::Standard).unwrap()
+    }
+
+    fn left(dir: &Path) -> Vec<std::ffi::OsString> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect()
+    }
+
+    /// A writer, a prune, a truncation, a compaction or an identity on a
+    /// read-only archive is refused and changes no file, the segments'
+    /// included.
+    #[test]
+    fn a_read_only_archive_refuses_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive");
+        archived(&path, 100..103);
+
+        let before = files(dir.path());
+
+        {
+            let store = open_view(&path);
+
+            let errors = [
+                store.start_writer().err().unwrap(),
+                store.prune_history(0, None, None).err().unwrap(),
+                store.truncate_front(&point(100)).err().unwrap(),
+            ];
+
+            // The error's Display hides its message, so read its Debug.
+            for error in errors {
+                assert!(format!("{error:?}").contains("read-only"), "{error:?}");
+            }
+
+            for error in [
+                store.compact().unwrap_err(),
+                store.record_identity("other").unwrap_err(),
+            ] {
+                assert!(matches!(error, Error::ReadOnly), "{error:?}");
+            }
+        }
+
+        assert!(
+            files(dir.path()) == before,
+            "a read-only archive changed a file"
+        );
+
+        let store = ArchiveStore::open(schema(), &path, None, Preset::Standard).unwrap();
+        assert_eq!(store.get_tip().unwrap().unwrap().0, 102);
+    }
+
+    /// The rows of the iterator `make` takes from a read-only open of the
+    /// archive in `dir`, drained after the store is dropped, so that it alone
+    /// holds the view; the view goes with it, not before.
+    ///
+    /// The view is checked as well as the rows: a table lsm-tree already
+    /// opened stays readable on unix once its link is removed.
+    fn drained<I: Iterator>(dir: &Path, make: impl FnOnce(&ArchiveStore) -> I) -> Vec<I::Item> {
+        let store = open_view(&dir.join("archive"));
+        let iter = make(&store);
+        drop(store);
+        assert_eq!(left(dir).len(), 2, "the view went before its iterator");
+
+        let rows = iter.collect();
+        assert_eq!(left(dir), ["archive"]);
+
+        rows
+    }
+
+    fn read<T>(rows: Vec<Result<T, ArchiveError>>) -> u64 {
+        rows.into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .len() as u64
+    }
+
+    /// Each iterator, drained after its read-only archive is dropped, reads
+    /// every row.
+    #[test]
+    fn an_iterator_outlives_its_read_only_archive() {
+        const ROWS: u64 = 20_000;
+
+        let dir = tempfile::tempdir().unwrap();
+        archived(&dir.path().join("archive"), 0..ROWS);
+        let dir = dir.path();
+
+        let blocks = drained(dir, |store| store.get_range(None, None).unwrap());
+        assert_eq!(blocks.len() as u64, ROWS);
+
+        let logs = drained(dir, |store| {
+            store.iter_logs("logs", KeyRange::all()).unwrap()
+        });
+        assert_eq!(read(logs), ROWS);
+
+        let slots = drained(dir, |store| {
+            store.slots_by_tag("address", &TAGGED, 0, u64::MAX).unwrap()
+        });
+        assert_eq!(read(slots), ROWS);
+
+        let tags = drained(dir, |store| {
+            store.iter_archive_tags(&["address"], 0..u64::MAX).unwrap()
+        });
+        assert_eq!(read(tags), ROWS);
+
+        let exact = drained(dir, |store| store.iter_exact_records(0..u64::MAX).unwrap());
+        assert!(read(exact) >= ROWS);
+    }
+
+    /// A writable open removes the view a killed observer left, which would
+    /// otherwise keep the tables the writer compacts away on disk.
+    #[test]
+    fn a_writable_open_removes_a_killed_observers_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive");
+        archived(&path, 100..103);
+
+        crate::view::left_by_a_kill(&path.join("index"), &path);
+        assert_eq!(left(dir.path()).len(), 2);
+
+        let _store = ArchiveStore::open(schema(), &path, None, Preset::Standard).unwrap();
+        assert_eq!(left(dir.path()), ["archive"]);
     }
 
     #[test]

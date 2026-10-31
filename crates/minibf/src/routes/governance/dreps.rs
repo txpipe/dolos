@@ -28,7 +28,7 @@ use crate::{
     Facade,
 };
 
-use super::{chain_context, drep_distribution};
+use super::{chain_context, drep_distribution, drep_final_rows, point_read_drep_row, DRepReads};
 
 /// How many anchors one page loads at a time. A page asks for up to 100 rows
 /// and every miss costs a round trip capped at the fetch timeout, so the bound
@@ -155,7 +155,8 @@ fn parse_bool_filter(value: Option<&str>) -> Result<Option<bool>, Error> {
 }
 
 /// One listed DRep: its sighting, and its ledger row where the ledger has
-/// one. A DRep only a vote delegation named has none.
+/// one, in state or as its final row in the log. A DRep only a vote
+/// delegation named has none.
 struct DrepRow {
     key: DRepKey,
     sighting: DRepSightingState,
@@ -198,9 +199,10 @@ where
         .await
 }
 
-/// The ledger row of every sighted DRep, read by one scan of `dreps` rather
-/// than a point read per DRep: the filters and `order_by=amount` need every
-/// row before they can cut a page.
+/// The ledger row of every sighted DRep, read by one scan of `dreps` and one
+/// of its log rather than a point read per DRep: the filters and
+/// `order_by=amount` need every row before they can cut a page. The state
+/// row wins over a final row.
 async fn join_drep_states<D>(
     domain: &Facade<D>,
     sightings: Vec<(DRepKey, DRepSightingState)>,
@@ -215,10 +217,14 @@ where
         .into_iter()
         .collect();
 
+    let mut finals = domain
+        .blocking(|facade| drep_final_rows(&facade.inner))
+        .await?;
+
     let rows = sightings
         .into_iter()
         .map(|(key, sighting)| {
-            let state = states.remove(&key);
+            let state = states.remove(&key).or_else(|| finals.remove(&key));
 
             DrepRow {
                 key,
@@ -232,19 +238,27 @@ where
 }
 
 /// The ledger rows of one page's DReps, by point reads in one blocking task.
+/// The DReps the point read misses, among them those only a vote delegation
+/// named, take their final rows from one scan of the log, as in
+/// [`super::read_drep_row`].
 async fn read_drep_states<D>(
     domain: &Facade<D>,
+    chain: &ChainSummary,
     sightings: Vec<(DRepKey, DRepSightingState)>,
 ) -> Result<Vec<DrepRow>, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
+    let chain = chain.clone();
+
     domain
         .blocking(move |facade| {
-            sightings
+            let reads = DRepReads::new(&chain);
+
+            let mut rows = sightings
                 .into_iter()
                 .map(|(key, sighting)| {
-                    let state = facade.read_cardano_entity::<DRepState>(&key)?;
+                    let state = point_read_drep_row(&facade.inner, &reads, &key)?;
 
                     Ok(DrepRow {
                         key,
@@ -252,7 +266,21 @@ where
                         state,
                     })
                 })
-                .collect()
+                .collect::<Result<Vec<_>, StatusCode>>()?;
+
+            let missed = |row: &DrepRow| {
+                row.state.is_none() && !matches!(row.key.0, DRep::Abstain | DRep::NoConfidence)
+            };
+
+            if rows.iter().any(missed) {
+                let mut finals = drep_final_rows(&facade.inner)?;
+
+                for row in rows.iter_mut().filter(|row| missed(row)) {
+                    row.state = finals.remove(&row.key);
+                }
+            }
+
+            Ok(rows)
         })
         .await
 }
@@ -291,7 +319,7 @@ where
             .take(pagination.count)
             .collect();
 
-        let rows = read_drep_states(domain, page).await?;
+        let rows = read_drep_states(domain, &chain, page).await?;
 
         return Ok(DrepsPage {
             rows,

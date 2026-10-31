@@ -846,7 +846,15 @@ fn the_first_stake_epoch_logs_its_distribution() {
     overwrite_estarts_rows(&domain, first_stake);
     wrap_the_epoch(&domain);
 
-    let expected = first_stake_distribution.unwrap();
+    // `RETIRED` is retired in every snapshot by now, so it has left state for
+    // the final-row log, and RUPD logs no empty row for it.
+    let mut expected = first_stake_distribution.unwrap();
+    assert_eq!(
+        expected.remove(&pool_hash(RETIRED)),
+        Some(PoolTally::default())
+    );
+    assert!(!pools(&domain).contains_key(&pool_hash(RETIRED)));
+
     let genesis_tally = expected.get(&pool_hash(GENESIS_POOL)).unwrap();
     assert_eq!(genesis_tally.stake, GENESIS_FUNDS);
     assert_eq!(genesis_tally.delegators, 1);

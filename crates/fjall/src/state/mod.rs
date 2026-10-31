@@ -31,7 +31,7 @@
 //! entity and UTxO keyspaces'.
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use dolos_core::{
     ChainPoint, EntityKey, EntityValue, KeyRange, Namespace, StateError,
@@ -46,6 +46,7 @@ pub mod tags;
 pub mod utxos;
 
 use crate::preset::{Preset, Tuning};
+use crate::view::{View, Viewed};
 use crate::Error;
 
 /// Keyspace names for state store
@@ -85,13 +86,33 @@ pub struct StateStore {
     /// Live-UTxO tags keyspace
     tags: Keyspace,
     preset: Preset,
+    /// The mirror a read-only store opened over, dropped after the database
+    /// and every iterator over it.
+    view: Option<Arc<View>>,
 }
 
 impl StateStore {
-    /// Open or create a state store at the given path, tuned by `preset`.
+    /// Open or create a state store at the given path, tuned by `preset`,
+    /// removing the views beside it that killed observers left.
     pub fn open(path: impl AsRef<Path>, preset: Preset) -> Result<Self, Error> {
+        let store = Self::open_at(path.as_ref(), preset, None)?;
+        crate::view::remove_views(path.as_ref());
+
+        Ok(store)
+    }
+
+    /// Open the state store at `path` without writing to it, over a
+    /// [`View`] beside it. The store refuses writers.
+    pub fn open_view(path: impl AsRef<Path>, preset: Preset) -> Result<Self, Error> {
+        let path = path.as_ref();
+        let view = Arc::new(View::of(path, path)?);
+
+        Self::open_at(view.path(), preset, Some(Arc::clone(&view)))
+    }
+
+    fn open_at(path: &Path, preset: Preset, view: Option<Arc<View>>) -> Result<Self, Error> {
         let tuning = preset.state();
-        let db = tuning.database.builder(path.as_ref()).open()?;
+        let db = tuning.database.builder(path).open()?;
 
         let store = Self {
             cursor: db.keyspace(keyspace_names::CURSOR, || tuning.cursor.options())?,
@@ -100,6 +121,7 @@ impl StateStore {
             tags: db.keyspace(keyspace_names::TAGS, || tuning.tags.options())?,
             db,
             preset,
+            view,
         };
 
         tracing::info!(tuning = %store.tuning(), "state store opened");
@@ -142,10 +164,19 @@ impl StateStore {
 
     /// Record the compatibility identity, synced to disk before it returns.
     pub fn record_identity(&self, identity: &str) -> Result<(), Error> {
+        self.writable()?;
         self.cursor.insert(IDENTITY_KEY, identity.as_bytes())?;
         self.db.persist(PersistMode::SyncAll)?;
 
         Ok(())
+    }
+
+    /// Refuse a write on a store opened read-only.
+    fn writable(&self) -> Result<(), Error> {
+        match self.view {
+            Some(_) => Err(Error::ReadOnly),
+            None => Ok(()),
+        }
     }
 
     /// Whether the store holds a cursor or any row.
@@ -301,9 +332,9 @@ impl CoreStateWriter for StateWriter {
 }
 
 impl CoreStateStore for StateStore {
-    type EntityIter = entities::EntityIterator;
+    type EntityIter = Viewed<entities::EntityIterator>;
     type EntityValueIter = entities::EmptyEntityValueIterator;
-    type UtxoIter = utxos::UtxosIterator;
+    type UtxoIter = Viewed<utxos::UtxosIterator>;
     type Writer = StateWriter;
 
     fn read_cursor(&self) -> Result<Option<ChainPoint>, StateError> {
@@ -333,6 +364,8 @@ impl CoreStateStore for StateStore {
     }
 
     fn start_writer(&self) -> Result<Self::Writer, StateError> {
+        self.writable()?;
+
         let batch = self.db.batch();
         Ok(StateWriter {
             batch: Mutex::new(batch),
@@ -347,8 +380,9 @@ impl CoreStateStore for StateStore {
     ) -> Result<Self::EntityIter, StateError> {
         // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
         let snapshot = self.db.snapshot();
-        entities::EntityIterator::new(&snapshot, &self.entities, ns, range)
-            .map_err(StateError::from)
+        let iter = entities::EntityIterator::new(&snapshot, &self.entities, ns, range)?;
+
+        Ok(Viewed::new(iter, self.view.as_ref()))
     }
 
     /// Multi-value namespaces have no encoding in this store: its entity
@@ -406,7 +440,9 @@ impl CoreStateStore for StateStore {
     fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {
         // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
         let snapshot = self.db.snapshot();
-        Ok(utxos::UtxosIterator::new(&snapshot, &self.utxos))
+        let iter = utxos::UtxosIterator::new(&snapshot, &self.utxos);
+
+        Ok(Viewed::new(iter, self.view.as_ref()))
     }
 }
 
@@ -426,5 +462,133 @@ mod tests {
         let store = StateStore::open(dir.path(), Preset::Standard).unwrap();
         assert_fjall_holds(store.database(), &store.tuning());
         assert_memtables_hold(store.database(), &store.tuning());
+    }
+
+    const NS: Namespace = "accounts";
+
+    /// A store holding `rows` entities and `rows` UTxOs, each in a table,
+    /// shut down by its writer.
+    fn written(path: &Path, rows: u32) {
+        let store = StateStore::open(path, Preset::Standard).unwrap();
+        let writer = store.start_writer().unwrap();
+
+        let mut delta = UtxoSetDelta::default();
+
+        for row in 0..rows {
+            let key = EntityKey::from_raw(&row.to_be_bytes());
+            writer.write_entity(NS, &key, &vec![1; 8]).unwrap();
+
+            let utxo = dolos_core::UtxoValue {
+                output: dolos_core::EraCbor(1, vec![1; 8]),
+                position: None,
+            };
+            delta.produced_utxo.insert(
+                TxoRef(pallas::crypto::hash::Hash::new([0; 32]), row),
+                Arc::new(utxo),
+            );
+        }
+
+        writer.apply_utxoset(&delta).unwrap();
+        writer.commit().unwrap();
+        store.entities.rotate_memtable_and_wait().unwrap();
+        store.utxos.rotate_memtable_and_wait().unwrap();
+        store.shutdown().unwrap();
+    }
+
+    fn files(dir: &Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+        let mut found = Vec::new();
+
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+
+            if path.is_dir() {
+                found.extend(files(&path));
+            } else {
+                found.push((path.clone(), std::fs::read(&path).unwrap()));
+            }
+        }
+
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn a_read_only_store_refuses_writers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state");
+        written(&path, 1);
+
+        let before = files(dir.path());
+
+        {
+            let store = StateStore::open_view(&path, Preset::Standard).unwrap();
+            let error = store.start_writer().err().unwrap();
+            assert!(error.to_string().contains("read-only"), "{error}");
+
+            let error = store.record_identity("other").unwrap_err();
+            assert!(matches!(error, Error::ReadOnly), "{error:?}");
+        }
+
+        assert!(
+            files(dir.path()) == before,
+            "a read-only store changed a file"
+        );
+    }
+
+    /// An iterator drained after its read-only store is dropped reads every
+    /// row, and the view goes with the iterator.
+    #[test]
+    fn an_iterator_outlives_its_read_only_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state");
+        written(&path, 20_000);
+
+        let store = StateStore::open_view(&path, Preset::Standard).unwrap();
+        let entities = store.iter_entities(NS, KeyRange::all()).unwrap();
+        drop(store);
+        assert_eq!(
+            left(dir.path()).len(),
+            2,
+            "the view went before its iterator"
+        );
+
+        let rows = entities.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(rows.len(), 20_000);
+        assert_eq!(left(dir.path()), ["state"]);
+
+        let store = StateStore::open_view(&path, Preset::Standard).unwrap();
+        let utxos = store.iter_utxos().unwrap();
+        drop(store);
+        assert_eq!(
+            left(dir.path()).len(),
+            2,
+            "the view went before its iterator"
+        );
+
+        let rows = utxos.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(rows.len(), 20_000);
+        assert_eq!(left(dir.path()), ["state"]);
+    }
+
+    fn left(dir: &Path) -> Vec<std::ffi::OsString> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect()
+    }
+
+    /// A writable open removes the view a killed observer left, which would
+    /// otherwise keep the tables the writer compacts away on disk.
+    #[test]
+    fn a_writable_open_removes_a_killed_observers_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state");
+        written(&path, 1);
+
+        crate::view::left_by_a_kill(&path, &path);
+        assert_eq!(left(dir.path()).len(), 2);
+
+        let _store = StateStore::open(&path, Preset::Standard).unwrap();
+        assert_eq!(left(dir.path()), ["state"]);
     }
 }

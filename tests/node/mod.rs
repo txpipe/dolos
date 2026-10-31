@@ -109,29 +109,48 @@ impl Node {
     /// Apply synthetic blocks through the real domain, then close every store
     /// so the publishing process can open them.
     pub fn sync(&self) {
+        // Inside epoch zero, so the ledger stays epoch-coherent and the
+        // `strict` assertions in `dolos-cardano` hold — see the note on the
+        // export crate's own harness fixture.
+        self.sync_chain(
+            Arc::new(dolos_cardano::include::preview::load()),
+            GenesisConfig::in_dir(self.root.path()),
+            SyntheticBlockConfig {
+                block_count: 3,
+                txs_per_block: 2,
+                slot: 100,
+                ..Default::default()
+            },
+        );
+    }
+
+    /// [`Self::sync`] over `genesis`, which the files `files` names hold, and
+    /// the synthetic blocks `blocks` configures.
+    pub fn sync_chain(
+        &self,
+        genesis: Arc<dolos_core::Genesis>,
+        files: GenesisConfig,
+        blocks: SyntheticBlockConfig,
+    ) {
         dolos::storage::ensure_storage_path(&self.config).unwrap();
 
         let stores =
             dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&self.config).unwrap();
-        let genesis = Arc::new(dolos_cardano::include::preview::load());
 
-        // Inside epoch zero, so the ledger stays epoch-coherent and the
-        // `strict` assertions in `dolos-cardano` hold — see the note on the
-        // export crate's own harness fixture.
-        let (blocks, _, chain_config) = build_synthetic_blocks(SyntheticBlockConfig {
-            block_count: 3,
-            txs_per_block: 2,
-            slot: 100,
-            ..Default::default()
-        });
+        let (blocks, _, chain_config) = build_synthetic_blocks(blocks);
 
         // The synthetic chain's initial UTxOs are seeded through the chain
         // config's `custom_utxos`, so they are part of this chain's genesis.
         // Persist them into `dolos.toml`: a separate process replaying from
         // origin (`doctor rebuild-state`) runs genesis from the file and must
         // seed the same set. Only a custom network carries them, so the file
-        // becomes preview's genesis under a custom chain.
-        self.write_chain(&self.custom_chain(2, chain_config.custom_utxos.clone()));
+        // becomes the genesis under a custom chain.
+        self.write_chain(&ChainConfig::custom(CardanoConfig {
+            magic: genesis.network_magic(),
+            is_testnet: true,
+            genesis: files,
+            custom_utxos: chain_config.custom_utxos.clone(),
+        }));
 
         let chain = dolos_cardano::CardanoLogic::initialize::<DomainAdapter>(
             chain_config,
@@ -322,16 +341,6 @@ impl Node {
     /// `dolos <args>` against the node's `dolos.toml`.
     pub fn run(&self, args: &[&str]) -> std::process::Output {
         self.command().args(args).output().unwrap()
-    }
-
-    /// [`Self::run`] from the node's directory, which a relative
-    /// `storage.path` resolves against.
-    pub fn run_in_root(&self, args: &[&str]) -> std::process::Output {
-        self.command()
-            .current_dir(self.root.path())
-            .args(args)
-            .output()
-            .unwrap()
     }
 
     fn command(&self) -> Command {

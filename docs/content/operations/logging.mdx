@@ -4,7 +4,7 @@ sidebar:
   order: 2
 ---
 
-Dolos outputs logs through stdout. Internally, it uses a tracing mechanism that groups logs into hierarchical blocks called _spans_ that holds data describing the context where the event occurred.
+Dolos writes logs to stderr, for every command, the node's `daemon`, `sync` and `serve` included; stdout carries only a command's own output, such as a report. Internally, it uses a tracing mechanism that groups logs into hierarchical blocks called _spans_ that holds data describing the context where the event occurred.
 
 Depending on your use-case, the amount and detail of these logs might be overwhelming. _Dolos_ provides a set of configuration values that allows you to opt-in into different levels of detail.
 

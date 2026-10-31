@@ -4,8 +4,8 @@
 //!
 //! The namespace is not in the record: it is the layer's *kind*, one per log
 //! namespace (`crate::LOG_KINDS`), so a shape change to one namespace's logs
-//! costs a backfill of that namespace's blobs and leaves the other eight alone.
-//! Which is also why this module has one codec rather than nine — the nine
+//! costs a backfill of that namespace's blobs and leaves the others alone.
+//! Which is also why this module has one codec rather than one per kind — the
 //! kinds differ in what they carry, never in how a record is written — and why
 //! its refusals name the record shape, `log`, rather than a layer.
 //!
@@ -37,7 +37,7 @@ use stelae::codec::{blob, close, open};
 
 /// The name this codec refuses under.
 ///
-/// One record shape serves all six `log-{ns}` kinds, so an error names the
+/// One record shape serves every `log-{ns}` kind, so an error names the
 /// shape rather than a layer — the layer is already in the message the caller
 /// wraps it in.
 const LOG: &str = "log";
@@ -125,9 +125,9 @@ impl OrderCheck {
 #[cfg(test)]
 mod tests {
     use dolos_cardano::model::{
-        AccountAddressChunk, AccountStats, AddressStats, AssetMintChunk, DRepEpochLog, EpochState,
-        FirstMintChunk, FirstScriptChunk, FixedNamespace as _, PaymentAddressChunk, PolicyKey,
-        PolicyMintChunk, PoolEpochLog, PoolKey, ProposalState,
+        AccountAddressChunk, AccountStats, AddressStats, AssetMintChunk, DRepEpochLog, DRepState,
+        EpochState, FirstMintChunk, FirstScriptChunk, FixedNamespace as _, PaymentAddressChunk,
+        PolicyKey, PolicyMintChunk, PoolEpochLog, PoolKey, PoolState, ProposalState,
     };
 
     use super::*;
@@ -159,7 +159,7 @@ mod tests {
     /// Each log takes exactly the keys of its kind after the slot: none for
     /// the epoch log, a chunk index for first mints and first scripts, a policy
     /// and a chunk for the per-policy list, an asset key and a chunk for an
-    /// asset's mints, a proposal for its final row.
+    /// asset's mints, a pool, a proposal or a DRep for its final row.
     #[test]
     fn keys_are_held_to_their_namespace_kind() {
         let slot = 7u64.to_be_bytes();
@@ -171,6 +171,7 @@ mod tests {
             (PolicyMintChunk::NS, 32),
             (AssetMintChunk::NS, 36),
             (PoolEpochLog::NS, 28),
+            (PoolState::NS, 28),
             (ProposalState::NS, 36),
         ] {
             let key = [slot.as_slice(), &vec![1; len]].concat();
@@ -197,21 +198,23 @@ mod tests {
         )
         .unwrap();
 
-        // drep epochs take a drep: a credential header and its hash, or the
-        // one-byte tag of Abstain or NoConfidence
-        for drep in [&[0x22][..], &[0x23], &[0x00], &[0x01]] {
-            let hash: &[u8] = if drep[0] > 1 { &[1; 28] } else { &[] };
-            let key = [slot.as_slice(), drep, hash].concat();
-            decode(DRepEpochLog::NS, wire(&key).as_bytes()).unwrap();
-        }
+        // drep epochs and a DRep's final row take a drep: a credential
+        // header and its hash, or the one-byte tag of Abstain or NoConfidence
+        for ns in [DRepEpochLog::NS, DRepState::NS] {
+            for drep in [&[0x22][..], &[0x23], &[0x00], &[0x01]] {
+                let hash: &[u8] = if drep[0] > 1 { &[1; 28] } else { &[] };
+                let key = [slot.as_slice(), drep, hash].concat();
+                decode(ns, wire(&key).as_bytes()).unwrap_or_else(|err| panic!("{ns}: {err:?}"));
+            }
 
-        for drep in [&[][..], &[0x22; 28], &[0x22; 30], &[0x00, 0x01], &[0x02]] {
-            let key = [slot.as_slice(), drep].concat();
-            let err = decode(DRepEpochLog::NS, wire(&key).as_bytes()).unwrap_err();
-            assert!(
-                matches!(err, Error::MalformedRecord { .. }),
-                "drep-epochs/{drep:02x?}: {err:?}"
-            );
+            for drep in [&[][..], &[0x22; 28], &[0x22; 30], &[0x00, 0x01], &[0x02]] {
+                let key = [slot.as_slice(), drep].concat();
+                let err = decode(ns, wire(&key).as_bytes()).unwrap_err();
+                assert!(
+                    matches!(err, Error::MalformedRecord { .. }),
+                    "{ns}/{drep:02x?}: {err:?}"
+                );
+            }
         }
 
         for (ns, len) in [
@@ -227,6 +230,7 @@ mod tests {
             (PaymentAddressChunk::NS, 32),
             (PoolEpochLog::NS, 32),
             (PoolEpochLog::NS, 0),
+            (PoolState::NS, 32),
             (ProposalState::NS, 32),
             (ProposalState::NS, 37),
         ] {

@@ -1,6 +1,6 @@
 use bincode;
 use itertools::Itertools;
-use redb::{Range, ReadableDatabase, ReadableTableMetadata, TableDefinition};
+use redb::{Range, ReadableTableMetadata, TableDefinition};
 use serde::{de::DeserializeOwned, Serialize};
 use std::{marker::PhantomData, ops::RangeBounds, path::Path, sync::Arc};
 use thiserror::Error;
@@ -10,6 +10,8 @@ use dolos_core::{
     config::RedbWalConfig, BlockSlot, ChainPoint, EntityDelta, LogEntry, LogValue, RawBlock,
     WalError, WalStore,
 };
+
+use crate::handle::Handle;
 
 #[derive(Debug, Error)]
 #[error(transparent)]
@@ -191,6 +193,39 @@ const WAL_METADATA: TableDefinition<&str, u32> = TableDefinition::new("wal_metad
 
 const WAL_METADATA_VERSION_KEY: &str = "version";
 
+/// What [`probe`] found in a WAL file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalProbe {
+    Empty,
+    Entries,
+    /// Another process holds the file open, so what it holds can't be read.
+    InUse,
+}
+
+/// Whether the WAL file at `path` holds an entry, read without writing to it.
+///
+/// Opening the file as a [`RedbWalStore`] stamps its version, and wipes one
+/// of another version, so a caller deciding whether to touch the WAL at all
+/// reads it here instead. A file that needs repair is an error.
+pub fn probe(path: impl AsRef<Path>) -> Result<WalProbe, RedbWalError> {
+    use redb::ReadableDatabase as _;
+
+    let db = match redb::ReadOnlyDatabase::open(path) {
+        Ok(db) => db,
+        Err(redb::DatabaseError::DatabaseAlreadyOpen) => return Ok(WalProbe::InUse),
+        Err(error) => return Err(error.into()),
+    };
+
+    let rx = db.begin_read()?;
+
+    match rx.open_table(WAL) {
+        Ok(table) if table.is_empty()? => Ok(WalProbe::Empty),
+        Ok(_) => Ok(WalProbe::Entries),
+        Err(redb::TableError::TableDoesNotExist(_)) => Ok(WalProbe::Empty),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Current WAL on-disk schema version.
 ///
 /// Bump this whenever the serialized format of WAL entries changes in a way
@@ -204,7 +239,9 @@ const WAL_METADATA_VERSION_KEY: &str = "version";
 ///    asset.
 /// 6: the DRep and pool deltas drop the fields minibf now derives, and
 ///    `DRepAnchorUpdate` and `DRepPowerUpdate` retire.
-pub const CURRENT_WAL_VERSION: u32 = 6;
+/// 7: `ScriptFirstSeen` retires.
+/// 8: `MintStatsUpdate` and `MetadataTxUpdate` retire.
+pub const CURRENT_WAL_VERSION: u32 = 8;
 
 pub struct LogIter<'a, T>(Range<'a, DbChainPoint, DbLogValue>, PhantomData<T>);
 
@@ -286,7 +323,7 @@ const DEFAULT_CACHE_SIZE_MB: usize = 50;
 /// Concrete implementation of WalStore using Redb
 #[derive(Clone, Debug)]
 pub struct RedbWalStore<T> {
-    db: Arc<redb::Database>,
+    db: Arc<Handle>,
     _phantom: PhantomData<T>,
 }
 
@@ -329,7 +366,7 @@ where
             .map_err(WalError::internal)?;
 
         let out = Self {
-            db: Arc::new(db),
+            db: Arc::new(Handle::Writable(db)),
             _phantom: Default::default(),
         };
 
@@ -347,7 +384,7 @@ where
             .map_err(WalError::internal)?;
 
         let out = Self {
-            db: Arc::new(inner),
+            db: Arc::new(Handle::Writable(inner)),
             _phantom: Default::default(),
         };
 
@@ -357,8 +394,35 @@ where
         Ok(out)
     }
 
+    /// Open an existing WAL read-only (see [`Handle`]), without the
+    /// initialization and version stamps [`Self::open`] writes. A WAL of
+    /// another version is refused: only a writable open converts it.
+    pub fn open_read_only(
+        path: impl AsRef<Path>,
+        config: &RedbWalConfig,
+    ) -> Result<Self, WalError> {
+        let db = Handle::open_read_only(
+            path,
+            1024 * 1024 * config.cache.unwrap_or(DEFAULT_CACHE_SIZE_MB),
+        )
+        .map_err(WalError::internal)?;
+
+        let out = Self {
+            db: Arc::new(db),
+            _phantom: Default::default(),
+        };
+
+        match out.read_version()? {
+            Some(CURRENT_WAL_VERSION) => Ok(out),
+            found => Err(WalError::IncompatibleVersion {
+                found: found.unwrap_or_default(),
+                expected: CURRENT_WAL_VERSION,
+            }),
+        }
+    }
+
     pub fn db_mut(&mut self) -> Option<&mut redb::Database> {
-        Arc::get_mut(&mut self.db)
+        Arc::get_mut(&mut self.db).and_then(Handle::writable_mut)
     }
 
     pub fn ensure_initialized(&self) -> Result<(), RedbWalError> {
@@ -876,6 +940,7 @@ where
 mod tests {
     use super::*;
     use dolos_core::{ChainError, Entity, EntityValue, Namespace, NsKey};
+    use redb::ReadableDatabase as _;
     use serde::{Deserialize, Serialize};
 
     /// Minimal delta type used by tests to satisfy `RedbWalStore`'s generic
@@ -921,10 +986,113 @@ mod tests {
         redb::Database::builder().create(path).unwrap()
     }
 
+    /// An entry is seen whatever version the file records, and reading it
+    /// leaves the file as it was.
+    #[test]
+    fn probe_reads_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.redb");
+
+        open_test_store(&path).unwrap();
+        assert_eq!(probe(&path).unwrap(), WalProbe::Empty);
+
+        {
+            let db = open_raw_db(&path);
+            let wx = db.begin_write().unwrap();
+            {
+                let mut metadata = wx.open_table(WAL_METADATA).unwrap();
+                metadata.insert(WAL_METADATA_VERSION_KEY, 1).unwrap();
+
+                let mut table = wx.open_table(WAL).unwrap();
+                let key = DbChainPoint::from(ChainPoint::Specific(42, [1u8; 32].into()));
+                table.insert(key, vec![0xDEu8, 0xAD, 0xBE, 0xEF]).unwrap();
+            }
+            wx.commit().unwrap();
+        }
+
+        let before = std::fs::read(&path).unwrap();
+        assert_eq!(probe(&path).unwrap(), WalProbe::Entries);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    /// A file with no WAL table, as a fresh redb file is, holds no entry.
+    #[test]
+    fn probe_without_a_table_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.redb");
+
+        drop(open_raw_db(&path));
+
+        assert_eq!(probe(&path).unwrap(), WalProbe::Empty);
+    }
+
+    /// A file a store holds open is in use, not data, and is still in use
+    /// until the store closes.
+    #[test]
+    fn probe_under_an_open_store_is_in_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.redb");
+
+        let store = open_test_store(&path).unwrap();
+        assert_eq!(probe(&path).unwrap(), WalProbe::InUse);
+
+        drop(store);
+        assert_eq!(probe(&path).unwrap(), WalProbe::Empty);
+    }
+
     #[test]
     fn fresh_in_memory_stamps_current_version() {
         let store = TestStore::memory().unwrap();
         assert_eq!(store.read_version().unwrap(), Some(CURRENT_WAL_VERSION));
+    }
+
+    /// A read-only open leaves the file as it found it, refuses writes, and
+    /// is refused while a writer holds the file.
+    #[test]
+    fn read_only_open_never_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.redb");
+
+        let writer = open_test_store(&path).unwrap();
+        writer.reset_to(&ChainPoint::Origin).unwrap();
+
+        let error = TestStore::open_read_only(&path, &RedbWalConfig::default()).unwrap_err();
+        assert!(crate::handle::is_already_open(&error), "{error}");
+
+        drop(writer);
+        let before = std::fs::read(&path).unwrap();
+
+        let store = TestStore::open_read_only(&path, &RedbWalConfig::default()).unwrap();
+        assert_eq!(store.find_tip().unwrap().unwrap().0, ChainPoint::Origin);
+        assert!(store.reset_to(&ChainPoint::Origin).is_err());
+        drop(store);
+
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn read_only_open_refuses_another_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.redb");
+
+        {
+            let db = open_raw_db(&path);
+            let wx = db.begin_write().unwrap();
+            wx.open_table(WAL).unwrap();
+            wx.commit().unwrap();
+        }
+
+        let error = TestStore::open_read_only(&path, &RedbWalConfig::default()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                WalError::IncompatibleVersion {
+                    found: 0,
+                    expected: CURRENT_WAL_VERSION
+                }
+            ),
+            "{error}"
+        );
     }
 
     #[test]

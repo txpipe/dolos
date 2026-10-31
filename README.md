@@ -108,7 +108,9 @@ npm install @txpipe/dolos
 Once installed:
 
 ```bash
-dolos init       # Interactive configuration and bootstrapping
+dolos init       # Interactive configuration
+dolos bootstrap  # Load the chain data
+dolos daemon     # Run the node
 ```
 
 📖 **Full documentation**: [https://docs.txpipe.io/dolos](https://docs.txpipe.io/dolos)

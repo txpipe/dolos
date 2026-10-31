@@ -24,8 +24,8 @@
 //!    set. They are never shipped — ADR-004's Amendment 2.
 //! 5. Set the cursor as the last write, after all state and tags have landed.
 //!
-//! Nothing is added for the WAL: `bootstrap::run` already reseeds it from the
-//! state cursor after any bootstrap method.
+//! Nothing is added for the WAL: `bootstrap::run` reseeds it from the state
+//! cursor after a Stelae restore.
 //!
 //! ## Why `set_cursor` is the last write
 //!
@@ -33,19 +33,18 @@
 //! reads as restored exactly when that cursor is there. Writing it after step 4
 //! makes it the completion marker for the whole restore rather than for the
 //! state tip alone: a node whose ledger is complete and whose live-UTxO
-//! dimensions are not has no cursor, and the next `bootstrap` treats it as
-//! empty — which is what it is.
+//! dimensions are not has no cursor, and `has_existing_data()` reports no node
+//! — which is what it is.
 //!
 //! No state or tag write needs the cursor. The tip is never checkpointed, so
-//! every resume rewrites its UTxOs and their tags together, including when an
-//! older restore stopped after writing UTxOs without their tags.
+//! every resume rewrites its UTxOs and their tags together.
 //!
 //! What it leaves is worth stating rather than discovering: an interruption
 //! anywhere in a restore leaves a node `has_existing_data()` reports as empty.
-//! `--continue` repairs it cheaply, because the epoch layers stay checkpointed;
-//! without it the stele is restored again from the top over keyed writes, which
-//! is a rewrite and not a duplication — the behaviour every interruption before
-//! the tip already had.
+//! A resumed restore repairs it cheaply, because the epoch layers stay
+//! checkpointed; without one the stele is restored again from the top over
+//! keyed writes, which is a rewrite and not a duplication — the behaviour
+//! every interruption before the tip already had.
 //!
 //! ## Resume, and where the checkpoint goes
 //!
@@ -155,11 +154,12 @@ use tracing::info;
 use crate::{
     entity_kind_for,
     layers::{blocks, entities, indexes, logs, state},
-    log_ns_for, preflight, read_position,
+    log_ns_for, read_position,
     reporting::Cursor,
-    state_ns_for, DolosProfile, Error, Position, BLOCKS, DIGESTS, ENTITY_KINDS, INDEXES,
-    NAMESPACES, RETIRED_SCHEMA_REV, SCOPE_REQUIRED, STATE_KINDS, UTXOS,
+    state_ns_for, DolosProfile, Error, Position, BLOCKS, ENTITY_KINDS, INDEXES, NAMESPACES,
+    RETIRED_SCHEMA_REV, SCOPE_REQUIRED, STATE_KINDS, UTXOS,
 };
+use stelae_driver::preflight;
 
 pub use stelae_driver::restore::{Budget, Checkpoint, Outlook};
 
@@ -428,12 +428,13 @@ impl Plan {
 
     /// Refuse a restore that cannot fit, before it starts writing.
     ///
-    /// Two needs, one policy ([`crate::preflight`]): the stores this restore
-    /// will write, and — for a transport that stages — the one layer it holds
-    /// on disk while it drains it. Both are handed to the same check rather
-    /// than compared separately, because whenever the scratch directory sits on
-    /// the storage filesystem they are two claims on one pool of free bytes,
-    /// and the default `<storage.path>/scratch` makes that the ordinary case.
+    /// Two needs, one policy ([`stelae_driver::preflight`]): the stores this
+    /// restore will write, and — for a transport that stages — the one
+    /// layer it holds on disk while it drains it. Both are handed to the
+    /// same check rather than compared separately, because whenever the
+    /// scratch directory sits on the storage filesystem they are two claims
+    /// on one pool of free bytes, and the default `<storage.path>/scratch`
+    /// makes that the ordinary case.
     ///
     /// Both needs are resume-aware, and for the same reason: what a run has to
     /// fit is what *this* run will move, not what the plan describes. The
@@ -944,7 +945,7 @@ impl Summary {
 ///
 /// The [`Checkpoint`] takes the path it is given — the driver never derives
 /// dolos layout — and this is where dolos derives it. The `resume` flag a
-/// checkpoint is opened with is the operator's `--continue`, and the driver's
+/// checkpoint is opened with is the caller's, and the driver's
 /// ignore-unless-resuming rule is the reason `--force` is safe: clearing
 /// storage removes this file with the rest of it, and even a progress file
 /// that somehow survived its stores cannot skip layers onto empty ones.
@@ -986,7 +987,7 @@ pub struct Restoring<'a> {
     pub max_history: Option<u64>,
     /// `storage.path` — where the stores live, and with them the progress file.
     pub storage_path: &'a Path,
-    /// The operator's `--continue`.
+    /// Whether to honour the progress file an interrupted restore left.
     pub resume: bool,
     /// The operator explicitly accepted the risk of restoring without checking
     /// the destination and staging volumes against the stele's declared sizes.
@@ -999,7 +1000,7 @@ pub struct Restoring<'a> {
 /// Which store set is legitimate depends on `checkpoint`: an empty one always
 /// is, and one carrying what an interrupted attempt left behind is exactly what
 /// a [`Checkpoint`] opened with `resume` describes. Deciding between them is
-/// `bootstrap`'s, and it already owns `--force` and `--continue`.
+/// the caller's.
 ///
 /// `observer` hears about it as it happens, and is forwarded to `stele`:
 /// this loop knows which layer of how many and whether the resume skipped it,
@@ -1569,13 +1570,6 @@ fn restore_state<R: SteleReader, S: StateStore>(
     Ok((entities, 0))
 }
 
-/// The kinds a restore reads nothing from, for a caller reporting what it
-/// skipped.
-///
-/// `digests` is verification metadata about Mithril immutable files; ADR-004 is
-/// explicit that nothing is written to the stores from it.
-pub const UNRESTORED_KINDS: [&str; 1] = [DIGESTS];
-
 /// Where a `--source` points.
 ///
 /// The scheme is what selects a restore path, which is why this is parsed
@@ -1692,12 +1686,12 @@ mod tests {
     use stelae::{inscription::LayerDescriptor, Digest, RestoreProgress};
 
     use super::*;
-    use crate::MAINNET_MAGIC;
+    use crate::{DIGESTS, MAINNET_MAGIC};
 
     fn descriptor(kind: &str, scope: serde_json::Value, byte: u8) -> LayerDescriptor {
         LayerDescriptor {
             kind: kind.to_owned(),
-            media_type: format!("application/vnd.dolos.stele.{kind}.v1+zstd"),
+            media_type: crate::payload_media_type(kind),
             diff_id: Digest::from_bytes([byte; 32]),
             records: 1,
             uncompressed_size: 100,
@@ -2197,6 +2191,40 @@ mod tests {
         assert_eq!(*namespace, retired);
     }
 
+    /// `plan` asks before a store could be opened.
+    #[test]
+    fn plan_refuses_a_retired_namespace() {
+        let retired = NAMESPACES[0];
+
+        let mut bare = inscription(vec![]);
+        bare.parameters["schemas"][retired] = json!(RETIRED_SCHEMA_REV);
+
+        let temp = tempfile::tempdir().unwrap();
+        let stele = stelae::dir::SteleDir::create(temp.path()).unwrap();
+        stelae::SteleWriter::seal(&stele, &DolosProfile, &bare).unwrap();
+
+        assert!(matches!(
+            plan(&stele, MAINNET_MAGIC, None),
+            Err(Error::RetiredNamespace { namespace }) if namespace == retired
+        ));
+    }
+
+    /// A namespace this build does not model is not a refusal, at any
+    /// revision: a newer publisher's addition and an older one's retirement
+    /// are both namespaces this reader has no history to lose in.
+    #[test]
+    fn a_namespace_this_build_does_not_model_is_not_a_refusal() {
+        let unmodeled = "not-a-namespace";
+        assert!(!NAMESPACES.contains(&unmodeled));
+
+        for rev in [json!(RETIRED_SCHEMA_REV), json!(1)] {
+            let mut inscription = inscription(state_layers());
+            inscription.parameters["schemas"][unmodeled] = rev;
+
+            check_namespaces(&inscription).unwrap();
+        }
+    }
+
     /// A namespace dropped from `schemas` outright says the same thing as one
     /// declared retired, and is refused the same way: the rule is that a
     /// publisher declares what it carries, not that it declares what it lost.
@@ -2285,12 +2313,16 @@ mod tests {
             Err(Error::UndeclaredEntityKind { kind: refused }) if refused == kind.name()
         ));
 
-        // A stele published before the declaration existed carries none.
-        let mut older = inscription(state_layers());
-        older.parameters.as_object_mut().unwrap().remove("entities");
+        // A stele without the map declares no kind at all.
+        let mut undeclared = inscription(state_layers());
+        undeclared
+            .parameters
+            .as_object_mut()
+            .unwrap()
+            .remove("entities");
 
         assert!(matches!(
-            check_entities(&older),
+            check_entities(&undeclared),
             Err(Error::UndeclaredEntityKind { .. })
         ));
 
@@ -2533,7 +2565,7 @@ mod tests {
     /// The destination need is nil here — no layers, so nothing to write — so
     /// what the refusal is about is unambiguous. That the two needs are
     /// *summed* when they share a volume is the policy's own property and is
-    /// tested where the policy lives, in [`crate::preflight`].
+    /// tested where the policy lives, in [`stelae_driver::preflight`].
     #[test]
     fn the_preflight_refuses_a_scratch_volume_that_cannot_hold_a_layer() {
         let temp = tempfile::tempdir().unwrap();

@@ -1,4 +1,4 @@
-use dolos_cardano::networks::ResolvedNetwork;
+use dolos_cardano::networks::{KnownNetwork, ResolvedNetwork};
 use dolos_core::config::{
     ConfigError, LoggingConfig, RootConfig, TelemetryConfig, DEFAULT_CONFIG_FILE,
 };
@@ -48,6 +48,19 @@ pub fn open_data_stores(config: &RootConfig) -> Result<Stores, Error> {
     storage::open_data_stores(config)
 }
 
+/// The dataset's stores as they are on disk, creating, bootstrapping and
+/// catching up nothing; see [`storage::open_existing_stores`].
+#[allow(
+    dead_code,
+    reason = "the first commands ported to it land with the sync and data groups"
+)]
+pub fn open_existing_stores(
+    config: &RootConfig,
+    access: storage::Access,
+) -> Result<Stores, storage::OpenError> {
+    storage::open_existing_stores(config, access)
+}
+
 /// The configuration file a command reads and `init` writes: `--config`, else
 /// `./dolos.toml`.
 pub fn config_file(explicit: Option<&Path>) -> &Path {
@@ -63,6 +76,24 @@ pub fn load_config(explicit_file: Option<&Path>) -> Result<RootConfig, ConfigErr
 
         log_filter(&config.logging).map(|_| ())
     })
+}
+
+/// Parses `--known-network` / `--network` against the catalog.
+pub fn parse_known_network(name: &str) -> Result<&'static KnownNetwork, String> {
+    KnownNetwork::by_name(name).ok_or_else(|| format!("unknown network {name}"))
+}
+
+/// The configuration a command runs on. A custom network's genesis is checked
+/// before any command that could touch a store, since several of them clear
+/// data before they need it.
+pub fn load_and_check_config(config_file: &Path) -> miette::Result<RootConfig> {
+    load_config(Some(config_file))
+        .map_err(miette::Report::from_err)
+        .and_then(|config| {
+            check_network(&config)?;
+            Ok(config)
+        })
+        .context("loading configuration")
 }
 
 pub fn resolve_network(config: &RootConfig) -> miette::Result<ResolvedNetwork<'_>> {
@@ -138,6 +169,9 @@ pub fn setup_domain_with_stop_epoch(
 /// library returns typed construction errors.
 fn render_domain_build_error(error: DomainBuildError) -> miette::Report {
     match error {
+        DomainBuildError::Storage(error @ Error::InUse { .. }) => {
+            miette::Report::new(storage::OpenError::from(error))
+        }
         DomainBuildError::Storage(Error::WalError(WalError::IncompatibleVersion {
             found,
             expected,
@@ -177,7 +211,7 @@ pub fn setup_tracing_error_only() -> miette::Result<()> {
     let filter = Targets::new().with_default(tracing::Level::ERROR);
 
     tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .with(filter)
         .init();
 
@@ -226,6 +260,7 @@ fn log_filter(config: &LoggingConfig) -> Result<Targets, ConfigError> {
     Ok(filter)
 }
 
+/// Logs go to stderr, which leaves stdout to a command's result.
 pub fn setup_tracing(
     config: &LoggingConfig,
     telemetry: Option<&TelemetryConfig>,
@@ -260,7 +295,7 @@ pub fn setup_tracing(
     #[cfg(not(feature = "debug"))]
     {
         tracing_subscriber::registry()
-            .with(tracing_subscriber::fmt::layer())
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
             .with(otel_layer)
             .with(filter)
             .init();
@@ -269,7 +304,7 @@ pub fn setup_tracing(
     #[cfg(feature = "debug")]
     {
         tracing_subscriber::registry()
-            .with(tracing_subscriber::fmt::layer())
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
             .with(console_subscriber::spawn())
             .with(otel_layer)
             .with(filter)

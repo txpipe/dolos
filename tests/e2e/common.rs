@@ -234,37 +234,38 @@ pub fn shutdown_gracefully(handle: &mut Child) {
     handle.wait().expect("failed to wait for process");
 }
 
-pub fn reset_and_bootstrap(workspace: &ScenarioWorkspace) {
-    let mut cmd = prepare_scenario_process(workspace);
+/// A custom scenario runs on preview's genesis under preview's magic, its
+/// files beside its `dolos.toml`; a known network's genesis is built in.
+pub fn write_custom_genesis(workspace: &ScenarioWorkspace) {
+    let config = std::fs::read_to_string(workspace.path().join("dolos.toml"))
+        .expect("failed to read the scenario config");
 
-    let reset = cmd
-        .args(["doctor", "reset-genesis"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .expect("failed to reset genesis");
-
-    assert!(
-        reset.status.success(),
-        "doctor reset-genesis failed for scenario {}: {}",
-        workspace.name(),
-        String::from_utf8_lossy(&reset.stderr)
-    );
+    if !config.contains("network = \"custom\"") {
+        return;
+    }
 
     let mut cmd = prepare_scenario_process(workspace);
 
-    let bootstrap = cmd
-        .args(["bootstrap", "relay", "--force"])
+    let write = cmd
+        .args([
+            "config",
+            "write-genesis",
+            "--network",
+            "preview",
+            "--dir",
+            ".",
+            "--force",
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
-        .expect("failed to bootstrap data");
+        .expect("failed to write genesis");
 
     assert!(
-        bootstrap.status.success(),
-        "bootstrap relay failed for scenario {}: {}",
+        write.status.success(),
+        "config write-genesis failed for scenario {}: {}",
         workspace.name(),
-        String::from_utf8_lossy(&bootstrap.stderr)
+        String::from_utf8_lossy(&write.stderr)
     );
 }
 

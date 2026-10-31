@@ -22,14 +22,14 @@ use std::collections::BTreeMap;
 
 use dolos_cardano::{
     model::{
-        AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AssetState,
-        AuthHistory, CalidusRegistration, Committee, CommitteeAuthorization, Constitution,
-        DRepDelegation, DRepEpochLog, DRepExpiry, DRepSightingState, DRepState, DatumState,
-        EndStats, EpochState, EpochValue, EraBoundary, EraState, FirstMintChunk, FirstMintSet,
-        FirstScriptChunk, FirstScriptSet, GovDistr, GovRoots, GovState, MetadataLabelState, Nonces,
-        PParamValue, PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk,
-        PoolDelegation, PoolEpochLog, PoolParams, PoolSnapshot, PoolState, PoolTally,
-        ProposalAction, ProposalState, RollingStats, ScriptState, ShardProgress, Stake, VoteEntry,
+        AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AuthHistory,
+        CalidusRegistration, Committee, CommitteeAuthorization, Constitution, DRepDelegation,
+        DRepEpochLog, DRepExpiry, DRepSightingState, DRepState, DatumState, EndStats, EpochState,
+        EpochValue, EraBoundary, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
+        FirstScriptSet, GovDistr, GovRoots, GovState, MetadataLabelState, Nonces, PParamValue,
+        PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk, PoolDelegation,
+        PoolEpochLog, PoolParams, PoolSnapshot, PoolState, PoolTally, ProposalAction,
+        ProposalState, PrunedAccountState, RollingStats, ShardProgress, Stake, VoteEntry,
     },
     model::{
         AccountStats, AddressStats, AssetMintChunk, AssetMintSet, PaymentAddressChunk,
@@ -196,16 +196,6 @@ pub fn account_state() -> AccountState {
     }
 }
 
-pub fn asset_state() -> AssetState {
-    AssetState {
-        quantity_bytes: bytes_of::<16>(0x80),
-        initial_tx: Some(hash32(0x81)),
-        initial_slot: Some(44_444),
-        mint_tx_count: 19,
-        metadata_tx: Some(hash32(0x82)),
-    }
-}
-
 pub fn first_mint_chunk() -> FirstMintChunk {
     FirstMintChunk {
         count: 258,
@@ -340,10 +330,6 @@ pub fn account_address_chunk() -> AccountAddressChunk {
                 .into(),
         ],
     }
-}
-
-pub fn script_state() -> ScriptState {
-    ScriptState { slot: 99_999_999 }
 }
 
 pub fn first_script_set() -> FirstScriptSet {
@@ -660,6 +646,13 @@ pub fn pending_mir_state() -> PendingMirState {
         credential: StakeCredential::ScriptHash(hash28(0xe0)),
         from_reserves: 7_000_000,
         from_treasury: 8_000_000,
+    }
+}
+
+pub fn pruned_account_state() -> PrunedAccountState {
+    PrunedAccountState {
+        lifetime_rewards: 4_981_449,
+        deregistered_at: Some(171_234_567),
     }
 }
 

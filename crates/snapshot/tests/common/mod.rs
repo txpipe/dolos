@@ -24,13 +24,13 @@ use dolos_cardano::{
     indexes::archive_dimensions,
     model::{
         AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountKey, AccountState,
-        AccountStats, AddressKey, AddressStats, AssetKey, AssetMintChunk, AssetMintSet, AssetState,
+        AccountStats, AddressKey, AddressStats, AssetKey, AssetMintChunk, AssetMintSet,
         DRepEpochLog, DRepKey, DRepSightingState, DRepState, DatumKey, DatumState, EpochState,
         EraKey, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk, FirstScriptSet,
         FixedNamespace as _, GovState, MetadataLabelState, PaymentAddressChunk, PaymentAddressKey,
         PaymentAddressSet, PaymentKey, PaymentStats, PendingMirState, PendingRewardState,
         PolicyKey, PolicyMintChunk, PoolEpochLog, PoolKey, PoolState, ProposalKey, ProposalState,
-        ScriptKey, ScriptState,
+        PrunedAccountState, ScriptKey,
     },
     pallas::ledger::primitives::{conway::DRep, StakeCredential},
     periods::{GroupKey, Ungrouped},
@@ -42,7 +42,6 @@ use dolos_core::{
 use dolos_snapshot::{
     layers::{
         blocks::BlockRecord,
-        digests::ImmutableDigests,
         logs::LogRecord,
         state::{self, StateRecord},
     },
@@ -55,6 +54,7 @@ use stelae::{
     inscription::LayerDescriptor,
     Digest, Profile, SteleReader, SteleWriter,
 };
+use stelae_driver::digests::ImmutableDigests;
 
 pub const NETWORK_MAGIC: u64 = dolos_snapshot::MAINNET_MAGIC;
 
@@ -102,6 +102,7 @@ pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
         | AccountEpochLog::NS
         | PendingMirState::NS
         | PendingRewardState::NS
+        | PrunedAccountState::NS
         | AccountAddressChunk::NS => keys::encode(&credential),
         AccountStats::NS => keys::encode(&(u64::from(byte), credential)),
         AddressStats::NS => keys::encode(&(u64::from(byte), address)),
@@ -116,7 +117,6 @@ pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
             epoch: u64::from(byte),
             member: (),
         }),
-        AssetState::NS => keys::encode(&AssetKey([byte; 32].into())),
         AssetMintChunk::NS => keys::encode(&(AssetKey([byte; 32].into()), u32::from(byte))),
         AssetMintSet::NS => keys::encode(&GroupKey {
             group: AssetKey([byte; 32].into()),
@@ -134,7 +134,6 @@ pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
         PolicyMintChunk::NS => keys::encode(&(PolicyKey([byte; 28].into()), u32::from(byte))),
         PoolState::NS | PoolEpochLog::NS => keys::encode(&PoolKey([byte; 28].into())),
         ProposalState::NS => keys::encode(&ProposalKey::new([byte; 32].into(), u32::from(byte))),
-        ScriptState::NS => keys::encode(&ScriptKey([byte; 28].into())),
         FirstScriptSet::NS => keys::encode(&GroupKey {
             group: Ungrouped,
             epoch: u64::from(byte),
@@ -282,8 +281,8 @@ pub fn entities(kind: EntityKind) -> Vec<EntityRecord> {
 /// inscription order.
 ///
 /// One layer per namespace, so a kind's shards are the ones its spec'd count
-/// allows and its fixture keys reach: both of [`SHARDS`] for `assets`,
-/// `datums`, `scripts` and `utxos`, [`ACCOUNT_SHARD`] alone for `accounts`,
+/// allows and its fixture keys reach: both of [`SHARDS`] for `datums` and
+/// `utxos`, [`ACCOUNT_SHARD`] alone for `accounts`,
 /// and shard 0 for every single blob. Every state namespace is among them —
 /// which is what `the_golden_state_layers_cover_every_namespace` holds this
 /// to.
@@ -408,9 +407,9 @@ pub fn write_layer(
 /// per populated shard in each role, dump and tip.
 pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
     use dolos_snapshot::layers::{
-        blocks, digests as digests_layer, entities as entities_layer, indexes as indexes_layer,
-        logs,
+        blocks, entities as entities_layer, indexes as indexes_layer, logs,
     };
+    use stelae_driver::digests as digests_layer;
 
     let mut layers: Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> = vec![
         (
@@ -463,7 +462,9 @@ pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
     layers.push((
         DIGESTS,
         Box::new(digests_scope()),
-        encode_all(&self::digests(), digests_layer::encode),
+        encode_all(&self::digests(), |record| {
+            Ok(digests_layer::encode(record)?)
+        }),
     ));
 
     layers

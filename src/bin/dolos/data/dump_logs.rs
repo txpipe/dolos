@@ -5,8 +5,8 @@ use dolos_cardano::{
     eras::load_chain_summary_from_state,
     eras::log_epoch_range_to_key_range,
     model::{
-        AccountEpochLog, AccountKey, DRepEpochLog, DRepKey, PParamKind, PoolKey, ProposalKey,
-        ProposalState,
+        AccountEpochLog, AccountKey, DRepEpochLog, DRepKey, DRepState, PParamKind, PoolKey,
+        PoolState, ProposalKey, ProposalState,
     },
     ChainSummary, EpochState, PoolEpochLog,
 };
@@ -277,6 +277,48 @@ impl TableRow for PoolEpochLog {
     }
 }
 
+/// A retired pool's final row (`dolos_cardano::final_rows`). The epoch is the
+/// key's, the one the boundary that moved it closed: its retiring epoch + 2.
+impl TableRow for PoolState {
+    type Log = PoolState;
+
+    fn view(log: Self::Log) -> Self {
+        log
+    }
+
+    fn header(format: OutputFormat) -> Vec<&'static str> {
+        if matches!(format, OutputFormat::Dbsync) {
+            todo!("dbsync format not supported for pools logs");
+        }
+        vec![
+            "pool bech32",
+            "epoch",
+            "retiring epoch",
+            "deposit",
+            "calidus",
+        ]
+    }
+
+    fn row(&self, slot: BlockSlot, pool: &PoolKey, ctx: &RowContext) -> Vec<String> {
+        if matches!(ctx.format, OutputFormat::Dbsync) {
+            todo!("dbsync format not supported for pools logs");
+        }
+        let pool_bech32 = bech32::encode::<bech32::Bech32>(POOL_HRP, pool.0.as_ref()).unwrap();
+
+        vec![
+            pool_bech32,
+            epoch_of(slot, ctx),
+            self.retiring_epoch
+                .map_or("-".to_string(), |x| x.to_string()),
+            self.deposit.to_string(),
+            self.calidus
+                .as_ref()
+                .and_then(|x| x.pub_key)
+                .map_or("-".to_string(), hex::encode),
+        ]
+    }
+}
+
 const DREP_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("drep");
 
 /// One DRep's power in one epoch's distribution. A credential DRep renders as
@@ -314,6 +356,46 @@ impl TableRow for DRepEpochLog {
             epoch_of(slot, ctx),
             self.voting_power.to_string(),
             self.registered.to_string(),
+        ]
+    }
+}
+
+/// A moved DRep's final row (`dolos_cardano::final_rows`). The epoch is the
+/// key's, the one the boundary that moved it closed.
+impl TableRow for DRepState {
+    type Log = DRepState;
+
+    fn view(log: Self::Log) -> Self {
+        log
+    }
+
+    fn header(format: OutputFormat) -> Vec<&'static str> {
+        if matches!(format, OutputFormat::Dbsync) {
+            todo!("dbsync format not supported for dreps logs");
+        }
+        vec![
+            "drep",
+            "epoch",
+            "registered slot",
+            "unregistered slot",
+            "deposit",
+        ]
+    }
+
+    fn row(&self, slot: BlockSlot, drep: &DRepKey, ctx: &RowContext) -> Vec<String> {
+        if matches!(ctx.format, OutputFormat::Dbsync) {
+            todo!("dbsync format not supported for dreps logs");
+        }
+
+        let at =
+            |x: Option<(BlockSlot, _)>| x.map_or("-".to_string(), |(slot, _)| slot.to_string());
+
+        vec![
+            bech32::encode::<bech32::Bech32>(DREP_HRP, &dolos_core::keys::encode(drep)).unwrap(),
+            epoch_of(slot, ctx),
+            at(self.registered_at),
+            at(self.unregistered_at),
+            self.deposit.to_string(),
         ]
     }
 }
@@ -711,7 +793,12 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         || matches!(args.format, OutputFormat::Dbsync)
         || matches!(
             args.namespace.as_str(),
-            "pool-epochs" | "drep-epochs" | "proposals" | "account-epochs/rewards"
+            "pool-epochs"
+                | "drep-epochs"
+                | "dreps"
+                | "pools"
+                | "proposals"
+                | "account-epochs/rewards"
         );
     let summary = if need_summary {
         let state = crate::common::open_state_store(config)?;
@@ -745,6 +832,8 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         "drep-epochs" => {
             dump_logs::<DRepEpochLog>(&archive, skip, take, &ctx, start_slot, end_slot, range)?
         }
+        "dreps" => dump_logs::<DRepState>(&archive, skip, take, &ctx, start_slot, end_slot, range)?,
+        "pools" => dump_logs::<PoolState>(&archive, skip, take, &ctx, start_slot, end_slot, range)?,
         "proposals" => {
             dump_logs::<ProposalState>(&archive, skip, take, &ctx, start_slot, end_slot, range)?
         }

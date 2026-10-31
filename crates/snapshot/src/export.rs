@@ -76,9 +76,10 @@ use stelae::{
     progress::{Observer, Outcome},
     transport::{LayerSpec, RecordSink, SteleWriter},
 };
+use stelae_driver::digests;
 
 use crate::{
-    layers::{blocks, digests, entities, indexes, logs, state},
+    layers::{blocks, entities, indexes, logs, state},
     namespaces::NAMESPACES,
     reporting::{Cursor, Records},
     state_layer_count, DigestsScope, DolosProfile, EpochScope, Error, Network, RetainedEpochs,
@@ -2768,7 +2769,7 @@ mod chain_tests {
 
         previous.layers.push(LayerDescriptor {
             kind: "log-future".to_owned(),
-            media_type: "application/vnd.dolos.stele.log-future.v1+zstd".to_owned(),
+            media_type: crate::payload_media_type("log-future"),
             diff_id: Digest::compute(b"a layer this build cannot build"),
             records: 2,
             uncompressed_size: 128,
@@ -2809,7 +2810,7 @@ mod chain_tests {
     fn described(kind: &str, scope: serde_json::Value, identity: u8) -> LayerDescriptor {
         LayerDescriptor {
             kind: kind.to_owned(),
-            media_type: format!("application/vnd.dolos.stele.{kind}.v1+zstd"),
+            media_type: crate::payload_media_type(kind),
             diff_id: Digest::compute([identity]),
             records: 2,
             uncompressed_size: 64,

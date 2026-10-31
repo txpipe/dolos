@@ -11,14 +11,16 @@ mod common;
 use common::*;
 use dolos_core::{ExactKind, ExactRecord, IndexRecord, MAX_EXACT_KEY_LEN};
 use dolos_snapshot::{
-    layers::{blocks, digests, indexes, logs, state},
+    layers::{blocks, indexes, logs, state},
     shards_for, DolosProfile, Error, Scope, BLOCKS, DIGESTS, INDEXES, LOG_KINDS,
 };
 use stelae::{
     dir::SteleDir,
     frame::{self, CanonicalCbor},
+    profile::MediaType,
     Profile, SteleReader, SteleWriter,
 };
+use stelae_driver::digests;
 
 /// Write one layer, read it back both ways, and decode what comes out.
 fn roundtrip<T>(
@@ -173,8 +175,8 @@ fn digests_round_trip_through_a_layer() {
         DIGESTS,
         &digests_scope(),
         &records,
-        digests::encode,
-        digests::decode,
+        |record| Ok(digests::encode(record)?),
+        |bytes| Ok(digests::decode(bytes)?),
     );
 
     let mut order = digests::OrderCheck::default();
@@ -283,7 +285,13 @@ fn a_layer_of_another_profile_is_refused() {
         }
 
         fn layer_media_type(&self, kind: &str) -> Result<String, stelae::Error> {
-            Ok(format!("application/vnd.acme.stele.{kind}.v1+zstd"))
+            Ok(MediaType {
+                vendor: "acme".to_owned(),
+                kind: kind.to_owned(),
+                version: 1,
+                codec: "zstd".to_owned(),
+            }
+            .to_string())
         }
 
         fn tag_for_sequence(&self, sequence: u64) -> Result<String, stelae::Error> {

@@ -16,8 +16,8 @@ edition.workspace = true
 # parties; this profile publishes into registries as a matter of course, so
 # it turns the transport on unconditionally rather than forwarding a feature
 # nothing in dolos ever left off.
-stelae = { git = "https://github.com/txpipe/stelae", rev = "a68e7cbbd89f4aa800e9ec405f679937b905c11d", features = ["oci"] }
-stelae-driver = { git = "https://github.com/txpipe/stelae", rev = "a68e7cbbd89f4aa800e9ec405f679937b905c11d", features = ["oci"] }
+stelae = { git = "https://github.com/txpipe/stelae", tag = "v0.4.0", features = ["oci"] }
+stelae-driver = { git = "https://github.com/txpipe/stelae", tag = "v0.4.0", features = ["oci"] }
 dolos-core = { path = "../core" }
 dolos-cardano = { path = "../cardano" }
 

@@ -208,9 +208,9 @@ checksum = "ace50bade8e6234aa140d9a2f552bbee1db4d353f69b8217bc503490fc1a9f26"
 
 [[package]]
 name = "aws-lc-rs"
-version = "1.18.2"
+version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "faac5829c2b74c28f830747e7818ccfb684261b5f48a1118b1e2a13d36dfab13"
+checksum = "048006790404103c488e6c5616b3e7e702a71292aadda08e8f7698a9e0d2eb53"
 dependencies = [
  "aws-lc-sys",
  "zeroize",
@@ -218,9 +218,9 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-sys"
-version = "0.46.0"
+version = "0.47.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1622d8446a2d4b2ce0c7eefc73dd43a99779028d5ee5c2dd8073a658ba8a2bc"
+checksum = "8bfbe32ac36b3c428696ce315464181bc4029d689fd58e3f2a4e58c252242f52"
 dependencies = [
  "cc",
  "cmake",
@@ -474,7 +474,7 @@ checksum = "90dbd31c98227229239363921e60fcf5e558e43ec69094d46fc4996f08d1d5bc"
 dependencies = [
  "bitcoin_hashes",
  "rand 0.8.6",
- "rand_core 0.5.1",
+ "rand_core 0.6.4",
  "serde",
  "unicode-normalization",
 ]
@@ -1188,9 +1188,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.6"
+version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe3e9d21d39e6f39ff46e03d5b621424f88ee23d8a1672c6bfc9ccc7f2da4f6a"
+checksum = "a2376ffd6f96d8a9db59875b4b6b0237d6900b5baf64279714e05493ce64828a"
 dependencies = [
  "cmov",
 ]
@@ -1509,6 +1509,7 @@ dependencies = [
  "comfy-table",
  "config",
  "console-subscriber",
+ "crc32fast",
  "csv",
  "csv-diff",
  "divan",
@@ -1522,7 +1523,6 @@ dependencies = [
  "dolos-snapshot",
  "dolos-testing",
  "dolos-trp",
- "flate2",
  "futures-core",
  "futures-util",
  "gasket",
@@ -1546,13 +1546,11 @@ dependencies = [
  "protoc-wkt",
  "rayon",
  "redb-extras",
- "reqwest 0.12.28",
  "rustls",
  "serde",
  "serde_json",
  "serial_test",
  "stats_alloc",
- "tar",
  "tempfile",
  "thiserror 2.0.21",
  "tikv-jemallocator",
@@ -1572,7 +1570,7 @@ dependencies = [
  "trait-variant",
  "vergen-gitcl",
  "xxhash-rust",
- "zstd",
+ "zstd 0.14.3",
 ]
 
 [[package]]
@@ -1659,7 +1657,7 @@ dependencies = [
  "rayon",
  "sha2 0.10.9",
  "tempfile",
- "zstd",
+ "zstd 0.14.3",
 ]
 
 [[package]]
@@ -1772,7 +1770,7 @@ dependencies = [
  "thiserror 2.0.21",
  "toml 0.8.20",
  "tracing",
- "zstd",
+ "zstd 0.14.3",
 ]
 
 [[package]]
@@ -1780,6 +1778,7 @@ name = "dolos-testing"
 version = "2.0.0-alpha.0"
 dependencies = [
  "bech32 0.9.1",
+ "crc32fast",
  "dolos-cardano",
  "dolos-core",
  "dolos-fjall",
@@ -2964,9 +2963,9 @@ dependencies = [
 
 [[package]]
 name = "js-sys"
-version = "0.3.106"
+version = "0.3.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7883d941dae510fb2d978fc3fe018c71c9e2892fd38854de3e8b92c2e5ad9cc5"
+checksum = "8dc09d2154098bbf4ef54eab6b117a3c24cbbffe94046b16ee6d6d4510584d3a"
 dependencies = [
  "cfg-if",
  "futures-util",
@@ -3454,7 +3453,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "uuid",
- "zstd",
+ "zstd 0.14.3",
 ]
 
 [[package]]
@@ -3600,7 +3599,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5030,7 +5029,7 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5639,8 +5638,8 @@ checksum = "5c0e04424e733e69714ca1bbb9204c1a57f09f5493439520f9f68c132ad25eec"
 
 [[package]]
 name = "stelae"
-version = "0.2.0"
-source = "git+https://github.com/txpipe/stelae?rev=a68e7cbbd89f4aa800e9ec405f679937b905c11d#a68e7cbbd89f4aa800e9ec405f679937b905c11d"
+version = "0.4.0"
+source = "git+https://github.com/txpipe/stelae?tag=v0.4.0#b2456d6ac5f860cfdd919339e986ae62c2f01935"
 dependencies = [
  "bytes",
  "futures-util",
@@ -5656,13 +5655,13 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
- "zstd",
+ "zstd 0.13.3",
 ]
 
 [[package]]
 name = "stelae-driver"
-version = "0.2.0"
-source = "git+https://github.com/txpipe/stelae?rev=a68e7cbbd89f4aa800e9ec405f679937b905c11d#a68e7cbbd89f4aa800e9ec405f679937b905c11d"
+version = "0.4.0"
+source = "git+https://github.com/txpipe/stelae?tag=v0.4.0#b2456d6ac5f860cfdd919339e986ae62c2f01935"
 dependencies = [
  "fs4",
  "minicbor 0.26.4",
@@ -6865,12 +6864,11 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen"
-version = "0.2.129"
+version = "0.2.130"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9bb54f33acc68fd454578d9820b0bde1a1a3d17aa17bb7b6595806d02886d409"
+checksum = "a0181c14ddd6c7b8b0b0132a5f1ea2f32be0d893cd3ea97b6e3b28886b8a3d1c"
 dependencies = [
  "cfg-if",
- "once_cell",
  "rustversion",
  "wasm-bindgen-macro",
  "wasm-bindgen-shared",
@@ -6878,9 +6876,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-futures"
-version = "0.4.79"
+version = "0.4.80"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3cbab34de2d982e9b48e18d216d04c4a6f641066ff19ffb699980f591ee3610e"
+checksum = "5e14e0327cb5368ad60ccb22d04a9827a693c95a926d8d125e9fa39e0baec501"
 dependencies = [
  "js-sys",
  "tokio",
@@ -6889,9 +6887,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro"
-version = "0.2.129"
+version = "0.2.130"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e29d0c35b16e224a7eeb5cd2d25e3e1968fbd65604117b44d3b789d00ee8535"
+checksum = "6e931a02a39abdbf66966fc35902b5ed58344750a70885bed4ebb3d8eaf28ed9"
 dependencies = [
  "quote",
  "wasm-bindgen-macro-support",
@@ -6899,9 +6897,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro-support"
-version = "0.2.129"
+version = "0.2.130"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f501a8bc3719dba86ef8ae4728879c08001bea749eb1333ac5b91e040e2a6b7"
+checksum = "2ca4b54280e455bd831e33a6b8e734baf432fe63fbc35c42ac14ce67a043a53a"
 dependencies = [
  "bumpalo",
  "proc-macro2",
@@ -6912,9 +6910,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-shared"
-version = "0.2.129"
+version = "0.2.130"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23f0c9c52aa7cd7d77769a4cfe2a9adb1b331f489a41d912ce14513d5ab995c6"
+checksum = "3b1f9c3798725016c6ee5f2f57869ec0831e8bbc0ab0310a86e787e97f41389e"
 dependencies = [
  "unicode-ident",
 ]
@@ -6934,9 +6932,9 @@ dependencies = [
 
 [[package]]
 name = "web-sys"
-version = "0.3.106"
+version = "0.3.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88261b9deccee56594c11a3460c462c41f58d148598fe70ad77070126a68aba4"
+checksum = "d7d179596ff5ec0f6de4db64d54011bde6289cc49603d3a6e4ce3f329207ab88"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
@@ -7267,7 +7265,7 @@ dependencies = [
  "tower 0.4.13",
  "vergen-gitcl",
  "xshell",
- "zstd",
+ "zstd 0.14.3",
 ]
 
 [[package]]
@@ -7391,11 +7389,29 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zstd"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+dependencies = [
+ "zstd-safe 7.2.4",
+]
+
+[[package]]
+name = "zstd"
 version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db3ae9bf90af6e40197bef767eeefc46ad6397420fe873830bd85e5fbbfb3c70"
 dependencies = [
- "zstd-safe",
+ "zstd-safe 8.2.0",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "7.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f49c4d5f0abb602a93fb8736af2a4f4dd9512e36f7f570d66e65ff867ed3b9d"
+dependencies = [
+ "zstd-sys",
 ]
 
 [[package]]
