@@ -68,21 +68,21 @@ pub fn hash32(seed: u8) -> Hash<32> {
     Hash::new(bytes_of::<32>(seed))
 }
 
-pub fn rational(numerator: u64, denominator: u64) -> RationalNumber {
+fn rational(numerator: u64, denominator: u64) -> RationalNumber {
     RationalNumber {
         numerator,
         denominator,
     }
 }
 
-pub fn anchor(seed: u8) -> Anchor {
+fn anchor(seed: u8) -> Anchor {
     Anchor {
         url: format!("https://canary.invalid/{seed}"),
         content_hash: hash32(seed),
     }
 }
 
-pub fn gov_action_id(seed: u8, index: u32) -> GovActionId {
+fn gov_action_id(seed: u8, index: u32) -> GovActionId {
     GovActionId {
         transaction_id: hash32(seed),
         action_index: index,
@@ -223,9 +223,8 @@ pub fn first_mint_set() -> FirstMintSet {
     }
 }
 
-/// Lovelace and two assets, one's received sum past u64 so the bignum arm is
-/// pinned too. The policy-only asset is shorter and sorts after the other by
-/// raw bytes, so the units' encoded-key order shows in the bytes.
+/// Lovelace and one asset, the asset's received sum past u64 so the bignum
+/// arm is pinned too.
 pub fn address_stats() -> AddressStats {
     AddressStats {
         units: [
@@ -241,13 +240,6 @@ pub fn address_stats() -> AddressStats {
                 UnitSums {
                     received: Sum(u128::from(u64::MAX) + 7),
                     sent: Sum(42),
-                },
-            ),
-            (
-                Bytes::from(hash28(0xc1).to_vec()),
-                UnitSums {
-                    received: Sum(9),
-                    sent: Sum(3),
                 },
             ),
         ]
@@ -595,51 +587,28 @@ pub fn gov_state() -> GovState {
         prev_distr: Some(gov_distr(0xdb, 8)),
         drep_snapshot: Some(dolos_cardano::DRepSnapshot {
             closing_epoch: 508,
-            dreps: BTreeMap::from([
-                (
-                    StakeCredential::AddrKeyhash(hash28(0xdc)),
-                    dolos_cardano::DRepSnapshotEntry {
-                        expiry: Some(530),
-                        unregistered_at: Some((55_444_333, 7)),
-                    },
-                ),
-                (
-                    StakeCredential::ScriptHash(hash28(0xe1)),
-                    dolos_cardano::DRepSnapshotEntry {
-                        expiry: Some(531),
-                        unregistered_at: None,
-                    },
-                ),
-            ]),
+            dreps: BTreeMap::from([(
+                StakeCredential::AddrKeyhash(hash28(0xdc)),
+                dolos_cardano::DRepSnapshotEntry {
+                    expiry: Some(530),
+                    unregistered_at: Some((55_444_333, 7)),
+                },
+            )]),
         }),
         dissolved_committee: Some(dolos_cardano::DissolvedCommittee {
             committee: Committee {
-                members: BTreeMap::from([
-                    (StakeCredential::AddrKeyhash(hash28(0xdd)), 420u64),
-                    (StakeCredential::ScriptHash(hash28(0xe2)), 425u64),
-                ]),
+                members: BTreeMap::from([(StakeCredential::AddrKeyhash(hash28(0xdd)), 420u64)]),
                 threshold: rational(1, 2),
             },
-            auths: BTreeMap::from([
-                (
-                    StakeCredential::AddrKeyhash(hash28(0xdd)),
-                    vec![(
-                        50_000u64,
-                        CommitteeAuthorization::HotCredential(StakeCredential::ScriptHash(hash28(
-                            0xde,
-                        ))),
-                    )],
-                ),
-                (
-                    StakeCredential::ScriptHash(hash28(0xe2)),
-                    vec![(
-                        60_000u64,
-                        CommitteeAuthorization::HotCredential(StakeCredential::AddrKeyhash(
-                            hash28(0xe3),
-                        )),
-                    )],
-                ),
-            ]),
+            auths: BTreeMap::from([(
+                StakeCredential::AddrKeyhash(hash28(0xdd)),
+                vec![(
+                    50_000u64,
+                    CommitteeAuthorization::HotCredential(StakeCredential::ScriptHash(hash28(
+                        0xde,
+                    ))),
+                )],
+            )]),
             action: gov_action_id(0xdf, 4),
             epoch: 505,
             seated_by: Some(gov_action_id(0xe0, 5)),
@@ -777,11 +746,9 @@ pub fn proposal_state() -> ProposalState {
                 StakeCredential::AddrKeyhash(hash28(0x13)),
                 StakeCredential::ScriptHash(hash28(0x14)),
             ],
-            // Pallas's credential order, script hashes first, as decoding
-            // the transaction's map leaves it.
             to_add: vec![
-                (StakeCredential::ScriptHash(hash28(0x16)), 530u64),
                 (StakeCredential::AddrKeyhash(hash28(0x15)), 520u64),
+                (StakeCredential::ScriptHash(hash28(0x16)), 530u64),
             ],
             threshold: rational(2, 3),
         },

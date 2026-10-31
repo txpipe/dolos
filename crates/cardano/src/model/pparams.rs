@@ -210,11 +210,7 @@ pub enum PParamValue {
     #[n(38)]
     CostModelsPlutusV3(#[n(0)] Vec<i64>),
     #[n(39)]
-    CostModelsUnknown(
-        #[n(0)]
-        #[cbor(with = "super::codec::canonical_map")]
-        BTreeMap<u64, Vec<i64>>,
-    ),
+    CostModelsUnknown(#[n(0)] BTreeMap<u64, Vec<i64>>),
 }
 
 impl PParamValue {
@@ -266,57 +262,30 @@ impl PParamValue {
 
 /// The protocol parameters set so far, one value per kind.
 ///
-/// Kept in kind order, and encoded in it whatever the order in memory, so a
-/// set has one encoding; decode refuses kinds out of order or repeated.
+/// Encoded in kind order whatever the order in memory, so the bytes do not
+/// depend on the order the values were set in.
 #[derive(Debug, Encode, Decode, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PParamsSet {
     #[n(0)]
-    #[cbor(with = "by_kind")]
+    #[cbor(encode_with = "encode_by_kind")]
     values: Vec<PParamValue>,
 }
 
-/// The codec of [`PParamsSet::values`]: sorted by kind, each kind once.
-mod by_kind {
-    use pallas::codec::minicbor::{self, Decode, Decoder, Encode, Encoder};
+fn encode_by_kind<Ctx, W: minicbor::encode::Write>(
+    values: &[PParamValue],
+    e: &mut minicbor::Encoder<W>,
+    ctx: &mut Ctx,
+) -> Result<(), minicbor::encode::Error<W::Error>> {
+    let mut sorted: Vec<&PParamValue> = values.iter().collect();
+    sorted.sort_by_key(|value| value.kind());
 
-    use super::PParamValue;
+    e.array(sorted.len() as u64)?;
 
-    pub fn encode<Ctx, W: minicbor::encode::Write>(
-        values: &[PParamValue],
-        e: &mut Encoder<W>,
-        ctx: &mut Ctx,
-    ) -> Result<(), minicbor::encode::Error<W::Error>> {
-        let mut sorted: Vec<&PParamValue> = values.iter().collect();
-        sorted.sort_by_key(|value| value.kind());
-
-        e.array(sorted.len() as u64)?;
-
-        for value in sorted {
-            value.encode(e, ctx)?;
-        }
-
-        Ok(())
+    for value in sorted {
+        value.encode(e, ctx)?;
     }
 
-    pub fn decode<Ctx>(
-        d: &mut Decoder<'_>,
-        ctx: &mut Ctx,
-    ) -> Result<Vec<PParamValue>, minicbor::decode::Error> {
-        let start = d.position();
-        let values: Vec<PParamValue> = Decode::decode(d, ctx)?;
-
-        if !values
-            .windows(2)
-            .all(|pair| pair[0].kind() < pair[1].kind())
-        {
-            return Err(minicbor::decode::Error::message(
-                "pparams: kinds out of order, or repeated",
-            )
-            .at(start));
-        }
-
-        Ok(values)
-    }
+    Ok(())
 }
 
 impl TransitionDefault for PParamsSet {
@@ -546,5 +515,68 @@ pub(crate) mod testing {
     /// merge is applied twice.
     pub fn any_pparams_set() -> impl Strategy<Value = PParamsSet> {
         Just(PParamsSet::default())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use PParamValue as V;
+
+    /// A `PParamsSet` holding `values` in the order given.
+    fn encoded(values: &[PParamValue]) -> Vec<u8> {
+        let mut bytes = vec![0x81, 0x80 + values.len() as u8];
+
+        for value in values {
+            bytes.extend(minicbor::to_vec(value).unwrap());
+        }
+
+        bytes
+    }
+
+    #[test]
+    fn values_set_out_of_kind_order_encode_in_kind_order() {
+        let set = PParamsSet::default()
+            .with(V::ProtocolVersion((0, 0)))
+            .with(V::KeyDeposit(2_000_000))
+            .with(V::MinFeeA(44));
+
+        let sorted = [
+            V::MinFeeA(44),
+            V::KeyDeposit(2_000_000),
+            V::ProtocolVersion((0, 0)),
+        ];
+
+        assert_eq!(set.iter().cloned().collect::<Vec<_>>(), sorted);
+        assert_eq!(minicbor::to_vec(&set).unwrap(), encoded(&sorted));
+    }
+
+    #[test]
+    fn a_set_decoded_out_of_kind_order_encodes_in_kind_order() {
+        let unsorted = encoded(&[V::ProtocolVersion((0, 0)), V::MinFeeA(44)]);
+        let set: PParamsSet = minicbor::decode(&unsorted).unwrap();
+
+        assert_eq!(
+            minicbor::to_vec(&set).unwrap(),
+            encoded(&[V::MinFeeA(44), V::ProtocolVersion((0, 0))])
+        );
+    }
+
+    #[test]
+    fn replacing_a_kind_keeps_one_entry_in_place() {
+        let set = PParamsSet::default()
+            .with(V::MinFeeA(44))
+            .with(V::MinFeeB(155_381))
+            .with(V::KeyDeposit(2_000_000))
+            .with(V::MinFeeB(155_382));
+
+        assert_eq!(
+            set.iter().cloned().collect::<Vec<_>>(),
+            [
+                V::MinFeeA(44),
+                V::MinFeeB(155_382),
+                V::KeyDeposit(2_000_000)
+            ]
+        );
     }
 }

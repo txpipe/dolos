@@ -92,25 +92,3 @@ async fn a_tip_scoped_entry_is_never_in_the_file_after_a_restart() {
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert_eq!(refilled, fold(&domain));
 }
-
-/// A `totals` entry written under version 1, before `AddressStats.units`
-/// took encoded-key order, is wiped when the node registers `totals`.
-#[tokio::test]
-async fn a_version_1_totals_entry_is_wiped() {
-    let dir = tempfile::tempdir().unwrap();
-
-    let domain = start(dir.path());
-    domain.cache().disk().put("totals", b"k", b"v1", 1).unwrap();
-    shut_down(domain);
-
-    let domain = ToyDomain::new(Some(fake_genesis_delta(1_000_000)), None)
-        .with_persistent_cache(dir.path())
-        .unwrap();
-    domain
-        .cache()
-        .register(dolos_cardano::periods::stats::TOTALS)
-        .unwrap();
-
-    assert!(domain.cache().disk().keys("totals").unwrap().is_empty());
-    assert_eq!(domain.cache().get("totals", b"k"), None);
-}

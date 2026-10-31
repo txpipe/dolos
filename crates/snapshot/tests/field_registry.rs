@@ -28,11 +28,7 @@ mod registry;
 
 use dolos_core::Namespace;
 use dolos_snapshot::{NAMESPACES, SCHEMA_REVS};
-use registry::{
-    decode_hex, ground_rules, normalize,
-    value_encoding::{self, Rule, Violation},
-    Entry,
-};
+use registry::{decode_hex, ground_rules, normalize, Entry};
 
 /// How many times a canary is rebuilt and re-encoded before its bytes are
 /// believed.
@@ -222,134 +218,6 @@ fn enum_variant_tables_are_pinned() {
     }
 }
 
-/// Every Pallas struct a record embeds still encodes to its pinned bytes.
-#[test]
-fn pallas_struct_canaries_are_pinned() {
-    for pinned in registry::structs::pinned() {
-        assert_eq!(
-            hex::encode((pinned.encode)()),
-            normalize(pinned.hex),
-            "{} no longer encodes to its pinned bytes. {}",
-            pinned.name,
-            registry::structs::POLICY,
-        );
-    }
-}
-
-/// Every golden value follows the value encoding (PROFILE.md, "Value
-/// encoding"), except where [`value_encoding::EXCEPTIONS`] names the place.
-///
-/// Read from the directory rather than the registry, so a golden the registry
-/// does not list is held to the same rules.
-#[test]
-fn every_golden_follows_the_value_encoding() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/registry/goldens");
-    let mut walked = 0;
-    let mut exceptions_seen = Vec::new();
-
-    for file in std::fs::read_dir(&dir).expect("the goldens directory reads") {
-        let path = file.expect("a goldens entry reads").path();
-        let name = path.file_name().unwrap().to_string_lossy().to_string();
-
-        let Some(ns) = golden_namespace(&name) else {
-            continue;
-        };
-
-        let hex = std::fs::read_to_string(&path).expect("a golden reads");
-        walked += 1;
-
-        for Violation { path, rule } in value_encoding::violations(&decode_hex(&hex)) {
-            let allowed = value_encoding::EXCEPTIONS
-                .iter()
-                .find(|(at_ns, at_path, at_rule)| {
-                    *at_ns == ns && *at_path == path && *at_rule == rule
-                });
-
-            match allowed {
-                Some(exception) => exceptions_seen.push(*exception),
-                None => panic!(
-                    "{ns}: {rule:?} at {path}. Record values follow PROFILE.md's value \
-                     encoding: shortest-form integers, definite lengths, map keys in \
-                     bytewise encoded-key order, no floats, and only tags 2 and 30."
-                ),
-            }
-        }
-    }
-
-    assert!(walked > 0, "no golden found under {}", dir.display());
-
-    for exception in value_encoding::EXCEPTIONS {
-        assert!(
-            exceptions_seen.contains(exception),
-            "the exception {exception:?} no longer occurs: remove it from EXCEPTIONS",
-        );
-    }
-}
-
-/// The namespace of a golden named `{ns}.rev{N}.hex`.
-fn golden_namespace(file: &str) -> Option<&str> {
-    let (ns, rev) = file.strip_suffix(".hex")?.rsplit_once(".rev")?;
-    (!rev.is_empty() && rev.bytes().all(|b| b.is_ascii_digit())).then_some(ns)
-}
-
-#[test]
-fn every_revision_of_a_golden_is_walked() {
-    assert_eq!(golden_namespace("gov.rev1.hex"), Some("gov"));
-    assert_eq!(
-        golden_namespace("pool-epochs.rev12.hex"),
-        Some("pool-epochs")
-    );
-    assert_eq!(golden_namespace("gov.rev.hex"), None);
-    assert_eq!(golden_namespace("gov.revx.hex"), None);
-    assert_eq!(golden_namespace("gov.rev1.txt"), None);
-}
-
-/// The value-encoding walk flags each rule it checks, at the place it breaks,
-/// and nothing in a value that keeps them all.
-#[test]
-fn the_value_encoding_walk_flags_each_rule() {
-    let cases: &[(&str, &[(&str, Rule)])] = &[
-        // [0, 23, 24, 255, 256, -1, h'', "", [], {}, false, true, null]
-        ("8d0017181818ff19010020406080a0f4f5f6", &[]),
-        // {1: 0, 24: 0}, with a tag 2 bignum of 2^64 and a tag 30 rational
-        ("a20100181882c249010000000000000000d81e820103", &[]),
-        ("1817", &[("$", Rule::NotShortest)]),
-        ("8119000a", &[("$[0]", Rule::NotShortest)]),
-        ("9f01ff", &[("$", Rule::Indefinite)]),
-        ("5f4101ff", &[("$", Rule::Indefinite)]),
-        ("a2020001 00", &[("${1}", Rule::KeyOrder)]),
-        ("a2010001 00", &[("${1}", Rule::KeyOrder)]),
-        ("a2410001 4000", &[("${1}", Rule::KeyOrder)]),
-        ("a1181700", &[("${0}", Rule::NotShortest)]),
-        ("a101fb3ff0000000000000", &[("${0}:", Rule::Float)]),
-        ("bf0000ff", &[("$", Rule::Indefinite)]),
-        ("fb3ff0000000000000", &[("$", Rule::Float)]),
-        ("f93c00", &[("$", Rule::Float)]),
-        ("f7", &[("$", Rule::Simple)]),
-        ("d81841 00", &[("$", Rule::Tag)]),
-        ("c24101", &[("$#2", Rule::Bignum)]),
-        ("c249000100000000000000", &[("$#2", Rule::Bignum)]),
-        ("c201", &[("$#2", Rule::Bignum)]),
-        ("d81e830102 03", &[("$#30", Rule::Rational)]),
-        ("d81e822001", &[("$#30", Rule::Rational)]),
-        ("82", &[("$", Rule::Malformed)]),
-        ("0000", &[("$", Rule::Malformed)]),
-    ];
-
-    for (hex, expected) in cases {
-        let found = value_encoding::violations(&decode_hex(hex));
-        let expected: Vec<Violation> = expected
-            .iter()
-            .map(|(path, rule)| Violation {
-                path: path.to_string(),
-                rule: *rule,
-            })
-            .collect();
-
-        assert_eq!(found, expected, "{hex}");
-    }
-}
-
 /// Rule 1: a decoder skips a trailing field it does not know.
 #[test]
 fn an_unknown_trailing_field_is_skipped() {
@@ -430,9 +298,5 @@ fn print_current_canary_encodings() {
         for (name, bytes) in (table.encode)() {
             println!("{}::{name} {}", table.name, hex::encode(&bytes));
         }
-    }
-
-    for pinned in registry::structs::pinned() {
-        println!("{} {}", pinned.name, hex::encode((pinned.encode)()));
     }
 }

@@ -54,7 +54,6 @@ pub struct Constitution {
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Committee {
     #[n(0)]
-    #[cbor(with = "super::codec::canonical_map")]
     pub members: BTreeMap<StakeCredential, Epoch>,
 
     #[n(1)]
@@ -110,12 +109,10 @@ pub struct GovDistr {
     /// Delegated stake per DRep. `AlwaysAbstain` / `AlwaysNoConfidence`
     /// accumulate under their own keys — the ratification tallies need both.
     #[n(3)]
-    #[cbor(with = "super::codec::canonical_map")]
     pub drep_distr: BTreeMap<DRep, u64>,
 
     /// Delegated stake per pool.
     #[n(4)]
-    #[cbor(with = "super::codec::canonical_map")]
     pub pool_distr: BTreeMap<PoolHash, u64>,
 
     /// Total pool-delegated stake (SPO tally denominator input).
@@ -202,7 +199,6 @@ pub struct DRepSnapshot {
     #[n(0)]
     pub closing_epoch: Epoch,
     #[n(1)]
-    #[cbor(with = "super::codec::canonical_map")]
     pub dreps: BTreeMap<StakeCredential, DRepSnapshotEntry>,
 }
 
@@ -216,7 +212,6 @@ pub struct DissolvedCommittee {
     pub committee: Committee,
 
     #[n(1)]
-    #[cbor(with = "super::codec::canonical_map")]
     pub auths: BTreeMap<StakeCredential, AuthHistory>,
 
     #[n(2)]
@@ -256,7 +251,7 @@ pub struct GovState {
     /// for each cold credential of the current committee. The EPOCH rule
     /// removes an entry when the cold credential leaves the committee.
     #[n(2)]
-    #[cbor(default, with = "super::codec::canonical_map")]
+    #[cbor(default)]
     pub committee_auths: BTreeMap<StakeCredential, AuthHistory>,
 
     /// The four per-purpose previous-enacted-action roots.

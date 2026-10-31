@@ -1,4 +1,4 @@
-compatibility = "v2-alpha.1"
+compatibility = "v2-alpha.0"
 
 [chain]
 protocol = "cardano"

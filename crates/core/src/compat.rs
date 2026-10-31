@@ -8,7 +8,7 @@ use crate::config::{Compatibility, MIGRATION_GUIDE_URL};
 /// The `compatibility` values a configuration may declare, the current one
 /// first. A persistent store records the current one when it is created, and
 /// this release opens only stores that record one of them.
-pub const SUPPORTED_CONTRACTS: &[&str] = &["v2-alpha.2"];
+pub const SUPPORTED_CONTRACTS: &[&str] = &["v2-alpha.1"];
 
 /// Whether this release opens a store that records `identity`.
 pub fn reads_store_identity(identity: &str) -> bool {
@@ -86,7 +86,6 @@ mod tests {
     fn only_the_supported_contracts_are_read() {
         assert!(reads_store_identity(Compatibility::current().as_str()));
         assert!(!reads_store_identity("v1"));
-        assert!(!reads_store_identity("v2-alpha.1"));
         assert!(!reads_store_identity(""));
     }
 }

@@ -220,9 +220,7 @@ pub fn join_payment(payment: &Hash<28>, tail: &[u8]) -> Vec<u8> {
 
 /// A sum of unit quantities, wider than u64: one epoch's sums overflow it.
 ///
-/// A CBOR unsigned integer, or a positive bignum past u64. Decode refuses a
-/// bignum that fits in u64 or has leading zeros, so no sum takes both forms.
-/// It reads any head width: shortest form is checked on the goldens.
+/// A CBOR unsigned integer, or a positive bignum past u64.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
@@ -267,18 +265,6 @@ impl<'b, C> Decode<'b, C> for Sum {
             return Err(minicbor::decode::Error::message("sum: wider than u128"));
         }
 
-        if bytes.first() == Some(&0) {
-            return Err(minicbor::decode::Error::message(
-                "sum: bignum with leading zeros",
-            ));
-        }
-
-        if bytes.len() <= 8 {
-            return Err(minicbor::decode::Error::message(
-                "sum: bignum that fits in u64",
-            ));
-        }
-
         let mut wide = [0u8; 16];
         wide[16 - bytes.len()..].copy_from_slice(bytes);
 
@@ -313,7 +299,6 @@ impl UnitSums {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
 pub struct AddressStats {
     #[n(0)]
-    #[cbor(with = "super::codec::canonical_map")]
     pub units: BTreeMap<Bytes, UnitSums>,
 
     #[n(1)]

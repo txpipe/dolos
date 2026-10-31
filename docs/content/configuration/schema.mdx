@@ -13,7 +13,7 @@ The numbers on this page are the defaults the node uses when a field is left out
 A persistent node on a known network needs little more than the network's name. Everything else here is optional and shown for clarity:
 
 ```toml
-compatibility = "v2-alpha.2"
+compatibility = "v2-alpha.1"
 
 [chain]
 protocol = "cardano"
@@ -43,7 +43,7 @@ listen_address = "[::]:3000"
 The fields of a node following a known network, each with an example value. The fields of a custom network and of the emulator are in [`chain.cardano`](#chaincardano) and [`upstream`](#upstream). Many of these values are not defaults: a persistent mempool, a rolling history and a different peer, for instance. Each field's default is in its section's table below, and a field left at its default can be left out:
 
 ```toml
-compatibility = "v2-alpha.2"
+compatibility = "v2-alpha.1"
 
 [chain]
 protocol = "cardano"
@@ -166,7 +166,7 @@ An absolute path is used as written, which is how a store, or the archive's bloc
 | ----- | ---- | ------- |
 | `compatibility` | string | required |
 
-The configuration contract the file is written for. It is read before anything else, from the file alone; an environment variable cannot set it. This release accepts `"v2-alpha.2"`.
+The configuration contract the file is written for. It is read before anything else, from the file alone; an environment variable cannot set it. This release accepts `"v2-alpha.1"`.
 
 - A file without it is refused, asking for the line to add.
 - A value that is not a string is refused as malformed.
@@ -341,7 +341,7 @@ The state and archive tables refuse Fjall's tuning fields (`cache`, `max_journal
 An ephemeral node, which keeps nothing across a restart. The cache is on disk unless it is turned off, so this node turns it off:
 
 ```toml
-compatibility = "v2-alpha.2"
+compatibility = "v2-alpha.1"
 
 [chain]
 protocol = "cardano"

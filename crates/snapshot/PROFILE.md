@@ -140,16 +140,25 @@ Empty log and entity layers are omitted: **a `log-{ns}` or `entity-{kind}` layer
 
 #### Value encoding
 
-A record value — the `value` of a `log-{ns}` or `state-{ns}` record, `state-utxos` included — is one CBOR data item, and SPEC.md and this document fix how it is encoded. Values follow the SPEC encoding profile (SPEC.md, "Layer format"): integers, lengths and tag numbers in shortest form, definite lengths only, no floats, and map keys in bytewise lexicographic order of their encodings (RFC 8949 §4.2.1), each key once. The profile's one difference from the SPEC's is that two tags are allowed inside values, and no others:
+A record value — the `value` of a `log-{ns}` or `state-{ns}` record, `state-utxos` included — is one CBOR data item. The protocol carries it as opaque bytes, so SPEC.md's encoding profile does not reach inside it; this section fixes its encoding instead.
+
+Integers, lengths and tag numbers are in shortest form, and every array, map and string has a definite length. Two tags occur, and no others:
 
 - **tag 2**, an unsigned bignum: the value's big-endian bytes with no leading zero byte, used only for a value above 2^64 − 1. A smaller value is a plain unsigned integer. The `address-stats` sums are the one field that uses it.
-- **tag 30**, a rational `[numerator: uint, denominator: uint]`: committee thresholds, pool margins, and the protocol-parameter intervals and prices.
+- **tag 30**, a rational `[numerator, denominator]`: committee thresholds, pool margins, and the protocol-parameter intervals and prices.
 
-The order of a map is its encoded keys' order, not the order the type sorts its keys in memory: a map keyed by a stake credential lists key hashes (`82 00 …`) before script hashes (`82 01 …`), and a map keyed by a DRep lists `Abstain` (`81 02`) and `NoConfidence` (`81 03`) before every keyed DRep (`82 …`).
+One float occurs: `pool-epochs` field 2, `relative_size`, a double-precision float (`fb` and eight bytes), which is removed before the profile is published.
 
-A list's order is part of its value. These lists are sorted, because their order carries no meaning: a protocol-parameter set (`epochs` and the `ParamChange` action of `proposals`) lists its values in ascending kind, the variant index, each kind once; an `account-epochs` row lists `leader_rewards` and `deposit_refunds` ascending by pool, then amount; and a `payment-address-chunks` row lists its tails ascending by their raw bytes, not their encodings. Other lists keep the order of the chain data they are built from, unsorted: a pool's owners and relays, and the members an `UpdateCommittee` action removes, are in the order their transaction lists them. Two `proposals` lists come from maps in the transaction and keep the order Pallas decodes those maps in: the members an `UpdateCommittee` action adds, script hashes before key hashes, each ascending by hash; and a `TreasuryWithdrawal`'s entries, ascending by reward-account bytes, so key hashes before script hashes.
+A map's keys are in the order of its key type, the order the in-memory map iterates, not the encoded-key order of RFC 8949 §4.2.1. Each key occurs once.
 
-Decoders refuse a value outside these rules where the rule is the type's own: a map whose keys are out of order or repeated, a parameter set whose kinds are out of order or repeated, an unsorted `account-epochs` list, and a bignum that fits in u64 or has leading zeros. They check no other list's order, and they read an integer, length or tag under a longer head than it needs, so shortest form is checked on the bytes. `every_golden_follows_the_value_encoding` in `crates/snapshot/tests/field_registry.rs` walks every canary golden and asserts the encoding rules of the first paragraph: shortest form, definite lengths, the two tags, map key order and no floats. It checks no list order; the registry's decode of each retained golden enforces the parameter-set and `account-epochs` orders. One field breaks the encoding rules at this revision and is the walk's one allowed exception: `pool-epochs` field 2, `relative_size`, an f64, which is removed before the profile is published.
+- A map keyed by a stake credential lists script hashes before key hashes (`82 01 …` before `82 00 …`), each ascending by hash, because Pallas declares `ScriptHash` first. These are `gov`'s committee members, committee authorizations, dissolved committee's authorizations and DRep snapshot, and the committee and DRep votes of `proposals`.
+- A map keyed by a DRep, `gov`'s DRep distribution, follows Pallas's declaration order: key hashes, then script hashes, each ascending by hash, then `Abstain`, then `NoConfidence`.
+- A map keyed by a byte string, an `address-stats` row's units, ascends by the raw bytes, not by their encodings, so a longer unit can come before a shorter one.
+- A map keyed by an integer or a fixed-width hash ascends: the unknown cost models, `gov`'s pool distribution, the pool votes of `proposals` and `epochs`' `estart_tally`.
+
+A list's order is part of its value. These lists are sorted: a protocol-parameter set (`epochs`' parameters and a `ParamChange` action in `proposals`) lists its values ascending by kind, the variant index, each kind once; an `account-epochs` row lists `leader_rewards` and `deposit_refunds` ascending by pool, then amount; and a `payment-address-chunks` row lists its tails ascending by their raw bytes, not by their encodings. Other lists keep the order of the chain data they are built from: a pool's owners and relays, and the members an `UpdateCommittee` action removes, are in their transaction's order, an authorization history is in slot order, and the chunk logs keep the orders stated above. Two `proposals` lists come from maps in the transaction and keep the map's order: the members an `UpdateCommittee` action adds are credential-keyed, so script hashes come first as above, and a `TreasuryWithdrawal`'s entries ascend by reward-account bytes, so key hashes come before script hashes.
+
+Decoders check none of these orders. A value written in another order is read, but its bytes, and the digest of its layer, differ from those of a publisher that follows this section.
 
 #### Compatibility contract
 
@@ -163,8 +172,6 @@ The contract is enforced by `crates/snapshot/tests/field_registry.rs` and its `t
 - the registry's current revision equals `SCHEMA_REVS[ns]`, so a field appended without its revision bump — or a bump with nothing pinning it — fails in either direction;
 - every **retained** revision still decodes under today's decoder, which is the reader tolerance the contract promises, asserted rather than assumed. Retained canaries are append-only: never edited, never deleted. A change that makes one undecodable is breaking by definition.
 - every reachable enum's variant table is pinned per variant, including the Pallas enums the records embed — a dependency upgrade that renumbered `Relay` or `DRep` would otherwise change published bytes with nothing in this repository to notice;
-- each Pallas struct the records embed — `Anchor`, `GovActionId`, `RationalNumber`, `PoolMetadata`, `ExUnits`, `ExUnitPrices`, `Nonce`, `PoolVotingThresholds` and `DRepVotingThresholds` — and the `ProtocolVersion` tuple are pinned on their own, so a dependency upgrade that re-encoded one fails naming it rather than as a whole-record diff;
-- every canary golden follows the [value encoding](#value-encoding);
 - the codec's own tolerance behaviour (unknown trailing field skipped, index gap null-padded, missing trailing field defaulted) holds against the pinned `minicbor` version, so a codec upgrade that changed any of the three breaks in a test rather than in a published stele;
 - the same value encodes to the same bytes across repeated construction. A failure there is never a re-pin: it is an encoding-determinism defect, and it breaks the cross-party digest identity this whole document rests on.
 

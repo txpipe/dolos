@@ -240,17 +240,17 @@ pub struct ProposalState {
 
     /// Constitutional-committee votes, keyed by the member's hot credential.
     #[n(16)]
-    #[cbor(default, with = "super::codec::canonical_map")]
+    #[cbor(default)]
     pub cc_votes: BTreeMap<StakeCredential, VoteEntry>,
 
     /// DRep votes, keyed by the DRep credential.
     #[n(17)]
-    #[cbor(default, with = "super::codec::canonical_map")]
+    #[cbor(default)]
     pub drep_votes: BTreeMap<StakeCredential, VoteEntry>,
 
     /// Stake-pool operator votes, keyed by the pool operator key hash.
     #[n(18)]
-    #[cbor(default, with = "super::codec::canonical_map")]
+    #[cbor(default)]
     pub spo_votes: BTreeMap<PoolHash, VoteEntry>,
 }
 

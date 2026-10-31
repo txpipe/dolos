@@ -34,7 +34,7 @@ The node checks the file's `compatibility` declaration before anything else, and
 | message | cause | remedy |
 | ------- | ----- | ------ |
 | this is a Dolos v1 or v2.0.0-alpha.0 configuration, which this release does not read | the file has a root `[genesis]`, `storage.version` or `chain.type`, and no `compatibility` | rewrite it as described on this page |
-| the configuration does not declare `compatibility` | no `compatibility` in a file that is otherwise not recognisably old | add `compatibility = "v2-alpha.2"` at the top of the file |
+| the configuration does not declare `compatibility` | no `compatibility` in a file that is otherwise not recognisably old | add `compatibility = "v2-alpha.1"` at the top of the file |
 | `compatibility` must be a string | `compatibility` is a number, a table or another non-string | quote the value |
 | unsupported `compatibility = "…"` | a contract this release does not accept | use one the message lists |
 | the configuration carries sections that are now command arguments | a `[mithril]`, `[snapshot]` or `[stelae]` table | remove it, and pass the values as [command inputs](#bootstrap-inputs) |
@@ -45,7 +45,7 @@ The node checks the file's `compatibility` declaration before anything else, and
 
 | v1 / alpha.0 | v2 |
 | ------------ | -- |
-| no compatibility declaration; `storage.version` | root `compatibility = "v2-alpha.2"`; `storage.version` removed |
+| no compatibility declaration; `storage.version` | root `compatibility = "v2-alpha.1"`; `storage.version` removed |
 | `chain.type`, `chain.magic`, `chain.is_testnet` | `chain.protocol = "cardano"` and `chain.network`; `magic` and `is_testnet` only under `[chain.cardano]`, for `network = "custom"` |
 | root `[genesis]` | built in for `mainnet`, `preprod` and `preview`; `[chain.cardano.genesis]` for `custom`, resolved against the configuration file's directory |
 | `chain.custom_utxos` | `chain.cardano.custom_utxos` |
@@ -112,7 +112,7 @@ max_level = "DEBUG"
 becomes, in v2:
 
 ```toml
-compatibility = "v2-alpha.2"
+compatibility = "v2-alpha.1"
 
 [chain]
 protocol = "cardano"
@@ -182,17 +182,17 @@ The v1 and v2.0.0-alpha.0 example configurations remain in the repository's hist
 
 ## Stores
 
-Dolos v2 opens only the state and archive stores it wrote itself. Each store records, when it is created, the compatibility identifier of the contract the binary that created it writes (`v2-alpha.2`), and every command checks it before it reads or writes anything. Stores written by Dolos v1, or by a v2 alpha that predates store identities, record none, so v2 refuses them:
+Dolos v2 opens only the state and archive stores it wrote itself. Each store records, when it is created, the compatibility identifier of the contract the binary that created it writes (`v2-alpha.1`), and every command checks it before it reads or writes anything. Stores written by Dolos v1, or by a v2 alpha that predates store identities, record none, so v2 refuses them:
 
 ```
-the state store at /var/lib/dolos/data/state holds data but records no compatibility identity; this dolos opens stores that record `v2-alpha.2`. Restore it from a stele (`dolos bootstrap stelae --force`), replay a Cardano node database over it (`dolos bootstrap immutabledb --source <db> --force`), or clear it and sync from genesis (`dolos data cleanup --force`, then `dolos daemon`); see https://docs.txpipe.io/dolos/migration/dolos-v2
+the state store at /var/lib/dolos/data/state holds data but records no compatibility identity; this dolos opens stores that record `v2-alpha.1`. Clear it and re-sync (`dolos bootstrap relay --force`), or restore it from a stele (`dolos bootstrap stelae --force`); see https://docs.txpipe.io/dolos/migration/dolos-v2
 ```
 
 A store recording an identifier the release does not read is refused the same way, and the error names that identifier. The check reads only the stores: no configuration edit gets a refused store past it.
 
 To move a node to v2, replace its stores with ones v2 writes:
 
-- **Restore from a stele** (minutes): `dolos bootstrap stelae --force`. The restore writes through v2's own stores, so they record its identity. A stele published under `v2-alpha.1` holds values in an encoding this release refuses, and is not one to restore from. The stele has to declare the entity index kinds this release reads (`parameters.entities`): one published before them is refused before anything is written, because a node restored from it would have no record of which scripts, assets and stake credentials it had already seen. Re-sync instead until a stele that declares them is published.
+- **Restore from a stele** (minutes): `dolos bootstrap stelae --force`. The restore writes through v2's own stores, so they record its identity whatever release published the stele. The stele has to declare the entity index kinds this release reads (`parameters.entities`): one published before them is refused before anything is written, because a node restored from it would have no record of which scripts, assets and stake credentials it had already seen. Re-sync instead until a stele that declares them is published.
 - **Re-sync** (hours to days): `dolos bootstrap mithril --force`, or `dolos bootstrap relay --force` and then `dolos daemon` to sync from the relay.
 
 `--force` on its own is what clears the refused stores. Without it, `dolos bootstrap` refuses with the same error, `--skip-if-data` and `--continue` included, rather than leave the node a store it refuses. `--force` clears only the storage root, though, and never a state store that fails to open for another reason, as a half-unpacked one does, or whose cursor fails to read. So `--force` is refused too, naming what to remove by hand before bootstrapping, while such a state is there, or while the state, the archive or its block segments sit outside the root (an absolute or `..` `storage.state.path`, `storage.archive.path` or `storage.archive.blocks_path`; the archive and its segments only while `history.mode` is not `none`) and hold data: a store with data, an archive that fails to open, or block segments. `--force` neither checks nor clears a WAL, mempool or cache outside the root. A directory holding no data, such as a fresh mount point or an empty store this release opens, doesn't stop it. Stop the node first: a running node holds its stores, so they fail to open, and `--force` stops at the store's own error.
