@@ -18,7 +18,7 @@ transport — and this one for every byte inside it.
 
 - Profile name `io.txpipe.dolos.cardano`, version 1; the media-type vendor
   token is `dolos` (IANA `vnd.` custom).
-- Payload media types: `application/vnd.dolos.stele.{blocks|indexes|log-{ns}|entity-{kind}|state-{ns}|digests}.v1+zstd`.
+- Payload media types: `application/vnd.dolos.stelae.{blocks|indexes|log-{ns}|entity-{kind}|state-{ns}|digests}.v1+zstd`.
 - One repository per network — e.g. `ghcr.io/txpipe/dolos-snapshots/mainnet`.
 - Tags: immutable `epoch-E` per sequence plus a moving `latest`, where E is
   the newly started epoch — equal to `sequence` and to `position.epoch`; the
@@ -38,7 +38,7 @@ Rule 3 answers for a kind the reader does not *know*. It says nothing about a ki
 
 Like `required`, the rule binds forward and not backward: it constrains readers from the version that implements it onward, and cannot reach the ones already deployed. Retiring a namespace is a spec-level act, for the same reason marking one `required` is.
 
-Rule 3's skip is available at layer granularity and at no finer one. Index **dimensions** stay fail-closed: `indexes` is a single layer per epoch, so an unknown dimension surfaces mid-stream — record by record, inside a layer the plan has already committed to restoring — where skipping it would be silent data loss rather than a visible plan-time choice, and where the store cannot look the name up in any case (it keeps a hash of the name, not the name). Changing the dimension set therefore remains a media-type-version event. The same reasoning is why a new *namespace* is additive and a new dimension is not: a namespace arrives as its own `log-{ns}` or `state-{ns}` layer, which a plan can decline; a dimension arrives inside one.
+Rule 3's skip is available at layer granularity and at no finer one. Index **dimensions** stay fail-closed: `indexes` is a single layer per epoch, so an unknown dimension surfaces mid-stream — record by record, inside a layer the plan has already committed to restoring — where skipping it would be silent data loss rather than a visible plan-time choice, and where the store cannot look the name up in any case (it keeps a hash of the name, not the name). From the v2 data-model freeze on, changing the dimension set is therefore a media-type-version event; changes made before it kept `.v1` (decision 0063). The same reasoning is why a new *namespace* is additive and a new dimension is not: a namespace arrives as its own `log-{ns}` or `state-{ns}` layer, which a plan can decline; a dimension arrives inside one.
 
 ### Layer formats
 
@@ -106,7 +106,7 @@ A state row under a log-only namespace (`—` in the state key column) is never 
 
 `state-pools` carries `PoolState` values. Field 17, `calidus`, is the pool's highest-nonce CIP-151 registration signed by its cold key in a valid transaction, as `[pub_key, nonce, tx_hash, slot]`: the 32-byte public key, or null for a revocation (an all-zero key), the registration's nonce, and the transaction and slot that made it. A registration replaces it only with a higher nonce, so a revocation keeps its nonce. It is absent before any registration.
 
-`state-metadata-labels` carries `MetadataLabelState` values as CBOR `[tx_count: uint]`, with `tx_count` at field 0. Its key is the metadata label in big-endian byte order. Revision 2 uses the exact 8-byte u64 key; the value encoding is unchanged.
+`state-metadata-labels` carries `MetadataLabelState` values as CBOR `[tx_count: uint]`, with `tx_count` at field 0. Its key is the metadata label as an exact 8-byte big-endian u64.
 
 `state-pruned-accounts` carries `PrunedAccountState` values as CBOR `[lifetime_rewards: uint, deregistered_at: uint / null]`, keyed by `AccountKey`. ESTART deletes an account that is dead once rotated (unregistered, no balance, every stake snapshot empty and every delegation snapshot undelegated, no retired pool) from `state-accounts`, unless it deregistered in the closing epoch, in which case a later boundary deletes it; it adds the deleted account's history here: its lifetime rewards, which equal its lifetime withdrawals since a dead row holds no reward balance, summed over every pruned life of the credential, and its newest deregistration slot. A credential's row exists only once it was pruned while carrying rewards or a deregistration; the API reads it, and no sync pass does.
 
@@ -211,24 +211,24 @@ and the meaning of `sequence`:
     {"sequence": 548, "inscriptionDigest": "sha256:…"},
     {"sequence": 549, "inscriptionDigest": "sha256:…"} ],
   "layers": [
-    {"kind": "blocks", "mediaType": "application/vnd.dolos.stele.blocks.v1+zstd",
+    {"kind": "blocks", "mediaType": "application/vnd.dolos.stelae.blocks.v1+zstd",
      "diffId": "sha256:…", "records": 21600, "uncompressedSize": 43210000,
      "scope": {"epoch": 0, "startSlot": 0, "endSlot": 21599}},
-    {"kind": "state-utxos", "mediaType": "application/vnd.dolos.stele.state-utxos.v1+zstd",
+    {"kind": "state-utxos", "mediaType": "application/vnd.dolos.stelae.state-utxos.v1+zstd",
      "diffId": "sha256:…", "records": 812345, "uncompressedSize": 402653184,
      "scope": {"shard": 0}},
-    {"kind": "state-pools", "mediaType": "application/vnd.dolos.stele.state-pools.v1+zstd",
+    {"kind": "state-pools", "mediaType": "application/vnd.dolos.stelae.state-pools.v1+zstd",
      "diffId": "sha256:…", "records": 3210, "uncompressedSize": 1048576,
      "scope": {"shard": 0}},
-    {"kind": "state-pools", "mediaType": "application/vnd.dolos.stele.state-pools.v1+zstd",
+    {"kind": "state-pools", "mediaType": "application/vnd.dolos.stelae.state-pools.v1+zstd",
      "diffId": "sha256:…", "records": 2980, "uncompressedSize": 972800,
      "scope": {"epoch": 365, "shard": 0}},
-    {"kind": "digests", "mediaType": "application/vnd.dolos.stele.digests.v1+zstd",
+    {"kind": "digests", "mediaType": "application/vnd.dolos.stelae.digests.v1+zstd",
      "diffId": "sha256:…", "records": 6188, "uncompressedSize": 618800,
      "scope": {"lastImmutable": 6187}} ] }
 ```
 
-`parameters` is the profile's compatibility declaration. Every value but one is a consequence of publisher code rather than a free choice: `entities` declares the entity kinds and their id widths (`ENTITY_KINDS`); `indexKeyHash` names the hash behind the pre-hashed index keys; `shards` is the per-namespace shard map above; and `schemas` is a per-namespace revision of the *record content* — the stored minicbor a `state-{ns}` or `log-{ns}` layer carries verbatim — which moves when that namespace's stored shape changes, plus one entry at revision `0` per retired namespace, per the removed-kind rule above. `epochs` took the format's first bump (ADR-004, Limitations). `SCHEMA_REVS` in `crates/snapshot/src/namespaces.rs` holds each live namespace's current revision, and the namespace's entry in `crates/snapshot/tests/registry/mod.rs` records why it moved. Every live revision is pinned by a canary in `crates/snapshot/tests/field_registry.rs`, which fails the build when a record's field table moves without its revision, or the other way round. The split between the two is deliberate: a change to how a layer is *framed* moves that kind's media type and fails closed at the transport, while a change to what a record *contains* moves its schema revision, which a reader consults to decide whether it can interpret what it can already parse. The exception, `stateEpochs`, proves the rule: it is the publisher's configured retained set, and it is here precisely *because* it is a choice — declaring it is what turns a configuration difference between two publishers into a visible parameters difference instead of a silently divergent history.
+`parameters` is the profile's compatibility declaration. Every value but one is a consequence of publisher code rather than a free choice: `entities` declares the entity kinds and their id widths (`ENTITY_KINDS`); `indexKeyHash` names the hash behind the pre-hashed index keys; `shards` is the per-namespace shard map above; and `schemas` is a per-namespace revision of the *record content* — the stored minicbor a `state-{ns}` or `log-{ns}` layer carries verbatim — which moves when that namespace's stored shape changes, plus one entry at revision `0` per retired namespace, per the removed-kind rule above. The v2 freeze restarted every revision at 1 (decision 0063). `SCHEMA_REVS` in `crates/snapshot/src/namespaces.rs` holds each live namespace's current revision, and the namespace's entry in `crates/snapshot/tests/registry/mod.rs` records why it moved. Every live revision is pinned by a canary in `crates/snapshot/tests/field_registry.rs`, which fails the build when a record's field table moves without its revision, or the other way round. The split between the two is deliberate: a change to how a layer is *framed* moves that kind's media type and fails closed at the transport, while a change to what a record *contains* moves its schema revision, which a reader consults to decide whether it can interpret what it can already parse. The exception, `stateEpochs`, proves the rule: it is the publisher's configured retained set, and it is here precisely *because* it is a choice — declaring it is what turns a configuration difference between two publishers into a visible parameters difference instead of a silently divergent history.
 
 `sequence` is the protocol's ordering key; this profile sets it to the epoch. The three opaque objects are canonicalized by JCS like every generic key (SPEC.md), so determinism holds without the protocol interpreting them — which is why every value in them must itself be deterministic, the property the compatibility contract above enforces.
 

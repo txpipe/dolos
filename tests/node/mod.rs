@@ -347,16 +347,6 @@ impl Node {
         self.command().args(args).output().unwrap()
     }
 
-    /// [`Self::run`] from the node's directory, which a relative
-    /// `storage.path` resolves against.
-    pub fn run_in_root(&self, args: &[&str]) -> std::process::Output {
-        self.command()
-            .current_dir(self.root.path())
-            .args(args)
-            .output()
-            .unwrap()
-    }
-
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_dolos"));
 

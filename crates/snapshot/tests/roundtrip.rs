@@ -17,6 +17,7 @@ use dolos_snapshot::{
 use stelae::{
     dir::SteleDir,
     frame::{self, CanonicalCbor},
+    profile::MediaType,
     Profile, SteleReader, SteleWriter,
 };
 use stelae_driver::digests;
@@ -284,7 +285,13 @@ fn a_layer_of_another_profile_is_refused() {
         }
 
         fn layer_media_type(&self, kind: &str) -> Result<String, stelae::Error> {
-            Ok(format!("application/vnd.acme.stele.{kind}.v1+zstd"))
+            Ok(MediaType {
+                vendor: "acme".to_owned(),
+                kind: kind.to_owned(),
+                version: 1,
+                codec: "zstd".to_owned(),
+            }
+            .to_string())
         }
 
         fn tag_for_sequence(&self, sequence: u64) -> Result<String, stelae::Error> {

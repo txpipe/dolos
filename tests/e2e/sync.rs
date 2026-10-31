@@ -11,9 +11,9 @@ use common::*;
 fn daemon_syncs(workspace: &ScenarioWorkspace) {
     println!("e2e sync start: {}", workspace.name());
 
-    // A relay bootstrap leaves no store with data, and not every store, so
-    // there is nothing to read before the daemon runs: it starts from genesis.
-    reset_and_bootstrap(workspace);
+    // No store exists before the daemon runs, so there is nothing to read
+    // first: it starts from genesis.
+    write_custom_genesis(workspace);
 
     let mut cmd = prepare_scenario_process(workspace);
 
@@ -58,7 +58,7 @@ fn daemon_syncs(workspace: &ScenarioWorkspace) {
 /// asks for one header at a time, so the run takes minutes over a remote
 /// relay.
 fn sync_passes_the_first_epoch_boundary(workspace: &ScenarioWorkspace) {
-    reset_and_bootstrap(workspace);
+    write_custom_genesis(workspace);
 
     let mut cmd = prepare_scenario_process(workspace);
 

@@ -12,10 +12,8 @@ mod dump_blocks;
 mod dump_entity;
 mod dump_logs;
 mod dump_state;
-mod export;
 mod find_seq;
 mod housekeeping;
-mod import_archive;
 mod prune_chain;
 mod prune_wal;
 mod stats;
@@ -48,8 +46,6 @@ pub enum Command {
     ComputeNonce(compute_nonce::Args),
     /// finds the WAL seq for a block
     FindSeq(find_seq::Args),
-    /// exports a snapshot from the current data
-    Export(export::Args),
     /// copies a range of slots from the WAL into a new db
     CopyWal(copy_wal::Args),
     /// removes blocks from the WAL before a given slot
@@ -60,8 +56,6 @@ pub enum Command {
     Stats(stats::Args),
     /// runs housekeeping tasks
     Housekeeping(housekeeping::Args),
-    /// imports blocks from immutable DB into archive store only
-    ImportArchive(import_archive::Args),
 }
 
 #[derive(Debug, Parser)]
@@ -86,13 +80,11 @@ pub fn run(
         Command::ComputeSpdd(x) => compute_spdd::run(config, x)?,
         Command::ComputeNonce(x) => compute_nonce::run(config, x)?,
         Command::FindSeq(x) => find_seq::run(config, x)?,
-        Command::Export(x) => export::run(config, x, feedback)?,
         Command::CopyWal(x) => copy_wal::run(config, x)?,
         Command::PruneWal(x) => prune_wal::run(config, x)?,
         Command::PruneChain(x) => prune_chain::run(config, x)?,
         Command::Stats(x) => stats::run(config, x)?,
         Command::Housekeeping(x) => housekeeping::run(config, x)?,
-        Command::ImportArchive(x) => import_archive::run(config, x, feedback)?,
     }
 
     Ok(())
