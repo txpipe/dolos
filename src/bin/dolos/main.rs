@@ -8,6 +8,7 @@ use crate::output::ExitCode;
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod banner;
+mod bootstrap;
 mod cache;
 mod common;
 mod config;
@@ -27,9 +28,6 @@ mod init;
 
 #[cfg(feature = "utils")]
 mod data;
-
-#[cfg(feature = "mithril")]
-mod bootstrap;
 
 #[cfg(feature = "minibf")]
 mod minibf;
@@ -74,8 +72,8 @@ enum Command {
     /// Install the node as an OS service, or uninstall it
     Service(service::Args),
 
-    /// Bootstrap the node using Mithril
-    #[cfg(feature = "mithril")]
+    /// Fill the node's stores from a Stelae snapshot, Mithril or a local
+    /// ImmutableDB
     Bootstrap(bootstrap::Args),
 
     /// runs a minibf query in-process
@@ -144,7 +142,6 @@ fn run() -> Result<()> {
         #[cfg(feature = "utils")]
         Command::Data(args) => data::run(&load()?, &args, &feedback),
 
-        #[cfg(feature = "mithril")]
         Command::Bootstrap(args) => bootstrap::run(&load()?, &args, &feedback),
 
         #[cfg(feature = "minibf")]
