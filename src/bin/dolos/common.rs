@@ -50,10 +50,6 @@ pub fn open_data_stores(config: &RootConfig) -> Result<Stores, Error> {
 
 /// The dataset's stores as they are on disk, creating, bootstrapping and
 /// catching up nothing; see [`storage::open_existing_stores`].
-#[allow(
-    dead_code,
-    reason = "the first commands ported to it land with the sync and data groups"
-)]
 pub fn open_existing_stores(
     config: &RootConfig,
     access: storage::Access,
@@ -120,7 +116,7 @@ pub fn open_genesis(config: &RootConfig) -> miette::Result<Genesis> {
         .context("loading genesis")
 }
 
-/// When `daemon` and `sync` stop.
+/// When `daemon` stops.
 #[derive(Debug, Clone, Default, clap::Args)]
 pub struct StopArgs {
     /// Stop once the ledger reaches this epoch, on its first block: the only
@@ -165,6 +161,16 @@ pub fn setup_domain_with_stop_epoch(
         .map_err(render_domain_build_error)
 }
 
+/// A domain over `stores` as they stand, for a command that repairs or rolls
+/// them back itself; see [`DomainBuilder::assemble`].
+pub fn assemble_domain(config: &RootConfig, stores: &Stores) -> miette::Result<DomainAdapter> {
+    let genesis = Arc::new(open_genesis(config)?);
+
+    DomainBuilder::new(config, genesis)
+        .assemble(stores)
+        .map_err(render_domain_build_error)
+}
+
 /// Keep actionable executable diagnostics at the UI boundary while the
 /// library returns typed construction errors.
 fn render_domain_build_error(error: DomainBuildError) -> miette::Report {
@@ -197,7 +203,7 @@ fn render_domain_build_error(error: DomainBuildError) -> miette::Report {
             };
             let help: &str = match (wal, state) {
                 (_, Some(_)) => {
-                    "run `dolos doctor reset-wal` to rebuild the WAL from the current state"
+                    "run `dolos sync recover --discard-wal` to rebuild the WAL from the current state"
                 }
                 _ => "storage may be corrupted; consider re-bootstrapping with `dolos bootstrap`",
             };

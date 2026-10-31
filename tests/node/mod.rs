@@ -14,12 +14,16 @@ use std::process::Command;
 use std::sync::Arc;
 
 use dolos::adapters::DomainAdapter;
+use dolos::engine::DomainBuilder;
+use dolos_cardano::CardanoLogic;
 use dolos_core::{
     config::{CardanoConfig, ChainConfig, CustomUtxo, GenesisConfig, RootConfig},
     import::ImportExt as _,
-    BootstrapExt as _, ChainLogic as _, Domain as _, QueryLimiter, StateStore as _,
+    ArchiveStore as _, BootstrapExt as _, ChainLogic as _, ChainPoint, Domain as _, Genesis,
+    QueryLimiter, RawBlock, StateStore as _, WalStore as _, WorkUnit,
 };
 use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
+use pallas::ledger::traverse::MultiEraBlock;
 
 /// A path as a TOML string *value*, quotes and escapes included.
 ///
@@ -362,4 +366,103 @@ pub fn assert_ok(output: &std::process::Output) -> String {
     );
 
     stdout
+}
+
+/// A node over `tables` on the synthetic chain's network, and that chain's
+/// blocks, for the tests that sync it live through [`start`].
+pub fn fixture(tables: &str) -> (Node, Arc<Genesis>, Vec<RawBlock>) {
+    let mut node = Node::with_tables(tables);
+    let (blocks, _, chain) = build_synthetic_blocks(SyntheticBlockConfig {
+        block_count: 4,
+        slot: 100,
+        ..Default::default()
+    });
+    node.config.chain = node.custom_chain(2, chain.custom_utxos);
+    node.write_chain(&node.config.chain);
+
+    let genesis = Arc::new(dolos_cardano::include::preview::load());
+
+    (node, genesis, blocks)
+}
+
+pub fn start(node: &Node, genesis: &Arc<Genesis>) -> DomainAdapter {
+    DomainBuilder::new(&node.config, genesis.clone())
+        .build()
+        .unwrap()
+}
+
+pub fn point(block: &RawBlock) -> ChainPoint {
+    let block = MultiEraBlock::decode(block).unwrap();
+    ChainPoint::Specific(block.slot(), block.hash())
+}
+
+/// Where in a work unit's lifecycle a crash comes.
+#[derive(Clone, Copy, Debug)]
+pub enum CrashAfter {
+    /// After compute, before any commit.
+    Compute,
+    /// After the WAL commit.
+    Wal,
+    /// After the WAL and state commits.
+    State,
+}
+
+/// Feed `blocks` through the work-unit lifecycle, stopping each block's unit
+/// where `crash` says. Genesis, which a fresh node's first block brings, runs
+/// whole.
+pub fn feed_until_crash(domain: &DomainAdapter, blocks: &[RawBlock], crash: CrashAfter) {
+    let mut chain = domain.write_chain();
+
+    for block in blocks {
+        if !chain.can_receive_block() {
+            drain_until_crash(&mut chain, domain, crash);
+        }
+        chain.receive_block(block.clone()).unwrap();
+    }
+
+    drain_until_crash(&mut chain, domain, crash);
+}
+
+fn drain_until_crash(chain: &mut CardanoLogic, domain: &DomainAdapter, crash: CrashAfter) {
+    while let Some(mut work) = chain.pop_work::<DomainAdapter>(domain) {
+        if WorkUnit::<DomainAdapter>::name(&work) == "genesis" {
+            dolos_core::sync::execute_work_unit(domain, &mut work).unwrap();
+            continue;
+        }
+
+        WorkUnit::<DomainAdapter>::initialize(&mut work, domain).unwrap();
+
+        let shards = WorkUnit::<DomainAdapter>::start_shard(&work)
+            ..WorkUnit::<DomainAdapter>::total_shards(&work);
+
+        for shard in shards {
+            WorkUnit::<DomainAdapter>::load(&mut work, domain, shard).unwrap();
+            WorkUnit::<DomainAdapter>::compute(&mut work, shard).unwrap();
+
+            if matches!(crash, CrashAfter::Compute) {
+                continue;
+            }
+
+            WorkUnit::<DomainAdapter>::commit_wal(&mut work, domain, shard).unwrap();
+
+            if matches!(crash, CrashAfter::State) {
+                WorkUnit::<DomainAdapter>::commit_state(&mut work, domain, shard).unwrap();
+            }
+        }
+    }
+}
+
+/// The WAL tip, state cursor and archive tip, read without recovery.
+pub fn store_positions(node: &Node) -> (Option<ChainPoint>, Option<ChainPoint>, Option<u64>) {
+    let stores =
+        dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&node.config).unwrap();
+
+    let wal = stores.wal.find_tip().unwrap().map(|(point, _)| point);
+    let state = stores.state.read_cursor().unwrap();
+    let archive = stores.archive.get_tip().unwrap().map(|(slot, _)| slot);
+
+    stores.state.shutdown().unwrap();
+    stores.archive.shutdown().unwrap();
+
+    (wal, state, archive)
 }

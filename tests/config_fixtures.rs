@@ -435,8 +435,7 @@ fn older_files_point_to_the_migration_guide() {
 }
 
 /// The binary in `cwd`, without the `DOLOS_` variables the in-process tests
-/// set. `data summary` opens every store, so a refused file shows that none
-/// was.
+/// set.
 fn run_dolos(cwd: &Path, args: &[&str]) -> std::process::Output {
     run_dolos_with_env(cwd, args, &[])
 }
@@ -479,8 +478,8 @@ fn plant_store_markers(dir: &Path) -> Vec<PathBuf> {
 const STORE_COMMANDS: [&[&str]; 4] = [
     &["bootstrap", "immutabledb", "--force", "--source", "db"],
     &["doctor", "rebuild-state", "--force"],
-    &["doctor", "reset-wal"],
-    &["data", "summary"],
+    &["sync", "recover", "--discard-wal"],
+    &["sync", "status"],
 ];
 
 fn assert_refused_with_stores_intact(dir: &Path, markers: &[PathBuf], message: &str) {
@@ -515,7 +514,7 @@ fn an_invalid_log_filter_stops_every_command_before_its_stores() {
 
     assert_refused_with_stores_intact(dir.path(), &markers, "logging.filter");
 
-    let output = run_dolos(dir.path(), &["doctor", "check"]);
+    let output = run_dolos(dir.path(), &["config", "check"]);
     assert!(!output.status.success());
 }
 
@@ -790,7 +789,7 @@ fn an_older_file_opens_no_store() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::copy(fixture(name), dir.path().join("dolos.toml")).unwrap();
 
-        let output = run_dolos(dir.path(), &["data", "summary"]);
+        let output = run_dolos(dir.path(), &["sync", "status"]);
         let stderr = String::from_utf8_lossy(&output.stderr);
 
         assert!(!output.status.success(), "{name}");
@@ -807,7 +806,7 @@ fn an_older_file_opens_no_store() {
 fn only_the_selected_file_is_read() {
     let dir = tempfile::tempdir().unwrap();
 
-    let output = run_dolos(dir.path(), &["data", "summary"]);
+    let output = run_dolos(dir.path(), &["sync", "status"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(!output.status.success());
@@ -819,7 +818,7 @@ fn only_the_selected_file_is_read() {
     let elsewhere = dir.path().join("elsewhere.toml");
     let output = run_dolos(
         dir.path(),
-        &["--config", elsewhere.to_str().unwrap(), "data", "summary"],
+        &["--config", elsewhere.to_str().unwrap(), "sync", "status"],
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
 
@@ -841,14 +840,14 @@ fn the_given_file_is_not_merged_with_the_default_one() {
     let given = dir.path().join("given.toml");
     std::fs::copy(fixture("ephemeral.toml"), &given).unwrap();
 
-    let output = run_dolos(dir.path(), &["data", "summary"]);
+    let output = run_dolos(dir.path(), &["config", "check"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success());
     assert!(stderr.contains("max_concurrent_queries"), "{stderr}");
 
     let output = run_dolos(
         dir.path(),
-        &["--config", given.to_str().unwrap(), "data", "summary"],
+        &["--config", given.to_str().unwrap(), "config", "check"],
     );
     assert!(
         output.status.success(),
@@ -2046,7 +2045,7 @@ fn an_override_the_binary_refuses_is_named() {
         ("DOLOS_CHAIN__NETWORK", "preveiw", "`preveiw`"),
         ("DOLOS_LOGGING__FILTER", "dolos=loud", "logging.filter"),
     ] {
-        let output = run_dolos_with_env(dir.path(), &["data", "summary"], &[(name, value)]);
+        let output = run_dolos_with_env(dir.path(), &["sync", "status"], &[(name, value)]);
         let stderr = String::from_utf8_lossy(&output.stderr);
 
         assert!(!output.status.success(), "{name}: {stderr}");

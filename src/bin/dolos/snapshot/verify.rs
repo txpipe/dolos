@@ -69,9 +69,10 @@ pub struct Args {
 
     /// also rebuild every layer from this node's stores and require the result
     /// to be byte-identical to the published inscription. The stores must
-    /// stand on the first block of the stele's epoch, as `dolos sync
-    /// --stop-epoch` leaves them. Costs what a publish costs — hours on mainnet
-    /// — which is why it is opt-in and does not belong in a pre-flight
+    /// stand on the first block of the stele's epoch, as `dolos sync catchup
+    /// --follow --stop-epoch` leaves them. Costs what a publish costs — hours
+    /// on mainnet — which is why it is opt-in and does not belong in a
+    /// pre-flight
     #[arg(long, action)]
     reproduce: bool,
 
