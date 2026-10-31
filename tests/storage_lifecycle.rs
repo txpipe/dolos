@@ -161,7 +161,7 @@ fn a_command_that_does_not_sync_recovers_a_crash_from_the_wal() {
         drop(domain);
 
         let committed = match crash {
-            CrashAfter::Wal => point(&blocks[1]),
+            CrashAfter::Compute | CrashAfter::Wal => point(&blocks[1]),
             CrashAfter::State => tip.clone(),
         };
         assert_eq!(
@@ -186,6 +186,37 @@ fn a_command_that_does_not_sync_recovers_a_crash_from_the_wal() {
             "{crash:?}"
         );
     }
+}
+
+/// A crash between genesis's WAL commit, which resets the WAL to Origin, and
+/// its state commit, which writes the cursor, leaves the WAL at Origin beside
+/// no cursor. The node boots over it, runs genesis again with the first
+/// block and syncs on.
+#[test]
+fn a_node_resumes_over_an_interrupted_genesis() {
+    let (node, genesis, blocks) = fixture("");
+    let tip = point(&blocks[3]);
+
+    // Genesis's WAL commit, then the crash.
+    let domain = start(&node, &genesis);
+    domain.wal().reset_to(&ChainPoint::Origin).unwrap();
+    domain.shutdown().unwrap();
+    drop(domain);
+
+    assert_eq!(
+        store_positions(&node),
+        (Some(ChainPoint::Origin), None, None)
+    );
+
+    let domain = start(&node, &genesis);
+    domain.roll_forward_batch(blocks.clone()).unwrap();
+    domain.shutdown().unwrap();
+    drop(domain);
+
+    assert_eq!(
+        store_positions(&node),
+        (Some(tip.clone()), Some(tip.clone()), Some(tip.slot()))
+    );
 }
 
 fn has_segments(dir: &Path) -> bool {

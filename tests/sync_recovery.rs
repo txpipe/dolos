@@ -11,7 +11,9 @@ use std::sync::Arc;
 
 use dolos::engine::DomainBuilder;
 use dolos_cardano::CardanoDelta;
-use dolos_core::{ChainPoint, Genesis, LogValue, RawBlock, SyncExt as _, WalStore as _};
+use dolos_core::{
+    ChainPoint, Domain as _, Genesis, LogValue, RawBlock, SyncExt as _, WalStore as _,
+};
 use node::{feed_until_crash, fixture, point, start, store_positions, CrashAfter, Node};
 
 const EPHEMERAL_ARCHIVE: &str = r#"
@@ -22,6 +24,15 @@ type = "ephemeral"
 const NO_HISTORY: &str = r#"
 [history]
 mode = "none"
+"#;
+
+/// A rolling archive one slot wide, which housekeeping prunes to the last two
+/// blocks while the WAL keeps more, as `dolos init`'s day does against
+/// mainnet's 3k/f.
+const ROLLING: &str = r#"
+[history]
+mode = "rolling"
+window = { unit = "slot", value = 1 }
 "#;
 
 /// The four synthetic blocks synced live over `tables`, the stores in
@@ -74,6 +85,15 @@ fn empty_wal(node: &Node) {
 
     let wal = dolos::storage::open_wal_store::<CardanoDelta>(&node.config).unwrap();
     wal.shutdown().unwrap();
+}
+
+/// Empty the state store, as deleting a corrupt one leaves it once a node
+/// recreates it.
+fn empty_state(node: &Node) {
+    std::fs::remove_dir_all(node.config.storage.state_path().unwrap()).unwrap();
+
+    let state = dolos::storage::open_state_store(&node.config).unwrap();
+    state.shutdown().unwrap();
 }
 
 /// Append `count` entries without a block past `past`, one a slot.
@@ -489,6 +509,101 @@ fn a_wal_holding_only_origin_reads_as_empty() {
     assert_eq!(status["rollback_window"], serde_json::Value::Null);
 }
 
+/// Genesis applied and no block yet, as a crash in a node's first block
+/// leaves it: the state cursor at Origin reads as empty, as the WAL does.
+#[test]
+fn a_genesis_only_dataset_reads_as_empty() {
+    let (node, genesis, blocks) = fixture("");
+
+    let domain = start(&node, &genesis);
+    feed_until_crash(&domain, &blocks[..1], CrashAfter::Compute);
+    domain.shutdown().unwrap();
+    drop(domain);
+
+    assert_eq!(
+        store_positions(&node),
+        (Some(ChainPoint::Origin), Some(ChainPoint::Origin), None)
+    );
+
+    let status = node.run(&["sync", "status"]);
+    let text = stdout(&status);
+    assert_eq!(code(&status), Some(0), "{text}");
+    assert!(text.contains("wal        empty"), "{text}");
+    assert!(text.contains("state      empty"), "{text}");
+    assert!(!text.contains("slot 0"), "{text}");
+
+    let status = json(&node.run(&["sync", "status", "--format", "json"]));
+    assert_eq!(status["state"]["tip_slot"], 0, "{status}");
+}
+
+/// Genesis applied, then every block the WAL committed and a crash kept from
+/// the state: its cursor at Origin reads as empty, and the WAL replays into
+/// it.
+#[test]
+fn a_state_at_origin_behind_the_wal_reads_as_empty_and_replays() {
+    let (node, genesis, blocks) = fixture("");
+    let tip = point(&blocks[3]);
+
+    let domain = start(&node, &genesis);
+    feed_until_crash(&domain, &blocks, CrashAfter::Wal);
+    domain.shutdown().unwrap();
+    drop(domain);
+
+    assert_eq!(
+        store_positions(&node),
+        (Some(tip.clone()), Some(ChainPoint::Origin), None)
+    );
+
+    let status = node.run(&["sync", "status"]);
+    let text = stdout(&status);
+    assert_eq!(code(&status), Some(3), "{text}");
+    assert!(text.contains("state      empty"), "{text}");
+    assert!(
+        text.contains(&format!(
+            "the state, empty, is behind the WAL tip at slot {}",
+            tip.slot()
+        )),
+        "{text}"
+    );
+
+    let output = node.run(&["sync", "recover"]);
+    assert_eq!(code(&output), Some(0), "{}", stderr_words(&output));
+    assert_eq!(
+        store_positions(&node),
+        (Some(tip.clone()), Some(tip.clone()), Some(tip.slot()))
+    );
+}
+
+/// A state store emptied beside a WAL holding blocks from Origin: the state
+/// never applied genesis, which the WAL does not hold, so recovery refuses
+/// it, as the daemon does.
+#[test]
+fn a_state_without_a_cursor_is_refused() {
+    let (node, blocks) = synced();
+    let tip = point(&blocks[3]);
+    empty_state(&node);
+
+    let emptied = (Some(tip.clone()), None, Some(tip.slot()));
+    assert_eq!(store_positions(&node), emptied);
+
+    let dry_run = node.run(&["sync", "recover", "--dry-run", "--format", "json"]);
+    assert_eq!(code(&dry_run), Some(0), "{}", stderr_words(&dry_run));
+    assert_eq!(json(&dry_run)["action"], "refuse");
+
+    for args in [
+        &["sync", "recover"][..],
+        &["sync", "recover", "--discard-wal"],
+    ] {
+        let output = node.run(args);
+        let message = stderr_words(&output);
+
+        assert_eq!(code(&output), Some(1), "{args:?}: {message}");
+        assert!(message.contains("the state has no cursor"), "{message}");
+        assert!(message.contains("dolos bootstrap --force"), "{message}");
+        assert_eq!(store_positions(&node), emptied, "{args:?}");
+    }
+}
+
 /// The state at the tip, the archive two blocks back, and a WAL reset to the
 /// tip: resetting the WAL to the state cannot fill the archive.
 #[test]
@@ -727,6 +842,114 @@ fn a_rollback_with_only_the_archive_behind_points_to_recover() {
         store_positions(&node),
         (Some(tip.clone()), Some(tip), Some(to.slot()))
     );
+}
+
+/// The four blocks synced over a rolling archive and housekeeping run: the
+/// archive keeps the last two, and the WAL, pruned past Origin, all four.
+fn rolling() -> (Node, Vec<RawBlock>) {
+    let (node, genesis, blocks) = fixture(ROLLING);
+
+    let domain = start(&node, &genesis);
+    domain.roll_forward_batch(blocks.clone()).unwrap();
+    domain.drain_housekeeping(Some(10)).unwrap();
+    // As housekeeping prunes it on a chain long enough to drop Origin.
+    domain.wal().prune_history(3, None).unwrap();
+    domain.shutdown().unwrap();
+
+    (node, blocks)
+}
+
+/// A rollback past a rolling archive's first block empties it. It keeps only
+/// the latest blocks, so recovery refills it from the WAL, as a boot does,
+/// and the rest of the window stays open.
+#[test]
+fn an_emptied_rolling_archive_is_refilled_from_the_wal() {
+    let (node, blocks) = rolling();
+    let to = point(&blocks[1]);
+
+    let (slot, hash) = (to.slot().to_string(), hash_of(&to));
+    let output = node.run(&[
+        "sync", "rollback", "--slot", &slot, "--hash", &hash, "--yes",
+    ]);
+    assert_eq!(code(&output), Some(0), "{}", stderr_words(&output));
+    assert_eq!(
+        store_positions(&node),
+        (Some(to.clone()), Some(to.clone()), None)
+    );
+
+    let status = node.run(&["sync", "status"]);
+    assert_eq!(code(&status), Some(3), "{}", stdout(&status));
+
+    let dry_run = node.run(&["sync", "recover", "--dry-run", "--format", "json"]);
+    let plan = json(&dry_run);
+    assert_eq!(plan["action"], "replay", "{plan}");
+    assert_eq!(plan["steps"][0]["store"], "archive", "{plan}");
+    assert_eq!(plan["steps"][0]["covered"], true, "{plan}");
+
+    let output = node.run(&["sync", "recover"]);
+    let message = stderr_words(&output);
+    assert_eq!(code(&output), Some(0), "{message}");
+    assert!(!message.contains("ERROR"), "{message}");
+    assert_eq!(
+        store_positions(&node),
+        (Some(to.clone()), Some(to.clone()), Some(to.slot()))
+    );
+
+    let status = node.run(&["sync", "status"]);
+    assert_eq!(code(&status), Some(0), "{}", stdout(&status));
+
+    let first = point(&blocks[0]);
+    let (slot, hash) = (first.slot().to_string(), hash_of(&first));
+    let output = node.run(&[
+        "sync", "rollback", "--slot", &slot, "--hash", &hash, "--yes",
+    ]);
+    assert_eq!(code(&output), Some(0), "{}", stderr_words(&output));
+}
+
+/// A rollback to a reset point a rolling archive pruned past empties it, and
+/// leaves the WAL no block to refill it with: recovery leaves it to a sync,
+/// which brings the stores together.
+#[test]
+fn an_emptied_rolling_archive_with_nothing_to_replay_waits_for_a_sync() {
+    let (node, genesis, blocks) = fixture(ROLLING);
+    let reset = point(&blocks[0]);
+
+    let domain = start(&node, &genesis);
+    domain.roll_forward_batch(blocks[..1].to_vec()).unwrap();
+    domain.shutdown().unwrap();
+    drop(domain);
+
+    reset_wal(&node, &reset);
+
+    let domain = start(&node, &genesis);
+    domain.roll_forward_batch(blocks[1..3].to_vec()).unwrap();
+    domain.drain_housekeeping(Some(10)).unwrap();
+    domain.shutdown().unwrap();
+    drop(domain);
+
+    let (slot, hash) = (reset.slot().to_string(), hash_of(&reset));
+    let output = node.run(&[
+        "sync", "rollback", "--slot", &slot, "--hash", &hash, "--yes",
+    ]);
+    assert_eq!(code(&output), Some(0), "{}", stderr_words(&output));
+
+    let emptied = (Some(reset.clone()), Some(reset.clone()), None);
+    assert_eq!(store_positions(&node), emptied);
+
+    let output = node.run(&["sync", "recover", "--format", "json"]);
+    let message = stderr_words(&output);
+    assert_eq!(code(&output), Some(0), "{message}");
+    assert_eq!(json(&output)["action"], "none");
+    assert!(message.contains("dolos sync catchup"), "{message}");
+    assert_eq!(store_positions(&node), emptied);
+
+    let domain = start(&node, &genesis);
+    domain.roll_forward_batch(blocks[1..].to_vec()).unwrap();
+    domain.shutdown().unwrap();
+    drop(domain);
+
+    let status = node.run(&["sync", "status"]);
+    assert_eq!(code(&status), Some(0), "{}", stdout(&status));
 }
 
 #[test]

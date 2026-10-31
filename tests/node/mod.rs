@@ -396,15 +396,20 @@ pub fn point(block: &RawBlock) -> ChainPoint {
     ChainPoint::Specific(block.slot(), block.hash())
 }
 
-/// The store commits a crash lets through after the WAL's.
+/// Where in a work unit's lifecycle a crash comes.
 #[derive(Clone, Copy, Debug)]
 pub enum CrashAfter {
+    /// After compute, before any commit.
+    Compute,
+    /// After the WAL commit.
     Wal,
+    /// After the WAL and state commits.
     State,
 }
 
-/// Feed `blocks` through the work-unit lifecycle, stopping each unit after
-/// the commits `crash` lets through.
+/// Feed `blocks` through the work-unit lifecycle, stopping each block's unit
+/// where `crash` says. Genesis, which a fresh node's first block brings, runs
+/// whole.
 pub fn feed_until_crash(domain: &DomainAdapter, blocks: &[RawBlock], crash: CrashAfter) {
     let mut chain = domain.write_chain();
 
@@ -420,6 +425,11 @@ pub fn feed_until_crash(domain: &DomainAdapter, blocks: &[RawBlock], crash: Cras
 
 fn drain_until_crash(chain: &mut CardanoLogic, domain: &DomainAdapter, crash: CrashAfter) {
     while let Some(mut work) = chain.pop_work::<DomainAdapter>(domain) {
+        if WorkUnit::<DomainAdapter>::name(&work) == "genesis" {
+            dolos_core::sync::execute_work_unit(domain, &mut work).unwrap();
+            continue;
+        }
+
         WorkUnit::<DomainAdapter>::initialize(&mut work, domain).unwrap();
 
         let shards = WorkUnit::<DomainAdapter>::start_shard(&work)
@@ -428,6 +438,11 @@ fn drain_until_crash(chain: &mut CardanoLogic, domain: &DomainAdapter, crash: Cr
         for shard in shards {
             WorkUnit::<DomainAdapter>::load(&mut work, domain, shard).unwrap();
             WorkUnit::<DomainAdapter>::compute(&mut work, shard).unwrap();
+
+            if matches!(crash, CrashAfter::Compute) {
+                continue;
+            }
+
             WorkUnit::<DomainAdapter>::commit_wal(&mut work, domain, shard).unwrap();
 
             if matches!(crash, CrashAfter::State) {

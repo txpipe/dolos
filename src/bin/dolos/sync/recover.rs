@@ -71,8 +71,21 @@ impl Recovery {
         if !positions.archive_kept {
             plan.steps
                 .retain(|step| step.store != RecoveredStore::Archive);
-            plan.covers_lag = plan.steps.iter().all(|step| step.covered);
         }
+
+        // An emptied rolling archive lacks nothing the WAL's blocks do not
+        // bring, so replaying them leaves it whole; with none to replay, it
+        // waits for a sync.
+        if positions.archive_refills() {
+            plan.steps
+                .retain(|step| step.store != RecoveredStore::Archive || step.entries > 0);
+
+            for step in &mut plan.steps {
+                step.covered |= step.store == RecoveredStore::Archive;
+            }
+        }
+
+        plan.covers_lag = plan.steps.iter().all(|step| step.covered);
 
         // A WAL that holds no block, empty or Origin alone, has no rollback
         // history to lose.
@@ -94,8 +107,9 @@ impl Recovery {
             },
         };
 
-        // Replaying or reseeding brings the state to the WAL tip; an archive
-        // ahead of it stays where it is.
+        // Replaying or reseeding brings the state to the WAL tip, and the
+        // archive too when the plan replays into it; any other archive stays
+        // where it is.
         let remains = match action {
             Action::None | Action::Replay | Action::DiscardWal | Action::SeedWal => {
                 let target = match action {
@@ -103,11 +117,18 @@ impl Recovery {
                     _ => positions.wal(),
                 };
 
-                match positions.archive {
-                    Some(archive) if positions.archive_kept && Some(archive) > target => {
-                        vec![relative_to_wal("archive", Some(archive), target)]
-                    }
-                    _ => vec![],
+                let replayed = action == Action::Replay
+                    && plan
+                        .steps
+                        .iter()
+                        .any(|step| step.store == RecoveredStore::Archive);
+
+                let archive = if replayed { target } else { positions.archive };
+
+                if positions.archive_kept && archive != target {
+                    vec![relative_to_wal("archive", archive, target)]
+                } else {
+                    vec![]
                 }
             }
             Action::NeedsDiscard | Action::Refuse => positions.disagreements(),
@@ -123,10 +144,17 @@ impl Recovery {
     }
 }
 
-/// What the WAL lacks to bring the stores to its tip: the blocks between a
-/// store and a WAL that starts past it, or every block a state ahead of the
-/// WAL applied.
+/// What the WAL lacks to bring the stores to its tip: the genesis a state
+/// with no cursor never applied, the blocks between a store and a WAL that
+/// starts past it, or every block a state ahead of the WAL applied.
 fn gap(plan: &RecoveryPlan, positions: &Positions) -> Option<String> {
+    // Genesis's effects never pass through the WAL.
+    if positions.state.is_none() && positions.wal().is_some() {
+        return Some(
+            "the state has no cursor, so it lacks the genesis the WAL's blocks build on".into(),
+        );
+    }
+
     if positions.state() > positions.wal() {
         let ahead = relative_to_wal("state", positions.state(), positions.wal());
 
@@ -185,7 +213,10 @@ fn discard_refusal(positions: &Positions) -> Option<String> {
         ));
     }
 
-    if positions.archive_kept && positions.archive < positions.state() {
+    if positions.archive_kept
+        && positions.archive < positions.state()
+        && !positions.archive_refills()
+    {
         let archive = match positions.archive {
             Some(slot) => format!("at slot {slot}"),
             None => "empty".to_string(),
@@ -205,7 +236,7 @@ const REFUSED_HELP: &str = "rebuild the state from the archive with `dolos data 
 const DISCARD_HELP: &str =
     "pass `--discard-wal` to reset the WAL to the state cursor, losing its rollback history";
 
-const ARCHIVE_AHEAD_HELP: &str = "sync past it with `dolos sync catchup`";
+const SYNC_HELP: &str = "a sync with `dolos sync catchup` brings the stores together";
 
 fn slot(slot: Option<BlockSlot>) -> String {
     slot.map_or("empty".to_string(), |slot| format!("slot {slot}"))
@@ -338,7 +369,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     }
 
     for remaining in &recovery.remains {
-        eprintln!("warning: {remaining}, which recovery does not change: {ARCHIVE_AHEAD_HELP}");
+        eprintln!("warning: {remaining}, which recovery does not change: {SYNC_HELP}");
     }
 
     Ok(())
@@ -374,6 +405,7 @@ mod tests {
             state: Some(point(state)),
             archive,
             archive_kept: true,
+            archive_rolling: false,
         }
     }
 
@@ -466,6 +498,7 @@ mod tests {
             state: Some(state),
             archive,
             archive_kept: true,
+            archive_rolling: false,
         };
 
         let plan = RecoveryPlan {
@@ -558,6 +591,66 @@ mod tests {
         assert_eq!(recovery.action, Action::Replay);
         assert!(recovery.plan.covers_lag);
         assert_eq!(recovery.plan.steps.len(), 1);
+    }
+
+    /// A state store emptied beside a WAL from Origin, which the plan alone
+    /// would replay into it.
+    #[test]
+    fn a_state_without_a_cursor_is_refused() {
+        let mut emptied = positions(0, 200, 200, Some(200));
+        emptied.state = None;
+
+        for discard_wal in [false, true] {
+            let recovery = decide(&emptied, discard_wal);
+            assert_eq!(recovery.action, Action::Refuse);
+            assert!(recovery.gap.unwrap().contains("genesis"));
+            assert!(recovery.refusal.unwrap().contains("no cursor"));
+        }
+    }
+
+    #[test]
+    fn an_emptied_rolling_archive_is_refilled_from_the_wal() {
+        let mut emptied = positions(100, 200, 200, None);
+        emptied.archive_rolling = true;
+
+        let recovery = decide(&emptied, false);
+        assert_eq!(recovery.action, Action::Replay);
+        assert!(recovery.plan.covers_lag);
+        assert!(recovery.remains.is_empty(), "{:?}", recovery.remains);
+
+        // A full archive lacks the blocks before the WAL's.
+        emptied.archive_rolling = false;
+        assert_eq!(decide(&emptied, true).action, Action::Refuse);
+
+        // A rolling archive that holds blocks would keep a hole up to them.
+        let mut behind = positions(180, 200, 200, Some(150));
+        behind.archive_rolling = true;
+        assert_eq!(decide(&behind, true).action, Action::Refuse);
+    }
+
+    /// With no block in the WAL to replay, an emptied rolling archive waits
+    /// for a sync, and lets the WAL be reset or seeded meanwhile.
+    #[test]
+    fn an_emptied_rolling_archive_without_blocks_waits_for_a_sync() {
+        let mut reset = positions(200, 200, 200, None);
+        reset.archive_rolling = true;
+
+        let recovery = decide(&reset, false);
+        assert_eq!(recovery.action, Action::None);
+        assert!(recovery.plan.steps.is_empty());
+        assert_eq!(recovery.remains.len(), 1, "{:?}", recovery.remains);
+
+        let (mut empty, plan) = without_wal(point(250), None);
+        empty.archive_rolling = true;
+        let recovery = Recovery::decide(plan, &empty, false);
+        assert_eq!(recovery.action, Action::SeedWal);
+        assert_eq!(recovery.remains.len(), 1, "{:?}", recovery.remains);
+
+        let mut short = positions(180, 200, 150, None);
+        short.archive_rolling = true;
+        let recovery = decide(&short, true);
+        assert_eq!(recovery.action, Action::DiscardWal);
+        assert_eq!(recovery.remains.len(), 1, "{:?}", recovery.remains);
     }
 
     #[test]

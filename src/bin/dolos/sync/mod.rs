@@ -81,6 +81,9 @@ struct Positions {
     archive: Option<BlockSlot>,
     /// Whether the dataset keeps an archive; see [`archive_kept`].
     archive_kept: bool,
+    /// Whether the archive keeps only the latest blocks
+    /// (`history.mode = "rolling"`).
+    archive_rolling: bool,
 }
 
 /// The first WAL entry past Origin, the oldest point a rollback reaches.
@@ -133,7 +136,15 @@ impl Positions {
             state,
             archive,
             archive_kept: archive_kept(config),
+            archive_rolling: config.history.max_slots().is_some(),
         })
+    }
+
+    /// Whether the archive is a kept rolling one, left empty: it keeps only
+    /// the latest blocks, so it is whole again with whatever blocks reach it
+    /// next, replayed from the WAL or synced, as after a bootstrap.
+    fn archive_refills(&self) -> bool {
+        self.archive_kept && self.archive_rolling && self.archive.is_none()
     }
 
     /// The slot the WAL tip has applied the chain through.
