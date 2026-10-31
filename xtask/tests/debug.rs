@@ -396,9 +396,34 @@ fn a_missing_store_is_refused_and_not_created() {
     );
 
     let clear = node.debug("clear-state", &["--namespace", "epochs"]);
+    let update = ["--namespace", "epochs", "--cbor-hex", "0405"];
+    let write = node.debug("update-entity", &update);
+    let dry_run = node.debug("update-entity", &[&update[..], &["--dry-run"]].concat());
 
     let data = node.data().display().to_string();
-    assert!(stderr(&find).contains(&data));
-    assert!(stderr(&clear).contains(&data));
+    for output in [&find, &clear, &write, &dry_run] {
+        assert!(stderr(output).contains(&data));
+    }
     assert!(!node.data().exists(), "the dataset was created");
+}
+
+/// A dataset whose state store is gone is refused by the state-only open,
+/// naming the state, which is not recreated.
+#[test]
+fn a_missing_state_is_refused_and_not_created() {
+    let node = Node::new(10..=10);
+    let state = node.config.storage.state_path().unwrap();
+
+    std::fs::remove_dir_all(&state).unwrap();
+
+    let clear = node.debug("clear-state", &["--namespace", "epochs"]);
+    let update = node.debug(
+        "update-entity",
+        &["--namespace", "epochs", "--cbor-hex", "0405"],
+    );
+
+    let path = state.display().to_string();
+    assert!(stderr(&clear).contains(&path));
+    assert!(stderr(&update).contains(&path));
+    assert!(!state.exists(), "the state store was created");
 }

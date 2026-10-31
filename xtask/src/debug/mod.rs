@@ -1,11 +1,12 @@
 //! Maintainer tooling over a node's stores, outside the `dolos` CLI.
 //!
 //! Each command opens the dataset of the `dolos.toml` it is given as it is on
-//! disk, with the library's `open_existing_stores`: it creates, bootstraps and
-//! catches up nothing, and refuses a store that is missing or that another
-//! process holds, naming its path. Stop the node first. The commands that
-//! write touch the state only, and open nothing else, so that a writable open
-//! cannot migrate or wipe a WAL from another version.
+//! disk: it creates, bootstraps and catches up nothing, and refuses a store it
+//! opens that is missing or that another process holds, naming its path. Stop
+//! the node first. `find-seq` and `copy-wal` open every store with the
+//! library's `open_existing_stores`. `update-entity` and `clear-state` open
+//! the state alone with `open_existing_state`, so that a writable open cannot
+//! migrate or wipe a WAL from another version.
 
 use std::path::{Path, PathBuf};
 
