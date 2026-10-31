@@ -134,9 +134,12 @@ fn footprint_to_json(footprint: &TableFootprint) -> serde_json::Value {
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     // Each store the dataset holds, so one that holds only an archive is
-    // reported too; with neither, the state's absence is the refusal.
+    // reported too; with neither, the state's absence is the refusal. An
+    // archive index without its segments is a broken archive, not none.
+    let index = config.storage.archive_path().map(|path| path.join("index"));
+
     let archive = match dolos::storage::open_existing_archive(config, Access::Observe) {
-        Err(OpenError::Missing { .. }) => None,
+        Err(OpenError::Missing { path }) if Some(&path) == index.as_ref() => None,
         archive => Some(archive?),
     };
 

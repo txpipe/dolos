@@ -4,8 +4,9 @@
 //! The ledger keys maps by credentials and DReps, enums with newtype
 //! variants, so here a key that is not a string is written as one: a newtype
 //! variant over a string or number as `Variant:value`
-//! (`AddrKeyhash:9a1c…`), anything else as its compact JSON text. Everything
-//! else is what `serde_json::to_value` makes.
+//! (`AddrKeyhash:9a1c…`), anything else as its compact JSON text. An
+//! integer beyond 64 bits, which a JSON value cannot hold, is written as its
+//! decimal string. Everything else is what `serde_json::to_value` makes.
 
 use serde::ser::{self, Serialize};
 use serde_json::{Error, Map, Value};
@@ -84,7 +85,10 @@ impl ser::Serializer for Serializer {
     }
 
     fn serialize_i128(self, v: i128) -> Result<Value, Error> {
-        serde_json::value::Serializer.serialize_i128(v)
+        match i64::try_from(v) {
+            Ok(v) => Ok(Value::from(v)),
+            Err(_) => Ok(Value::String(v.to_string())),
+        }
     }
 
     fn serialize_u8(self, v: u8) -> Result<Value, Error> {
@@ -104,7 +108,10 @@ impl ser::Serializer for Serializer {
     }
 
     fn serialize_u128(self, v: u128) -> Result<Value, Error> {
-        serde_json::value::Serializer.serialize_u128(v)
+        match u64::try_from(v) {
+            Ok(v) => Ok(Value::from(v)),
+            Err(_) => Ok(Value::String(v.to_string())),
+        }
     }
 
     fn serialize_f32(self, v: f32) -> Result<Value, Error> {
@@ -365,6 +372,23 @@ mod tests {
     use serde_json::json;
 
     use super::to_value;
+
+    /// 128-bit integers are numbers while 64 bits hold them, decimal strings
+    /// beyond.
+    #[test]
+    fn wide_integers_beyond_64_bits_are_written_as_strings() {
+        let wide = u128::from(u64::MAX) + 1;
+
+        assert!(serde_json::to_value(wide).is_err(), "serde_json refuses it");
+
+        assert_eq!(to_value(&wide).unwrap(), json!("18446744073709551616"));
+        assert_eq!(to_value(&u128::from(u64::MAX)).unwrap(), json!(u64::MAX));
+        assert_eq!(
+            to_value(&(i128::from(i64::MIN) - 1)).unwrap(),
+            json!("-9223372036854775809")
+        );
+        assert_eq!(to_value(&-1i128).unwrap(), json!(-1));
+    }
 
     #[test]
     fn credential_keys_are_written_as_strings() {

@@ -53,9 +53,12 @@ The runner creates fresh disposable instances. Binary specs are
 `LABEL=PATH[:STORAGE_VERSION]`. Without a version the binary gets a v2
 configuration file. A version marks a binary that predates v2 configuration,
 such as v1 or v2.0.0-alpha.0, and gives it the older file with that
-`storage.version`, and the commands before the v2 CLI (`doctor rebuild-state`,
-`data dump-blocks`); the baseline above is one, at v4. Historical raw revision
-`9165dbd8` needs `:v3`; that is a compression baseline, not a redb comparison.
+`storage.version`; the baseline above is one, at v4. Each binary is asked
+which `data` commands it has: one whose `data --help` lists no `rebuild`,
+whatever configuration it reads, gets the commands before the v2 `data` group
+(`doctor rebuild-state`, `data dump-blocks`). `doctor rebuild-state` arrived
+in v1.7.0-alpha.1, so an older binary cannot seed an instance before
+serving it. Historical raw revision `9165dbd8` needs `:v3`; that is a compression baseline, not a redb comparison.
 The network magic defaults to the `networkMagic` of the genesis in `--genesis`;
 `--magic` overrides it.
 

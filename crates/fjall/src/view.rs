@@ -151,6 +151,27 @@ pub fn live_views(store: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Hold the database at `database` against every view and writer until the
+/// returned lock drops: no view starts while it is held, and it fails with
+/// [`fjall::Error::Locked`] while a writer or a view, even one still
+/// mirroring, holds the database. `None` when no database is there.
+pub fn lock_out(database: &Path) -> Result<Option<File>, Error> {
+    let lock_path = database.join(LOCK_FILE);
+
+    let lock = match File::open(&lock_path) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_error(&lock_path, error)),
+    };
+
+    lock.try_lock().map_err(|error| match error {
+        TryLockError::WouldBlock => Error::Fjall(fjall::Error::Locked),
+        TryLockError::Error(error) => io_error(&lock_path, error),
+    })?;
+
+    Ok(Some(lock))
+}
+
 /// The folder views of `store` live in, and the name each starts with.
 fn beside(store: &Path) -> Result<(PathBuf, String), Error> {
     let store = std::path::absolute(store).map_err(|error| io_error(store, error))?;
@@ -537,6 +558,31 @@ mod tests {
 
         assert!(live_views(&path).is_empty());
         assert_eq!(views(dir.path()), [killed]);
+    }
+
+    /// A lock-out fails while a writer or a view holds the database, and no
+    /// view starts while it holds it.
+    #[test]
+    fn a_lock_out_excludes_writers_and_views() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+
+        assert!(lock_out(&path).unwrap().is_none());
+
+        let held = database(&path);
+        assert!(lock_out(&path).err().unwrap().is_locked());
+        drop(held);
+
+        let view = View::of(&path, &path).unwrap();
+        assert!(lock_out(&path).err().unwrap().is_locked());
+        drop(view);
+
+        let lock = lock_out(&path).unwrap().unwrap();
+        assert!(View::of(&path, &path).err().unwrap().is_locked());
+        assert!(views(dir.path()).is_empty());
+
+        drop(lock);
+        drop(View::of(&path, &path).unwrap());
     }
 
     /// A writer's open removes every view beside the store, a killed

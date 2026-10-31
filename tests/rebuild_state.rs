@@ -508,15 +508,59 @@ fn without_yes_an_in_place_rebuild_refuses_before_touching_anything() {
     node.sync();
 
     let before = InstanceContents::read(&node);
+    let files = read_dir_bytes(&node.config.storage.path);
 
-    let output = rebuild(&node, &[]);
-    assert_eq!(output.status.code(), Some(2));
+    let state = node.config.storage.state_path().unwrap();
+    let wal = node.config.wal_path().unwrap();
+    let archive = node.config.storage.archive_path().unwrap();
+
+    // An observer of the archive is no reason to refuse otherwise: the
+    // refusal comes before any store opens.
+    let observer = dolos_fjall::view::View::of(&archive.join("index"), &archive).unwrap();
+
+    for (flags, rewritten) in [
+        (&[][..], vec![&state, &wal]),
+        (&["--rewrite-logs"][..], vec![&state, &wal, &archive]),
+    ] {
+        let output = rebuild(&node, flags);
+        assert_eq!(output.status.code(), Some(2));
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("--yes"), "{stderr}");
+
+        for path in rewritten {
+            assert!(stderr.contains(&path.display().to_string()), "{stderr}");
+        }
+    }
+
+    drop(observer);
+
+    // Before the contents are read back: a writable open rewrites files.
+    assert_eq!(read_dir_bytes(&node.config.storage.path), files);
+    assert_eq!(InstanceContents::read(&node), before);
+}
+
+/// A live view of the state refuses an in-place rebuild before the WAL
+/// moves: the wipe would empty the store under its reader.
+#[test]
+fn a_live_view_of_the_state_refuses_an_in_place_rebuild() {
+    let node = Node::new();
+    node.sync();
+
+    let before = InstanceContents::read(&node);
+    let state = node.config.storage.state_path().unwrap();
+    let view = dolos_fjall::view::View::of(&state, &state).unwrap();
+
+    let output = rebuild(&node, &["--yes"]);
+    assert_eq!(output.status.code(), Some(1));
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("--yes"), "{stderr}");
-    let state = node.config.storage.state_path().unwrap();
-    assert!(stderr.contains(&state.display().to_string()), "{stderr}");
+    assert!(stderr.contains("holds the state store"), "{stderr}");
+    // miette wraps a long path, so the view's own folder name is matched.
+    let held = view.path().parent().unwrap().file_name().unwrap();
+    assert!(stderr.contains(&*held.to_string_lossy()), "{stderr}");
 
+    drop(view);
     assert_eq!(InstanceContents::read(&node), before);
 }
 

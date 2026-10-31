@@ -809,3 +809,160 @@ fn an_archive_alone_still_dumps_and_reports() {
         stderr(&inspect)
     );
 }
+
+/// `storage.path = "data"`, read from the node's directory: the default a
+/// node is configured with.
+#[test]
+fn reset_resolves_a_relative_storage_path() {
+    let (node, _) = populated();
+    let data = node.config.storage.path.clone();
+
+    let config_path = node.config_path();
+    let written = std::fs::read_to_string(&config_path).unwrap();
+    let relative = written.replace(&node::toml_string(&data), "\"data\"");
+    assert_ne!(relative, written);
+    std::fs::write(&config_path, relative).unwrap();
+
+    let refused = node.run_in_root(&["data", "reset"]);
+    assert_eq!(refused.status.code(), Some(2), "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("data/state"),
+        "{}",
+        stderr(&refused)
+    );
+
+    let reset = node.run_in_root(&["data", "reset", "--yes"]);
+    assert_eq!(reset.status.code(), Some(0), "{}", stderr(&reset));
+
+    for store in ["wal", "state", "archive"] {
+        assert!(!data.join(store).exists(), "{store} is left");
+    }
+}
+
+/// A dataset holding the state alone still inspects and dumps it, while
+/// what reads the archive refuses, naming it.
+#[test]
+fn a_state_alone_still_inspects_and_dumps() {
+    let (node, totals) = populated();
+
+    std::fs::remove_file(node.config.wal_path().unwrap()).unwrap();
+    std::fs::remove_dir_all(node.config.storage.archive_path().unwrap()).unwrap();
+
+    let datums = json_lines(&dolos(
+        &node,
+        &[
+            "data",
+            "dump",
+            "state",
+            "--namespace",
+            "datums",
+            "--limit",
+            "0",
+            "--format",
+            "json",
+        ],
+    ));
+    assert_eq!(datums.len(), totals.datums);
+
+    let inspected = json_lines(&dolos(
+        &node,
+        &[
+            "data",
+            "inspect",
+            "--namespace",
+            "epochs",
+            "--format",
+            "json",
+        ],
+    ));
+    assert!(!inspected.is_empty());
+
+    let stats = json_lines(&dolos(&node, &["data", "stats", "--format", "json"]));
+    assert!(stats[0]["state"].is_object(), "{}", stats[0]);
+
+    let blocks = dolos(&node, &["data", "dump", "blocks"]);
+    assert_eq!(blocks.status.code(), Some(1), "{}", stderr(&blocks));
+    assert!(
+        stderr(&blocks).contains("no store at"),
+        "{}",
+        stderr(&blocks)
+    );
+}
+
+/// An archive index whose segments are gone is reported broken, not left
+/// out of `stats`.
+#[test]
+fn stats_refuses_an_archive_without_its_segments() {
+    let (node, _) = populated();
+    let segments = node.config.storage.path.join("segments");
+
+    let config_path = node.config_path();
+    let mut written = std::fs::read_to_string(&config_path).unwrap();
+    written.push_str(&format!(
+        "\n[storage.archive]\nblocks_path = {}\n",
+        node::toml_string(&segments)
+    ));
+    std::fs::write(&config_path, written).unwrap();
+
+    let stats = dolos(&node, &["data", "stats", "--format", "json"]);
+    assert_eq!(stats.status.code(), Some(1), "{}", stderr(&stats));
+    // miette wraps a long path, so its last part is matched.
+    assert!(stderr(&stats).contains("no store at"), "{}", stderr(&stats));
+    assert!(stderr(&stats).contains("segments"), "{}", stderr(&stats));
+    assert!(!segments.exists());
+}
+
+/// `--offset` skips records read, never one that fails to: the failure
+/// reaches the caller whatever the offset.
+#[test]
+fn an_offset_never_skips_an_unreadable_record() {
+    use dolos_core::{Entity as _, EntityKey, LogKey};
+
+    let (node, _) = populated();
+
+    let stores =
+        dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&node.config).unwrap();
+
+    let (datums, _) = DatumState::encode_entity(&DatumState::new(vec![]));
+    let state = stores.state.start_writer().unwrap();
+    state
+        .write_entity(
+            datums,
+            &EntityKey::of(&DatumKey([0xee; 32].into())),
+            &vec![0xff],
+        )
+        .unwrap();
+    state.commit().unwrap();
+
+    let drep = DRepKey(DRep::Key([0xee; 28].into()));
+    let (drep_epochs, _) = DRepEpochLog::encode_entity(&DRepEpochLog {
+        voting_power: 0,
+        registered: true,
+    });
+    let archive = stores.archive.start_writer().unwrap();
+    archive
+        .write_log(drep_epochs, &LogKey::of(400, &drep), &vec![0xff])
+        .unwrap();
+    archive.commit().unwrap();
+
+    drop(stores);
+
+    for namespace in [
+        ["state", "--namespace", "datums"],
+        ["logs", "--namespace", "drep-epochs"],
+    ] {
+        for format in ["text", "json"] {
+            let mut args = vec!["data", "dump"];
+            args.extend(namespace);
+            args.extend(["--offset", "100000", "--format", format]);
+
+            let dumped = dolos(&node, &args);
+            assert_eq!(
+                dumped.status.code(),
+                Some(1),
+                "{args:?}: {}",
+                stderr(&dumped)
+            );
+        }
+    }
+}

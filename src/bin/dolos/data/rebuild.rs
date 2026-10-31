@@ -156,6 +156,64 @@ fn check_wipe_scope(config: &RootConfig, state_path: &std::path::Path) -> miette
     Ok(())
 }
 
+/// What an in-place rebuild rewrites, for its `--yes` refusal.
+fn in_place_rewrites(
+    config: &RootConfig,
+    state_path: &std::path::Path,
+    rewrite_logs: bool,
+) -> String {
+    let mut rewrites = format!(
+        "the state store, to rebuild it from the local archive:\n  {}",
+        state_path.display()
+    );
+
+    if let Some(wal) = config.wal_path() {
+        rewrites.push_str(&format!(
+            "\nthe WAL's entries, reset to the chain's origin and reseeded at the rebuilt \
+             tip:\n  {}",
+            wal.display()
+        ));
+    }
+
+    if let (true, Some(archive)) = (rewrite_logs, config.storage.archive_path()) {
+        rewrites.push_str(&format!(
+            "\nthe archive's log rows and index entries, rewritten from its blocks:\n  {}",
+            archive.display()
+        ));
+    }
+
+    rewrites
+}
+
+/// Lock the state store at `state_path` against every view and writer,
+/// refusing while one holds it.
+fn lock_out_state(state_path: &std::path::Path) -> miette::Result<Option<std::fs::File>> {
+    dolos_fjall::view::lock_out(state_path).map_err(|error| {
+        if !error.is_locked() {
+            return miette::miette!(
+                "locking the state store at {}: {error}",
+                state_path.display()
+            );
+        }
+
+        let views = dolos_fjall::view::live_views(state_path);
+        let held = if views.is_empty() {
+            format!("  {}", state_path.display())
+        } else {
+            views
+                .iter()
+                .map(|view| format!("  {}", view.display()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        miette::miette!(
+            help = "dataset in use by another dolos process (stop it, then run the rebuild again)",
+            "a dolos process holds the state store:\n{held}",
+        )
+    })
+}
+
 /// Check the archive is usable as a replay source and return its tip point.
 ///
 /// Two gates: the first block must sit at the start of the chain (an archive
@@ -389,6 +447,26 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         return Err(Usage::new("--chunk must be at least 1", None).into());
     }
 
+    // Refused before any store opens, so a refusal writes nothing.
+    let in_place = match &mode {
+        Mode::InPlace => {
+            let Some(state_path) = config.storage.state_path() else {
+                bail!(
+                    "the configured state store is `storage.state.type = \"ephemeral\"`, so \
+                     there is no on-disk state store to rebuild in place; use --ephemeral or \
+                     --target"
+                );
+            };
+
+            check_wipe_scope(config, &state_path)?;
+            args.confirm
+                .require(&in_place_rewrites(config, &state_path, args.rewrite_logs))?;
+
+            Some(state_path)
+        }
+        _ => None,
+    };
+
     // Held for the run, so no node starts on the dataset meanwhile; the
     // state it rebuilds may be missing, the archive it replays may not.
     let archive = dolos::storage::open_existing_archive(config, Access::Mutate)?;
@@ -409,25 +487,21 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
 
     let (state, wal) = match &mode {
         Mode::InPlace => {
-            let Some(state_path) = config.storage.state_path() else {
-                bail!(
-                    "the configured state store is `storage.state.type = \"ephemeral\"`, so \
-                     there is no on-disk state store to rebuild in place; use --ephemeral or \
-                     --target"
-                );
-            };
+            let state_path = in_place.expect("an in-place rebuild names its state store");
 
-            check_wipe_scope(config, &state_path)?;
-            args.confirm.require(&format!(
-                "the state store, to rebuild it from the local archive:\n  {}",
-                state_path.display()
-            ))?;
+            // Held until the wipe: a view of the state, live or starting,
+            // refuses the rebuild before the WAL moves, and none starts
+            // meanwhile.
+            let lock = lock_out_state(&state_path)?;
 
             let wal = open_store("wal", crate::common::open_wal_store(config))?;
 
             wal.reset_to(&ChainPoint::Origin)
                 .into_diagnostic()
                 .context("resetting the WAL to origin")?;
+
+            // Windows removes no file a handle holds open.
+            drop(lock);
 
             if state_path.exists() {
                 std::fs::remove_dir_all(&state_path)

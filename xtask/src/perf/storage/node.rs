@@ -144,6 +144,9 @@ pub struct Bin {
     pub storage_version: String,
     /// The binary reads the configuration file of before v2.
     pub legacy_config: bool,
+    /// The binary predates the v2 `data` group, whatever configuration it
+    /// reads: assumed from the version until [`Bin::probe_cli`] asks it.
+    pub legacy_cli: bool,
 }
 
 impl Bin {
@@ -166,7 +169,26 @@ impl Bin {
             path: PathBuf::from(path),
             storage_version: version.to_string(),
             legacy_config,
+            legacy_cli: legacy_config,
         })
+    }
+
+    /// Ask the binary which `data` commands it has: one that lists no
+    /// `rebuild` under `data --help` predates the v2 `data` group, as
+    /// builds from v2 configuration up to it do.
+    pub fn probe_cli(&mut self) -> io::Result<()> {
+        let output = Command::new(&self.path).args(["data", "--help"]).output()?;
+
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "{} data --help exited with {}",
+                self.label, output.status
+            )));
+        }
+
+        self.legacy_cli = !lists_subcommand(&String::from_utf8_lossy(&output.stdout), "rebuild");
+
+        Ok(())
     }
 
     fn identity(&self) -> io::Result<Value> {
@@ -1052,10 +1074,16 @@ fn read_import_metrics(path: &Path) -> io::Result<Option<Value>> {
     Ok(Some(metrics))
 }
 
+/// Whether clap's `help` lists `name` among its subcommands.
+fn lists_subcommand(help: &str, name: &str) -> bool {
+    help.lines()
+        .any(|line| line.split_whitespace().next() == Some(name))
+}
+
 /// `data rebuild --target STATE` to epoch 1, or `doctor rebuild-state` for
-/// a binary that predates v2 configuration, and with it the v2 CLI.
+/// a binary that predates the v2 `data` group.
 fn seed_args(bin: &Bin, state: &Path) -> Vec<std::ffi::OsString> {
-    let command: &[&str] = if bin.legacy_config {
+    let command: &[&str] = if bin.legacy_cli {
         &["doctor", "rebuild-state"]
     } else {
         &["data", "rebuild"]
@@ -1069,12 +1097,13 @@ fn seed_args(bin: &Bin, state: &Path) -> Vec<std::ffi::OsString> {
 }
 
 /// `data dump blocks` over `first..=last`, every block, or `data
-/// dump-blocks` for a binary that predates v2 configuration.
+/// dump-blocks` for a binary that predates the v2 `data` group, whose `--to`
+/// is exclusive.
 fn scan_args(bin: &Bin, first: u64, last: u64) -> Vec<String> {
-    let (first, last) = (first.to_string(), last.to_string());
+    let (first, last, past) = (first.to_string(), last.to_string(), (last + 1).to_string());
 
-    let args: Vec<&str> = if bin.legacy_config {
-        vec!["data", "dump-blocks", "--from", &first, "--to", &last]
+    let args: Vec<&str> = if bin.legacy_cli {
+        vec!["data", "dump-blocks", "--from", &first, "--to", &past]
     } else {
         vec![
             "data",
@@ -1234,6 +1263,8 @@ pub fn run(args: NodeArgs) -> anyhow::Result<()> {
             bin.path = bin
                 .path
                 .canonicalize()
+                .map_err(|e| anyhow::anyhow!("{}: {e}", bin.path.display()))?;
+            bin.probe_cli()
                 .map_err(|e| anyhow::anyhow!("{}: {e}", bin.path.display()))?;
             Ok(bin)
         })
@@ -1509,7 +1540,7 @@ mod tests {
 
         assert_eq!(
             scan_args(&legacy, 3, 9),
-            ["data", "dump-blocks", "--from", "3", "--to", "9"]
+            ["data", "dump-blocks", "--from", "3", "--to", "10"]
         );
         assert_eq!(
             scan_args(&current, 3, 9),
@@ -1525,6 +1556,44 @@ mod tests {
                 "9"
             ]
         );
+    }
+
+    /// A binary is asked which `data` commands it has: a v2-configuration
+    /// build from before the v2 `data` group takes the older names too.
+    #[cfg(unix)]
+    #[test]
+    fn the_binary_says_which_data_commands_it_has() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+
+        let fake = |name: &str, listed: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(
+                &path,
+                format!("#!/bin/sh\nprintf 'Commands:\\n  stats  Show\\n  {listed}  Do\\n'\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+
+        let mut before =
+            Bin::parse(&format!("main={}", fake("before", "dump-blocks").display())).unwrap();
+        assert!(!before.legacy_cli);
+        before.probe_cli().unwrap();
+        assert!(before.legacy_cli);
+        assert_eq!(
+            seed_args(&before, Path::new("/s"))[..2],
+            ["doctor", "rebuild-state"]
+        );
+
+        let mut after =
+            Bin::parse(&format!("pr={}:v4", fake("after", "rebuild").display())).unwrap();
+        assert!(after.legacy_cli);
+        after.probe_cli().unwrap();
+        assert!(!after.legacy_cli && after.legacy_config);
+        assert_eq!(seed_args(&after, Path::new("/s"))[..2], ["data", "rebuild"]);
     }
 
     #[test]
