@@ -89,8 +89,8 @@ fn committee_voter(cred: &StakeCredential) -> Voter {
 ///
 /// A proposal row lives in state until the boundary after its resolution, and
 /// in the final-row log from then on, so a vote on an action always finds its
-/// row. The legacy `Other` variant has no Blockfrost type, so a vote on such a
-/// row has no type (`None`).
+/// row. A vote has no type (`None`) only when neither store holds the row,
+/// which means the stores disagree.
 struct ProposalTypes<'a, D: Domain> {
     domain: &'a D,
     types: HashMap<(Hash<32>, u32), Option<committee_votes_inner::GovernanceType>>,

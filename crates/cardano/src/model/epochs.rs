@@ -92,47 +92,47 @@ impl Nonces {
 /// Epoch data that is gathered as part of the block rolling process
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct RollingStats {
-    #[n(2)]
+    #[n(0)]
     pub produced_utxos: Lovelace,
 
-    #[n(3)]
+    #[n(1)]
     pub consumed_utxos: Lovelace,
 
-    #[n(4)]
+    #[n(2)]
     pub gathered_fees: Lovelace,
 
-    #[n(5)]
+    #[n(3)]
     pub new_accounts: u64,
 
-    #[n(6)]
+    #[n(4)]
     pub removed_accounts: u64,
 
-    #[n(7)]
+    #[n(5)]
     pub withdrawals: Lovelace,
 
-    #[n(13)]
+    #[n(6)]
     pub blocks_minted: u32,
 
-    #[n(14)]
+    #[n(7)]
     pub drep_deposits: Lovelace,
 
-    #[n(15)]
+    #[n(8)]
     pub proposal_deposits: Lovelace,
 
-    #[n(16)]
+    #[n(9)]
     pub drep_refunds: Lovelace,
 
-    #[n(18)]
+    #[n(10)]
     #[cbor(default)]
     pub treasury_donations: Lovelace,
 
     /// Blocks minted in non-overlay slots (includes pools + genesis delegates).
-    #[n(20)]
+    #[n(11)]
     #[cbor(default)]
     pub non_overlay_blocks_minted: u32,
 
     /// Number of transactions across all blocks minted this epoch.
-    #[n(22)]
+    #[n(12)]
     #[cbor(default)]
     pub tx_count: u64,
 
@@ -140,19 +140,19 @@ pub struct RollingStats {
     /// db-sync's `epoch.out_sum`). The type is [`cbor::U128`] because the sum
     /// for one epoch can be more than u64 allows, although the outputs of one
     /// transaction always fit in u64.
-    #[n(23)]
+    #[n(13)]
     #[cbor(default)]
     pub output: cbor::U128,
 
     /// Slot of the first block minted this epoch (0 if the epoch has no block).
     /// The reader converts this slot to a wall-clock time with `ChainSummary`.
-    #[n(24)]
+    #[n(14)]
     #[cbor(default)]
     pub first_block_slot: u64,
 
     /// Slot of the last block minted this epoch (0 if the epoch has no block).
     /// The reader converts this slot to a wall-clock time with `ChainSummary`.
-    #[n(25)]
+    #[n(15)]
     #[cbor(default)]
     pub last_block_slot: u64,
 }
@@ -186,23 +186,23 @@ pub struct EndStats {
     pub unspendable_to_treasury: u64,
 
     /// Unspendable rewards that return to reserves.
-    #[n(10)]
+    #[n(8)]
     #[cbor(default)]
     pub unspendable_to_reserves: u64,
 
     /// Effective MIR sourced from treasury (only to registered accounts).
-    #[n(11)]
+    #[n(9)]
     #[cbor(default)]
     pub treasury_mirs: Lovelace,
 
     /// Effective MIR sourced from reserves (only to registered accounts).
-    #[n(12)]
+    #[n(10)]
     #[cbor(default)]
     pub reserve_mirs: Lovelace,
 
     /// Treasury withdrawals enacted by governance at the boundary and
     /// delivered to registered accounts (moved treasury → rewards).
-    #[n(15)]
+    #[n(11)]
     #[cbor(default)]
     pub treasury_withdrawals: Lovelace,
 
