@@ -650,6 +650,7 @@ mod tests {
         short.archive_rolling = true;
         let recovery = decide(&short, true);
         assert_eq!(recovery.action, Action::DiscardWal);
+        assert!(!recovery.plan.covers_lag);
         assert_eq!(recovery.remains.len(), 1, "{:?}", recovery.remains);
     }
 
@@ -708,6 +709,7 @@ mod tests {
 
         let recovery = Recovery::decide(plan.clone(), &reset, false);
         assert_eq!(recovery.action, Action::NeedsDiscard);
+        assert!(!recovery.plan.covers_lag);
         assert_eq!(recovery.plan.steps.len(), 1);
 
         let recovery = Recovery::decide(plan, &reset, true);
