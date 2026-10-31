@@ -106,6 +106,7 @@ pub mod account_addresses;
 pub mod accounts;
 pub mod asset_mints;
 pub mod assets;
+pub mod codec;
 pub mod datums;
 pub mod drep_sightings;
 pub mod dreps;

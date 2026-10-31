@@ -34,7 +34,7 @@ The node checks the file's `compatibility` declaration before anything else, and
 | message | cause | remedy |
 | ------- | ----- | ------ |
 | this is a Dolos v1 or v2.0.0-alpha.0 configuration, which this release does not read | the file has a root `[genesis]`, `storage.version` or `chain.type`, and no `compatibility` | rewrite it as described on this page |
-| the configuration does not declare `compatibility` | no `compatibility` in a file that is otherwise not recognisably old | add `compatibility = "v2-alpha.1"` at the top of the file |
+| the configuration does not declare `compatibility` | no `compatibility` in a file that is otherwise not recognisably old | add `compatibility = "v2-alpha.2"` at the top of the file |
 | `compatibility` must be a string | `compatibility` is a number, a table or another non-string | quote the value |
 | unsupported `compatibility = "…"` | a contract this release does not accept | use one the message lists |
 | the configuration carries sections that are now command arguments | a `[mithril]`, `[snapshot]` or `[stelae]` table | remove it, and pass the values as [command inputs](#bootstrap-inputs) |
@@ -45,7 +45,7 @@ The node checks the file's `compatibility` declaration before anything else, and
 
 | v1 / alpha.0 | v2 |
 | ------------ | -- |
-| no compatibility declaration; `storage.version` | root `compatibility = "v2-alpha.1"`; `storage.version` removed |
+| no compatibility declaration; `storage.version` | root `compatibility = "v2-alpha.2"`; `storage.version` removed |
 | `chain.type`, `chain.magic`, `chain.is_testnet` | `chain.protocol = "cardano"` and `chain.network`; `magic` and `is_testnet` only under `[chain.cardano]`, for `network = "custom"` |
 | root `[genesis]` | built in for `mainnet`, `preprod` and `preview`; `[chain.cardano.genesis]` for `custom`, resolved against the configuration file's directory |
 | `chain.custom_utxos` | `chain.cardano.custom_utxos` |
@@ -112,7 +112,7 @@ max_level = "DEBUG"
 becomes, in v2:
 
 ```toml
-compatibility = "v2-alpha.1"
+compatibility = "v2-alpha.2"
 
 [chain]
 protocol = "cardano"
@@ -182,10 +182,10 @@ The v1 and v2.0.0-alpha.0 example configurations remain in the repository's hist
 
 ## Stores
 
-Dolos v2 opens only the state and archive stores it wrote itself. Each store records, when it is created, the compatibility identifier of the contract the binary that created it writes (`v2-alpha.1`), and every command checks it before it reads or writes anything. Stores written by Dolos v1, or by a v2 alpha that predates store identities, record none, so v2 refuses them:
+Dolos v2 opens only the state and archive stores it wrote itself. Each store records, when it is created, the compatibility identifier of the contract the binary that created it writes (`v2-alpha.2`), and every command checks it before it reads or writes anything. Stores written by Dolos v1, or by a v2 alpha that predates store identities, record none, so v2 refuses them:
 
 ```
-the state store at /var/lib/dolos/data/state holds data but records no compatibility identity; this dolos opens stores that record `v2-alpha.1`. Clear it and re-sync (`dolos bootstrap relay --force`), or restore it from a stele (`dolos bootstrap stelae --force`); see https://docs.txpipe.io/dolos/migration/dolos-v2
+the state store at /var/lib/dolos/data/state holds data but records no compatibility identity; this dolos opens stores that record `v2-alpha.2`. Clear it and re-sync (`dolos bootstrap relay --force`), or restore it from a stele (`dolos bootstrap stelae --force`); see https://docs.txpipe.io/dolos/migration/dolos-v2
 ```
 
 A store recording an identifier the release does not read is refused the same way, and the error names that identifier. The check reads only the stores: no configuration edit gets a refused store past it.

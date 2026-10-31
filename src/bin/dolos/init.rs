@@ -849,7 +849,7 @@ mod tests {
 
             let written = std::fs::read_to_string(&path).unwrap();
             assert!(
-                written.starts_with("compatibility = \"v2-alpha.1\""),
+                written.starts_with("compatibility = \"v2-alpha.2\""),
                 "{written}"
             );
 

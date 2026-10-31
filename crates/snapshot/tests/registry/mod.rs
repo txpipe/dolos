@@ -15,6 +15,11 @@
 //! entity namespaces, `layers::state::encode_utxo_value` for `utxos`,
 //! the one namespace whose value this profile builds rather than carries.
 //!
+//! Beside them, the variant table of every reachable enum ([`enums`]), the
+//! encoding of every Pallas struct the records embed ([`structs`]), and the
+//! walk that holds every golden to PROFILE.md's value encoding
+//! ([`value_encoding`]).
+//!
 //! ## Append-only history
 //!
 //! [`Entry::history`] is ascending by revision and append-only. When a field is
@@ -55,6 +60,8 @@
 pub mod canaries;
 pub mod enums;
 pub mod ground_rules;
+pub mod structs;
+pub mod value_encoding;
 
 use dolos_cardano::model::{
     AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,

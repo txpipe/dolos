@@ -68,21 +68,21 @@ pub fn hash32(seed: u8) -> Hash<32> {
     Hash::new(bytes_of::<32>(seed))
 }
 
-fn rational(numerator: u64, denominator: u64) -> RationalNumber {
+pub fn rational(numerator: u64, denominator: u64) -> RationalNumber {
     RationalNumber {
         numerator,
         denominator,
     }
 }
 
-fn anchor(seed: u8) -> Anchor {
+pub fn anchor(seed: u8) -> Anchor {
     Anchor {
         url: format!("https://canary.invalid/{seed}"),
         content_hash: hash32(seed),
     }
 }
 
-fn gov_action_id(seed: u8, index: u32) -> GovActionId {
+pub fn gov_action_id(seed: u8, index: u32) -> GovActionId {
     GovActionId {
         transaction_id: hash32(seed),
         action_index: index,

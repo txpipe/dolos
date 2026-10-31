@@ -55,7 +55,7 @@ Value: (empty)
 
 ```
 Key:   "identity"
-Value: UTF-8 contract identifier, e.g. "v2-alpha.1"
+Value: UTF-8 contract identifier, e.g. "v2-alpha.2"
 ```
 
 The compatibility identity the store recorded when it was created, which the

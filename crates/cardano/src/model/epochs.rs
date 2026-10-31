@@ -310,7 +310,7 @@ pub struct EpochState {
     /// boundary. Each `EStartProgress` adds its shard's part; ESTART finalize
     /// freezes it onto the pools and `EpochTransition` clears it.
     #[n(19)]
-    #[cbor(default)]
+    #[cbor(default, with = "super::codec::canonical_map::option", has_nil)]
     pub estart_tally: Option<BTreeMap<PoolHash, PoolTally>>,
 
     /// Whether Ewrap's finalize pass has committed in this boundary.

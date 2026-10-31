@@ -210,7 +210,11 @@ pub enum PParamValue {
     #[n(38)]
     CostModelsPlutusV3(#[n(0)] Vec<i64>),
     #[n(39)]
-    CostModelsUnknown(#[n(0)] BTreeMap<u64, Vec<i64>>),
+    CostModelsUnknown(
+        #[n(0)]
+        #[cbor(with = "super::codec::canonical_map")]
+        BTreeMap<u64, Vec<i64>>,
+    ),
 }
 
 impl PParamValue {
@@ -260,10 +264,59 @@ impl PParamValue {
     }
 }
 
+/// The protocol parameters set so far, one value per kind.
+///
+/// Kept in kind order, and encoded in it whatever the order in memory, so a
+/// set has one encoding; decode refuses kinds out of order or repeated.
 #[derive(Debug, Encode, Decode, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PParamsSet {
     #[n(0)]
+    #[cbor(with = "by_kind")]
     values: Vec<PParamValue>,
+}
+
+/// The codec of [`PParamsSet::values`]: sorted by kind, each kind once.
+mod by_kind {
+    use pallas::codec::minicbor::{self, Decode, Decoder, Encode, Encoder};
+
+    use super::PParamValue;
+
+    pub fn encode<Ctx, W: minicbor::encode::Write>(
+        values: &[PParamValue],
+        e: &mut Encoder<W>,
+        ctx: &mut Ctx,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        let mut sorted: Vec<&PParamValue> = values.iter().collect();
+        sorted.sort_by_key(|value| value.kind());
+
+        e.array(sorted.len() as u64)?;
+
+        for value in sorted {
+            value.encode(e, ctx)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn decode<Ctx>(
+        d: &mut Decoder<'_>,
+        ctx: &mut Ctx,
+    ) -> Result<Vec<PParamValue>, minicbor::decode::Error> {
+        let start = d.position();
+        let values: Vec<PParamValue> = Decode::decode(d, ctx)?;
+
+        if !values
+            .windows(2)
+            .all(|pair| pair[0].kind() < pair[1].kind())
+        {
+            return Err(minicbor::decode::Error::message(
+                "pparams: kinds out of order, or repeated",
+            )
+            .at(start));
+        }
+
+        Ok(values)
+    }
 }
 
 impl TransitionDefault for PParamsSet {
@@ -355,13 +408,15 @@ impl PParamsSet {
         self.values.iter_mut().find(|value| value.kind() == kind)
     }
 
+    /// Replace the value of `value`'s kind, or insert it in kind order.
     pub fn set(&mut self, value: PParamValue) {
-        let existing = self.get_mut(value.kind());
+        let kind = value.kind();
 
-        if let Some(existing) = existing {
+        if let Some(existing) = self.get_mut(kind) {
             *existing = value;
         } else {
-            self.values.push(value);
+            let at = self.values.partition_point(|x| x.kind() < kind);
+            self.values.insert(at, value);
         }
     }
 

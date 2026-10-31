@@ -41,9 +41,10 @@ use super::pools::PoolHash;
 /// account that is the reward account of N pools earns N leader rewards in one
 /// epoch, and an operator retiring several pools into one reward account
 /// collects N refunds. Under the four namespaces those collapsed onto one
-/// `LogKey` and all but one were lost; here they are elements. Both are sorted
-/// by pool id, because the ledger holds them in a `HashMap` and a stele's bytes
-/// have to be reproducible across publishers.
+/// `LogKey` and all but one were lost; here they are elements. Both encode
+/// sorted by pool id whatever their order in memory, because the ledger holds
+/// them in a `HashMap` and a stele's bytes have to be reproducible across
+/// publishers; decode refuses them unsorted.
 #[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
 pub struct AccountEpochLog {
     /// Active stake in Lovelaces, at the snapshot epoch the boundary rewards.
@@ -61,10 +62,12 @@ pub struct AccountEpochLog {
 
     /// Rewards earned as the operator of each named pool.
     #[n(3)]
+    #[cbor(with = "super::codec::sorted_list")]
     pub leader_rewards: Vec<(PoolHash, u64)>,
 
     /// Pool deposits refunded to this account by each named pool's retirement.
     #[n(4)]
+    #[cbor(with = "super::codec::sorted_list")]
     pub deposit_refunds: Vec<(PoolHash, u64)>,
 }
 
@@ -81,12 +84,11 @@ impl AccountEpochLog {
             && self.deposit_refunds.is_empty()
     }
 
-    /// Put the two list fields in pool order.
+    /// Put the two list fields in the pool order they encode in, so the row
+    /// equals its own decode.
     ///
     /// Both are assembled from `HashMap` iteration, whose order varies per
-    /// process. Two honest publishers of identical state have to produce
-    /// identical bytes (ADR-004), so the order is fixed here rather than left
-    /// to the map.
+    /// process.
     pub fn sort(&mut self) {
         self.leader_rewards.sort_unstable();
         self.deposit_refunds.sort_unstable();
