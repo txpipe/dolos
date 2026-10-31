@@ -645,7 +645,8 @@ fn a_rebuild_without_an_archive_is_refused() {
     assert_eq!(read_dir_bytes(&state), before);
 }
 
-/// Every file under `dir`, with its bytes.
+/// Every file under `dir`, with its bytes; one another handle holds locked,
+/// which Windows refuses to read, with its length instead.
 fn read_dir_bytes(dir: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
     let mut found = BTreeMap::new();
     let mut pending = vec![dir.to_path_buf()];
@@ -656,9 +657,20 @@ fn read_dir_bytes(dir: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
 
             if path.is_dir() {
                 pending.push(path);
-            } else {
-                found.insert(path.clone(), std::fs::read(&path).unwrap());
+                continue;
             }
+
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                // ERROR_LOCK_VIOLATION: Windows file locks are mandatory.
+                Err(error) if cfg!(windows) && error.raw_os_error() == Some(33) => {
+                    let length = std::fs::metadata(&path).unwrap().len();
+                    format!("locked, {length} bytes").into_bytes()
+                }
+                Err(error) => panic!("{}: {error}", path.display()),
+            };
+
+            found.insert(path, bytes);
         }
     }
 
