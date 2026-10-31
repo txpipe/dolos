@@ -73,7 +73,7 @@ comfy-table = { version = "7.1.1", optional = true }
 inquire = { version = "0.9.4", optional = true }
 toml = { version = "0.8.13", optional = true }
 console-subscriber = { version = "0.4.1", optional = true }
-zstd = "0.13"
+zstd = "0.14"
 paste = "1.0.15"
 redb-extras = "0.6.1"
 
