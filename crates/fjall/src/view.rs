@@ -54,6 +54,10 @@ impl View {
 
         let lock_path = database.join(LOCK_FILE);
         let database_lock = File::open(&lock_path).map_err(|error| io_error(&lock_path, error))?;
+
+        #[cfg(test)]
+        tests::opened(&lock_path);
+
         let database_lock = lock_opened(database_lock, &lock_path, Shared::Yes)?;
 
         sweep(&parent, &prefix);
@@ -178,6 +182,9 @@ pub fn lock_out(database: &Path) -> Result<Option<LockOut>, Error> {
         }
         Err(error) => return Err(io_error(&path, error)),
     };
+
+    #[cfg(test)]
+    tests::opened(&path);
 
     let lock = lock_opened(lock, &path, Shared::No)?;
 
@@ -406,7 +413,29 @@ pub(crate) fn left_by_a_kill(database: &Path, store: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
-    use std::collections::BTreeMap;
+    use std::{cell::RefCell, collections::BTreeMap};
+
+    type Hook = Box<dyn FnMut(&Path)>;
+
+    thread_local! {
+        static OPENED: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    /// Called with a lock file's path once it is open, before it is locked.
+    pub(super) fn opened(path: &Path) {
+        OPENED.with_borrow_mut(|hook| {
+            if let Some(hook) = hook {
+                hook(path);
+            }
+        });
+    }
+
+    fn while_opening<T>(hook: impl FnMut(&Path) + 'static, run: impl FnOnce() -> T) -> T {
+        OPENED.set(Some(Box::new(hook)));
+        let result = run();
+        OPENED.set(None);
+        result
+    }
 
     fn files(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
         let mut found = BTreeMap::new();
@@ -667,6 +696,36 @@ mod tests {
             .err()
             .unwrap();
         assert!(error.is_locked(), "{error:?}");
+    }
+
+    /// A store made anew between a view's or a lock-out's open of the lock
+    /// file and its lock is refused as a held one: the lock taken guards
+    /// the file removed with the old store.
+    #[test]
+    fn a_store_replaced_before_the_lock_is_taken_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        written(&path);
+
+        let replace = |path: PathBuf| {
+            move |_: &Path| {
+                fs::remove_dir_all(&path).unwrap();
+                written(&path);
+            }
+        };
+
+        let error = while_opening(replace(path.clone()), || View::of(&path, &path))
+            .err()
+            .unwrap();
+        assert!(error.is_locked(), "{error:?}");
+
+        let error = while_opening(replace(path.clone()), || lock_out(&path))
+            .err()
+            .unwrap();
+        assert!(error.is_locked(), "{error:?}");
+
+        drop(View::of(&path, &path).unwrap());
+        drop(lock_out(&path).unwrap().unwrap());
     }
 
     /// A writer's open removes every view beside the store, a killed

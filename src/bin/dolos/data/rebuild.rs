@@ -143,8 +143,14 @@ fn check_wipe_scope(config: &RootConfig, state_path: &std::path::Path) -> miette
         others.push(("archive segments", path));
     }
 
+    // Compared where `..` resolves, as the OS reaches each.
+    let state_path = &super::reset::resolved(state_path).into_diagnostic()?;
+
     for (what, path) in others {
-        if path.starts_with(state_path) {
+        if super::reset::resolved(&path)
+            .into_diagnostic()?
+            .starts_with(state_path)
+        {
             bail!(
                 "refusing the in-place wipe: the {what} path {} sits at or under the state path \
                  {}; wiping the state store would take it too",
@@ -246,6 +252,23 @@ impl InPlace {
         }
 
         check_wipe_scope(config, &state_path)?;
+
+        // Wiped where `..` resolves: a folder it is written through may be
+        // gone.
+        let state_path = super::reset::resolved(&state_path).into_diagnostic()?;
+
+        #[cfg(unix)]
+        if !super::reset::mount_points(std::slice::from_ref(&state_path))
+            .into_diagnostic()?
+            .is_empty()
+        {
+            bail!(
+                "refusing the in-place wipe: the state store {} is a mount point, which the \
+                 wipe can neither move aside nor remove; rebuild into --target",
+                state_path.display(),
+            );
+        }
+
         args.confirm
             .require(&in_place_rewrites(config, &state_path, args.rewrite_logs))?;
 
@@ -760,7 +783,8 @@ mod tests {
         let error = dolos_fjall::view::View::of(&state, &state).err().unwrap();
         assert!(error.is_locked(), "{error:?}");
 
-        let (hook, calls) = super::super::reset::tests::assert_held(vec![state.clone()]);
+        let (hook, calls) =
+            super::super::reset::tests::assert_held(vec![(state.clone(), state.clone())]);
         drop(super::super::reset::tests::while_removing(hook, || in_place.wipe(&config)).unwrap());
 
         assert!(calls.get() > 0);
@@ -794,6 +818,55 @@ mod tests {
             assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), before);
             assert!(dolos_fjall::view::lock_out(&elsewhere).unwrap().is_some());
         }
+    }
+
+    /// A state written through a folder that is gone is wiped where the OS
+    /// reaches it, and what a stopped wipe moved aside goes with it.
+    #[test]
+    fn an_in_place_rebuild_wipes_a_state_written_through_a_gone_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = dir.path().join("data");
+        config.storage.state.path = Some(PathBuf::from("gone/../state"));
+
+        let state = config.storage.path.join("state");
+        drop(dolos_fjall::StateStore::open(&state, Default::default()).unwrap());
+
+        let left = config.storage.path.join(".state.reset").join("keyspaces");
+        std::fs::create_dir_all(&left).unwrap();
+        std::fs::write(left.join("000001.sst"), b"a table").unwrap();
+
+        let in_place = InPlace::prepare(&config, &args(false)).unwrap();
+        drop(in_place.wipe(&config).unwrap());
+
+        assert!(!state.exists());
+        assert!(!config.storage.path.join(".state.reset").exists());
+    }
+
+    /// A storage root climbing `..` out of a link refuses an in-place
+    /// rebuild before anything opens.
+    #[cfg(unix)]
+    #[test]
+    fn a_root_climbing_out_of_a_link_refuses_an_in_place_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("releases").join("v2")).unwrap();
+        std::os::unix::fs::symlink(
+            dir.path().join("releases").join("v2"),
+            dir.path().join("current"),
+        )
+        .unwrap();
+
+        let state = dir.path().join("releases").join("data").join("state");
+        drop(dolos_fjall::StateStore::open(&state, Default::default()).unwrap());
+        let before = std::fs::read_dir(&state).unwrap().count();
+
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = dir.path().join("current").join("..").join("data");
+
+        let error = InPlace::prepare(&config, &args(false)).err().unwrap();
+        assert!(error.to_string().contains("climbs `..`"), "{error}");
+        assert_eq!(std::fs::read_dir(&state).unwrap().count(), before);
+        assert!(!dir.path().join("data").exists());
     }
 
     /// The refusal names the archive only when its rows are rewritten.
