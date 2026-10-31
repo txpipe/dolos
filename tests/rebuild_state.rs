@@ -547,15 +547,15 @@ fn a_live_view_of_the_state_refuses_an_in_place_rebuild() {
     let node = Node::new();
     node.sync();
 
-    let before = InstanceContents::read(&node);
-    let archive = node.config.storage.archive_path().unwrap();
-    let archive_files = read_dir_bytes(&archive);
     let state = node.config.storage.state_path().unwrap();
     let view = dolos_fjall::view::View::of(&state, &state).unwrap();
 
+    // Before any store opens: the first writable open rewrites files.
+    let files = read_dir_bytes(&node.config.storage.path);
+
     let output = rebuild(&node, &["--yes"]);
     assert_eq!(output.status.code(), Some(1));
-    assert_eq!(read_dir_bytes(&archive), archive_files);
+    assert_eq!(read_dir_bytes(&node.config.storage.path), files);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("holds the state store"), "{stderr}");
@@ -564,7 +564,6 @@ fn a_live_view_of_the_state_refuses_an_in_place_rebuild() {
     assert!(stderr.contains(&*held.to_string_lossy()), "{stderr}");
 
     drop(view);
-    assert_eq!(InstanceContents::read(&node), before);
 }
 
 /// A `--target` holding anything is refused before the archive opens for
