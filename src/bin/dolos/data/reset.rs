@@ -82,9 +82,14 @@ impl Removal {
     }
 }
 
-/// The file whose absence has fjall make a new, empty database where it
-/// would otherwise open the one there.
+/// The file fjall reads first: absent, it makes a new database over
+/// whatever keyspace folders are still there, and recovers those.
 const VERSION_FILE: &str = "version";
+
+/// What a removal in place puts in a database's [`VERSION_FILE`]: not a
+/// version fjall knows, so every open refuses the database until it is gone.
+const REMOVING_VERSION: &[u8] =
+    b"dolos: a reset or rebuild was removing this store; run it again\n";
 
 /// Remove the store at `path` while `held` keep the fjall databases in it
 /// locked, so that no part of it is ever left at its path to open as a
@@ -148,27 +153,39 @@ pub(super) fn aside(store: &Path) -> miette::Result<PathBuf> {
 }
 
 /// Remove the store at `path` in place while `held` keep its fjall
-/// databases locked: each database's `version` first, so one left part
-/// removed opens as a new, empty database rather than a store with rows
-/// missing; then everything but the lock files; then those, still held.
-/// Released, the folders that held them go only once empty: a writer that
-/// started since keeps what it wrote.
+/// databases locked. Each database's `version` is first replaced, in one
+/// rename, by one fjall refuses, so a removal stopped part-way leaves no
+/// database that opens: neither the old one with rows missing, nor a new one
+/// recovering the keyspaces still on disk. Then everything goes but the lock
+/// files and those versions; then the versions, leaving folders that open as
+/// new, empty databases; then the lock files, still held. Released, the
+/// folders that held them go only once empty: a writer that started since
+/// keeps what it wrote.
 #[cfg_attr(unix, allow(dead_code))]
 fn remove_in_place(path: &Path, held: Vec<LockOut>) -> miette::Result<()> {
-    let kept = held
+    let locks = held
         .iter()
         .map(|lock| resolved(lock.path()).into_diagnostic())
         .collect::<miette::Result<Vec<_>>>()?;
 
-    for lock in &kept {
-        remove(&lock.with_file_name(VERSION_FILE))?;
+    let versions: Vec<PathBuf> = locks
+        .iter()
+        .map(|lock| lock.with_file_name(VERSION_FILE))
+        .collect();
+
+    for version in &versions {
+        refuse_opening(version)?;
     }
+
+    let kept: Vec<PathBuf> = locks.iter().chain(&versions).cloned().collect();
 
     remove_except(path, &kept)?;
 
-    for lock in &kept {
-        remove(lock)?;
+    for file in versions.iter().chain(&locks) {
+        remove(file)?;
     }
+
+    let kept = locks;
 
     drop(held);
 
@@ -189,6 +206,26 @@ fn remove_in_place(path: &Path, held: Vec<LockOut>) -> miette::Result<()> {
     }
 
     Ok(())
+}
+
+/// Replace the fjall version file at `version` with [`REMOVING_VERSION`] in
+/// one rename, so no open of its database succeeds from here on.
+#[cfg_attr(unix, allow(dead_code))]
+fn refuse_opening(version: &Path) -> miette::Result<()> {
+    use std::io::Write as _;
+
+    let staged = version.with_file_name(".version.reset");
+
+    let mut file = std::fs::File::create(&staged)
+        .into_diagnostic()
+        .with_context(|| format!("writing {}", staged.display()))?;
+    file.write_all(REMOVING_VERSION).into_diagnostic()?;
+    file.sync_all().into_diagnostic()?;
+    drop(file);
+
+    std::fs::rename(&staged, version)
+        .into_diagnostic()
+        .with_context(|| format!("marking {} as being removed", version.display()))
 }
 
 /// `path` made absolute, `.` dropped and each `..` taken out of the folder
@@ -328,6 +365,20 @@ fn managed_paths(config: &RootConfig) -> miette::Result<Removal> {
         );
     }
 
+    let at_asides = stores_at_asides(config).into_diagnostic()?;
+
+    if !at_asides.is_empty() {
+        let listed = format_paths(&at_asides);
+
+        miette::bail!(
+            "the configuration keeps stores under {} where a reset moves another store aside to \
+             remove it, named `.{{store}}.reset`, so a reset would remove them unlisted:\n\
+             {listed}\nMove them elsewhere in the configuration, or remove the stores by hand, \
+             then run `dolos bootstrap`",
+            root.display(),
+        );
+    }
+
     let mut links = Vec::new();
 
     for path in &candidates {
@@ -360,19 +411,7 @@ fn managed_paths(config: &RootConfig) -> miette::Result<Removal> {
     }
 
     #[cfg(unix)]
-    {
-        let mounted = mount_points(&managed).into_diagnostic()?;
-
-        if !mounted.is_empty() {
-            let listed = format_paths(&mounted);
-
-            miette::bail!(
-                "stores under {} are mount points, which a reset can neither move aside nor \
-                 remove:\n{listed}\nRemove what they hold by hand, then run `dolos bootstrap`",
-                root.display(),
-            );
-        }
-    }
+    refuse_mount_points(config)?;
 
     let mut locks = Vec::new();
     let mut held = Vec::new();
@@ -432,6 +471,53 @@ fn managed_paths(config: &RootConfig) -> miette::Result<Removal> {
 /// staging, a restore's progress and a publish's resumption record, and the
 /// read-only views of the fjall stores an interrupted observer left.
 fn store_paths(config: &RootConfig) -> std::io::Result<Vec<PathBuf>> {
+    let paths = configured_paths(config)?;
+
+    // A store nested in another goes with it.
+    let nested: Vec<PathBuf> = paths
+        .iter()
+        .filter(|(_, resolved)| {
+            paths
+                .iter()
+                .any(|(_, other)| other != resolved && resolved.starts_with(other))
+        })
+        .map(|(_, resolved)| resolved.clone())
+        .collect();
+
+    Ok(paths
+        .into_iter()
+        .filter(|(_, resolved)| !nested.contains(resolved))
+        .map(|(path, _)| path)
+        .collect())
+}
+
+/// Every path [`store_paths`] lists, nested ones included, in its order and
+/// each with `..` resolved, so one written through another's folder, as
+/// `archive/../state` is, is neither taken for nested in it nor kept twice.
+fn configured_paths(config: &RootConfig) -> std::io::Result<Vec<(PathBuf, PathBuf)>> {
+    let Written { first, rest } = written_paths(config);
+
+    let mut paths: Vec<(PathBuf, PathBuf)> = Vec::new();
+
+    for path in asides_of(config)?.into_iter().chain(first).chain(rest) {
+        let at = resolved(&path)?;
+
+        if !paths.iter().any(|(_, other)| *other == at) {
+            paths.push((path, at));
+        }
+    }
+
+    Ok(paths)
+}
+
+/// The stores' paths as the configuration writes them, the WAL and the
+/// state first.
+struct Written {
+    first: Vec<PathBuf>,
+    rest: Vec<PathBuf>,
+}
+
+fn written_paths(config: &RootConfig) -> Written {
     let storage = &config.storage;
     let root = &storage.path;
 
@@ -460,34 +546,7 @@ fn store_paths(config: &RootConfig) -> std::io::Result<Vec<PathBuf>> {
 
     rest.sort();
 
-    // Each with `..` resolved, so one written through another's folder, as
-    // `archive/../state` is, is neither taken for nested in it nor kept twice.
-    let mut paths: Vec<(PathBuf, PathBuf)> = Vec::new();
-
-    for path in asides_of(config).into_iter().chain(first).chain(rest) {
-        let at = resolved(&path)?;
-
-        if !paths.iter().any(|(_, other)| *other == at) {
-            paths.push((path, at));
-        }
-    }
-
-    // A store nested in another goes with it.
-    let nested: Vec<PathBuf> = paths
-        .iter()
-        .filter(|(_, resolved)| {
-            paths
-                .iter()
-                .any(|(_, other)| other != resolved && resolved.starts_with(other))
-        })
-        .map(|(_, resolved)| resolved.clone())
-        .collect();
-
-    Ok(paths
-        .into_iter()
-        .filter(|(_, resolved)| !nested.contains(resolved))
-        .map(|(path, _)| path)
-        .collect())
+    Written { first, rest }
 }
 
 /// The files a redb store may be kept in at `path`: the store itself when it
@@ -537,13 +596,57 @@ fn fjall_databases(config: &RootConfig) -> Vec<(PathBuf, PathBuf)> {
     [state, archive].into_iter().flatten().collect()
 }
 
-/// Where a reset moves each fjall store to remove it, which one that
-/// stopped part-way may have left.
-fn asides_of(config: &RootConfig) -> Vec<PathBuf> {
-    fjall_databases(config)
+/// Where a reset moves each path holding a fjall store to remove it, which
+/// one that stopped part-way may have left: the store's own, and that of any
+/// other path the store sits in, as the cache's when the state is
+/// `cache/state`.
+fn asides_of(config: &RootConfig) -> std::io::Result<Vec<PathBuf>> {
+    let stores = fjall_databases(config)
         .iter()
-        .filter_map(|(store, _)| aside(store).ok())
-        .collect()
+        .map(|(store, _)| resolved(store))
+        .collect::<std::io::Result<Vec<_>>>()?;
+
+    let Written { first, rest } = written_paths(config);
+    let mut asides = Vec::new();
+
+    for path in first.iter().chain(&rest) {
+        let at = resolved(path)?;
+
+        if !stores.iter().any(|store| store.starts_with(&at)) {
+            continue;
+        }
+
+        if let Ok(aside) = aside(path) {
+            if !asides.contains(&aside) {
+                asides.push(aside);
+            }
+        }
+    }
+
+    Ok(asides)
+}
+
+/// The configured stores that resolve at or under where a reset moves
+/// another aside: removing what a stopped reset left there would remove
+/// them, piecewise and unlisted.
+fn stores_at_asides(config: &RootConfig) -> std::io::Result<Vec<PathBuf>> {
+    let asides = asides_of(config)?
+        .iter()
+        .map(|aside| resolved(aside))
+        .collect::<std::io::Result<Vec<_>>>()?;
+
+    let Written { first, rest } = written_paths(config);
+    let mut found = Vec::new();
+
+    for path in first.iter().chain(&rest) {
+        let at = resolved(path)?;
+
+        if asides.iter().any(|aside| at.starts_with(aside)) {
+            found.push(path.clone());
+        }
+    }
+
+    Ok(found)
 }
 
 fn views_of(config: &RootConfig) -> Vec<PathBuf> {
@@ -686,6 +789,37 @@ fn resolved_outside(root: &Path, existing: &[PathBuf]) -> std::io::Result<Vec<Pa
     }
 
     Ok(outside)
+}
+
+/// Refuse when another filesystem is mounted at any configured store,
+/// nested ones included: a reset can neither move a mount point aside nor
+/// remove it, and moving aside the store it sits in would carry it along.
+#[cfg(unix)]
+fn refuse_mount_points(config: &RootConfig) -> miette::Result<()> {
+    let mounted = mount_points(&mount_checked(config).into_diagnostic()?).into_diagnostic()?;
+
+    if mounted.is_empty() {
+        return Ok(());
+    }
+
+    let listed = format_paths(&mounted);
+
+    miette::bail!(
+        "stores under {} are mount points, which a reset can neither move aside nor \
+         remove:\n{listed}\nRemove what they hold by hand, then run `dolos bootstrap`",
+        config.storage.path.display(),
+    );
+}
+
+/// The configured stores the mount check covers: every one that exists,
+/// nested in another or not.
+#[cfg(unix)]
+fn mount_checked(config: &RootConfig) -> std::io::Result<Vec<PathBuf>> {
+    Ok(configured_paths(config)?
+        .into_iter()
+        .filter(|(_, at)| std::fs::symlink_metadata(at).is_ok())
+        .map(|(path, _)| path)
+        .collect())
 }
 
 /// The folders among `paths` another filesystem is mounted at.
@@ -1733,36 +1867,55 @@ pub(super) mod tests {
         std::fs::create_dir_all(left.parent().unwrap()).unwrap();
         std::fs::write(&left, b"a table").unwrap();
 
+        let archived = root.join(".archive.reset").join("index").join("version");
+        std::fs::create_dir_all(archived.parent().unwrap()).unwrap();
+        std::fs::write(&archived, b"a version").unwrap();
+
         let config = config_over(&root);
         let listed = managed_paths(&config).unwrap().paths;
-        assert_eq!(listed[0], root.join(".state.reset"), "{listed:?}");
+        assert_eq!(
+            listed[..2],
+            [root.join(".state.reset"), root.join(".archive.reset")],
+            "{listed:?}"
+        );
 
         reset(&config).unwrap();
 
         assert!(!root.join(".state.reset").exists());
+        assert!(!root.join(".archive.reset").exists());
         assert!(!kept.iter().any(|file| file.exists()));
         assert!(root.join("dolos.toml").is_file());
     }
 
-    /// Removed in place, a fjall store loses its `version` first, so what
-    /// is left opens as a new, empty database, and its lock file last,
-    /// still held.
+    /// Removed in place, a fjall store has its `version` replaced by one
+    /// fjall refuses before anything of it goes, then loses it just before
+    /// its lock file, which goes last, still held. The lock is given with a
+    /// `..`, as the configuration may write it.
     #[test]
-    fn in_place_the_version_goes_first_and_the_lock_last() {
+    fn in_place_the_version_is_refused_first_and_the_lock_goes_last() {
         let dir = tempfile::tempdir().unwrap();
         let archive = dir.path().join("archive");
         let index = archive.join("index");
         drop(dolos_fjall::StateStore::open(&index, Default::default()).unwrap());
         std::fs::write(archive.join("000000.segment"), b"a store").unwrap();
 
-        let lock = dolos_fjall::view::lock_out(&index).unwrap().unwrap();
+        let lock = dolos_fjall::view::lock_out(&index.join("keyspaces").join(".."))
+            .unwrap()
+            .unwrap();
         let (mut held, _) = assert_held(vec![(archive.clone(), index.clone())]);
         let order = std::rc::Rc::new(RefCell::new(Vec::new()));
 
         let hook = {
             let order = order.clone();
+            let version = index.join(VERSION_FILE);
+
             move |path: &Path| {
                 held(path);
+
+                if let Ok(written) = std::fs::read(&version) {
+                    assert_eq!(written, REMOVING_VERSION, "at {}", path.display());
+                }
+
                 order.borrow_mut().push(path.to_path_buf());
             }
         };
@@ -1770,9 +1923,90 @@ pub(super) mod tests {
         while_removing(hook, || remove_in_place(&archive, vec![lock])).unwrap();
 
         let order = order.borrow();
-        assert_eq!(order.first(), Some(&index.join(VERSION_FILE)), "{order:?}");
-        assert_eq!(order.last(), Some(&index.join("lock")), "{order:?}");
+        let tail = &order[order.len() - 2..];
+        assert_eq!(
+            tail,
+            [index.join(VERSION_FILE), index.join("lock")],
+            "{order:?}"
+        );
         assert!(!archive.exists());
+    }
+
+    /// Copy the folder at `from` to `to`, as a removal stopped at that
+    /// moment leaves it.
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), &target).unwrap();
+            }
+        }
+    }
+
+    /// The entities a state store at `path` holds once opened twice, the
+    /// second open recovering whatever the first made of the folder; `None`
+    /// when it does not open.
+    fn entities_after_reopening(path: &Path) -> Option<usize> {
+        drop(dolos_fjall::StateStore::open(path, Default::default()).ok()?);
+        let store = dolos_fjall::StateStore::open(path, Default::default()).ok()?;
+
+        Some(store.entities_keyspace().len().unwrap())
+    }
+
+    /// A state store removed in place and stopped before any removal opens
+    /// with none of its rows, or not at all: never with the keyspaces still
+    /// on disk recovered under a new database.
+    #[test]
+    fn in_place_a_stopped_removal_leaves_no_rows_to_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+
+        {
+            let store = dolos_fjall::StateStore::open(&state, Default::default()).unwrap();
+            let entities = store.entities_keyspace();
+
+            for key in 0u32..100 {
+                entities.insert(key.to_be_bytes(), b"an entity").unwrap();
+            }
+
+            entities.rotate_memtable_and_wait().unwrap();
+        }
+
+        let copies = dir.path().join("stopped");
+        copy_tree(&state, &copies.join("before"));
+        assert_eq!(entities_after_reopening(&copies.join("before")), Some(100));
+
+        let lock = dolos_fjall::view::lock_out(&state).unwrap().unwrap();
+        let stops = std::rc::Rc::new(std::cell::Cell::new(0));
+
+        let hook = {
+            let (state, copies, stops) = (state.clone(), copies.clone(), stops.clone());
+
+            move |_: &Path| {
+                copy_tree(&state, &copies.join(stops.get().to_string()));
+                stops.set(stops.get() + 1);
+            }
+        };
+
+        while_removing(hook, || remove_in_place(&state, vec![lock])).unwrap();
+        assert!(stops.get() > 2, "{}", stops.get());
+
+        for stop in 0..stops.get() {
+            let copy = copies.join(stop.to_string());
+            let rows = entities_after_reopening(&copy);
+
+            assert!(
+                rows.is_none_or(|rows| rows == 0),
+                "stopped at removal {stop}, it opens with {rows:?} rows: {:?}",
+                walk(&copy)
+            );
+        }
     }
 
     /// Removed in place, a store a writer made anew once its lock was let
@@ -1817,5 +2051,122 @@ pub(super) mod tests {
             .count();
 
         assert_eq!(mempool, 1, "{listed:?}");
+    }
+
+    /// A folder moved aside because a fjall store sits in it, as the cache
+    /// does with the state at `cache/state`, is listed and removed by the
+    /// next reset, whether the folder was made anew since or not.
+    #[test]
+    fn a_rerun_removes_a_folder_moved_aside_around_a_store() {
+        for remade in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("data");
+            let mut config = config_over(&root);
+            config.storage.state.path = Some(PathBuf::from("cache/state"));
+
+            let left = root.join(".cache.reset").join("state").join("version");
+            std::fs::create_dir_all(left.parent().unwrap()).unwrap();
+            std::fs::write(&left, b"a version").unwrap();
+
+            if remade {
+                std::fs::create_dir_all(root.join("cache")).unwrap();
+            }
+
+            let listed = managed_paths(&config).unwrap().paths;
+            assert!(listed.contains(&root.join(".cache.reset")), "{listed:?}");
+
+            reset(&config).unwrap();
+            assert!(!root.join(".cache.reset").exists());
+        }
+    }
+
+    /// A store configured where a reset moves another aside refuses the
+    /// reset: removing what a stopped one left there would take it.
+    #[test]
+    fn refuses_a_store_at_another_stores_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("data");
+        let kept = old_store_under(&root);
+
+        let mut config = config_over(&root);
+        config.storage.archive.path = Some(PathBuf::from(".state.reset"));
+
+        assert_refused(&config, &kept, "moves another store aside");
+    }
+
+    /// The mount check covers a store nested in another, which the removal
+    /// takes with the outer one.
+    #[cfg(unix)]
+    #[test]
+    fn the_mount_check_covers_a_nested_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("data");
+        let mut config = config_over(&root);
+        config.storage.state.path = Some(PathBuf::from("cache/state"));
+        std::fs::create_dir_all(root.join("cache").join("state")).unwrap();
+
+        let checked = mount_checked(&config).unwrap();
+
+        assert!(checked.contains(&root.join("cache")), "{checked:?}");
+        assert!(
+            checked.contains(&root.join("cache").join("state")),
+            "{checked:?}"
+        );
+    }
+
+    /// `/dev` sits on another filesystem than `/` on macOS and Linux.
+    #[cfg(unix)]
+    #[test]
+    fn finds_a_mount_point() {
+        let dev = PathBuf::from("/dev");
+
+        assert_eq!(mount_points(std::slice::from_ref(&dev)).unwrap(), [dev]);
+
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("folder");
+        std::fs::create_dir(&folder).unwrap();
+        assert!(mount_points(&[folder]).unwrap().is_empty());
+    }
+
+    /// A store at a mount point refuses the reset.
+    #[cfg(unix)]
+    #[test]
+    fn refuses_a_store_at_a_mount_point() {
+        let mut config = config_over(Path::new("/"));
+        config.storage.state.path = Some(PathBuf::from("dev"));
+
+        let error = refuse_mount_points(&config).unwrap_err();
+        assert!(error.to_string().contains("mount points"), "{error}");
+    }
+
+    /// A store that cannot move aside stays where it is, and the reset
+    /// stops there.
+    #[cfg(unix)]
+    #[test]
+    fn a_store_that_cannot_move_aside_stays() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("sealed");
+        let store = parent.join("state");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join("version"), b"a version").unwrap();
+
+        let set = |mode| {
+            std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(mode)).unwrap()
+        };
+        set(0o555);
+
+        // Whoever ignores permissions, as root does, can rename it anyway.
+        if std::fs::write(parent.join("probe"), b"").is_ok() {
+            set(0o755);
+            return;
+        }
+
+        let result = remove_aside(&store);
+        set(0o755);
+
+        assert!(result.is_err());
+        assert!(store.join("version").is_file());
     }
 }

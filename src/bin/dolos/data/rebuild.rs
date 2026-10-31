@@ -122,10 +122,11 @@ fn open_store<T>(what: &str, result: Result<T, Error>) -> miette::Result<T> {
 
 /// Refuse an in-place wipe that would take another store with it.
 ///
-/// The wipe removes `state_path` recursively, so any other configured store
-/// path at or under it is a configuration this command must not act on. Paths
-/// are compared as the configuration resolves them, which is also how the
-/// stores themselves are opened.
+/// The wipe removes `state_path` recursively, and on Unix first moves it
+/// aside to its [`aside`](super::reset::aside), removing what a stopped wipe
+/// left there; so the storage root or any other configured store at or under
+/// either is a configuration this command must not act on. Paths are compared
+/// where `..` resolves, as the OS reaches each.
 fn check_wipe_scope(config: &RootConfig, state_path: &std::path::Path) -> miette::Result<()> {
     let mut others: Vec<(&str, PathBuf)> = vec![("storage root", config.storage.path.clone())];
 
@@ -138,25 +139,31 @@ fn check_wipe_scope(config: &RootConfig, state_path: &std::path::Path) -> miette
     if let Some(path) = config.mempool_path() {
         others.push(("mempool", path));
     }
-
     if let Some(path) = config.storage.blocks_path() {
         others.push(("archive segments", path));
     }
+    if let Some(path) = config.storage.cache_path() {
+        others.push(("cache", path));
+    }
 
-    // Compared where `..` resolves, as the OS reaches each.
-    let state_path = &super::reset::resolved(state_path).into_diagnostic()?;
+    let state_path = super::reset::resolved(state_path).into_diagnostic()?;
+    let aside = super::reset::aside(&state_path)?;
 
     for (what, path) in others {
-        if super::reset::resolved(&path)
-            .into_diagnostic()?
-            .starts_with(state_path)
-        {
-            bail!(
-                "refusing the in-place wipe: the {what} path {} sits at or under the state path \
-                 {}; wiping the state store would take it too",
-                path.display(),
-                state_path.display(),
-            );
+        let at = super::reset::resolved(&path).into_diagnostic()?;
+
+        for (wiped, how) in [
+            (&state_path, "the state path"),
+            (&aside, "where the wipe moves the state aside,"),
+        ] {
+            if at.starts_with(wiped) {
+                bail!(
+                    "refusing the in-place wipe: the {what} path {} sits at or under {how} {}; \
+                     wiping the state store would take it too",
+                    path.display(),
+                    wiped.display(),
+                );
+            }
         }
     }
 
@@ -189,7 +196,22 @@ fn in_place_rewrites(
         ));
     }
 
+    if let Some(left) = left_aside(state_path) {
+        rewrites.push_str(&format!(
+            "\nwhat a stopped wipe or reset moved aside, removed:\n  {}",
+            left.display()
+        ));
+    }
+
     rewrites
+}
+
+/// What a stopped wipe or reset left where the state moves aside, if
+/// anything.
+fn left_aside(state_path: &std::path::Path) -> Option<PathBuf> {
+    super::reset::aside(state_path)
+        .ok()
+        .filter(|aside| std::fs::symlink_metadata(aside).is_ok())
 }
 
 /// Lock the state store at `state_path` against every view and writer,
@@ -242,6 +264,10 @@ impl InPlace {
         // A trailing separator would have the wipe follow a link at the store.
         let state_path: PathBuf = state_path.components().collect();
 
+        // Wiped where `..` resolves: a folder it is written through may be
+        // gone, and the link check below is of the folder the wipe reaches.
+        let state_path = super::reset::resolved(&state_path).into_diagnostic()?;
+
         if std::fs::symlink_metadata(&state_path).is_ok_and(|metadata| metadata.is_symlink()) {
             bail!(
                 "refusing the in-place wipe: the state store {} is a symbolic link, and the wipe \
@@ -252,10 +278,6 @@ impl InPlace {
         }
 
         check_wipe_scope(config, &state_path)?;
-
-        // Wiped where `..` resolves: a folder it is written through may be
-        // gone.
-        let state_path = super::reset::resolved(&state_path).into_diagnostic()?;
 
         #[cfg(unix)]
         if !super::reset::mount_points(std::slice::from_ref(&state_path))
@@ -287,6 +309,15 @@ impl InPlace {
         wal.reset_to(&ChainPoint::Origin)
             .into_diagnostic()
             .context("resetting the WAL to origin")?;
+
+        // A held store moves aside, removing what is there first; one gone
+        // already leaves that to this.
+        if self.lock.is_none() {
+            if let Some(left) = left_aside(&self.state_path) {
+                super::reset::remove_held(&left, Vec::new())
+                    .with_context(|| format!("removing {}", left.display()))?;
+            }
+        }
 
         super::reset::remove_held(&self.state_path, self.lock.into_iter().collect())
             .with_context(|| format!("wiping the state store at {}", self.state_path.display()))?;
@@ -896,5 +927,122 @@ mod tests {
         config.storage.archive.blocks_path = Some(PathBuf::from("state/blocks"));
         let error = check_wipe_scope(&config, &state_path).unwrap_err();
         assert!(error.to_string().contains("archive segments"), "{error}");
+    }
+
+    #[test]
+    fn a_state_resolving_to_the_root_refuses_the_wipe() {
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = PathBuf::from("/data");
+
+        let error = check_wipe_scope(&config, std::path::Path::new("/data/db/..")).unwrap_err();
+        assert!(error.to_string().contains("storage root"), "{error}");
+    }
+
+    #[test]
+    fn segments_reaching_the_state_through_dot_dot_refuse_the_wipe() {
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = PathBuf::from("/data");
+        config.storage.archive.blocks_path = Some(PathBuf::from("x/../state/segments"));
+        let state_path = config.storage.state_path().unwrap();
+
+        let error = check_wipe_scope(&config, &state_path).unwrap_err();
+        assert!(error.to_string().contains("archive segments"), "{error}");
+    }
+
+    /// A store, or the root, where the wipe moves the state aside refuses
+    /// it: the wipe removes whatever is there first.
+    #[test]
+    fn a_store_at_the_state_aside_refuses_the_wipe() {
+        type Set = fn(&mut RootConfig);
+
+        let cases: [(Set, &str); 3] = [
+            (
+                |config| config.storage.archive.path = Some(PathBuf::from(".state.reset")),
+                "archive",
+            ),
+            (
+                |config| {
+                    config.storage.cache.enabled = true;
+                    config.storage.cache.path = Some(PathBuf::from(".state.reset/cache"));
+                },
+                "cache",
+            ),
+            (
+                |config| {
+                    config.storage.path = PathBuf::from("/srv/.state.reset");
+                    config.storage.state.path = Some(PathBuf::from("/srv/state"));
+                },
+                "storage root",
+            ),
+        ];
+
+        for (set, what) in cases {
+            let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+            config.storage.path = PathBuf::from("/data");
+            set(&mut config);
+            let state_path = config.storage.state_path().unwrap();
+
+            let error = check_wipe_scope(&config, &state_path).unwrap_err();
+            let error = error.to_string();
+            assert!(
+                error.contains(what) && error.contains("aside"),
+                "{what}: {error}"
+            );
+        }
+    }
+
+    /// A rebuild run again after a wipe stopped once the state moved aside
+    /// names what is left there, and removes it.
+    #[test]
+    fn a_rerun_removes_what_a_stopped_wipe_moved_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = dir.path().join("data");
+
+        let left = config.storage.path.join(".state.reset");
+        std::fs::create_dir_all(left.join("keyspaces")).unwrap();
+        std::fs::write(left.join("version"), b"a version").unwrap();
+
+        let state = config.storage.state_path().unwrap();
+        assert!(!state.exists());
+        assert!(in_place_rewrites(&config, &state, false).contains(&left.display().to_string()));
+
+        let in_place = InPlace::prepare(&config, &args(false)).unwrap();
+        drop(in_place.wipe(&config).unwrap());
+
+        assert!(!left.exists());
+    }
+
+    /// A state written with `..` through a missing folder to a link refuses
+    /// an in-place rebuild like a link written plainly.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_state_reached_through_a_missing_folder_refuses_the_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = dir.path().join("data");
+        config.storage.state.path = Some(PathBuf::from("gone/../state"));
+
+        let elsewhere = dir.path().join("elsewhere").join("st");
+        drop(dolos_fjall::StateStore::open(&elsewhere, Default::default()).unwrap());
+        std::fs::create_dir_all(&config.storage.path).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, config.storage.path.join("state")).unwrap();
+
+        let error = InPlace::prepare(&config, &args(false)).err().unwrap();
+        assert!(error.to_string().contains("symbolic link"), "{error}");
+        assert!(config.storage.path.join("state").is_symlink());
+    }
+
+    /// A state at a mount point refuses an in-place rebuild before anything
+    /// opens. `/dev` sits on another filesystem than `/` on macOS and Linux.
+    #[cfg(unix)]
+    #[test]
+    fn a_state_at_a_mount_point_refuses_the_rebuild() {
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = PathBuf::from("/");
+        config.storage.state.path = Some(PathBuf::from("dev"));
+
+        let error = InPlace::prepare(&config, &args(false)).err().unwrap();
+        assert!(error.to_string().contains("mount point"), "{error}");
     }
 }
