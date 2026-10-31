@@ -231,6 +231,12 @@ pub struct ShardProgress {
     pub total: u32,
 }
 
+/// One epoch's ledger-wide state.
+///
+/// `ewrap_progress`, `estart_progress`, `rupd_progress`, `estart_tally` and
+/// `ewrap_finalized` are the sync cursors: crash-recovery state a boundary
+/// pass keeps while it runs ([`Self::set_sync_cursors`]). They are clear at an
+/// epoch-boundary cut, and the `epochs` log row is written without them.
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct EpochState {
@@ -244,24 +250,24 @@ pub struct EpochState {
     #[n(2)]
     pub rolling: ShallowEpochValue<RollingStats>,
 
-    #[n(9)]
+    #[n(3)]
     pub pparams: ShallowEpochValue<PParamsSet>,
 
-    #[n(10)]
+    #[n(4)]
     pub largest_stable_slot: BlockSlot,
 
-    #[n(11)]
+    #[n(5)]
     pub previous_nonce_tail: Option<Hash<32>>,
 
-    #[n(12)]
+    #[n(6)]
     pub nonces: Option<Nonces>,
 
-    #[n(13)]
+    #[n(7)]
     pub end: Option<EndStats>,
 
     /// Epoch incentives computed during RUPD, used for pot calculations at
     /// epoch boundary.
-    #[n(14)]
+    #[n(8)]
     #[cbor(default)]
     pub incentives: Option<EpochIncentives>,
 
@@ -274,7 +280,7 @@ pub struct EpochState {
     /// (ESTART finalize) clears the field back to `None`. The persisted
     /// `total` guards against a config change mid-boundary breaking the
     /// in-flight pipeline.
-    #[n(15)]
+    #[n(9)]
     #[cbor(default)]
     pub ewrap_progress: Option<ShardProgress>,
 
@@ -284,7 +290,7 @@ pub struct EpochState {
     /// `EpochTransition` clears the field back to `None` for the new epoch.
     /// The two fields are never both populated — Ewrap clears
     /// `ewrap_progress` before any EStart-shard runs.
-    #[n(16)]
+    #[n(10)]
     #[cbor(default)]
     pub estart_progress: Option<ShardProgress>,
 
@@ -295,21 +301,21 @@ pub struct EpochState {
     /// writing the global `incentives` for this epoch. The persisted
     /// `total` guards against a config change mid-RUPD breaking the
     /// in-flight pipeline.
-    #[n(17)]
+    #[n(11)]
     #[cbor(default)]
     pub rupd_progress: Option<ShardProgress>,
 
     /// The active stake of this epoch: the stake distribution frozen when
     /// epoch `number - 2` closed, summed when this epoch opens. `None` until
     /// a frozen distribution exists.
-    #[n(18)]
+    #[n(12)]
     #[cbor(default)]
     pub active_stake: Option<u64>,
 
     /// The per-pool tally of the ESTART shards committed so far in this
     /// boundary. Each `EStartProgress` adds its shard's part; ESTART finalize
     /// freezes it onto the pools and `EpochTransition` clears it.
-    #[n(19)]
+    #[n(13)]
     #[cbor(default)]
     pub estart_tally: Option<BTreeMap<PoolHash, PoolTally>>,
 
@@ -318,7 +324,7 @@ pub struct EpochState {
     /// `EpochTransitionV2` clears it. `ewrap_progress` at `committed ==
     /// total` only says the shards are done: until this is set, finalize is
     /// still owed.
-    #[n(20)]
+    #[n(14)]
     #[cbor(default)]
     pub ewrap_finalized: bool,
 }
@@ -348,6 +354,34 @@ impl Default for EpochState {
 entity_boilerplate!(EpochState, "epochs", state = (), log = ());
 
 impl SingletonEntity for EpochState {}
+
+impl EpochState {
+    /// The names of the sync cursors that are set.
+    pub fn set_sync_cursors(&self) -> Vec<&'static str> {
+        [
+            ("ewrap_progress", self.ewrap_progress.is_some()),
+            ("estart_progress", self.estart_progress.is_some()),
+            ("rupd_progress", self.rupd_progress.is_some()),
+            ("estart_tally", self.estart_tally.is_some()),
+            ("ewrap_finalized", self.ewrap_finalized),
+        ]
+        .into_iter()
+        .filter_map(|(name, set)| set.then_some(name))
+        .collect()
+    }
+
+    /// This state with every sync cursor cleared: the `epochs` log row.
+    pub fn without_sync_cursors(&self) -> Self {
+        Self {
+            ewrap_progress: None,
+            estart_progress: None,
+            rupd_progress: None,
+            estart_tally: None,
+            ewrap_finalized: false,
+            ..self.clone()
+        }
+    }
+}
 
 #[cfg(test)]
 pub(crate) mod testing {

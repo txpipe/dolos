@@ -172,15 +172,11 @@ fn read_page<D: Domain>(domain: &D, pagination: &Pagination) -> Result<Vec<Propo
             return;
         }
 
-        let Some(governance_type) = governance_type(&state.action) else {
-            return;
-        };
-
         rows.push(ProposalRow {
             slot: state.slot,
             tx: state.tx,
             idx: state.idx,
-            governance_type,
+            governance_type: governance_type(&state.action),
         });
     })?;
 

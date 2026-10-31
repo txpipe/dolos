@@ -226,9 +226,9 @@ impl BoundaryWork {
     /// epoch, summed per return credential — the pulser's `proposalDeposits`
     /// field. The snapshot is the end-of-closing-epoch position, so a
     /// proposal submitted *during* that epoch has its deposit locked in it.
-    /// Rows missing `proposed_in`, the deposit, or the return credential
-    /// predate the tracking fields and cannot be attributed; they are
-    /// excluded (the accepted design-§6 degradation).
+    /// Rows missing the deposit or the return credential predate the
+    /// tracking fields and cannot be attributed; they are excluded (the
+    /// accepted design-§6 degradation).
     ///
     /// The gate is `is_unresolved_at_close`, not `is_active`: a proposal
     /// resolved at the *previous* boundary is out of the ledger's live
@@ -271,7 +271,7 @@ impl BoundaryWork {
             return None;
         }
 
-        if proposal.proposed_in.is_none_or(|epoch| epoch > closing) {
+        if proposal.proposed_in > closing {
             return None;
         }
 
@@ -1123,20 +1123,7 @@ impl BoundaryWork {
                 continue;
             }
 
-            let in_snapshot = proposal
-                .proposed_in
-                .is_some_and(|proposed| proposed < closing);
-
-            if !in_snapshot {
-                continue;
-            }
-
-            if matches!(proposal.action, crate::ProposalAction::Other) {
-                tracing::warn!(
-                    proposal = %key,
-                    "legacy proposal without tracked action content; \
-                     excluded from shadow ratification"
-                );
+            if proposal.proposed_in >= closing {
                 continue;
             }
 
@@ -1422,11 +1409,9 @@ impl BoundaryWork {
             let curated =
                 crate::hacks::pre_conway_updates::enacts_at(magic, &proposal.id_as_string());
 
-            // rows written before `proposed_in` existed can't be placed on
-            // their own; they are the accepted in-place-upgrade degradation
-            let enacts_at = curated.or(proposal.proposed_in);
+            let enacts_at = curated.unwrap_or(proposal.proposed_in);
 
-            if enacts_at == Some(closing) {
+            if enacts_at == closing {
                 live.push((key, (proposal.slot, proposal.idx)));
             }
         }
@@ -1915,7 +1900,7 @@ mod tests {
             canceled_epoch: None,
             deposit: Some(40),
             reward_account: Some(alice.credential.clone()),
-            proposed_in: Some(CLOSING_EPOCH - 2),
+            proposed_in: CLOSING_EPOCH - 2,
             parent: None,
             purpose: None,
             anchor: None,
@@ -1930,7 +1915,7 @@ mod tests {
         let same_epoch_proposal = ProposalState {
             tx: [8u8; 32].into(),
             deposit: Some(7),
-            proposed_in: Some(CLOSING_EPOCH),
+            proposed_in: CLOSING_EPOCH,
             ..proposal.clone()
         };
 
@@ -2218,7 +2203,7 @@ mod tests {
             canceled_epoch: None,
             deposit: None,
             reward_account: Some(alice_credential),
-            proposed_in: Some(CLOSING_EPOCH - 2),
+            proposed_in: CLOSING_EPOCH - 2,
             parent: None,
             purpose: None,
             anchor: None,
@@ -3583,7 +3568,7 @@ mod ratification_tests {
             canceled_epoch: None,
             deposit: Some(DEPOSIT),
             reward_account: Some(beneficiary()),
-            proposed_in: Some(CLOSING - 1),
+            proposed_in: CLOSING - 1,
             parent: None,
             purpose: None,
             anchor: None,
@@ -3950,7 +3935,7 @@ mod ratification_tests {
     /// A withdrawal the committee accepts, so the DRep tally decides it.
     fn drep_decided_withdrawal() -> ProposalState {
         let mut proposal = withdrawal(1, Some(Vote::Yes), CLOSING + 10);
-        proposal.proposed_in = Some(CLOSING - 3);
+        proposal.proposed_in = CLOSING - 3;
         proposal.drep_votes.clear();
         proposal
     }
@@ -4524,7 +4509,7 @@ mod ratification_tests {
         // same purpose, no lineage to the enacted action, submitted in the
         // epoch this boundary closes
         let mut sibling = committee_update(0x02, None, CLOSING);
-        sibling.proposed_in = Some(CLOSING);
+        sibling.proposed_in = CLOSING;
 
         let domain = seed(&[enacting.clone(), sibling.clone()]);
         let boundary = finalize(&domain);
@@ -4672,7 +4657,7 @@ mod ratification_tests {
         );
         update.deposit = None;
         update.reward_account = None;
-        update.proposed_in = Some(proposed_in);
+        update.proposed_in = proposed_in;
         update
     }
 

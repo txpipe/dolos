@@ -241,7 +241,9 @@ pub fn probe(path: impl AsRef<Path>) -> Result<WalProbe, RedbWalError> {
 ///    `DRepAnchorUpdate` and `DRepPowerUpdate` retire.
 /// 7: `ScriptFirstSeen` retires.
 /// 8: `MintStatsUpdate` and `MetadataTxUpdate` retire.
-pub const CURRENT_WAL_VERSION: u32 = 8;
+/// 9: the `Other` proposal action retires, `proposed_in` is required, and
+///    the record types close their field-index gaps.
+pub const CURRENT_WAL_VERSION: u32 = 9;
 
 pub struct LogIter<'a, T>(Range<'a, DbChainPoint, DbLogValue>, PhantomData<T>);
 

@@ -43,6 +43,12 @@
 //! for a stele at sequence 0 to follow, and the first stele a chain can carry
 //! is `epoch-1`.
 //!
+//! The state's bookkeeping has to show every boundary pass finished: no sync
+//! cursor set on the epoch row ([`EpochState::set_sync_cursors`]), and every
+//! shard merged into the governance stake distributions. A published row
+//! carries the cursors only as null or false, and the shard counters only
+//! equal.
+//!
 //! ## What the check does not do
 //!
 //! It reads the stores once, before the walk. It does not keep them still: a
@@ -51,7 +57,10 @@
 //! backends lock their directories against a second process, and the headless
 //! replay API lends its snapshot only while no import runs.
 
-use dolos_cardano::{eras::ChainSummary, pallas::ledger::traverse::MultiEraBlock};
+use dolos_cardano::{
+    eras::ChainSummary, model::GovDistr, pallas::ledger::traverse::MultiEraBlock, EpochState,
+    GovState,
+};
 use dolos_core::{ArchiveStore, BlockBody, BlockSlot, ChainPoint, StateStore};
 
 use crate::{export::Plan, Error};
@@ -89,6 +98,14 @@ pub enum Ineligible {
     LaterBlock { parent: ChainPoint },
     /// The archive holds blocks after the cursor's, up to `tip`.
     ArchivePastCursor { tip: ChainPoint },
+    /// The state's epoch row has these sync cursors set.
+    SyncCursorsSet { cursors: Vec<&'static str> },
+    /// A governance stake distribution has fewer shards merged than planned.
+    IncompleteGovDistr {
+        field: &'static str,
+        committed: u32,
+        total: u32,
+    },
 }
 
 impl std::fmt::Display for Ineligible {
@@ -151,6 +168,21 @@ impl std::fmt::Display for Ineligible {
                  wrote log and index records the stele cannot tell from the boundary's; publish \
                  from a node whose archive ends at the cursor, as dolos sync --stop-epoch leaves it"
             ),
+            Self::SyncCursorsSet { cursors } => write!(
+                f,
+                "the state's epoch row has {} set, so a boundary pass has not finished; let \
+                 the node complete the boundary before cutting",
+                cursors.join(", ")
+            ),
+            Self::IncompleteGovDistr {
+                field,
+                committed,
+                total,
+            } => write!(
+                f,
+                "the governance state's {field} has {committed} of {total} shards merged, so a \
+                 boundary pass has not finished; let the node complete the boundary before cutting"
+            ),
         }
     }
 }
@@ -164,7 +196,52 @@ pub fn check<A: ArchiveStore, S: StateStore>(
 ) -> Result<Boundary, Error> {
     let summary = dolos_cardano::eras::load_chain_summary_from_state(state)?;
 
-    evidence(&summary, plan, state.read_cursor()?, archive)
+    let boundary = evidence(&summary, plan, state.read_cursor()?, archive)?;
+
+    let epoch = state.read_entity_typed::<EpochState>(&())?;
+    let gov = state.read_entity_typed::<GovState>(&())?;
+
+    if let Some(reason) = unfinished_bookkeeping(epoch.as_ref(), gov.as_ref()) {
+        return Err(Error::NotABoundary {
+            cursor: plan.cursor.to_string(),
+            sequence: plan.sequence,
+            reason,
+        });
+    }
+
+    Ok(boundary)
+}
+
+/// Why the state's bookkeeping shows a boundary pass still in flight, if it
+/// does.
+fn unfinished_bookkeeping(
+    epoch: Option<&EpochState>,
+    gov: Option<&GovState>,
+) -> Option<Ineligible> {
+    if let Some(epoch) = epoch {
+        let cursors = epoch.set_sync_cursors();
+
+        if !cursors.is_empty() {
+            return Some(Ineligible::SyncCursorsSet { cursors });
+        }
+    }
+
+    let gov = gov?;
+
+    let distrs: [(&'static str, Option<&GovDistr>); 2] = [
+        ("distr", gov.distr.as_ref()),
+        ("prev_distr", gov.prev_distr.as_ref()),
+    ];
+
+    distrs.into_iter().find_map(|(field, distr)| {
+        let distr = distr?;
+
+        (distr.committed_shards != distr.total_shards).then_some(Ineligible::IncompleteGovDistr {
+            field,
+            committed: distr.committed_shards,
+            total: distr.total_shards,
+        })
+    })
 }
 
 fn evidence<A: ArchiveStore>(
@@ -548,6 +625,94 @@ mod tests {
                 predecessor: blocks[0].0.clone()
             }
         );
+    }
+
+    /// Every sync cursor refuses the cut on its own, by name, and so does a
+    /// governance distribution with a shard still to merge; the bookkeeping a
+    /// finished boundary leaves passes.
+    #[test]
+    fn unfinished_bookkeeping_is_refused_and_a_finished_one_passes() {
+        use dolos_cardano::{model::GovDistr, ShardProgress};
+
+        fn done() -> ShardProgress {
+            ShardProgress {
+                committed: 32,
+                total: 32,
+            }
+        }
+
+        let clean = EpochState::default();
+
+        let mut complete = GovDistr::new(4, 32);
+        complete.committed_shards = 32;
+
+        let gov = GovState {
+            distr: Some(complete.clone()),
+            prev_distr: Some(complete.clone()),
+            ..Default::default()
+        };
+
+        assert_eq!(unfinished_bookkeeping(None, None), None);
+        assert_eq!(unfinished_bookkeeping(Some(&clean), Some(&gov)), None);
+
+        type Setter = fn(&mut EpochState);
+
+        let cursors: [(&str, Setter); 5] = [
+            ("ewrap_progress", |x| x.ewrap_progress = Some(done())),
+            ("estart_progress", |x| x.estart_progress = Some(done())),
+            ("rupd_progress", |x| x.rupd_progress = Some(done())),
+            ("estart_tally", |x| {
+                x.estart_tally = Some(Default::default())
+            }),
+            ("ewrap_finalized", |x| x.ewrap_finalized = true),
+        ];
+
+        for (name, set) in cursors {
+            let mut epoch = clean.clone();
+            set(&mut epoch);
+
+            assert_eq!(
+                unfinished_bookkeeping(Some(&epoch), Some(&gov)),
+                Some(Ineligible::SyncCursorsSet {
+                    cursors: vec![name]
+                }),
+                "{name}"
+            );
+        }
+
+        // EWRAP's finalize state, which the `epochs` log row used to carry
+        let mut finalized = clean.clone();
+        finalized.ewrap_progress = Some(done());
+        finalized.ewrap_finalized = true;
+
+        let refusal = unfinished_bookkeeping(Some(&finalized), None).unwrap();
+        assert!(
+            refusal
+                .to_string()
+                .contains("has ewrap_progress, ewrap_finalized set"),
+            "{refusal}"
+        );
+
+        let mut partial = complete.clone();
+        partial.committed_shards = 31;
+
+        for field in ["distr", "prev_distr"] {
+            let mut gov = gov.clone();
+
+            match field {
+                "distr" => gov.distr = Some(partial.clone()),
+                _ => gov.prev_distr = Some(partial.clone()),
+            }
+
+            assert_eq!(
+                unfinished_bookkeeping(Some(&clean), Some(&gov)),
+                Some(Ineligible::IncompleteGovDistr {
+                    field,
+                    committed: 31,
+                    total: 32,
+                })
+            );
+        }
     }
 
     /// A Byron boundary block, then the first main block after it at the same

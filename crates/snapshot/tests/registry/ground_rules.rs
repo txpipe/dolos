@@ -63,9 +63,9 @@ pub struct AfterDefaultedAppend {
     pub c: u64,
 }
 
-/// A record whose indexes leave a gap — `PoolState` and `RollingStats` both do
-/// this for real. The gap is null-padded, which is what lets a later append
-/// land at the next index without moving anything before it.
+/// A record whose indexes leave a gap, as `RollingStats` does for real. The
+/// gap is null-padded, which is what lets a later append land at the next
+/// index without moving anything before it.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct Gapped {
     #[n(0)]

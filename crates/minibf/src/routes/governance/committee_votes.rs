@@ -54,20 +54,17 @@ struct CommitteeCast {
     slot: BlockSlot,
 }
 
-fn committee_governance_type(
-    action: &ProposalAction,
-) -> Option<committee_votes_inner::GovernanceType> {
+fn committee_governance_type(action: &ProposalAction) -> committee_votes_inner::GovernanceType {
     use committee_votes_inner::GovernanceType;
 
     match action {
-        ProposalAction::ParamChange(_) => Some(GovernanceType::ParameterChange),
-        ProposalAction::HardFork(_) => Some(GovernanceType::HardForkInitiation),
-        ProposalAction::TreasuryWithdrawal(_) => Some(GovernanceType::TreasuryWithdrawals),
-        ProposalAction::NoConfidence => Some(GovernanceType::NoConfidence),
-        ProposalAction::UpdateCommittee { .. } => Some(GovernanceType::NewCommittee),
-        ProposalAction::NewConstitution { .. } => Some(GovernanceType::NewConstitution),
-        ProposalAction::Info => Some(GovernanceType::InfoAction),
-        ProposalAction::Other => None,
+        ProposalAction::ParamChange(_) => GovernanceType::ParameterChange,
+        ProposalAction::HardFork(_) => GovernanceType::HardForkInitiation,
+        ProposalAction::TreasuryWithdrawal(_) => GovernanceType::TreasuryWithdrawals,
+        ProposalAction::NoConfidence => GovernanceType::NoConfidence,
+        ProposalAction::UpdateCommittee { .. } => GovernanceType::NewCommittee,
+        ProposalAction::NewConstitution { .. } => GovernanceType::NewConstitution,
+        ProposalAction::Info => GovernanceType::InfoAction,
     }
 }
 
@@ -121,7 +118,7 @@ impl<'a, D: Domain> ProposalTypes<'a, D> {
         let row = read_proposal_row(self.domain, &key)?;
 
         let governance_type = match row {
-            Some(row) => committee_governance_type(&row.state().action),
+            Some(row) => Some(committee_governance_type(&row.state().action)),
             None => {
                 // The ledger rejects a vote on an unknown action, so a block
                 // that holds the vote also holds, or follows, the proposal.

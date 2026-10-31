@@ -26,7 +26,7 @@ use dolos_cardano::{
     final_rows::newest_final_row,
     indexes::{AsyncCardanoQueryExt, CardanoArchiveIndexExt, SlotOrder},
     model::{AccountState, CalidusRegistration, FixedNamespace as _, PoolState},
-    pallas_extras, pool_history, AccountKey, PoolEpochLog, PoolHash, PoolKey,
+    pallas_extras, pool_history, AccountKey, EpochState, PoolEpochLog, PoolHash, PoolKey,
 };
 use dolos_core::{
     keys, ArchiveStore as _, BlockSlot, Domain, Entity as _, KeyRange, StateStore as _,
@@ -1765,6 +1765,81 @@ where
     Ok(Json(mapped))
 }
 
+/// `numerator / denominator` as Blockfrost reports a pool's `active_size`
+/// in its history.
+///
+/// db-sync divides the two stakes as Postgres `numeric` and casts the
+/// quotient to `float8`. The division rounds half up to a scale Postgres
+/// picks for at least sixteen significant digits (`select_div_scale`), so the
+/// float is the one nearest that decimal rather than the exact ratio, and a
+/// plain `f64` division of the stakes misses it by an ulp about a quarter of
+/// the time. A zero denominator gives zero.
+fn numeric_ratio(numerator: u64, denominator: u64) -> f64 {
+    if numerator == 0 || denominator == 0 {
+        return 0.0;
+    }
+
+    // Postgres stores numerics in base-10000 digits: the weight is the index
+    // of the leading digit, counted from the units digit.
+    let leading = |mut value: u64| {
+        let mut weight = 0i32;
+        while value >= 10_000 {
+            value /= 10_000;
+            weight += 1;
+        }
+        (weight, value)
+    };
+
+    let (weight1, first1) = leading(numerator);
+    let (weight2, first2) = leading(denominator);
+
+    let mut qweight = weight1 - weight2;
+    if first1 <= first2 {
+        qweight -= 1;
+    }
+
+    let scale = (16 - qweight * 4).clamp(0, 1000) as usize;
+
+    // Long division to `scale` decimals; the remainder stays below the
+    // denominator, so ten times it fits a u128.
+    let divisor = denominator as u128;
+    let mut integer = numerator as u128 / divisor;
+    let mut remainder = numerator as u128 % divisor;
+    let mut decimals = Vec::with_capacity(scale);
+
+    for _ in 0..scale {
+        remainder *= 10;
+        decimals.push((remainder / divisor) as u8);
+        remainder %= divisor;
+    }
+
+    // Round half up, carrying through the decimals into the integer part.
+    if remainder * 2 >= divisor {
+        let mut carry = true;
+        for digit in decimals.iter_mut().rev() {
+            if *digit == 9 {
+                *digit = 0;
+            } else {
+                *digit += 1;
+                carry = false;
+                break;
+            }
+        }
+        if carry {
+            integer += 1;
+        }
+    }
+
+    let decimals: String = decimals
+        .iter()
+        .map(|digit| char::from(b'0' + digit))
+        .collect();
+
+    format!("{integer}.{decimals}")
+        .parse()
+        .expect("a decimal literal parses as f64")
+}
+
 /// A pool margin as db-sync stores it: a `float8` holding the ratio rounded
 /// to the nearest double.
 ///
@@ -1820,6 +1895,21 @@ fn bf_compatible_fees(log: &PoolEpochLog) -> u64 {
     (fixed as f64 + (rewards - fixed) as f64 * margin).floor() as u64
 }
 
+/// The active stake of the epoch starting at `epoch_start`, from its `epochs`
+/// log row: the sum a pool's `PoolEpochLog.total_stake` is a share of. Zero
+/// without the row.
+fn epoch_active_stake<D: Domain>(
+    domain: &Facade<D>,
+    epoch_start: BlockSlot,
+) -> Result<u64, StatusCode> {
+    let row = domain
+        .archive()
+        .read_log_typed::<EpochState>(epoch_start, &())
+        .map_err(log_and_500("failed to read an epoch row"))?;
+
+    Ok(row.and_then(|row| row.active_stake).unwrap_or_default())
+}
+
 pub async fn by_id_history<D: Domain>(
     Path(id): Path<String>,
     Query(params): Query<PaginationParameters>,
@@ -1857,11 +1947,13 @@ where
         .skip(pagination.skip())
         .take(pagination.count)
         .map(|(epoch, log)| {
+            let total_active_stake = epoch_active_stake(&domain, summary.epoch_start(epoch))?;
+
             Ok(PoolHistoryInner {
                 epoch: epoch as i32,
                 blocks: log.blocks_minted as i32,
                 active_stake: log.total_stake.to_string(),
-                active_size: log.relative_size,
+                active_size: numeric_ratio(log.total_stake, total_active_stake),
                 delegators_count: log.delegators_count as i32,
                 rewards: log.total_rewards.to_string(),
                 fees: bf_compatible_fees(&log).to_string(),
@@ -4088,6 +4180,105 @@ mod tests {
         })
     }
 
+    /// Pool stake, epoch stake and the `active_size` Blockfrost reports, from
+    /// mainnet (pool1pu5jlj…, epochs 212, 214, 229) and preview (pool1a7h89…,
+    /// epochs 42, 58). A plain `f64` division misses all but the last.
+    #[test]
+    fn numeric_ratio_matches_blockfrost() {
+        let cases = [
+            (76778927458702, 12106602864871837, 0.006341905183119658),
+            (76957913014111, 13382718156097189, 0.0057505442553946965),
+            (13375523282499, 19510155416091834, 0.0006855672339476581),
+            (2663056412603, 375970644528781, 0.0070831498452245244),
+            (1536346314736, 384837670103602, 0.003992193161138307),
+        ];
+
+        for (numerator, denominator, expected) in cases {
+            assert_eq!(numeric_ratio(numerator, denominator), expected);
+        }
+
+        assert_ne!(76778927458702.0 / 12106602864871837.0, 0.006341905183119658);
+    }
+
+    #[test]
+    fn numeric_ratio_edges() {
+        assert_eq!(numeric_ratio(0, 100), 0.0);
+        assert_eq!(numeric_ratio(5, 0), 0.0);
+        assert_eq!(numeric_ratio(7, 7), 1.0);
+        assert_eq!(numeric_ratio(1, 3), 1.0 / 3.0);
+        assert_eq!(numeric_ratio(u64::MAX, u64::MAX), 1.0);
+    }
+
+    /// The quotient 0.00323897880448927272|72… is cut at 20 decimals, and the
+    /// next digit rounds the cut up to a different double than the truncated
+    /// decimal gives. 1273 / 10485760 is 0.00012140274047851562|5, an exact
+    /// half at the cut, which rounds up where half down or half to even would
+    /// keep a different double. 8529360004794 / 20235083305638617 is
+    /// 0.00042151346134647476|4999…, just short of a half, and stays down.
+    /// 3000000000014 / 21955336489517329 is 0.00013664103947786739|96…, which
+    /// carries through the 9 to …786740.
+    #[test]
+    fn numeric_ratio_rounds_half_up_at_the_scale() {
+        assert_eq!(
+            numeric_ratio(71_257_533_698_764, 22_000_000_000_000_000),
+            0.003238978804489273
+        );
+        assert_ne!(
+            "0.00323897880448927272".parse::<f64>().unwrap(),
+            0.003238978804489273
+        );
+
+        assert_eq!(numeric_ratio(1273, 10_485_760), 0.00012140274047851564);
+        assert_ne!(
+            "0.00012140274047851562".parse::<f64>().unwrap(),
+            0.00012140274047851564
+        );
+
+        assert_eq!(
+            numeric_ratio(8_529_360_004_794, 20_235_083_305_638_617),
+            0.00042151346134647474
+        );
+        assert_ne!(
+            "0.00042151346134647477".parse::<f64>().unwrap(),
+            0.00042151346134647474
+        );
+
+        assert_eq!(
+            numeric_ratio(3_000_000_000_014, 21_955_336_489_517_329),
+            0.0001366410394778674
+        );
+        assert_ne!(
+            "0.00013664103947786749".parse::<f64>().unwrap(),
+            0.0001366410394778674
+        );
+    }
+
+    /// Both stakes lead with the base-10000 digit 1, so the quotient's weight
+    /// drops by one and the scale is 24 decimals, not 20:
+    /// 0.000093332914661520271677 against 0.00009333291466152027, which is a
+    /// different double. 10^16 + 1 is five digits led by 1, not four led by
+    /// 10000, so 1.25e12 over it also takes 24 decimals.
+    #[test]
+    fn numeric_ratio_scales_past_equal_leading_digits() {
+        assert_eq!(
+            numeric_ratio(1_129_944_532_028, 12_106_602_864_871_837),
+            9.333291466152028e-5
+        );
+        assert_ne!(
+            "0.00009333291466152027".parse::<f64>().unwrap(),
+            9.333291466152028e-5
+        );
+
+        assert_eq!(
+            numeric_ratio(1_250_000_000_000, 10_000_000_000_000_001),
+            0.00012499999999999998
+        );
+        assert_ne!(
+            "0.00012499999999999999".parse::<f64>().unwrap(),
+            0.00012499999999999998
+        );
+    }
+
     fn fee_log(total_rewards: u64, fixed_cost: u64, margin: Option<(u64, u64)>) -> PoolEpochLog {
         PoolEpochLog {
             total_rewards,
@@ -4211,6 +4402,67 @@ mod tests {
         let path = format!("/pools/{}/history", missing_pool_id());
         let mismatch = error_mismatch(&app, &path, StatusCode::NOT_FOUND, NOT_FOUND_MESSAGE).await;
         assert!(mismatch.is_none(), "{mismatch:?}");
+    }
+
+    /// `active_size` is the pool's stake over the active stake in the same
+    /// epoch's `epochs` row, rounded as db-sync rounds it. An epoch without
+    /// that row reports zero.
+    #[tokio::test]
+    async fn pools_history_divides_by_the_epoch_rows_active_stake() {
+        let cfg = SyntheticBlockConfig {
+            pool_id: REG_POOL_ID.to_string(),
+            ..Default::default()
+        };
+
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, _| {
+            use dolos_core::ArchiveWriter as _;
+
+            let summary = dolos_cardano::eras::load_era_summary::<
+                dolos_testing::toy_domain::ToyDomain,
+            >(domain.state())
+            .unwrap();
+            let pool = PoolKey(PoolHash::from(
+                <[u8; 28]>::try_from(hex::decode(REG_POOL_HEX).unwrap()).unwrap(),
+            ));
+            let log = |total_stake| PoolEpochLog {
+                total_stake,
+                ..Default::default()
+            };
+
+            // Preview epoch 42's stakes, where a plain `f64` division misses
+            // Blockfrost's `active_size`.
+            let row = EpochState {
+                number: 1,
+                active_stake: Some(375_970_644_528_781),
+                ..Default::default()
+            };
+
+            let writer = domain.archive().start_writer().unwrap();
+            writer
+                .write_log_typed(summary.epoch_start(0), &pool, &log(1_536_346_314_736))
+                .unwrap();
+            writer
+                .write_log_typed(summary.epoch_start(1), &pool, &log(2_663_056_412_603))
+                .unwrap();
+            writer
+                .write_log_typed(summary.epoch_start(1), &(), &row)
+                .unwrap();
+            writer.commit().unwrap();
+        });
+
+        let (status, bytes) = app
+            .get_bytes(&format!("/pools/{REG_POOL_ID}/history"))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let history: Vec<PoolHistoryInner> = serde_json::from_slice(&bytes).unwrap();
+        let sizes: Vec<(i32, f64)> = history.iter().map(|x| (x.epoch, x.active_size)).collect();
+
+        assert_eq!(sizes, vec![(0, 0.0), (1, 0.0070831498452245244)]);
+        assert_ne!(
+            2_663_056_412_603.0 / 375_970_644_528_781.0,
+            0.0070831498452245244
+        );
     }
 
     #[tokio::test]

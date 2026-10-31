@@ -39,25 +39,24 @@ pub struct PoolParams {
     pub pool_metadata: Option<PoolMetadata>,
 }
 
-/// A registered pool. Indexes 11 and 12 held fields that left the record;
-/// they must not be reused.
+/// A registered pool.
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PoolState {
-    #[n(1)]
+    #[n(0)]
     pub operator: PoolHash,
 
-    #[n(2)]
+    #[n(1)]
     pub snapshot: EpochValue<PoolSnapshot>,
 
-    #[n(13)]
+    #[n(2)]
     pub retiring_epoch: Option<u64>,
 
-    #[n(16)]
+    #[n(3)]
     pub deposit: u64,
 
     /// The pool's highest-nonce CIP-151 registration signed by its cold key
     /// in a valid transaction. `None` before any registration.
-    #[n(17)]
+    #[n(4)]
     #[cbor(default)]
     pub calidus: Option<CalidusRegistration>,
 }
@@ -85,32 +84,32 @@ pub struct CalidusRegistration {
 /// Pool state that is epoch-specific
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PoolSnapshot {
-    #[n(1)]
+    #[n(0)]
     pub is_retired: bool,
 
-    #[n(2)]
+    #[n(1)]
     pub blocks_minted: u32,
 
-    #[n(3)]
+    #[n(2)]
     pub params: PoolParams,
 
-    #[n(4)]
+    #[n(3)]
     pub is_new: bool,
 
     /// The active stake delegated to the pool in this snapshot's epoch.
     /// `None` while the snapshot is live; ESTART fills it when the snapshot
     /// freezes into `mark`.
-    #[n(5)]
+    #[n(4)]
     pub stake: Option<u64>,
 
     /// The accounts delegated to the pool in this snapshot's epoch, frozen
     /// with `stake`.
-    #[n(6)]
+    #[n(5)]
     pub delegators: Option<u64>,
 
     /// The part of `stake` delegated by the pool's own owners, frozen with
     /// `stake`.
-    #[n(7)]
+    #[n(6)]
     pub live_pledge: Option<u64>,
 }
 

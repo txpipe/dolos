@@ -395,7 +395,6 @@ impl TableRow for ProposalState {
                 format!("HardFork({:?})", x)
             }
             ProposalAction::TreasuryWithdrawal(x) => format!("TreasuryWithdrawal({:?})", x.len()),
-            ProposalAction::Other => "Other".to_string(),
             ProposalAction::NoConfidence => "NoConfidence".to_string(),
             ProposalAction::UpdateCommittee {
                 to_remove, to_add, ..

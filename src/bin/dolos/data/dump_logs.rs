@@ -434,7 +434,7 @@ impl TableRow for ProposalState {
         vec![
             ProposalState::id(key.tx, key.idx),
             epoch_of(slot, ctx),
-            epoch(self.proposed_in),
+            self.proposed_in.to_string(),
             epoch(self.ratified_epoch),
             epoch(self.canceled_epoch),
             epoch(self.deposit),

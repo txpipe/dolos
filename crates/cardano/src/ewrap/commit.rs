@@ -205,8 +205,8 @@ impl BoundaryWork {
     /// (overwrites `entity.end` with the final stats, rotates
     /// rolling/pparams snapshots, sets `ewrap_finalized`). Also settles the
     /// epoch's `PoolEpochLog` rewards and writes the completed `EpochState`
-    /// snapshot and the `drep-epochs` rows to the archive, at the start of its
-    /// epoch.
+    /// snapshot, its sync cursors cleared, and the `drep-epochs` rows to the
+    /// archive, at the start of its epoch.
     ///
     /// The state commit is what marks finalize done, so a crash before it
     /// re-runs finalize on restart; the archive writes it repeats are
@@ -273,9 +273,11 @@ impl BoundaryWork {
         // Write the completed `EpochState` to archive at the start of its
         // epoch (preserves the pre-snapshot-rotation state for historical
         // queries). `ending_state.end` was assembled with the final stats by
-        // `wrapup.flush` before this commit ran.
+        // `wrapup.flush` before this commit ran. The row keeps none of the
+        // sync cursors, which only the state's crash recovery reads.
         let start_of_epoch = self.chain_summary.epoch_start(self.ending_state().number);
-        archive_writer.write_log_typed(start_of_epoch, &(), self.ending_state())?;
+        let closed = self.ending_state().without_sync_cursors();
+        archive_writer.write_log_typed(start_of_epoch, &(), &closed)?;
 
         let drep_epoch_slot = self.drep_epoch_slot();
         debug!(log_count = self.drep_logs.len(), "writing drep-epochs logs");
