@@ -241,8 +241,8 @@ pub fn entity_kind_for(kind: &str) -> Option<EntityKind> {
         .map(|(_, entity)| entity)
 }
 
-/// The state layer kinds: the namespace each carries and the shard count its
-/// tip is published in, in inscription order.
+/// The state layer kinds: the namespace each carries, the shard count its tip
+/// is published in and the key byte it shards on, in inscription order.
 ///
 /// One kind per namespace, for the same reason [`LOG_KINDS`] is one per log
 /// namespace (decision 0026): a breaking change to one namespace's record shape
@@ -257,33 +257,39 @@ pub fn entity_kind_for(kind: &str) -> Option<EntityKind> {
 ///
 /// The shard count is **specification, never tuning**: the namespaces whose
 /// populations are chain-scale — the UTxO set, accounts and datums — shard
-/// sixteen ways by the first key nibble, and every other
-/// namespace is a single blob. Re-sharding a namespace is a media-type-version
-/// event for that namespace's kind, decided by the format's owner; it is not a
-/// constant to nudge.
-pub const STATE_KINDS: [(&str, Namespace, u8); 22] = [
-    ("state-account-addresses", AccountAddressSet::NS, 1),
-    ("state-account-stats", AccountStats::NS, 1),
-    ("state-accounts", AccountState::NS, 16),
-    ("state-address-stats", AddressStats::NS, 1),
-    ("state-asset-mints", AssetMintSet::NS, 1),
-    ("state-datums", DatumState::NS, 16),
-    ("state-drep-sightings", DRepSightingState::NS, 1),
-    ("state-dreps", DRepState::NS, 1),
-    ("state-epochs", EpochState::NS, 1),
-    ("state-eras", EraState::NS, 1),
-    ("state-first-mints", FirstMintSet::NS, 1),
-    ("state-first-scripts", FirstScriptSet::NS, 1),
-    ("state-gov", GovState::NS, 1),
-    ("state-metadata-labels", MetadataLabelState::NS, 1),
-    ("state-payment-addresses", PaymentAddressSet::NS, 1),
-    ("state-payment-stats", PaymentStats::NS, 1),
-    ("state-pending-mirs", PendingMirState::NS, 1),
-    ("state-pending-rewards", PendingRewardState::NS, 1),
-    ("state-pools", PoolState::NS, 1),
-    ("state-proposals", ProposalState::NS, 1),
-    ("state-pruned-accounts", PrunedAccountState::NS, 1),
-    ("state-utxos", namespaces::UTXOS, 16),
+/// sixteen ways, and every other namespace is a single blob. Re-sharding a
+/// namespace is a media-type-version event for that namespace's kind, decided
+/// by the format's owner; it is not a constant to nudge.
+///
+/// The shard byte is the first key byte that comes from a hash, and a
+/// sixteen-way namespace shards on its high nibble ([`shard_of`]). A UTxO key
+/// opens with its transaction hash and a datum key is the datum hash, so both
+/// shard on byte 0; an account key opens with the four-byte CBOR header of its
+/// stake credential, so it shards on byte 4, the first hash byte. A single
+/// blob never reads its key, so its shard byte is 0.
+pub const STATE_KINDS: [(&str, Namespace, u8, usize); 22] = [
+    ("state-account-addresses", AccountAddressSet::NS, 1, 0),
+    ("state-account-stats", AccountStats::NS, 1, 0),
+    ("state-accounts", AccountState::NS, 16, 4),
+    ("state-address-stats", AddressStats::NS, 1, 0),
+    ("state-asset-mints", AssetMintSet::NS, 1, 0),
+    ("state-datums", DatumState::NS, 16, 0),
+    ("state-drep-sightings", DRepSightingState::NS, 1, 0),
+    ("state-dreps", DRepState::NS, 1, 0),
+    ("state-epochs", EpochState::NS, 1, 0),
+    ("state-eras", EraState::NS, 1, 0),
+    ("state-first-mints", FirstMintSet::NS, 1, 0),
+    ("state-first-scripts", FirstScriptSet::NS, 1, 0),
+    ("state-gov", GovState::NS, 1, 0),
+    ("state-metadata-labels", MetadataLabelState::NS, 1, 0),
+    ("state-payment-addresses", PaymentAddressSet::NS, 1, 0),
+    ("state-payment-stats", PaymentStats::NS, 1, 0),
+    ("state-pending-mirs", PendingMirState::NS, 1, 0),
+    ("state-pending-rewards", PendingRewardState::NS, 1, 0),
+    ("state-pools", PoolState::NS, 1, 0),
+    ("state-proposals", ProposalState::NS, 1, 0),
+    ("state-pruned-accounts", PrunedAccountState::NS, 1, 0),
+    ("state-utxos", namespaces::UTXOS, 16, 0),
 ];
 
 /// The state kind names alone: what [`StateScope`] answers for
@@ -305,8 +311,8 @@ pub const STATE_KIND_NAMES: [&str; STATE_KINDS.len()] = {
 pub fn state_kind_for(ns: Namespace) -> Option<&'static str> {
     STATE_KINDS
         .into_iter()
-        .find(|(_, known, _)| *known == ns)
-        .map(|(kind, _, _)| kind)
+        .find(|(_, known, _, _)| *known == ns)
+        .map(|(kind, _, _, _)| kind)
 }
 
 /// The namespace `kind` carries state for, or `None` where the kind is not a
@@ -318,8 +324,8 @@ pub fn state_kind_for(ns: Namespace) -> Option<&'static str> {
 pub fn state_ns_for(kind: &str) -> Option<Namespace> {
     STATE_KINDS
         .into_iter()
-        .find(|(known, _, _)| *known == kind)
-        .map(|(_, ns, _)| ns)
+        .find(|(known, _, _, _)| *known == kind)
+        .map(|(_, ns, _, _)| ns)
 }
 
 /// Whether `kind` is one of the state kinds — the tip predicate the
@@ -334,8 +340,17 @@ pub fn is_state_kind(kind: &str) -> bool {
 pub fn shards_for(ns: Namespace) -> Option<u8> {
     STATE_KINDS
         .into_iter()
-        .find(|(_, known, _)| *known == ns)
-        .map(|(_, _, shards)| shards)
+        .find(|(_, known, _, _)| *known == ns)
+        .map(|(_, _, shards, _)| shards)
+}
+
+/// The key byte `ns`'s state kind shards on, or `None` where the namespace is
+/// not one this profile defines.
+pub fn shard_byte_for(ns: Namespace) -> Option<usize> {
+    STATE_KINDS
+        .into_iter()
+        .find(|(_, known, _, _)| *known == ns)
+        .map(|(_, _, _, byte)| byte)
 }
 
 /// How many state layers every publish writes: the shard counts summed. Every
@@ -1271,7 +1286,7 @@ pub fn read_position(value: &serde_json::Value) -> Result<Position, Error> {
 pub fn parameters(retained: &RetainedEpochs) -> serde_json::Value {
     let shards: serde_json::Map<String, serde_json::Value> = STATE_KINDS
         .into_iter()
-        .map(|(_, ns, shards)| (ns.to_owned(), json!(shards)))
+        .map(|(_, ns, shards, _)| (ns.to_owned(), json!(shards)))
         .collect();
 
     let schemas = schemas(RETIRED_NAMESPACES);
@@ -1694,7 +1709,7 @@ mod tests {
         // The two maps are the two tables, entry for entry — and nothing more:
         // a namespace in the JSON that no table has would be a claim about code
         // that does not exist.
-        for (_, ns, shards) in STATE_KINDS {
+        for (_, ns, shards, _) in STATE_KINDS {
             assert_eq!(parameters["shards"][ns], shards, "{ns}");
         }
         assert_eq!(
@@ -1733,10 +1748,10 @@ mod tests {
         // The routing rule behind the map: a sixteen-way namespace covers every
         // shard its count promises, and a single blob is always shard 0.
         let nibbles: std::collections::BTreeSet<u8> =
-            (0u8..=255).map(|b| shard_of(&[b], 16)).collect();
+            (0u8..=255).map(|b| shard_of(&[b], 16, 0)).collect();
         assert_eq!(nibbles.len(), 16);
 
-        assert!((0u8..=255).all(|b| shard_of(&[b], 1) == 0));
+        assert!((0u8..=255).all(|b| shard_of(&[b], 1, 0) == 0));
     }
 
     /// A scope belongs to the kinds whose shape it is, and to no others.
