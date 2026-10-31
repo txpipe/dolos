@@ -16,7 +16,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 
 use dolos::service::{
-    install, locate_binary, uninstall, CommandRunner, Install, Launchd, Name, Recorded, Scope,
+    install, locate_binary, uninstall, CommandRunner, Install, Launchd, Name, Recorded,
     ServiceBackend, ServiceError, SystemRunner, Systemd, Unit,
 };
 use dolos_core::config::{load_file, Compatibility, RootConfig};
@@ -134,7 +134,8 @@ struct Instance {
 }
 
 /// A machine under a temporary root, by its canonical path: a user's home,
-/// and one directory per instance under `srv/`.
+/// a `dolos` binary under `opt/`, and one directory per instance under
+/// `srv/`.
 struct Machine {
     _dir: tempfile::TempDir,
     root: PathBuf,
@@ -146,7 +147,12 @@ impl Machine {
         let root = dir.path().canonicalize().unwrap();
         std::fs::create_dir_all(root.join("home/operator")).unwrap();
 
-        Self { _dir: dir, root }
+        let machine = Self { _dir: dir, root };
+        let binary = machine.binary();
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, "dolos").unwrap();
+
+        machine
     }
 
     fn root(&self) -> &Path {
@@ -1139,6 +1145,33 @@ fn paths_differing_in_case_clash_on_macos() {
     }
 }
 
+/// Elsewhere, paths differing only in case are apart.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn paths_differing_in_case_are_apart_elsewhere() {
+    for kind in KINDS {
+        let machine = Machine::new();
+        let with = |storage: &str, socket: &str, port| {
+            format!(
+                "{}\n[serve.ouroboros]\nlisten_path = \"{socket}\"\n",
+                config("preview", storage, port)
+            )
+        };
+        let a = machine.instance_with("a", "data", &with("../store/Mainnet", "../A.socket", 3000));
+        let b = machine.instance_with("b", "data", &with("../store/mainnet", "../a.socket", 3001));
+        let runner = Recorder::default();
+        let backend = machine.backend(kind, &runner);
+
+        for (instance, name) in [(&a, "a"), (&b, "b")] {
+            install(
+                backend.as_ref(),
+                &machine.request(instance, Some(name), false),
+            )
+            .unwrap_or_else(|error| panic!("{kind:?}: {error}"));
+        }
+    }
+}
+
 #[test]
 fn every_neighbour_is_checked() {
     for kind in KINDS {
@@ -1853,7 +1886,7 @@ fn the_binary_is_recorded_by_the_path_it_was_run_as() {
     std::os::unix::fs::symlink(real.parent().unwrap(), root.join("hop")).unwrap();
 
     let locate = |invoked: Option<&str>, path: Option<&OsStr>, exe: &Path| {
-        locate_binary(Scope::User, invoked.map(OsStr::new), path, Some(root), exe).unwrap()
+        locate_binary(invoked.map(OsStr::new), path, Some(root), exe).unwrap()
     };
     let path = std::env::join_paths([other.parent().unwrap(), link.parent().unwrap()]).unwrap();
 
@@ -1877,26 +1910,41 @@ fn the_binary_is_recorded_by_the_path_it_was_run_as() {
 
     // Without a working directory, a relative name is passed over.
     let without_cwd = |invoked: Option<&str>, path: Option<&OsStr>| {
-        locate_binary(Scope::User, invoked.map(OsStr::new), path, None, &real).unwrap()
+        locate_binary(invoked.map(OsStr::new), path, None, &real).unwrap()
     };
     assert_eq!(without_cwd(Some("dolos"), Some(&path)), link);
     assert_eq!(without_cwd(Some("./bin/dolos"), None), real);
-    assert!(locate_binary(Scope::User, None, None, None, Path::new("bin/dolos")).is_err());
+    assert!(locate_binary(None, None, None, Path::new("bin/dolos")).is_err());
+}
 
-    // Root runs a system unit's binary by its canonical path, never through
-    // a link its invoker may own.
-    for exe in [&real, &link] {
-        assert_eq!(
-            locate_binary(
-                Scope::System,
-                link.to_str().map(OsStr::new),
-                Some(&path),
-                Some(root),
-                exe
-            )
-            .unwrap(),
-            real
-        );
+/// Root runs a system unit's binary by its canonical path, never through a
+/// link its invoker may own; the user's units run it as it was given.
+#[test]
+fn system_units_run_the_canonical_binary() {
+    for kind in KINDS {
+        let machine = Machine::new();
+        let preview = machine.instance("preview", "data", 3000);
+        let link = machine.home().join("bin/dolos");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(machine.binary(), &link).unwrap();
+
+        let runner = Recorder::default();
+        let backend = machine.backend(kind, &runner);
+        let request = Install {
+            binary: link.clone(),
+            ..machine.request(&preview, None, false)
+        };
+        let installed = install(backend.as_ref(), &request).unwrap();
+        let contents = std::fs::read_to_string(&installed.file).unwrap();
+
+        let (runs, not) = match kind {
+            Kind::SystemdSystem => (machine.binary(), link.clone()),
+            _ => (link.clone(), machine.binary()),
+        };
+
+        assert_eq!(installed.binary, runs, "{kind:?}");
+        assert!(contents.contains(runs.to_str().unwrap()), "{kind:?}");
+        assert!(!contents.contains(not.to_str().unwrap()), "{kind:?}");
     }
 }
 
@@ -2276,6 +2324,37 @@ mod command_line {
         assert_installing(&sandbox, "cardano-preview");
     }
 
+    /// Under `sudo`, the working directory and its `dolos.toml` are the
+    /// invoker's: a system unit reads only a file `--config` names, so a rule
+    /// granting `--system` alone prints no line of a file root can read.
+    #[test]
+    fn system_scope_reads_no_default_configuration() {
+        let sandbox = Sandbox::new();
+        let dir = sandbox.machine.root().join("invoker");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("dolos.toml"), "secret = not-toml-hunter2\n").unwrap();
+
+        for args in [
+            &["service", "install", "--system"][..],
+            &["service", "uninstall", "--system"],
+        ] {
+            let output = sandbox.dolos(&dir, args).output().unwrap();
+
+            assert_eq!(output.status.code(), Some(2), "{output:?}");
+            assert!(
+                !String::from_utf8_lossy(&output.stderr).contains("hunter2"),
+                "{output:?}"
+            );
+
+            // macOS refuses `--system` before it would.
+            if cfg!(target_os = "linux") {
+                assert!(stderr(&output).contains("--config"), "{output:?}");
+            }
+        }
+
+        assert!(sandbox.calls().is_empty(), "{:?}", sandbox.calls());
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn system_scope_as_a_user_prints_the_sudo_command() {
@@ -2290,19 +2369,21 @@ mod command_line {
         let output = sandbox
             .dolos(
                 preview.file.parent().unwrap(),
-                &["service", "install", "--system"],
+                &["--config", "dolos.toml", "service", "install", "--system"],
             )
             .output()
             .unwrap();
 
-        // The path the unit would record, which root never follows a link to.
+        // The paths the unit would record: root never follows a link to the
+        // binary, and a rule copied from it names the configuration's file.
         let binary = std::fs::canonicalize(env!("CARGO_BIN_EXE_dolos")).unwrap();
 
         assert_eq!(output.status.code(), Some(1), "{output:?}");
         assert!(
             stderr(&output).contains(&flat(&format!(
-                "sudo {} service install --system",
-                binary.display()
+                "sudo {} --config {} service install --system",
+                binary.display(),
+                preview.file.display()
             ))),
             "{output:?}"
         );

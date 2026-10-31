@@ -428,7 +428,8 @@ fn io_error(path: &Path) -> impl FnOnce(io::Error) -> ServiceError + '_ {
 /// What [`install`] is asked to install.
 pub struct Install<'a> {
     pub name: Name,
-    /// The `dolos` binary the service runs, by absolute path.
+    /// The `dolos` binary, by absolute path; see [`binary_for`] for the path
+    /// the service runs it by.
     pub binary: PathBuf,
     /// The configuration file, whose directory becomes the working directory.
     pub config_file: PathBuf,
@@ -537,10 +538,11 @@ pub fn install(
     let working_dir = config_file
         .parent()
         .map_or_else(|| PathBuf::from("/"), Path::to_path_buf);
+    let binary = binary_for(backend.scope(), &request.binary).map_err(io_error(&request.binary))?;
 
     let unit = Unit {
         name: request.name.clone(),
-        binary: request.binary.clone(),
+        binary,
         config: config_file,
         working_dir,
     };
@@ -779,7 +781,14 @@ impl Lock {
 
         loop {
             if create {
-                created.extend(create_dirs(dir)?);
+                match create_dirs(dir) {
+                    Ok(made) => created.extend(made),
+                    // Removed by a failed install while this one made it.
+                    Err(error) if removed_meanwhile(&error, dir) && Instant::now() < deadline => {
+                        continue
+                    }
+                    Err(error) => return Err(io_error(dir)(error)),
+                }
             }
 
             let handle = match fs::File::open(dir) {
@@ -832,7 +841,13 @@ impl Lock {
 fn still_at(handle: &fs::File, dir: &Path) -> io::Result<bool> {
     use std::os::unix::fs::MetadataExt as _;
 
-    let held = handle.metadata()?;
+    // macOS may report a directory missing through a handle on it while it
+    // is removed.
+    let held = match handle.metadata() {
+        Ok(held) => held,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
 
     match fs::metadata(dir) {
         Ok(current) => Ok(held.dev() == current.dev() && held.ino() == current.ino()),
@@ -848,7 +863,7 @@ fn still_at(_handle: &fs::File, dir: &Path) -> io::Result<bool> {
 
 /// Creates `dir` and its missing ancestors, returning those it created,
 /// outermost first. None is writable by group or others, whatever the umask.
-fn create_dirs(dir: &Path) -> Result<Vec<PathBuf>, ServiceError> {
+fn create_dirs(dir: &Path) -> io::Result<Vec<PathBuf>> {
     let missing: Vec<PathBuf> = dir
         .ancestors()
         .take_while(|ancestor| !ancestor.as_os_str().is_empty() && !ancestor.exists())
@@ -861,9 +876,18 @@ fn create_dirs(dir: &Path) -> Result<Vec<PathBuf>, ServiceError> {
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o755);
 
-    builder.create(dir).map_err(io_error(dir))?;
+    builder.create(dir)?;
 
     Ok(missing.into_iter().rev().collect())
+}
+
+/// Whether [`create_dirs`] failed as it does when a directory it makes, or
+/// finds, is removed meanwhile, rather than on a file in the way.
+fn removed_meanwhile(error: &io::Error, dir: &Path) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::AlreadyExists | io::ErrorKind::InvalidInput
+    ) && !fs::metadata(dir).is_ok_and(|found| !found.is_dir())
 }
 
 /// Removes the directories [`create_dirs`] created, when they are still
@@ -909,18 +933,24 @@ pub fn shell_quote(word: &str) -> Cow<'_, str> {
     }
 }
 
-/// The `dolos` binary a `scope` service runs, by an absolute path naming it
-/// as it was run: `invoked` (`argv[0]`), against `cwd` or found on `path`
-/// (`PATH`), when it leads to `exe`, the running binary. Otherwise `exe`.
-/// Linux reports the running binary through its symlinks, into a versioned
-/// directory a package manager's upgrade removes (Homebrew's
-/// `Cellar/dolos/<version>`), while the name it was run by stays.
-///
-/// A system service runs the binary by its canonical path instead: under
-/// `sudo`, the name it was run by may be a link its invoker owns, which root
-/// would then follow at every start.
+/// The path a `scope` service runs `binary` by: as given for the user's, and
+/// canonical for a system service. Under `sudo`, the name `dolos` was run by
+/// may be a link its invoker owns, which root would then follow at every
+/// start.
+pub fn binary_for(scope: Scope, binary: &Path) -> io::Result<PathBuf> {
+    match scope {
+        Scope::User => Ok(binary.to_path_buf()),
+        Scope::System => fs::canonicalize(binary),
+    }
+}
+
+/// The running `dolos` binary, by an absolute path naming it as it was run:
+/// `invoked` (`argv[0]`), against `cwd` or found on `path` (`PATH`), when it
+/// leads to `exe`, the running binary. Otherwise `exe`. Linux reports the
+/// running binary through its symlinks, into a versioned directory a package
+/// manager's upgrade removes (Homebrew's `Cellar/dolos/<version>`), while the
+/// name it was run by stays.
 pub fn locate_binary(
-    scope: Scope,
     invoked: Option<&OsStr>,
     path: Option<&OsStr>,
     cwd: Option<&Path>,
@@ -934,10 +964,6 @@ pub fn locate_binary(
 
     let exe = absolute(exe).ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
     let real = fs::canonicalize(&exe)?;
-
-    if scope == Scope::System {
-        return Ok(real);
-    }
 
     let invoked = invoked
         .map(Path::new)
@@ -968,8 +994,8 @@ pub fn locate_binary(
 
 /// `path`, absolute, without `.` and `..`: each `..` steps out of where the
 /// part before it leads, as the kernel steps, and the rest stays as written,
-/// symlinks included.
-fn without_dots(path: &Path) -> io::Result<PathBuf> {
+/// symlinks included. A service records its configuration so.
+pub fn without_dots(path: &Path) -> io::Result<PathBuf> {
     let mut resolved = PathBuf::new();
 
     for component in std::path::absolute(path)?.components() {
@@ -1017,6 +1043,9 @@ mod tests {
         assert_eq!(resolve("link/../x/../../link"), root.join("link"));
     }
 
+    // Windows opens no directory as a file, and `Lock` is reached only on
+    // Linux and macOS.
+    #[cfg(unix)]
     #[test]
     fn a_held_scope_is_waited_for_then_given_up() {
         let dir = tempfile::tempdir().unwrap();
@@ -1043,5 +1072,95 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    /// A waiter whose lock outlived its directory waits for the one made in
+    /// its place, which another install may hold by then.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_made_again_is_waited_for_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let scope = dir.path().join("scope");
+        fs::create_dir(&scope).unwrap();
+
+        let old = fs::File::open(&scope).unwrap();
+        old.lock_shared().unwrap();
+
+        std::thread::scope(|threads| {
+            let waiter = threads.spawn(|| {
+                Lock::take(&scope, Duration::from_secs(2), false).map(|lock| lock.is_some())
+            });
+
+            std::thread::sleep(Duration::from_millis(200));
+            assert!(!waiter.is_finished());
+
+            // As a failed install removes it, and another makes it again.
+            fs::remove_dir(&scope).unwrap();
+            fs::create_dir(&scope).unwrap();
+            let new = fs::File::open(&scope).unwrap();
+            new.lock_shared().unwrap();
+            drop(old);
+
+            let error = waiter.join().unwrap().err().unwrap();
+            assert!(matches!(error, ServiceError::Busy(_)), "{error}");
+        });
+    }
+
+    /// Failed installs remove the directories they made while others make
+    /// them; those make them again rather than give up.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_removed_while_it_is_made_is_made_again() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let scope = dir.path().join("a/b/c/d");
+        let done = AtomicBool::new(false);
+
+        std::thread::scope(|threads| {
+            threads.spawn(|| {
+                while !done.load(Ordering::Relaxed) {
+                    let _ = fs::create_dir_all(&scope);
+
+                    for made in scope.ancestors().take(4) {
+                        let _ = fs::remove_dir(made);
+                    }
+                }
+            });
+
+            let installs: Vec<_> = (0..4)
+                .map(|_| {
+                    threads.spawn(|| {
+                        for _ in 0..100 {
+                            Lock::take(&scope, PATIENCE, true).unwrap().unwrap();
+                        }
+                    })
+                })
+                .collect();
+
+            let results: Vec<_> = installs.into_iter().map(|x| x.join()).collect();
+            done.store(true, Ordering::Relaxed);
+
+            for result in results {
+                if let Err(panic) = result {
+                    std::panic::resume_unwind(panic);
+                }
+            }
+        });
+    }
+
+    /// A file where the directory goes is no race, and is not waited on.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_in_place_of_the_directory_fails_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let scope = dir.path().join("scope");
+        fs::write(&scope, "").unwrap();
+
+        let started = Instant::now();
+        let error = Lock::take(&scope, PATIENCE, true).err().unwrap();
+
+        assert!(matches!(error, ServiceError::Io { .. }), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 }

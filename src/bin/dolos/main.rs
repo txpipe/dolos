@@ -114,7 +114,8 @@ fn run() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let args = Cli::parse();
-    let config_file = crate::common::config_file(args.config.as_deref());
+    let explicit_config = args.config.as_deref();
+    let config_file = crate::common::config_file(explicit_config);
 
     let feedback = crate::feedback::Feedback::default();
 
@@ -131,7 +132,7 @@ fn run() -> Result<()> {
         Command::Snapshot(args) => snapshot::run(&load()?, &args),
         Command::Cache(args) => cache::run(&load()?, &args),
         Command::Config(args) => config::run(config_file, &args),
-        Command::Service(args) => service::run(config_file, &args),
+        Command::Service(args) => service::run(explicit_config, &args),
 
         // the init command is special because it knows how to execute with or without a valid
         // configuration, that is why we pass the whole result and let the command logic decide what

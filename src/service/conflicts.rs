@@ -155,9 +155,12 @@ fn comparable(path: &Path, working_dir: &Path) -> PathBuf {
     resolved
 }
 
-/// `path` as the file system compares it, including the part that does not
-/// exist yet. macOS volumes ignore case unless formatted otherwise; on one
-/// that does not, two paths differing only in case are refused all the same.
+/// `path` with its case folded on macOS, whose volumes ignore case unless
+/// formatted otherwise, so that the part that does not exist yet compares as
+/// the volume will compare it. On a volume that keeps case, two paths
+/// differing only in case are refused all the same. Unicode normalization is
+/// not folded: two spellings of one accented name (NFC and NFD) compare equal
+/// only once the name exists, as [`comparable`] resolves it.
 fn folded(path: &Path) -> Cow<'_, Path> {
     match path.to_str() {
         Some(text) if cfg!(target_os = "macos") => Cow::Owned(text.to_lowercase().into()),
