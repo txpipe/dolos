@@ -267,52 +267,6 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-/// [`stderr`] with every run of whitespace one space, so a phrase the
-/// diagnostic renderer wrapped across lines still reads as one.
-fn stderr_words(output: &Output) -> String {
-    stderr(output)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// `snapshot inspect` and `snapshot verify` on a preview node read the
-/// official preview repository as its published read-only user, not
-/// anonymously.
-#[test]
-fn the_snapshot_commands_read_the_official_repository_as_the_published_user() {
-    let node = Node::new();
-
-    for command in ["inspect", "verify"] {
-        let proxy = Proxy::start();
-
-        let output = proxy.run(
-            &node,
-            &[
-                "snapshot",
-                command,
-                "--repo",
-                networks::PREVIEW.stelae.registry,
-                "--insecure",
-            ],
-            None,
-        );
-
-        assert!(
-            !output.status.success(),
-            "{command}: the proxy has no stele"
-        );
-        assert!(
-            proxy
-                .authorizations("/cardano/preview/")
-                .contains(&published_user()),
-            "{command} did not read as the published user: {:?}\n{}",
-            proxy.seen.lock().unwrap(),
-            stderr(&output)
-        );
-    }
-}
-
 /// `bootstrap stelae` with no `--source` on a preview node reads the official
 /// preview repository, as its published read-only user.
 #[test]
@@ -370,225 +324,6 @@ fn force_restores_with_the_credentials_it_resolved() {
     );
 }
 
-/// `snapshot verify --reproduce` refuses a retained-epoch list the plan would
-/// refuse before it streams a blob.
-#[test]
-fn verify_refuses_a_bad_state_epoch_list_before_streaming() {
-    let node = Node::new();
-    let proxy = Proxy::start();
-
-    let output = proxy.run(
-        &node,
-        &[
-            "snapshot",
-            "verify",
-            "--repo",
-            networks::PREVIEW.stelae.registry,
-            "--insecure",
-            "--reproduce",
-            "--state-epochs",
-            "236,208",
-        ],
-        None,
-    );
-
-    assert!(!output.status.success());
-    assert!(
-        stderr(&output).contains("state epochs"),
-        "{}",
-        stderr(&output)
-    );
-    assert_eq!(proxy.requests(), 0, "the registry was read before the list");
-}
-
-/// `snapshot digest` plans with the retained epochs it is given, from the list
-/// or from a file, rather than retaining the tip alone.
-#[test]
-fn digest_plans_with_the_given_state_epochs() {
-    let node = Node::new();
-    node.sync();
-    let parent = node.stand_at_boundary();
-
-    let epochs = node.root.path().join("epochs.txt");
-    std::fs::write(&epochs, "208\n236\n").unwrap();
-    let inscription = node.root.path().join("inscription.json");
-
-    for source in [
-        ["--state-epochs", "208,236"],
-        ["--state-epochs-file", epochs.to_str().unwrap()],
-    ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_dolos"))
-            .arg("--config")
-            .arg(node.config_path())
-            .args(["snapshot", "digest", "--output"])
-            .arg(&inscription)
-            .args(source)
-            .stdin(Stdio::null())
-            .output()
-            .unwrap();
-
-        assert!(output.status.success(), "{}", stderr(&output));
-        assert!(
-            stderr(&output).contains("dumps:    [208, 236] retained"),
-            "{source:?} did not reach the plan:\n{}",
-            stderr(&output)
-        );
-        assert!(
-            stderr(&output).contains(&format!(
-                "boundary: first block of epoch 1, after {parent}\n"
-            )),
-            "the plan did not report its boundary evidence:\n{}",
-            stderr(&output)
-        );
-    }
-}
-
-/// `snapshot digest` refuses stores that are not standing on an epoch's first
-/// block, says where they stand and what to do, and writes no document.
-#[test]
-fn digest_refuses_stores_off_the_boundary() {
-    let node = Node::new();
-    node.sync();
-
-    let inscription = node.root.path().join("inscription.json");
-
-    let output = Command::new(env!("CARGO_BIN_EXE_dolos"))
-        .arg("--config")
-        .arg(node.config_path())
-        .args(["snapshot", "digest", "--output"])
-        .arg(&inscription)
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-
-    let message = stderr(&output);
-
-    assert!(!output.status.success(), "{message}");
-    assert!(message.contains("epoch-0 boundary cut"), "{message}");
-    assert!(message.contains("dolos sync --stop-epoch 1"), "{message}");
-    assert!(!inscription.exists(), "a refused digest wrote a document");
-}
-
-/// `snapshot digest` one block past the boundary is refused as it plans, before
-/// it reports a plan: it says the boundary state is gone from these stores and
-/// how to get one.
-#[test]
-fn digest_refuses_stores_past_the_boundary_as_it_plans() {
-    let node = Node::new();
-    node.sync();
-    node.stand_at_boundary();
-    node.step_past_boundary();
-
-    let inscription = node.root.path().join("inscription.json");
-
-    let output = Command::new(env!("CARGO_BIN_EXE_dolos"))
-        .arg("--config")
-        .arg(node.config_path())
-        .args(["snapshot", "digest", "--output"])
-        .arg(&inscription)
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-
-    let message = stderr_words(&output);
-
-    assert!(!output.status.success(), "{message}");
-    assert!(message.contains("epoch-1 boundary cut"), "{message}");
-    assert!(message.contains("is in the same epoch"), "{message}");
-    assert!(
-        message.contains("restore the stele for this epoch"),
-        "{message}"
-    );
-    assert!(
-        message.contains("dolos sync --stop-epoch set to the following epoch"),
-        "{message}"
-    );
-    assert!(
-        !message.contains("sequence:"),
-        "the plan was reported before the refusal:\n{message}"
-    );
-    assert!(!inscription.exists(), "a refused digest wrote a document");
-}
-
-/// `snapshot verify --reproduce` over stores past their boundary is refused
-/// before the registry is read.
-#[test]
-fn verify_refuses_a_reproduction_past_the_boundary_before_streaming() {
-    let node = Node::new();
-    node.sync();
-    node.stand_at_boundary();
-    node.step_past_boundary();
-
-    let proxy = Proxy::start();
-
-    let output = proxy.run(
-        &node,
-        &[
-            "snapshot",
-            "verify",
-            "--repo",
-            networks::PREVIEW.stelae.registry,
-            "--insecure",
-            "--reproduce",
-        ],
-        None,
-    );
-
-    let message = stderr_words(&output);
-
-    assert!(!output.status.success(), "{message}");
-    assert!(message.contains("epoch-1 boundary cut"), "{message}");
-    assert!(
-        message.contains("restore the stele for this epoch"),
-        "{message}"
-    );
-    assert_eq!(
-        proxy.requests(),
-        0,
-        "the registry was read before the boundary"
-    );
-}
-
-/// `snapshot verify --reproduce` plans with the retained epochs it is given,
-/// from the list or from a file, and reports that plan before it reads the
-/// registry.
-#[test]
-fn verify_reproduces_with_the_given_state_epochs() {
-    let node = Node::new();
-    node.sync();
-    node.stand_at_boundary();
-
-    let epochs = node.root.path().join("epochs.txt");
-    std::fs::write(&epochs, "208\n236\n").unwrap();
-
-    for source in [
-        ["--state-epochs", "208,236"],
-        ["--state-epochs-file", epochs.to_str().unwrap()],
-    ] {
-        let proxy = Proxy::start();
-
-        let mut args = vec![
-            "snapshot",
-            "verify",
-            "--repo",
-            networks::PREVIEW.stelae.registry,
-            "--insecure",
-            "--reproduce",
-        ];
-        args.extend(source);
-
-        let output = proxy.run(&node, &args, None);
-
-        assert!(!output.status.success(), "the proxy has no stele");
-        assert!(
-            stderr(&output).contains("dumps:    [208, 236] retained"),
-            "{source:?} did not reach the reproduction's plan:\n{}",
-            stderr(&output)
-        );
-        assert!(proxy.requests() > 0, "the registry was never read");
-    }
-}
-
 /// A node on a network with no catalog entry reads even the official registry
 /// anonymously: the published read-only password belongs to the catalog
 /// networks' repositories alone.
@@ -599,29 +334,73 @@ fn a_custom_network_reads_the_official_registry_anonymously() {
 
     let repository = networks::PREVIEW.stelae.registry;
 
-    for args in [
-        &["snapshot", "inspect", "--repo", repository, "--insecure"][..],
-        &["snapshot", "verify", "--repo", repository, "--insecure"][..],
-        &["bootstrap", "stelae", "--source", repository, "--insecure"][..],
-    ] {
-        let proxy = Proxy::start();
-        let output = proxy.run(&node, args, None);
+    let proxy = Proxy::start();
+    let output = proxy.run(
+        &node,
+        &["bootstrap", "stelae", "--source", repository, "--insecure"],
+        None,
+    );
 
-        assert!(!output.status.success(), "{args:?}: the proxy has no stele");
-        assert!(
-            proxy.requests() > 0,
-            "{args:?}: the registry was never read"
+    assert!(!output.status.success(), "the proxy has no stele");
+    assert!(proxy.requests() > 0, "the registry was never read");
+    assert!(
+        proxy
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|seen| seen.authorization.is_none()),
+        "bootstrap stelae sent credentials for a custom network: {:?}\n{}",
+        proxy.seen.lock().unwrap(),
+        stderr(&output)
+    );
+}
+
+/// The commands that left the binary are usage errors, refused before a
+/// configuration is read: the snapshot family moved to the Stelae publisher,
+/// the debug utilities to `cargo xtask debug`, and the rest were deleted.
+#[test]
+fn removed_commands_are_unknown_subcommands() {
+    let node = Node::new();
+
+    for args in [
+        &["snapshot", "digest"][..],
+        &["snapshot", "verify"][..],
+        &["snapshot", "inspect"][..],
+        &["minibf", "/blocks/latest"][..],
+        &["minikupo", "/health"][..],
+        &["eval", "--file", "tx.hex"][..],
+        &["data", "compute-spdd"][..],
+        &["data", "compute-nonce"][..],
+        &["data", "find-seq"][..],
+        &["data", "copy-wal"][..],
+        &["data", "clear-state"][..],
+        &["doctor", "reclaim-avvm"][..],
+        &["doctor", "update-entity"][..],
+    ] {
+        let output = node.run(args);
+
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{args:?}\n{}",
+            stderr(&output)
         );
         assert!(
-            proxy
-                .seen
-                .lock()
-                .unwrap()
-                .iter()
-                .all(|seen| seen.authorization.is_none()),
-            "{args:?} sent credentials for a custom network: {:?}\n{}",
-            proxy.seen.lock().unwrap(),
+            stderr(&output).contains("unrecognized subcommand"),
+            "{args:?}\n{}",
             stderr(&output)
+        );
+    }
+
+    let help = node::assert_ok(&node.run(&["--help"]));
+
+    for removed in ["snapshot", "minibf", "minikupo", "eval"] {
+        assert!(
+            !help
+                .lines()
+                .any(|line| line.split_whitespace().next() == Some(removed)),
+            "`dolos --help` still lists {removed}:\n{help}"
         );
     }
 }
