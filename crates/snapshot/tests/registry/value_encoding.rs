@@ -53,10 +53,8 @@ impl fmt::Display for Violation {
 /// path, rule)`.
 ///
 /// Exactly one. `pool-epochs` field 2 is `PoolEpochLog.relative_size`, an
-/// f64, which
-/// [record-residue](../../../../plans/
-/// stelae-dolos-profile-release-gate-freeze-hardening-record-residue.md)
-/// removes; its entry goes with it.
+/// f64, which the freeze-hardening record-residue change removes; its entry
+/// goes with it.
 pub const EXCEPTIONS: &[(&str, &str, Rule)] = &[("pool-epochs", "$[2]", Rule::Float)];
 
 /// Every break of the value encoding in `bytes`, one encoded value.
