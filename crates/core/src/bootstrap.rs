@@ -200,19 +200,35 @@ fn verify_caught_up(
 /// between the state commit and the archive commit). [`recovery_plan`] says
 /// what this would do, without doing it.
 pub fn catch_up_stores<D: Domain>(domain: &D) -> Result<(), DomainError> {
-    let target = match domain.wal().find_tip()? {
-        // nothing to catch up
-        None => return Ok(()),
-        // Origin means no blocks have been processed yet — state and archive
-        // are correctly empty, so there is nothing to replay.
-        Some((ChainPoint::Origin, _)) => return Ok(()),
-        Some((point, _)) => point,
+    let Some(target) = catch_up_target(domain)? else {
+        return Ok(());
     };
 
     catch_up_state(domain, &target)?;
     catch_up_archive(domain, &target)?;
 
     Ok(())
+}
+
+/// [`catch_up_stores`] for the state alone, over a dataset that keeps no
+/// archive to replay into.
+pub fn catch_up_state_only<D: Domain>(domain: &D) -> Result<(), DomainError> {
+    match catch_up_target(domain)? {
+        Some(target) => catch_up_state(domain, &target),
+        None => Ok(()),
+    }
+}
+
+/// The WAL tip the stores catch up to; none when there is nothing to replay.
+fn catch_up_target<D: Domain>(domain: &D) -> Result<Option<ChainPoint>, DomainError> {
+    match domain.wal().find_tip()? {
+        // nothing to catch up
+        None => Ok(None),
+        // Origin means no blocks have been processed yet — state and archive
+        // are correctly empty, so there is nothing to replay.
+        Some((ChainPoint::Origin, _)) => Ok(None),
+        Some((point, _)) => Ok(Some(point)),
+    }
 }
 
 /// What [`catch_up_stores`] would do to the stores as they stand.

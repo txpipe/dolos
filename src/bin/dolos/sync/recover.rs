@@ -2,7 +2,9 @@ use std::fmt;
 
 use dolos::storage::Access;
 use dolos_core::{
-    bootstrap::{catch_up_stores, recovery_plan, RecoveredStore, RecoveryPlan},
+    bootstrap::{
+        catch_up_state_only, catch_up_stores, recovery_plan, RecoveredStore, RecoveryPlan,
+    },
     config::RootConfig,
     seed_wal_from_state, BlockSlot,
 };
@@ -64,16 +66,16 @@ impl Recovery {
     /// Plan the recovery of the stores at `positions`, as `plan` replays
     /// them; `discard_wal` allows resetting the WAL.
     fn decide(mut plan: RecoveryPlan, positions: &Positions, discard_wal: bool) -> Self {
-        // A no-op archive always shows an archive step, uncovered: there is
-        // nothing to replay into.
+        // An archive the dataset does not keep reads empty, so the plan always
+        // shows an archive step: there is nothing to replay into.
         if !positions.archive_kept {
             plan.steps
                 .retain(|step| step.store != RecoveredStore::Archive);
             plan.covers_lag = plan.steps.iter().all(|step| step.covered);
         }
 
-        // A WAL that holds no block has no rollback history to lose, and the
-        // daemon seeds it at the state cursor itself.
+        // A WAL that holds no block, empty or Origin alone, has no rollback
+        // history to lose.
         let seed = positions.wal().is_none() && positions.state().is_some();
 
         let gap = if seed { None } else { gap(&plan, positions) };
@@ -274,7 +276,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         Access::Mutate
     };
 
-    let stores = super::open_stores(config, access)?;
+    let stores = crate::common::open_existing_stores(config, access)?;
     let positions = Positions::read(config, &stores)?;
 
     let plan = recovery_plan(&stores.wal, &stores.state, &stores.archive)
@@ -294,9 +296,14 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         Action::Replay => {
             let domain = crate::common::assemble_domain(config, &stores)?;
 
-            catch_up_stores(&domain)
-                .into_diagnostic()
-                .context("replaying the WAL")?;
+            // An archive the dataset does not keep has nothing to replay into.
+            let replayed = if positions.archive_kept {
+                catch_up_stores(&domain)
+            } else {
+                catch_up_state_only(&domain)
+            };
+
+            replayed.into_diagnostic().context("replaying the WAL")?;
 
             domain
                 .shutdown()

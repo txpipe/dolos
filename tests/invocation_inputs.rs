@@ -474,6 +474,28 @@ fn digest_refuses_stores_off_the_boundary() {
     assert!(!inscription.exists(), "a refused digest wrote a document");
 }
 
+/// The help of `snapshot digest` and of `verify --reproduce` names the sync
+/// that leaves the stores on an epoch's first block.
+#[test]
+fn the_snapshot_help_names_the_sync_to_a_boundary() {
+    let node = Node::new();
+
+    for args in [
+        &["snapshot", "digest", "--help"][..],
+        &["snapshot", "verify", "--help"],
+    ] {
+        let output = node.run(args);
+        let help = String::from_utf8_lossy(&output.stdout);
+        let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(output.status.success(), "{args:?}: {}", stderr(&output));
+        assert!(
+            help.contains("as `dolos sync catchup --follow --stop-epoch` leaves them"),
+            "{args:?}: {help}"
+        );
+    }
+}
+
 /// `snapshot digest` one block past the boundary is refused as it plans, before
 /// it reports a plan: it says the boundary state is gone from these stores and
 /// how to get one.

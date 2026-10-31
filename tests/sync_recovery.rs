@@ -19,6 +19,11 @@ const EPHEMERAL_ARCHIVE: &str = r#"
 type = "ephemeral"
 "#;
 
+const NO_HISTORY: &str = r#"
+[history]
+mode = "none"
+"#;
+
 /// The four synthetic blocks synced live over `tables`, the stores in
 /// agreement at the last.
 fn synced_on(tables: &str) -> (Node, Arc<Genesis>, Vec<RawBlock>) {
@@ -378,6 +383,49 @@ fn a_wal_that_cannot_replay_the_stores_is_discarded_only_when_asked() {
     assert_eq!(json(&status)["rollback_window"]["blocks"], 0);
 }
 
+/// The WAL discarded at the state, then the last two blocks synced again: a
+/// reset point holds no block, so a rollback to it undoes both, as the window
+/// says.
+#[test]
+fn a_rollback_window_past_a_reset_point_counts_every_block() {
+    let (node, genesis, blocks) = fixture("");
+
+    let domain = start(&node, &genesis);
+    domain.roll_forward_batch(blocks[..2].to_vec()).unwrap();
+    feed_until_crash(&domain, &blocks[2..], CrashAfter::Wal);
+    domain.shutdown().unwrap();
+    drop(domain);
+
+    let tip = point(&blocks[3]);
+    let floor = point(&blocks[1]);
+    reset_wal(&node, &tip);
+
+    let discarded = node.run(&["sync", "recover", "--discard-wal"]);
+    assert_eq!(code(&discarded), Some(0), "{}", stderr_words(&discarded));
+
+    let domain = start(&node, &genesis);
+    domain.roll_forward_batch(blocks[2..].to_vec()).unwrap();
+    domain.shutdown().unwrap();
+    drop(domain);
+
+    let status = node.run(&["sync", "status", "--format", "json"]);
+    assert_eq!(code(&status), Some(0), "{}", stdout(&status));
+    let window = &json(&status)["rollback_window"];
+    assert_eq!(window["from_slot"], floor.slot(), "{window}");
+    assert_eq!(window["to_slot"], tip.slot(), "{window}");
+    assert_eq!(window["blocks"], 2, "{window}");
+
+    let (slot, hash) = (floor.slot().to_string(), hash_of(&floor));
+    let output = node.run(&[
+        "sync", "rollback", "--slot", &slot, "--hash", &hash, "--yes",
+    ]);
+    assert_eq!(code(&output), Some(0), "{}", stderr_words(&output));
+    assert_eq!(
+        store_positions(&node),
+        (Some(floor.clone()), Some(floor.clone()), Some(floor.slot()))
+    );
+}
+
 /// A WAL emptied beside a state with a cursor, as a version wipe leaves it:
 /// it held no rollback history, so recovery seeds it without the flag, as the
 /// daemon would.
@@ -407,6 +455,38 @@ fn a_wal_without_blocks_is_seeded_without_the_flag() {
 
     let status = node.run(&["sync", "status"]);
     assert_eq!(code(&status), Some(0), "{}", stdout(&status));
+}
+
+/// A WAL holding only Origin, as an interrupted in-place `rebuild-state`
+/// leaves it, beside a state at the tip: the text calls it empty, as the
+/// agreement line does, while the JSON keeps the slots it read.
+#[test]
+fn a_wal_holding_only_origin_reads_as_empty() {
+    let (node, blocks) = synced();
+    let tip = point(&blocks[3]);
+    reset_wal(&node, &ChainPoint::Origin);
+
+    let status = node.run(&["sync", "status"]);
+    let text = stdout(&status);
+    assert_eq!(code(&status), Some(3), "{text}");
+    assert!(text.contains("wal        empty"), "{text}");
+    assert!(!text.contains("slot 0"), "{text}");
+    assert!(
+        text.contains("rollback   none: the WAL holds nothing past Origin"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "the state, at slot {}, is ahead of the WAL, which is empty",
+            tip.slot()
+        )),
+        "{text}"
+    );
+
+    let status = json(&node.run(&["sync", "status", "--format", "json"]));
+    assert_eq!(status["wal"]["start_slot"], 0, "{status}");
+    assert_eq!(status["wal"]["tip_slot"], 0, "{status}");
+    assert_eq!(status["rollback_window"], serde_json::Value::Null);
 }
 
 /// The state at the tip, the archive two blocks back, and a WAL reset to the
@@ -555,16 +635,7 @@ fn an_ephemeral_archive_is_left_out() {
     assert_eq!(code(&output), Some(0), "{}", stderr_words(&output));
     assert_eq!(store_positions(&node), (Some(to.clone()), Some(to), None));
 
-    // A lag the WAL covers is replayed into the state alone.
-    let (node, blocks) = lagging_on(CrashAfter::Wal, EPHEMERAL_ARCHIVE);
-    let tip = point(&blocks[3]);
-
-    let output = node.run(&["sync", "recover"]);
-    assert_eq!(code(&output), Some(0), "{}", stderr_words(&output));
-    assert_eq!(store_positions(&node), (Some(tip.clone()), Some(tip), None));
-    assert_eq!(code(&node.run(&["sync", "status"])), Some(0));
-
-    // One it cannot cover is discarded without an archive to refuse it.
+    // A lag the WAL cannot cover is discarded without an archive to refuse it.
     let (node, blocks) = lagging_on(CrashAfter::Wal, EPHEMERAL_ARCHIVE);
     let state = point(&blocks[1]);
     reset_wal(&node, &point(&blocks[3]));
@@ -575,6 +646,42 @@ fn an_ephemeral_archive_is_left_out() {
         store_positions(&node),
         (Some(state.clone()), Some(state), None)
     );
+}
+
+/// A lag the WAL covers, over a dataset that keeps no archive, is replayed
+/// into the state alone, with no archive left to report behind.
+#[test]
+fn a_replay_without_a_kept_archive_reaches_the_state_alone() {
+    for tables in [EPHEMERAL_ARCHIVE, NO_HISTORY] {
+        let (node, blocks) = lagging_on(CrashAfter::Wal, tables);
+        let tip = point(&blocks[3]);
+
+        let dry_run = node.run(&["sync", "recover", "--dry-run", "--format", "json"]);
+        assert_eq!(
+            code(&dry_run),
+            Some(0),
+            "{tables}{}",
+            stderr_words(&dry_run)
+        );
+        let plan = json(&dry_run);
+        assert_eq!(plan["action"], "replay", "{tables}{plan}");
+        assert_eq!(plan["steps"].as_array().unwrap().len(), 1, "{tables}{plan}");
+        assert_eq!(plan["steps"][0]["store"], "state", "{tables}{plan}");
+
+        let output = node.run(&["sync", "recover"]);
+        let message = stderr_words(&output);
+        assert_eq!(code(&output), Some(0), "{tables}{message}");
+        assert!(!message.contains("ERROR"), "{tables}{message}");
+        assert!(!message.contains("still behind"), "{tables}{message}");
+        assert_eq!(
+            store_positions(&node),
+            (Some(tip.clone()), Some(tip), None),
+            "{tables}"
+        );
+
+        let status = node.run(&["sync", "status"]);
+        assert_eq!(code(&status), Some(0), "{tables}{}", stdout(&status));
+    }
 }
 
 #[test]
@@ -595,6 +702,30 @@ fn a_rollback_refuses_stores_behind_the_wal() {
     assert_eq!(
         store_positions(&node),
         (Some(point(&blocks[3])), Some(to.clone()), Some(to.slot()))
+    );
+}
+
+/// The WAL and the state at the tip, the archive behind them: recovery, not
+/// a sync, brings the archive up, so that is the remedy a rollback names.
+#[test]
+fn a_rollback_with_only_the_archive_behind_points_to_recover() {
+    let (node, blocks) = lagging(CrashAfter::State);
+    let tip = point(&blocks[3]);
+    let to = point(&blocks[1]);
+
+    let (slot, hash) = (to.slot().to_string(), hash_of(&to));
+    let output = node.run(&[
+        "sync", "rollback", "--slot", &slot, "--hash", &hash, "--yes",
+    ]);
+    let message = stderr_words(&output);
+    assert_eq!(code(&output), Some(1), "{message}");
+    assert!(message.contains("archive, at slot"), "{message}");
+    assert!(message.contains("is behind the WAL tip"), "{message}");
+    assert!(message.contains("dolos sync recover"), "{message}");
+    assert!(!message.contains("sync catchup"), "{message}");
+    assert_eq!(
+        store_positions(&node),
+        (Some(tip.clone()), Some(tip), Some(to.slot()))
     );
 }
 
@@ -655,6 +786,10 @@ fn a_dump_is_bounded_unless_told_otherwise() {
     let output = node.run(&["sync", "dump"]);
     assert_eq!(code(&output), Some(0), "{}", stderr_words(&output));
     assert_eq!(table_rows(&stdout(&output)), (100, 1));
+
+    // A bounded dump is one table, however long.
+    let output = node.run(&["sync", "dump", "--limit", "1050"]);
+    assert_eq!(table_rows(&stdout(&output)), (1050, 1));
 
     // Every entry, a table at a time.
     let output = node.run(&["sync", "dump", "--limit", "0"]);

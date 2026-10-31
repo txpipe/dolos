@@ -36,7 +36,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
     crate::common::setup_tracing_warnings()?;
 
-    let stores = super::open_stores(config, Access::Mutate)?;
+    let stores = crate::common::open_existing_stores(config, Access::Mutate)?;
     let positions = Positions::read(config, &stores)?;
 
     // Each undone block takes back what it applied, so a store that never

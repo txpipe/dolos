@@ -34,6 +34,13 @@ struct Status {
     rollback_window: Option<RollbackWindow>,
     integrity: IntegrityReport,
     healthy: bool,
+    /// The slot the WAL tip has applied the chain through, which the text
+    /// prints: a WAL holding only Origin is empty there, not at slot 0.
+    #[serde(skip)]
+    wal_applied: Option<BlockSlot>,
+    /// The slot the state has applied the chain through, as for the WAL.
+    #[serde(skip)]
+    state_applied: Option<BlockSlot>,
 }
 
 #[derive(Debug, Serialize)]
@@ -79,12 +86,12 @@ fn slot(slot: Option<BlockSlot>) -> String {
 
 impl fmt::Display for Status {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match (self.cursors.wal.start_slot, self.cursors.wal.tip_slot) {
+        match (self.cursors.wal.start_slot, self.wal_applied) {
             (Some(start), Some(tip)) => writeln!(f, "wal        slot {start} to slot {tip}")?,
             _ => writeln!(f, "wal        empty")?,
         }
 
-        writeln!(f, "state      {}", slot(self.cursors.state.tip_slot))?;
+        writeln!(f, "state      {}", slot(self.state_applied))?;
 
         if self.archive_kept {
             writeln!(f, "archive    {}", slot(self.cursors.archive.tip_slot))?;
@@ -147,7 +154,7 @@ impl fmt::Display for Status {
 pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     crate::common::setup_tracing_warnings()?;
 
-    let stores = super::open_stores(config, Access::Observe)?;
+    let stores = crate::common::open_existing_stores(config, Access::Observe)?;
     let positions = Positions::read(config, &stores)?;
 
     let progress = feedback.slot_progress_bar();
@@ -192,6 +199,8 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         rollback_window,
         integrity,
         healthy,
+        wal_applied: positions.wal(),
+        state_applied: positions.state(),
     };
 
     emit(&status, &args.format)?;

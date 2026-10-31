@@ -2,7 +2,6 @@
 //! roll back the WAL it writes.
 
 use clap::{Parser, Subcommand};
-use dolos::storage::{Access, ArchiveStoreBackend};
 use dolos_core::{
     config::{RootConfig, StoreType},
     BlockSlot, ChainPoint,
@@ -63,18 +62,6 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
 /// what the running node refilled from the WAL, which no other process sees.
 fn archive_kept(config: &RootConfig) -> bool {
     config.keeps_archive() && config.storage.archive.kind != StoreType::Ephemeral
-}
-
-/// The dataset's stores, opened as `access` says, with an archive it does not
-/// keep left out.
-fn open_stores(config: &RootConfig, access: Access) -> miette::Result<Stores> {
-    let mut stores = crate::common::open_existing_stores(config, access)?;
-
-    if !archive_kept(config) {
-        stores.archive = ArchiveStoreBackend::noop();
-    }
-
-    Ok(stores)
 }
 
 /// Where each store stands, as read without changing any.

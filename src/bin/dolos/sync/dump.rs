@@ -22,7 +22,7 @@ pub struct Args {
     format: FormatArgs,
 }
 
-/// The rows of one text table.
+/// The rows of one text table, when every entry is printed.
 const TABLE_PAGE: usize = 1000;
 
 /// One WAL entry, as a row of the table or one JSON line.
@@ -39,7 +39,7 @@ struct Entry {
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing_warnings()?;
 
-    let stores = super::open_stores(config, Access::Observe)?;
+    let stores = crate::common::open_existing_stores(config, Access::Observe)?;
     let wal = &stores.wal;
 
     let start = match args.start {
@@ -79,15 +79,21 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
             }
         }
         Format::Text => {
-            // A table per page, so a dump of every entry streams rather than
-            // holding each row until the last.
+            // A dump of every entry prints a table per page, so it streams
+            // rather than holding each row until the last; a bounded dump is
+            // one table.
+            let page = match args.limit {
+                0 => TABLE_PAGE,
+                limit => limit,
+            };
+
             let mut entries = entries.peekable();
 
             loop {
                 let mut table = Table::new();
                 table.set_header(vec!["Slot", "Hash", "Block Size", "State Deltas", "Inputs"]);
 
-                for entry in entries.by_ref().take(TABLE_PAGE) {
+                for entry in entries.by_ref().take(page) {
                     table.add_row(vec![
                         entry.slot.to_string(),
                         entry.hash,

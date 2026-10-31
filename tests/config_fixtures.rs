@@ -435,8 +435,7 @@ fn older_files_point_to_the_migration_guide() {
 }
 
 /// The binary in `cwd`, without the `DOLOS_` variables the in-process tests
-/// set. `data summary` opens every store, so a refused file shows that none
-/// was.
+/// set.
 fn run_dolos(cwd: &Path, args: &[&str]) -> std::process::Output {
     run_dolos_with_env(cwd, args, &[])
 }

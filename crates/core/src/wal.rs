@@ -475,6 +475,39 @@ mod integrity_tests {
         assert!(report.is_intact(), "{report:?}");
     }
 
+    /// Blocks in different slots are checked in slot order, even when they
+    /// would chain in another: B's parent is A and C's is B, but C sits
+    /// between them.
+    #[test]
+    fn blocks_in_different_slots_chain_in_slot_order() {
+        let (a, ba) = make_block_with_prev(104, None);
+        let (b, bb) = make_block_with_prev(106, a.hash());
+        let (c, bc) = make_block_with_prev(105, b.hash());
+
+        let entries: Vec<(ChainPoint, RawBlock)> =
+            vec![(a.clone(), ba), (c.clone(), bc), (b.clone(), bb)];
+
+        let report = scan_chain_integrity(entries.into_iter(), |_| {});
+        assert!(report.complete);
+        assert_eq!(
+            report.failures,
+            vec![
+                IntegrityFailure::Discontinuity {
+                    slot: 105,
+                    block_hash: c.hash(),
+                    expected_prev: a.hash(),
+                    got_prev: b.hash(),
+                },
+                IntegrityFailure::Discontinuity {
+                    slot: 106,
+                    block_hash: b.hash(),
+                    expected_prev: c.hash(),
+                    got_prev: a.hash(),
+                },
+            ]
+        );
+    }
+
     /// Blocks that share a slot and do not chain are still a discontinuity.
     #[test]
     fn blocks_sharing_a_slot_that_do_not_chain_are_reported() {
