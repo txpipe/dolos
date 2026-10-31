@@ -810,7 +810,7 @@ fn select_state(inscription: &Inscription) -> Result<StateLayers, Error> {
         }
     }
 
-    for (kind, ns, shards) in STATE_KINDS {
+    for (kind, ns, shards, _) in STATE_KINDS {
         let expected: Vec<u64> = (0..u64::from(shards)).collect();
         let found: Vec<u64> = tip
             .get(ns)
@@ -1735,7 +1735,7 @@ mod tests {
 
         STATE_KINDS
             .into_iter()
-            .flat_map(|(kind, _, shards)| (0..shards).map(move |shard| (kind, shard)))
+            .flat_map(|(kind, _, shards, _)| (0..shards).map(move |shard| (kind, shard)))
             .map(|(kind, shard)| {
                 byte = byte.wrapping_add(1);
                 descriptor(kind, json!({ "shard": shard }), byte)
@@ -1750,7 +1750,7 @@ mod tests {
 
         STATE_KINDS
             .into_iter()
-            .flat_map(|(kind, _, shards)| (0..shards).map(move |shard| (kind, shard)))
+            .flat_map(|(kind, _, shards, _)| (0..shards).map(move |shard| (kind, shard)))
             .map(|(kind, shard)| {
                 byte = byte.wrapping_add(1);
                 descriptor(kind, json!({"epoch": epoch, "shard": shard}), byte)
@@ -1766,7 +1766,7 @@ mod tests {
 
         assert_eq!(selected.len(), STATE_KINDS.len(), "one entry per kind");
 
-        for (kind, ns, shards) in STATE_KINDS {
+        for (kind, ns, shards, _) in STATE_KINDS {
             let layers = &selected[ns];
 
             assert_eq!(layers.len(), shards as usize, "{kind}");
@@ -1826,7 +1826,7 @@ mod tests {
         // The tip is what it was: the dumps did not join it, and did not
         // displace a shard of it.
         assert_eq!(selected.tip.len(), STATE_KINDS.len());
-        for (kind, ns, shards) in STATE_KINDS {
+        for (kind, ns, shards, _) in STATE_KINDS {
             assert_eq!(selected.tip[ns].len(), shards as usize, "{kind}");
             for layer in &selected.tip[ns] {
                 assert!(layer.scope.get("epoch").is_none(), "{kind}");
@@ -1842,7 +1842,7 @@ mod tests {
         for (epoch, kinds) in &selected.dumps {
             assert_eq!(kinds.len(), STATE_KINDS.len(), "epoch {epoch}");
 
-            for (kind, ns, shards) in STATE_KINDS {
+            for (kind, ns, shards, _) in STATE_KINDS {
                 assert_eq!(kinds[ns].len(), shards as usize, "{kind} at {epoch}");
 
                 for (shard, layer) in kinds[ns].iter().enumerate() {

@@ -73,21 +73,14 @@ pub const POINT_HASH: [u8; 32] = [0x0b; 32];
 /// of these and stops — see [`state_layers`].
 pub const SHARDS: [u8; 2] = [0, 1];
 
-/// The one shard an account key reaches: every one starts with the CBOR
-/// header of its credential, `0x82`.
-pub const ACCOUNT_SHARD: u8 = 8;
-
-/// The shards the fixture populates for `ns`'s kind, published in `shards`.
-pub fn populated_shards(ns: Namespace, shards: u8) -> Vec<u8> {
-    if shards > 1 && ns == AccountState::NS {
-        return vec![ACCOUNT_SHARD];
-    }
-
+/// The shards the fixture populates for a kind published in `shards`.
+pub fn populated_shards(shards: u8) -> Vec<u8> {
     SHARDS.into_iter().filter(|shard| *shard < shards).collect()
 }
 
 /// A key of `ns`'s kind, stored, made from `byte`. Where the kind allows, the
-/// key's first byte is `byte`, which picks its shard.
+/// key's shard byte is `byte`, which picks its shard: the first byte for most
+/// kinds, the first hash byte after an account key's credential header.
 pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
     let credential = AccountKey(StakeCredential::AddrKeyhash([byte; 28].into()));
     let payment = PaymentKey([byte; 28].into());
@@ -282,15 +275,14 @@ pub fn entities(kind: EntityKind) -> Vec<EntityRecord> {
 ///
 /// One layer per namespace, so a kind's shards are the ones its spec'd count
 /// allows and its fixture keys reach: both of [`SHARDS`] for `datums` and
-/// `utxos`, [`ACCOUNT_SHARD`] alone for `accounts`,
-/// and shard 0 for every single blob. Every state namespace is among them —
-/// which is what `the_golden_state_layers_cover_every_namespace` holds this
-/// to.
+/// `utxos` and `accounts`, and shard 0 for every single blob. Every state
+/// namespace is among them — which is what
+/// `the_golden_state_layers_cover_every_namespace` holds this to.
 pub fn state_layers() -> Vec<(&'static str, Namespace, u8)> {
     STATE_KINDS
         .into_iter()
-        .flat_map(|(kind, ns, shards)| {
-            populated_shards(ns, shards)
+        .flat_map(|(kind, ns, shards, _)| {
+            populated_shards(shards)
                 .into_iter()
                 .map(move |shard| (kind, ns, shard))
         })
@@ -305,7 +297,7 @@ pub fn state_layers() -> Vec<(&'static str, Namespace, u8)> {
 /// The namespace strings are frozen by the kinds in the layer headers instead,
 /// which is where they now live on the wire.
 ///
-/// The key's first byte carries the shard in its high nibble, so the record
+/// The key's shard byte carries the shard in its high nibble, so the record
 /// lands in the layer that claims it under [`state_layers`] — the routing rule
 /// [`dolos_snapshot::shard_of`] applies, spelled out here because the fixture
 /// writes layers directly rather than through the export's router.
@@ -445,8 +437,8 @@ pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
     // ordering rule as well as the two scope shapes. The records are the same
     // in both; what tells the layers apart is the epoch in the header and the
     // epoch in the descriptor scope.
-    for (kind, ns, shards) in STATE_KINDS {
-        let populated = populated_shards(ns, shards);
+    for (kind, ns, shards, _) in STATE_KINDS {
+        let populated = populated_shards(shards);
 
         for scope in [dump_scope as fn(u8) -> StateScope, state_scope] {
             for shard in populated.iter().copied() {
