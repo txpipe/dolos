@@ -1,10 +1,11 @@
 //! The Pallas struct canaries.
 //!
 //! The records embed Pallas structs, and the `ProtocolVersion` tuple, whose
-//! bytes this repository does not define. The namespace canaries carry them,
-//! but a Pallas upgrade that moved one would fail there as a whole-record diff
-//! that does not name the struct. Each is pinned here on its own, so the
-//! failure names it. The Pallas enums are pinned in [`super::enums`].
+//! bytes this repository does not define. The namespace canaries and the enum
+//! tables carry them, but a Pallas upgrade that moved one would fail there as
+//! a whole-record or whole-variant diff that does not name the struct. Each is
+//! pinned here on its own, so the failure names it. The Pallas enums are
+//! pinned in [`super::enums`].
 
 use dolos_cardano::pallas::{
     codec::{minicbor, utils::Bytes},
