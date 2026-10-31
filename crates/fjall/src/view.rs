@@ -41,7 +41,7 @@ pub struct View {
     dir: PathBuf,
     mirror: PathBuf,
     lock: Option<File>,
-    _database_lock: File,
+    _database_lock: same_file::Handle,
 }
 
 impl View {
@@ -54,13 +54,7 @@ impl View {
 
         let lock_path = database.join(LOCK_FILE);
         let database_lock = File::open(&lock_path).map_err(|error| io_error(&lock_path, error))?;
-
-        database_lock
-            .try_lock_shared()
-            .map_err(|error| match error {
-                TryLockError::WouldBlock => Error::Fjall(fjall::Error::Locked),
-                TryLockError::Error(error) => io_error(&lock_path, error),
-            })?;
+        let database_lock = lock_opened(database_lock, &lock_path, Shared::Yes)?;
 
         sweep(&parent, &prefix);
 
@@ -154,7 +148,7 @@ pub fn live_views(store: &Path) -> Vec<PathBuf> {
 /// A database held against every view and writer until it drops.
 pub struct LockOut {
     path: PathBuf,
-    _lock: File,
+    _lock: same_file::Handle,
 }
 
 impl LockOut {
@@ -185,12 +179,42 @@ pub fn lock_out(database: &Path) -> Result<Option<LockOut>, Error> {
         Err(error) => return Err(io_error(&path, error)),
     };
 
-    lock.try_lock().map_err(|error| match error {
-        TryLockError::WouldBlock => Error::Fjall(fjall::Error::Locked),
-        TryLockError::Error(error) => io_error(&path, error),
-    })?;
+    let lock = lock_opened(lock, &path, Shared::No)?;
 
     Ok(Some(LockOut { path, _lock: lock }))
+}
+
+#[derive(Clone, Copy)]
+enum Shared {
+    Yes,
+    No,
+}
+
+/// Lock `file`, opened from the lock file at `path`, and keep it only while
+/// it is still the file there: one a removal unlinked since it was opened
+/// guards nothing, and a store made anew there locks a file of its own, so
+/// it fails as a held database does.
+fn lock_opened(file: File, path: &Path, shared: Shared) -> Result<same_file::Handle, Error> {
+    let locked = match shared {
+        Shared::Yes => file.try_lock_shared(),
+        Shared::No => file.try_lock(),
+    };
+
+    locked.map_err(|error| match error {
+        TryLockError::WouldBlock => Error::Fjall(fjall::Error::Locked),
+        TryLockError::Error(error) => io_error(path, error),
+    })?;
+
+    let held = same_file::Handle::from_file(file).map_err(|error| io_error(path, error))?;
+
+    match same_file::Handle::from_path(path) {
+        Ok(current) if current == held => Ok(held),
+        Ok(_) => Err(Error::Fjall(fjall::Error::Locked)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Err(Error::Fjall(fjall::Error::Locked))
+        }
+        Err(error) => Err(io_error(path, error)),
+    }
 }
 
 /// The folder views of `store` live in, and the name each starts with.
@@ -610,6 +634,39 @@ mod tests {
 
         drop(lock);
         drop(View::of(&path, &path).unwrap());
+    }
+
+    /// A lock file opened before its store was removed and made anew, then
+    /// locked, as an observer racing a wipe would, holds nothing: the lock
+    /// fails as a held database's does, shared or not.
+    #[test]
+    fn a_lock_on_a_removed_lock_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        written(&path);
+
+        for shared in [Shared::Yes, Shared::No] {
+            let stale = File::open(path.join(LOCK_FILE)).unwrap();
+
+            fs::remove_dir_all(&path).unwrap();
+            written(&path);
+
+            let error = lock_opened(stale, &path.join(LOCK_FILE), shared)
+                .err()
+                .unwrap();
+            assert!(error.is_locked(), "{error:?}");
+
+            let fresh = File::open(path.join(LOCK_FILE)).unwrap();
+            drop(lock_opened(fresh, &path.join(LOCK_FILE), shared).unwrap());
+        }
+
+        let stale = File::open(path.join(LOCK_FILE)).unwrap();
+        fs::remove_dir_all(&path).unwrap();
+
+        let error = lock_opened(stale, &path.join(LOCK_FILE), Shared::No)
+            .err()
+            .unwrap();
+        assert!(error.is_locked(), "{error:?}");
     }
 
     /// A writer's open removes every view beside the store, a killed

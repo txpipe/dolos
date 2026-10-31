@@ -236,6 +236,15 @@ impl InPlace {
         // A trailing separator would have the wipe follow a link at the store.
         let state_path: PathBuf = state_path.components().collect();
 
+        if std::fs::symlink_metadata(&state_path).is_ok_and(|metadata| metadata.is_symlink()) {
+            bail!(
+                "refusing the in-place wipe: the state store {} is a symbolic link, and the wipe \
+                 would empty what it points at; set `storage.state.path` to that folder itself, \
+                 or rebuild into --target",
+                state_path.display(),
+            );
+        }
+
         check_wipe_scope(config, &state_path)?;
         args.confirm
             .require(&in_place_rewrites(config, &state_path, args.rewrite_logs))?;
@@ -736,7 +745,7 @@ mod tests {
     }
 
     /// The state stays locked from the checks to the wipe: no view starts
-    /// while the WAL moves and the store goes.
+    /// while the WAL moves and the store goes, nor while any of it goes.
     #[test]
     fn an_in_place_rebuild_holds_the_state_until_it_is_wiped() {
         let dir = tempfile::tempdir().unwrap();
@@ -751,10 +760,40 @@ mod tests {
         let error = dolos_fjall::view::View::of(&state, &state).err().unwrap();
         assert!(error.is_locked(), "{error:?}");
 
-        drop(in_place.wipe(&config).unwrap());
+        let (hook, calls) = super::super::reset::tests::assert_held(vec![state.clone()]);
+        drop(super::super::reset::tests::while_removing(hook, || in_place.wipe(&config)).unwrap());
 
+        assert!(calls.get() > 0);
         assert!(!state.exists());
         assert!(dolos_fjall::view::lock_out(&state).unwrap().is_none());
+    }
+
+    /// A linked state, written with a trailing separator or not, refuses an
+    /// in-place rebuild, which would empty the folder it points at.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_state_refuses_an_in_place_rebuild() {
+        for written in ["state", "state/"] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+            config.storage.path = dir.path().join("data");
+            config.storage.state.path = Some(PathBuf::from(written));
+
+            let elsewhere = dir.path().join("elsewhere");
+            drop(dolos_fjall::StateStore::open(&elsewhere, Default::default()).unwrap());
+            std::fs::create_dir_all(&config.storage.path).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, config.storage.path.join("state")).unwrap();
+
+            let before = std::fs::read_dir(&elsewhere).unwrap().count();
+
+            let error = InPlace::prepare(&config, &args(false)).err().unwrap();
+            assert!(
+                error.to_string().contains("symbolic link"),
+                "{written}: {error}"
+            );
+            assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), before);
+            assert!(dolos_fjall::view::lock_out(&elsewhere).unwrap().is_some());
+        }
     }
 
     /// The refusal names the archive only when its rows are rewritten.

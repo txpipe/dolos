@@ -2835,7 +2835,7 @@ mod tests {
         for remedy in [
             "dolos bootstrap stelae --force",
             "dolos bootstrap immutabledb --source <db> --force",
-            "dolos data cleanup --force",
+            "dolos data reset --yes",
         ] {
             assert!(message.contains(remedy), "{message}");
         }

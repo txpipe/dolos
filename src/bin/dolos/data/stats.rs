@@ -320,4 +320,32 @@ mod tests {
         let tuning = archive.tuning();
         assert_reports(&fjall_section(archive.disk_usage(), &tuning), &tuning);
     }
+
+    /// Segments count where the archive keeps them: its own folder, or
+    /// `blocks_path` when set, and an empty folder holds none.
+    #[test]
+    fn segments_are_looked_for_where_the_archive_keeps_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = dir.path().to_path_buf();
+
+        let archive = dir.path().join("archive");
+        let blocks = dir.path().join("blocks");
+
+        assert!(!holds_segments(&config));
+
+        std::fs::create_dir_all(&archive).unwrap();
+        assert!(!holds_segments(&config));
+
+        std::fs::write(archive.join("000000.segment"), b"a segment").unwrap();
+        assert!(holds_segments(&config));
+
+        config.storage.archive.blocks_path = Some(std::path::PathBuf::from("blocks"));
+        assert!(!holds_segments(&config));
+
+        std::fs::create_dir_all(&blocks).unwrap();
+        std::fs::write(blocks.join("000000.segment"), b"a segment").unwrap();
+        std::fs::remove_file(archive.join("000000.segment")).unwrap();
+        assert!(holds_segments(&config));
+    }
 }

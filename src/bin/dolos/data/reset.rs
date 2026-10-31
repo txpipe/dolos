@@ -46,7 +46,8 @@ impl Removal {
     /// Remove every store in turn with `remove`, handing it the locks of the
     /// fjall stores it holds, and name each to `removed` once it is gone.
     /// Each is checked again just before: a link swapped in since the first
-    /// checks stops the reset rather than being followed.
+    /// checks stops the reset rather than being followed, and one gone since
+    /// is left alone.
     fn remove_all(
         self,
         mut remove: impl FnMut(&Path, Vec<LockOut>) -> miette::Result<()>,
@@ -58,16 +59,23 @@ impl Removal {
             mut locks,
         } = self;
 
-        for path in paths {
-            recheck(&root, &path)?;
+        for written in paths {
+            // Reached with `..` resolved, as the checks found it resolves on
+            // disk: a folder it climbs out of may be gone with a store.
+            let path = normalized(&written)?;
+            let present = recheck(&root, &path)?;
 
             let (held, rest): (Vec<_>, Vec<_>) = locks
                 .into_iter()
                 .partition(|(store, _)| store.starts_with(&path));
             locks = rest;
 
+            if !present {
+                continue;
+            }
+
             remove(&path, held.into_iter().map(|(_, lock)| lock).collect())?;
-            removed(&path);
+            removed(&written);
         }
 
         Ok(())
@@ -75,21 +83,48 @@ impl Removal {
 }
 
 /// Remove the store at `path` while `held` keep the fjall databases in it
-/// locked, so no view starts on a store half removed. Unix removes a file a
-/// handle holds open, so the whole store goes under the locks; elsewhere
-/// everything but the lock files goes first, then the locks are released
-/// and the rest goes.
+/// locked. Everything but their lock files goes first, so no view or writer
+/// starts on a store half removed, nor on a lock file made anew. Then the
+/// locks are released, and the lock files go, and the folders holding them
+/// only once empty: a writer that started since keeps what it wrote.
 pub(super) fn remove_held(path: &Path, held: Vec<LockOut>) -> miette::Result<()> {
-    if cfg!(unix) {
-        remove(path)?;
-    } else {
-        let kept: Vec<PathBuf> = held.iter().map(|lock| lock.path().to_path_buf()).collect();
-        remove_except(path, &kept)?;
-    }
+    let path = normalized(path)?;
+
+    let kept = held
+        .iter()
+        .map(|lock| normalized(lock.path()))
+        .collect::<miette::Result<Vec<_>>>()?;
+
+    remove_except(&path, &kept)?;
 
     drop(held);
 
-    remove(path)
+    for lock in &kept {
+        gone(std::fs::remove_file(lock), lock)?;
+    }
+
+    let mut folders: Vec<&Path> = kept
+        .iter()
+        .flat_map(|lock| lock.ancestors().skip(1))
+        .filter(|folder| folder.starts_with(&path))
+        .collect();
+
+    folders.sort_by_key(|folder| std::cmp::Reverse(folder.components().count()));
+    folders.dedup();
+
+    for folder in folders {
+        gone(std::fs::remove_dir(folder), folder)?;
+    }
+
+    Ok(())
+}
+
+/// `path` made absolute with `..` resolved lexically, as the checks found
+/// it resolves on disk.
+fn normalized(path: &Path) -> miette::Result<PathBuf> {
+    dolos::storage::normalize(path)
+        .into_diagnostic()
+        .with_context(|| format!("resolving {}", path.display()))
 }
 
 /// Remove everything under `dir` but `kept` and the folders holding them.
@@ -121,18 +156,18 @@ fn remove_except(dir: &Path, kept: &[PathBuf]) -> miette::Result<()> {
 }
 
 /// Refuse `path` if, since the checks, it or a folder on the way to it below
-/// `root` became a symbolic link, or it resolves outside the root. One
-/// already gone has nothing left to check.
-fn recheck(root: &Path, path: &Path) -> miette::Result<()> {
+/// `root` became a symbolic link, or it resolves outside the root. `false`
+/// for one already gone, which is left alone.
+fn recheck(root: &Path, path: &Path) -> miette::Result<bool> {
     if std::fs::symlink_metadata(path).is_err() {
-        return Ok(());
+        return Ok(false);
     }
 
     let mut changed = links_on_the_way(root, path).into_diagnostic()?;
     changed.extend(resolved_outside(root, &[path.to_path_buf()]).into_diagnostic()?);
 
     if changed.is_empty() {
-        return Ok(());
+        return Ok(true);
     }
 
     let listed = format_paths(&changed);
@@ -173,7 +208,7 @@ fn managed_paths(config: &RootConfig) -> miette::Result<Removal> {
 
     let mut outside = stores_outside_root(config).into_diagnostic()?;
 
-    let candidates = store_paths(config);
+    let candidates = store_paths(config).into_diagnostic()?;
 
     let managed: Vec<PathBuf> = candidates
         .iter()
@@ -233,7 +268,7 @@ fn managed_paths(config: &RootConfig) -> miette::Result<Removal> {
 
     for (store, database) in fjall_databases(config) {
         match dolos_fjall::view::lock_out(&database) {
-            Ok(Some(lock)) => locks.push((store, lock)),
+            Ok(Some(lock)) => locks.push((normalized(&store)?, lock)),
             Ok(None) => {}
             Err(error) if error.is_locked() => {
                 let live = dolos_fjall::view::live_views(&store);
@@ -251,6 +286,13 @@ fn managed_paths(config: &RootConfig) -> miette::Result<Removal> {
             }
         }
     }
+
+    held.extend(
+        managed
+            .iter()
+            .flat_map(|path| redb_files(path))
+            .filter(|file| held_open(file)),
+    );
 
     if !held.is_empty() {
         held.sort();
@@ -278,7 +320,7 @@ fn managed_paths(config: &RootConfig) -> miette::Result<Removal> {
 /// scratch, a snapshot download's staging, a restore's progress and a
 /// publish's resumption record, and the read-only views of the fjall stores
 /// an interrupted observer left.
-fn store_paths(config: &RootConfig) -> Vec<PathBuf> {
+fn store_paths(config: &RootConfig) -> std::io::Result<Vec<PathBuf>> {
     let storage = &config.storage;
     let root = &storage.path;
 
@@ -307,28 +349,64 @@ fn store_paths(config: &RootConfig) -> Vec<PathBuf> {
 
     rest.sort();
 
-    let mut paths = first;
+    // Each with `..` resolved, so one written through another's folder, as
+    // `archive/../state` is, is neither taken for nested in it nor kept twice.
+    let mut paths: Vec<(PathBuf, PathBuf)> = Vec::new();
 
-    for path in rest {
-        if !paths.contains(&path) {
-            paths.push(path);
+    for path in first.into_iter().chain(rest) {
+        let resolved = dolos::storage::normalize(&path)?;
+
+        if !paths.iter().any(|(_, other)| *other == resolved) {
+            paths.push((path, resolved));
         }
     }
 
     // A store nested in another goes with it.
     let nested: Vec<PathBuf> = paths
         .iter()
-        .filter(|path| {
+        .filter(|(_, resolved)| {
             paths
                 .iter()
-                .any(|other| other != *path && path.starts_with(other))
+                .any(|(_, other)| other != resolved && resolved.starts_with(other))
         })
-        .cloned()
+        .map(|(_, resolved)| resolved.clone())
         .collect();
 
-    paths.retain(|path| !nested.contains(path));
+    Ok(paths
+        .into_iter()
+        .filter(|(_, resolved)| !nested.contains(resolved))
+        .map(|(path, _)| path)
+        .collect())
+}
 
-    paths
+/// The files a redb store may be kept in at `path`: the store itself when it
+/// is a file, as the WAL, the mempool and a v1 store are, or the `.redb`
+/// files in its folder, as the cache's.
+fn redb_files(path: &Path) -> Vec<PathBuf> {
+    if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file()) {
+        return vec![path.to_path_buf()];
+    }
+
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return Vec::new();
+    };
+
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|file| {
+            file.extension()
+                .is_some_and(|extension| extension == "redb")
+        })
+        .filter(|file| file.is_file())
+        .collect()
+}
+
+/// Whether a process holds the file at `path` locked, as redb holds a
+/// database it has open, read-only or not.
+fn held_open(path: &Path) -> bool {
+    std::fs::File::open(path)
+        .is_ok_and(|file| matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
 }
 
 /// Each fjall store, and the database a view or a writer of it locks.
@@ -378,12 +456,20 @@ fn views_beside(store: &Path) -> Vec<PathBuf> {
 /// Remove `path`; one already gone, as a view another process swept, is
 /// not an error.
 fn remove(path: &Path) -> miette::Result<()> {
+    #[cfg(test)]
+    tests::before_removing(path);
+
     let removed = if path.is_dir() {
         std::fs::remove_dir_all(path)
     } else {
         std::fs::remove_file(path)
     };
 
+    gone(removed, path)
+}
+
+/// `removed`, with `path` already gone not an error.
+fn gone(removed: std::io::Result<()>, path: &Path) -> miette::Result<()> {
     removed
         .or_else(|error| match error.kind() {
             std::io::ErrorKind::NotFound => Ok(()),
@@ -520,8 +606,82 @@ fn symlinks_under(root: &Path) -> std::io::Result<Vec<PathBuf>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
+    use std::cell::RefCell;
+
     use super::*;
+
+    type Hook = Box<dyn FnMut(&Path)>;
+
+    thread_local! {
+        static BEFORE_REMOVING: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    /// Called by [`remove`] with each path just before it goes.
+    pub(super) fn before_removing(path: &Path) {
+        BEFORE_REMOVING.with_borrow_mut(|hook| {
+            if let Some(hook) = hook {
+                hook(path);
+            }
+        });
+    }
+
+    /// Run `run` with `hook` called before each removal it makes on this
+    /// thread.
+    pub(in crate::data) fn while_removing<T>(
+        hook: impl FnMut(&Path) + 'static,
+        run: impl FnOnce() -> T,
+    ) -> T {
+        BEFORE_REMOVING.set(Some(Box::new(hook)));
+        let result = run();
+        BEFORE_REMOVING.set(None);
+        result
+    }
+
+    /// A hook asserting that every fjall database among `databases` whose
+    /// lock file is there is locked against views and writers, and that
+    /// the path about to go holds none of those lock files. It counts its
+    /// calls in the returned cell.
+    pub(in crate::data) fn assert_held(
+        databases: Vec<PathBuf>,
+    ) -> (
+        impl FnMut(&Path) + 'static,
+        std::rc::Rc<std::cell::Cell<usize>>,
+    ) {
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counted = calls.clone();
+
+        let hook = move |path: &Path| {
+            counted.set(counted.get() + 1);
+
+            for database in &databases {
+                let lock = database.join("lock");
+
+                if !lock.exists() {
+                    continue;
+                }
+
+                assert!(
+                    !normalized(&lock)
+                        .unwrap()
+                        .starts_with(normalized(path).unwrap()),
+                    "{} goes with {} still locked",
+                    lock.display(),
+                    path.display()
+                );
+
+                let error = dolos_fjall::view::lock_out(database).err();
+                assert!(
+                    error.as_ref().is_some_and(|error| error.is_locked()),
+                    "{} is not held while {} goes: {error:?}",
+                    database.display(),
+                    path.display()
+                );
+            }
+        };
+
+        (hook, calls)
+    }
 
     fn config_over(root: &Path) -> RootConfig {
         let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
@@ -599,7 +759,7 @@ mod tests {
         let mut config = config_over(&root);
         config.storage.archive.blocks_path = Some(PathBuf::from("archive/blocks"));
 
-        let paths = store_paths(&config);
+        let paths = store_paths(&config).unwrap();
 
         assert!(paths.contains(&root.join("archive")));
         assert!(!paths.contains(&root.join("archive").join("blocks")));
@@ -923,41 +1083,130 @@ mod tests {
 
         std::fs::remove_dir_all(&view).unwrap();
 
-        removal.remove_all(remove_held, |_| {}).unwrap();
+        let mut removed = Vec::new();
+        removal
+            .remove_all(remove_held, |path| removed.push(path.to_path_buf()))
+            .unwrap();
+
+        assert!(!removed.contains(&view), "{removed:?}");
+        assert!(removed.contains(&root.join("state")), "{removed:?}");
     }
 
-    /// Each fjall store is removed while its lock is still held, so no view
-    /// starts on a store half removed.
+    /// Each fjall store is removed while its lock is still held, and its lock
+    /// file outlives the rest of it, so no view or writer starts on a store
+    /// half removed, nor takes a lock file made anew.
     #[test]
     fn the_stores_stay_locked_while_they_are_removed() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("data");
         let stores = fjall_stores_under(&root);
-        let mut locked = Vec::new();
 
-        managed_paths(&config_over(&root))
-            .unwrap()
-            .remove_all(
+        let databases = stores
+            .iter()
+            .map(|(_, database)| database.clone())
+            .collect();
+        let (hook, calls) = assert_held(databases);
+
+        let mut handed = Vec::new();
+
+        while_removing(hook, || {
+            managed_paths(&config_over(&root)).unwrap().remove_all(
                 |path, held| {
-                    for (store, database) in &stores {
-                        if store.starts_with(path) {
-                            assert_eq!(held.len(), 1, "{}", path.display());
-
-                            let error = dolos_fjall::view::View::of(database, store).err();
-                            assert!(error.unwrap().is_locked(), "{}", store.display());
-
-                            locked.push(store.clone());
-                        }
-                    }
-
+                    handed.push((path.to_path_buf(), held.len()));
                     remove_held(path, held)
                 },
                 |_| {},
             )
-            .unwrap();
+        })
+        .unwrap();
 
-        assert_eq!(locked.len(), stores.len());
-        assert!(stores.iter().all(|(store, _)| !store.exists()));
+        for (store, _) in &stores {
+            assert!(handed.contains(&(store.clone(), 1)), "{handed:?}");
+            assert!(!store.exists());
+        }
+
+        // Every file but the lock in each store went one by one.
+        assert!(calls.get() > stores.len(), "{}", calls.get());
+    }
+
+    /// A store written through another's folder, as `archive/../state` is,
+    /// is not nested in it: the reset removes both, the fjall ones under
+    /// their locks.
+    #[test]
+    fn a_store_written_through_another_folder_is_removed_too() {
+        type Set = fn(&mut RootConfig);
+
+        let through: [Set; 3] = [
+            |config| config.storage.state.path = Some(PathBuf::from("archive/../state")),
+            |config| config.storage.archive.path = Some(PathBuf::from("state/../archive")),
+            |config| {
+                config.storage.archive.blocks_path = Some(PathBuf::from("archive/../segments"))
+            },
+        ];
+
+        for set in through {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("data");
+            let stores = fjall_stores_under(&root);
+
+            std::fs::create_dir_all(root.join("segments")).unwrap();
+            std::fs::write(root.join("segments").join("000000.segment"), b"a store").unwrap();
+            std::fs::write(root.join("dolos.toml"), b"the operator's").unwrap();
+
+            let mut config = config_over(&root);
+            config.storage.archive.blocks_path = Some(PathBuf::from("segments"));
+            set(&mut config);
+
+            let databases = stores
+                .iter()
+                .map(|(_, database)| database.clone())
+                .collect();
+            let (hook, _) = assert_held(databases);
+
+            while_removing(hook, || reset(&config)).unwrap();
+
+            let left: Vec<_> = std::fs::read_dir(&root)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert_eq!(left, ["dolos.toml"]);
+        }
+    }
+
+    /// A store kept in a redb file a process holds, as a node holds its WAL,
+    /// mempool and cache, or a v1 node its state, refuses the reset; let go,
+    /// the reset goes ahead. redb locks its file as `File::lock` does.
+    #[test]
+    fn refuses_while_a_redb_store_is_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("data");
+
+        let stores = [
+            root.join("wal"),
+            root.join("mempool"),
+            root.join("state"),
+            root.join("cache").join("cache.redb"),
+        ];
+
+        for file in &stores {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, b"a redb file").unwrap();
+        }
+
+        for store in &stores {
+            let held = std::fs::File::open(store).unwrap();
+            held.lock_shared().unwrap();
+
+            let error = reset(&config_over(&root)).expect_err("a held redb store refuses a reset");
+            let message = error.to_string();
+
+            assert!(message.contains("a dolos process holds"), "{message}");
+            assert!(message.contains(&store.display().to_string()), "{message}");
+            assert!(stores.iter().all(|file| file.is_file()), "{message}");
+        }
+
+        reset(&config_over(&root)).unwrap();
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
     }
 
     /// The stores a release before v2 wrote as single redb files.
@@ -1087,32 +1336,20 @@ mod tests {
     }
 
     /// A relative storage path, the default `data` among them, resolves
-    /// against the working directory.
+    /// against the working directory, which tests running in parallel leave
+    /// as it is: the dataset sits under it.
     #[test]
     fn resets_a_relative_root() {
-        let dir = tempfile::tempdir().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let dir = tempfile::tempdir_in(&cwd).unwrap();
         let root = dir.path().join("data");
         let files = old_store_under(&root);
 
-        let relative = relative_to_cwd(&root);
+        let relative = root.strip_prefix(&cwd).unwrap();
         assert!(relative.is_relative(), "{}", relative.display());
 
-        reset(&config_over(&relative)).unwrap();
+        reset(&config_over(relative)).unwrap();
         assert!(!files.iter().any(|file| file.exists()));
-    }
-
-    /// `path` relative to the working directory, without changing it: tests
-    /// run in parallel.
-    fn relative_to_cwd(path: &Path) -> PathBuf {
-        let cwd = std::env::current_dir().unwrap();
-        let ups = cwd.components().count() - 1;
-
-        let mut relative = PathBuf::new();
-        for _ in 0..ups {
-            relative.push("..");
-        }
-
-        relative.join(path.strip_prefix("/").unwrap())
     }
 
     /// A `..` climbing through a link resolves where the link points, not
