@@ -143,9 +143,8 @@ fn a_forced_restore_replaces_a_store_this_release_refuses() {
     for refused in [
         node.run(&["data", "summary"]),
         node.bootstrap_headless(&["--skip-if-data"]),
-        node.bootstrap_headless(&["--continue"]),
         node.bootstrap_headless(&[]),
-        node.run(&["bootstrap", "relay", "--continue"]),
+        node.run(&["bootstrap", "immutabledb", "--source", "db", "--continue"]),
     ] {
         assert!(!refused.status.success());
 
@@ -299,22 +298,29 @@ fn a_well_formed_repository_reaches_the_registry() {
     );
 }
 
-/// A directory that is not a stele is a clean refusal, not a half-restore.
+/// A directory that is not a stele is a clean refusal, not a half-restore:
+/// it is refused before `--force` clears anything, so the node it was to
+/// replace is left as it was.
 #[test]
 fn a_source_that_is_not_a_stele_is_refused() {
     let node = Node::new();
     node.sync();
+    let before = Contents::read(&node);
+    assert!(before.cursor.is_some());
 
     let empty = node.root.path().join("not-a-stele");
     std::fs::create_dir_all(&empty).unwrap();
 
     let output = node.bootstrap_stelae(&format!("file://{}", empty.display()));
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(1));
 
-    // `--force` cleared the storage on the way in, so what this asserts is that
-    // the failure is total: no cursor, nothing a later `bootstrap` would read
-    // as a restored node.
-    assert!(Contents::read(&node).cursor.is_none());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let said: Vec<_> = stderr
+        .split_whitespace()
+        .filter(|word| *word != "│")
+        .collect();
+    assert!(said.join(" ").contains("holds no stele"), "{stderr}");
+    assert_eq!(Contents::read(&node), before);
 }
 
 /// `--force` must not clear the node before the command it is going to run is
@@ -433,8 +439,8 @@ fn a_decision_that_needs_no_command_does_not_ask_for_one() {
 /// The WAL is not in a stele, and does not need to be.
 ///
 /// `dolos_snapshot::restore` carries no `WalStore` at all — deliberately,
-/// because `bootstrap::run` reseeds the WAL from the state cursor after any
-/// bootstrap method. So a restored node's WAL tip *is* its state cursor, which
+/// because `bootstrap::run` reseeds the WAL from the state cursor after a
+/// Stelae restore. So a restored node's WAL tip *is* its state cursor, which
 /// is what `find_intersect` needs in order to resume chain-sync from a relay.
 ///
 /// Asserted as a property of the restored node rather than as a comparison
