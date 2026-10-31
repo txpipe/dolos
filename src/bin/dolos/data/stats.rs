@@ -1,11 +1,120 @@
-use dolos::storage::{ArchiveStoreBackend, StateStoreBackend};
+use comfy_table::Table;
+use dolos::storage::{Access, ArchiveStoreBackend, OpenError, StateStoreBackend};
 use dolos_core::config::RootConfig;
 use dolos_redb3::TableFootprint;
 use miette::{bail, IntoDiagnostic as _};
-use serde_json::json;
+use serde::Serialize;
+use serde_json::{json, Value};
+
+use crate::output::FormatArgs;
 
 #[derive(Debug, clap::Args)]
-pub struct Args {}
+pub struct Args {
+    #[command(flatten)]
+    format: FormatArgs,
+}
+
+/// Each persistent store's footprint, in the shape its engine reports.
+#[derive(Debug, Serialize)]
+struct Report {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    archive: Option<Value>,
+}
+
+impl std::fmt::Display for Report {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let sections = [("state", &self.state), ("archive", &self.archive)];
+        let mut first = true;
+
+        for (store, section) in sections {
+            let Some(section) = section else {
+                continue;
+            };
+
+            if !std::mem::take(&mut first) {
+                writeln!(f)?;
+            }
+
+            let mut table = Table::new();
+
+            if section["engine"] == "fjall" {
+                let tuning = &section["tuning"];
+
+                writeln!(
+                    f,
+                    "{store}: fjall, preset {}, cache {} MB, journal {} MB, {} workers, flush on commit {}",
+                    cell(&tuning["preset"]),
+                    cell(&tuning["cache_mb"]),
+                    cell(&tuning["journal_mb"]),
+                    cell(&tuning["workers"]),
+                    cell(&tuning["flush_on_commit"]),
+                )?;
+
+                table.set_header([
+                    "keyspace",
+                    "disk bytes",
+                    "memtable MB",
+                    "L0 threshold",
+                    "table MB",
+                    "level ratio",
+                ]);
+
+                for (name, keyspace) in section["keyspaces"].as_object().into_iter().flatten() {
+                    let tuning = &keyspace["tuning"];
+                    let compaction = &tuning["compaction"];
+
+                    table.add_row([
+                        name.clone(),
+                        cell(&keyspace["disk_bytes"]),
+                        cell(&tuning["memtable_mb"]),
+                        cell(&compaction["l0_threshold"]),
+                        cell(&compaction["table_mb"]),
+                        cell(&compaction["level_ratio"]),
+                    ]);
+                }
+            } else {
+                writeln!(f, "{store}: {}", cell(&section["engine"]))?;
+
+                table.set_header([
+                    "table",
+                    "rows",
+                    "bytes per row",
+                    "leaf fill",
+                    "stored bytes",
+                    "fragmented bytes",
+                    "tree height",
+                ]);
+
+                for (name, footprint) in section["tables"].as_object().into_iter().flatten() {
+                    table.add_row([
+                        name.clone(),
+                        cell(&footprint["rows"]),
+                        cell(&footprint["bytes_per_row"]),
+                        cell(&footprint["leaf_fill"]),
+                        cell(&footprint["stored_bytes"]),
+                        cell(&footprint["fragmented_bytes"]),
+                        cell(&footprint["tree_height"]),
+                    ]);
+                }
+            }
+
+            write!(f, "{table}")?;
+        }
+
+        Ok(())
+    }
+}
+
+/// A JSON value as a table cell: strings unquoted, absence as `-`.
+fn cell(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Null => "-".to_string(),
+        other => other.to_string(),
+    }
+}
 
 fn footprint_to_json(footprint: &TableFootprint) -> serde_json::Value {
     let stats = &footprint.stats;
@@ -23,51 +132,81 @@ fn footprint_to_json(footprint: &TableFootprint) -> serde_json::Value {
     })
 }
 
-pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
-    let stores = crate::common::open_data_stores(config)?;
+/// Whether the folder the archive keeps its segments in holds anything.
+fn holds_segments(config: &RootConfig) -> bool {
+    config
+        .storage
+        .blocks_path()
+        .or_else(|| config.storage.archive_path())
+        .and_then(|path| std::fs::read_dir(path).ok())
+        .is_some_and(|mut entries| entries.next().is_some())
+}
 
-    let mut json = serde_json::Map::new();
+pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
+    // Each store the dataset holds, so one that holds only an archive is
+    // reported too; with neither, the state's absence is the refusal. An
+    // archive index without its segments, or segments without their index,
+    // is a broken archive, not none.
+    let index = config.storage.archive_path().map(|path| path.join("index"));
+
+    let archive = match dolos::storage::open_existing_archive(config, Access::Observe) {
+        Err(OpenError::Missing { path })
+            if Some(&path) == index.as_ref() && !holds_segments(config) =>
+        {
+            None
+        }
+        archive => Some(archive?),
+    };
+
+    let state = match dolos::storage::open_existing_state(config, Access::Observe) {
+        Err(OpenError::Missing { .. })
+            if matches!(archive, Some(ArchiveStoreBackend::Fjall(_))) =>
+        {
+            None
+        }
+        state => Some(state?),
+    };
+
+    let mut report = Report {
+        state: None,
+        archive: None,
+    };
 
     // Each engine reports the shape it actually has: redb gets per-table
     // B-tree footprints (rows, leaf fill, page counts), fjall gets per-keyspace
     // disk footprints — LSM trees have no leaf-fill analogue and faking one
     // would mislead. Stores on neither engine are left out rather than
     // aborting the command.
-    match &stores.state {
-        StateStoreBackend::Redb(state) => {
+    match &state {
+        None | Some(StateStoreBackend::Memory(_)) => (),
+        Some(StateStoreBackend::Redb(state)) => {
             let stats = state.utxoset_stats().into_diagnostic()?;
 
-            json.insert("state".to_string(), redb_section(stats));
+            report.state = Some(redb_section(stats));
         }
-        StateStoreBackend::Fjall(state) => {
-            json.insert(
-                "state".to_string(),
-                fjall_section(state.disk_usage(), &state.tuning()),
-            );
+        Some(StateStoreBackend::Fjall(state)) => {
+            report.state = Some(fjall_section(state.disk_usage(), &state.tuning()));
         }
-        StateStoreBackend::Memory(_) => (),
     }
 
-    match &stores.archive {
-        ArchiveStoreBackend::Fjall(archive) => {
-            json.insert(
-                "archive".to_string(),
-                fjall_section(archive.disk_usage(), &archive.tuning()),
-            );
+    match &archive {
+        Some(ArchiveStoreBackend::Fjall(archive)) => {
+            report.archive = Some(fjall_section(archive.disk_usage(), &archive.tuning()));
         }
-        ArchiveStoreBackend::Memory(_)
-        | ArchiveStoreBackend::LogsOnly(_)
-        | ArchiveStoreBackend::EntityReads(_)
-        | ArchiveStoreBackend::NoOp(_) => (),
+        None
+        | Some(
+            ArchiveStoreBackend::Memory(_)
+            | ArchiveStoreBackend::LogsOnly(_)
+            | ArchiveStoreBackend::EntityReads(_)
+            | ArchiveStoreBackend::NoOp(_),
+        ) => (),
     }
 
-    if json.is_empty() {
+    if report.state.is_none() && report.archive.is_none() {
         bail!("no persistent store backends are configured, nothing to report");
     }
 
-    println!("{}", serde_json::to_string_pretty(&json).unwrap());
-
-    Ok(())
+    crate::output::emit(&report, &args.format)
 }
 
 fn redb_section<'a>(
@@ -180,5 +319,33 @@ mod tests {
         let archive = ArchiveStore::for_tempdir(Default::default()).unwrap();
         let tuning = archive.tuning();
         assert_reports(&fjall_section(archive.disk_usage(), &tuning), &tuning);
+    }
+
+    /// Segments count where the archive keeps them: its own folder, or
+    /// `blocks_path` when set, and an empty folder holds none.
+    #[test]
+    fn segments_are_looked_for_where_the_archive_keeps_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = dir.path().to_path_buf();
+
+        let archive = dir.path().join("archive");
+        let blocks = dir.path().join("blocks");
+
+        assert!(!holds_segments(&config));
+
+        std::fs::create_dir_all(&archive).unwrap();
+        assert!(!holds_segments(&config));
+
+        std::fs::write(archive.join("000000.segment"), b"a segment").unwrap();
+        assert!(holds_segments(&config));
+
+        config.storage.archive.blocks_path = Some(std::path::PathBuf::from("blocks"));
+        assert!(!holds_segments(&config));
+
+        std::fs::create_dir_all(&blocks).unwrap();
+        std::fs::write(blocks.join("000000.segment"), b"a segment").unwrap();
+        std::fs::remove_file(archive.join("000000.segment")).unwrap();
+        assert!(holds_segments(&config));
     }
 }

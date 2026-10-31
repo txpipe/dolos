@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
 use dolos::storage::{open_existing_stores, Access, OpenError, Stores};
@@ -18,6 +19,25 @@ use dolos_core::{
     ArchiveStore as _, ChainPoint, LogValue, StateStore as _, WalStore as _,
 };
 use node::Node;
+
+/// Taken shared by every test here that starts a process, and exclusively
+/// by every test that opens a store again after an observing open of it,
+/// from then on.
+///
+/// redb 3.1 never unlocks a read-only database: its shared lock goes with
+/// its file. A child started while an observing open closes may hold a copy
+/// of every open file until it executes (CI has seen it on macOS too), and
+/// with it that open's lock, so the next open of the store finds it in use.
+static SPAWNING: RwLock<()> = RwLock::new(());
+
+fn spawning() -> RwLockReadGuard<'static, ()> {
+    SPAWNING.read().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Held while a test reopens a store it observed, so no child starts.
+fn alone() -> RwLockWriteGuard<'static, ()> {
+    SPAWNING.write().unwrap_or_else(PoisonError::into_inner)
+}
 
 fn open(node: &Node, access: Access) -> Result<Stores<CardanoDelta>, OpenError> {
     open_existing_stores::<CardanoDelta>(&node.config, access)
@@ -74,6 +94,8 @@ fn crashing() -> Option<RootConfig> {
 /// and exits through [`exit_holding`]. Dropping a handle would shut its file
 /// down cleanly.
 fn crash(node: &Node, test: &str) {
+    let _spawning = spawning();
+
     let output = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", test, "--nocapture"])
         .env(CRASHING, node.config_path())
@@ -140,6 +162,8 @@ fn a_missing_dataset_is_missing_and_left_missing() {
 /// snapshot, since their first open after a run rewrites files.
 #[test]
 fn observing_a_lagging_dataset_changes_no_file() {
+    let _alone = alone();
+
     let node = Node::new();
     node.sync();
 
@@ -224,6 +248,7 @@ fn observing_a_dataset_a_crash_left_is_unclean() {
     node.sync();
 
     crash(&node, "observing_a_dataset_a_crash_left_is_unclean");
+    let _alone = alone();
 
     let wal = node.config.wal_path().unwrap();
     let before = files(&node.config.storage.path);
@@ -262,6 +287,7 @@ fn observing_a_mempool_a_crash_left_is_unclean() {
     node.sync();
 
     crash(&node, "observing_a_mempool_a_crash_left_is_unclean");
+    let _alone = alone();
 
     let mempool = node.config.mempool_path().unwrap();
     let before = files(&node.config.storage.path);
@@ -282,6 +308,8 @@ fn observing_a_mempool_a_crash_left_is_unclean() {
 /// observing, and changes no file; a writing open initialises it.
 #[test]
 fn observing_an_empty_wal_file_is_unclean() {
+    let _alone = alone();
+
     let node = Node::new();
     node.sync();
 
@@ -372,6 +400,8 @@ fn observing_a_dataset_it_cannot_mirror_is_unviewable() {
 /// access, and the open recreates nothing.
 #[test]
 fn a_dataset_missing_a_store_is_missing_it() {
+    let _alone = alone();
+
     let node = Node::with_tables("[storage.archive]\nblocks_path = \"blocks\"\n");
     node.sync();
 
@@ -418,6 +448,8 @@ fn a_dataset_missing_a_store_is_missing_it() {
 /// even a writing open leaves the file uncreated.
 #[test]
 fn a_missing_mempool_file_opens_in_memory() {
+    let _alone = alone();
+
     let node = Node::with_tables("[mempool]\npersistent = true\n");
     node.sync();
 
@@ -444,6 +476,8 @@ fn a_missing_mempool_file_opens_in_memory() {
 /// the open, naming that store.
 #[test]
 fn a_held_store_is_in_use() {
+    let _alone = alone();
+
     let node = Node::with_tables("[mempool]\npersistent = true\n");
     node.sync();
 
@@ -538,6 +572,8 @@ fn spawn_daemon(node: &Node, port: u16) -> Daemon {
     ignore = "the debug feature's console subscriber panics a daemon built without tokio_unstable"
 )]
 fn a_dataset_a_running_daemon_holds_is_in_use() {
+    let _spawning = spawning();
+
     let port = free_port();
     let node = Node::with_tables(&format!(
         "[serve.minibf]\nlisten_address = \"127.0.0.1:{port}\"\n"

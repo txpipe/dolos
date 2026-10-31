@@ -361,7 +361,8 @@ impl ArchiveStore {
         Ok(false)
     }
 
-    /// Per-keyspace disk footprint: `(name, bytes, path)`.
+    /// Per-keyspace disk footprint: `(name, bytes, path)`, the path in the
+    /// store's own folder.
     pub fn disk_usage(&self) -> Vec<(&'static str, u64, std::path::PathBuf)> {
         [
             (keyspace_names::BLOCKS, &self.blocks),
@@ -371,8 +372,16 @@ impl ArchiveStore {
             (keyspace_names::ENTITY, &self.entity),
             (keyspace_names::META, &self.meta),
         ]
-        .map(|(name, ks)| (name, ks.disk_space(), ks.path().to_path_buf()))
+        .map(|(name, ks)| (name, ks.disk_space(), self.source_of(ks.path())))
         .to_vec()
+    }
+
+    /// Where `path` is in the store itself, when it is in a view's mirror.
+    fn source_of(&self, path: &Path) -> std::path::PathBuf {
+        match &self.view {
+            Some(view) => view.source_of(path),
+            None => path.to_path_buf(),
+        }
     }
 
     /// Fully compact every keyspace and sync the result to disk.

@@ -34,6 +34,9 @@ use dolos_redb3::cache::RedbCacheTier;
 use futures_util::{stream, StreamExt as _};
 use miette::{bail, miette, Context as _, IntoDiagnostic as _};
 use pallas::crypto::hash::Hasher;
+use serde::Serialize;
+
+use crate::output::{FormatArgs, Unhealthy};
 
 mod uses;
 
@@ -49,7 +52,7 @@ pub enum Command {
 
     /// prints each namespace's entries, bytes on disk, format version and
     /// watermarks
-    Stats,
+    Stats(StatsArgs),
 
     /// rebuilds a sample of entries without the cache and compares them
     Verify(VerifyArgs),
@@ -94,6 +97,12 @@ pub struct ClearArgs {
 }
 
 #[derive(Debug, clap::Args)]
+pub struct StatsArgs {
+    #[command(flatten)]
+    format: FormatArgs,
+}
+
+#[derive(Debug, clap::Args)]
 pub struct VerifyArgs {
     /// the namespace to check, every one with a use if omitted
     #[arg(long)]
@@ -102,6 +111,9 @@ pub struct VerifyArgs {
     /// entries rebuilt per namespace
     #[arg(long, default_value_t = 100)]
     sample: usize,
+
+    #[command(flatten)]
+    format: FormatArgs,
 }
 
 #[tokio::main]
@@ -135,13 +147,10 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
             Ok(())
         }
-        Command::Stats => {
-            print_stats(&stats(&domain, &namespaces)?);
-            Ok(())
-        }
+        Command::Stats(x) => crate::output::emit(&stats(&domain, &namespaces)?, &x.format),
         Command::Verify(x) => {
             let verified = verify(&domain, &namespaces, x.namespace.as_deref(), x.sample)?;
-            print_verified(&verified)
+            report_verified(&verified, &x.format)
         }
     }
 }
@@ -584,7 +593,7 @@ where
     Ok(wiped)
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct NamespaceStats {
     pub name: &'static str,
     pub version: u32,
@@ -596,7 +605,7 @@ pub struct NamespaceStats {
 
 /// A namespace the node leaves off, and what an earlier run left of it on
 /// disk.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct OffStats {
     pub name: &'static str,
     pub why: &'static str,
@@ -604,7 +613,7 @@ pub struct OffStats {
     pub bytes: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct Stats {
     pub namespaces: Vec<NamespaceStats>,
     pub off: Vec<OffStats>,
@@ -675,57 +684,63 @@ fn watermarks<D: Domain>(
     Ok(range)
 }
 
-fn print_stats(stats: &Stats) {
-    let names = stats.namespaces.iter().map(|ns| ns.name);
-    let names = names.chain(stats.off.iter().map(|ns| ns.name));
-    let width = names
-        .chain(["namespace"])
-        .map(str::len)
-        .max()
-        .unwrap_or_default();
+impl std::fmt::Display for Stats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names = self.namespaces.iter().map(|ns| ns.name);
+        let names = names.chain(self.off.iter().map(|ns| ns.name));
+        let width = names
+            .chain(["namespace"])
+            .map(str::len)
+            .max()
+            .unwrap_or_default();
 
-    println!(
-        "{:<width$} {:>8} {:>10} {:>14} {:>12}",
-        "namespace", "version", "entries", "bytes on disk", "watermarks"
-    );
-
-    for ns in &stats.namespaces {
-        let watermarks = match ns.watermarks {
-            Some((oldest, newest)) => format!("{oldest}..{newest}"),
-            None => "-".to_string(),
-        };
-
-        println!(
+        writeln!(
+            f,
             "{:<width$} {:>8} {:>10} {:>14} {:>12}",
-            ns.name, ns.version, ns.entries, ns.bytes, watermarks
-        );
-    }
+            "namespace", "version", "entries", "bytes on disk", "watermarks"
+        )?;
 
-    for ns in &stats.off {
-        println!(
-            "{:<width$} {:>8} {:>10} {:>14} {:>12}",
-            ns.name, "off", ns.entries, ns.bytes, "-"
-        );
-    }
+        for ns in &self.namespaces {
+            let watermarks = match ns.watermarks {
+                Some((oldest, newest)) => format!("{oldest}..{newest}"),
+                None => "-".to_string(),
+            };
 
-    for ns in &stats.off {
-        println!("{} is off: {}", ns.name, ns.why);
-    }
+            writeln!(
+                f,
+                "{:<width$} {:>8} {:>10} {:>14} {:>12}",
+                ns.name, ns.version, ns.entries, ns.bytes, watermarks
+            )?;
+        }
 
-    println!();
-    println!(
-        "Hit rates are not kept on disk: read them from a running node's `dolos-cache` metrics."
-    );
+        for ns in &self.off {
+            writeln!(
+                f,
+                "{:<width$} {:>8} {:>10} {:>14} {:>12}",
+                ns.name, "off", ns.entries, ns.bytes, "-"
+            )?;
+        }
+
+        for ns in &self.off {
+            writeln!(f, "{} is off: {}", ns.name, ns.why)?;
+        }
+
+        writeln!(f)?;
+        write!(
+            f,
+            "Hit rates are not kept on disk: read them from a running node's `dolos-cache` metrics."
+        )
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct Mismatch {
     pub namespace: &'static str,
     pub key: String,
     pub reason: String,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize)]
 pub struct Verified {
     pub checked: u64,
     pub mismatches: Vec<Mismatch>,
@@ -822,22 +837,31 @@ fn sampled(mut keys: Vec<Bytes>, n: usize, seed: u64) -> Vec<Bytes> {
     keys
 }
 
-fn print_verified(verified: &Verified) -> miette::Result<()> {
-    for mismatch in &verified.mismatches {
-        println!(
-            "{}: key {} mismatch: {}",
-            mismatch.namespace, mismatch.key, mismatch.reason
-        );
-    }
+impl std::fmt::Display for Verified {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for mismatch in &self.mismatches {
+            writeln!(
+                f,
+                "{}: key {} mismatch: {}",
+                mismatch.namespace, mismatch.key, mismatch.reason
+            )?;
+        }
 
-    println!(
-        "checked {} entries, {} mismatched",
-        verified.checked,
-        verified.mismatches.len()
-    );
+        write!(
+            f,
+            "checked {} entries, {} mismatched",
+            self.checked,
+            self.mismatches.len()
+        )
+    }
+}
+
+/// Print `verified`, failing as unhealthy when an entry mismatched.
+fn report_verified(verified: &Verified, format: &FormatArgs) -> miette::Result<()> {
+    crate::output::emit(verified, format)?;
 
     if !verified.mismatches.is_empty() {
-        bail!("{} entries mismatched", verified.mismatches.len());
+        return Err(Unhealthy(format!("{} entries mismatched", verified.mismatches.len())).into());
     }
 
     Ok(())
@@ -1345,7 +1369,7 @@ mod tests {
         let verified = verify(&domain, &namespaces, None, 100).unwrap();
         assert_eq!(verified.checked, 2);
         assert!(verified.mismatches.is_empty(), "{:?}", verified.mismatches);
-        print_verified(&verified).unwrap();
+        report_verified(&verified, &FormatArgs::default()).unwrap();
 
         // flip a byte of one entry's stats, keeping its trailer
         let disk = domain.cache().disk();
@@ -1359,7 +1383,11 @@ mod tests {
         assert_eq!(verified.checked, 2);
         assert_eq!(verified.mismatches.len(), 1);
         assert_eq!(verified.mismatches[0].key, hex::encode(&key));
-        assert!(print_verified(&verified).is_err());
+        let error = report_verified(&verified, &FormatArgs::default()).unwrap_err();
+        assert_eq!(
+            crate::output::ExitCode::of(&error),
+            crate::output::ExitCode::Unhealthy
+        );
     }
 
     #[tokio::test]
@@ -1585,7 +1613,7 @@ mod tests {
 
         let error = error.to_string();
         assert!(error.contains("1 of the 9 assets"), "{error}");
-        assert!(error.contains("rebuild-state --rewrite-logs"), "{error}");
+        assert!(error.contains("data rebuild --rewrite-logs"), "{error}");
         assert_eq!(domain.cache().disk().entries(ASSETS.name).unwrap(), 0);
     }
 
@@ -1712,7 +1740,7 @@ mod tests {
     }
 
     /// An entry built from another first mint than the index's, as a read
-    /// before `rebuild-state --rewrite-logs` kept it, is not current at the
+    /// before `data rebuild --rewrite-logs` kept it, is not current at the
     /// same watermark: `warm` builds it again from the first mint, and
     /// `verify` then passes.
     #[tokio::test]

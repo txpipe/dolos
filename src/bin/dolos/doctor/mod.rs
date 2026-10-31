@@ -5,7 +5,6 @@ use crate::feedback::Feedback;
 
 mod catchup_stores;
 mod check;
-mod rebuild_state;
 mod reclaim_avvm;
 mod reset_wal;
 mod rollback;
@@ -19,9 +18,6 @@ pub enum Command {
 
     /// catch up store data from WAL records
     CatchupStores(catchup_stores::Args),
-
-    /// rebuild the state store by replaying the local archive
-    RebuildState(rebuild_state::Args),
 
     /// delete the unredeemed Byron AVVM utxos a pre-fix binary left behind
     ReclaimAvvm(reclaim_avvm::Args),
@@ -49,7 +45,6 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
     match &args.command {
         Command::Check(x) => check::run(config, x)?,
         Command::CatchupStores(x) => catchup_stores::run(config, x, feedback)?,
-        Command::RebuildState(x) => rebuild_state::run(config, x, feedback)?,
         Command::ReclaimAvvm(x) => reclaim_avvm::run(config, x)?,
         Command::ResetWal(x) => reset_wal::run(config, x, feedback)?,
         Command::WalIntegrity(x) => wal_integrity::run(config, x)?,

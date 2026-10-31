@@ -112,7 +112,7 @@ impl TransitionDefault for DRepDelegation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode)]
+#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Serialize)]
 pub struct AccountState {
     #[n(0)]
     pub registered_at: Option<u64>,

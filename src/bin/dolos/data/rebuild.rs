@@ -1,5 +1,4 @@
-//! `dolos doctor rebuild-state` — regenerate the state store from the local
-//! archive.
+//! `dolos data rebuild` — regenerate the state store from the local archive.
 //!
 //! The archive holds the full raw chain, and state computation reads nothing
 //! of it but the entity index below each batch, which a replay without
@@ -48,7 +47,6 @@
 //! in a sealed epoch through them alone; the same `--rewrite-logs` rebuild
 //! writes them.
 
-use std::io::IsTerminal as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -60,9 +58,13 @@ use pallas::ledger::traverse::MultiEraBlock;
 
 use dolos::adapters::DomainAdapter;
 use dolos::prelude::*;
-use dolos::storage::{ArchiveStoreBackend, MempoolBackend, StateStoreBackend, WalStoreBackend};
+use dolos::storage::{
+    Access, ArchiveStoreBackend, MempoolBackend, StateStoreBackend, WalStoreBackend,
+};
+use dolos_fjall::view::LockOut;
 
 use crate::feedback::Feedback;
+use crate::output::{ConfirmArgs, Usage};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -93,10 +95,8 @@ pub struct Args {
     #[arg(long, default_value_t = 500)]
     chunk: usize,
 
-    /// Skip the interactive confirmation of the in-place wipe (required when
-    /// no terminal is attached)
-    #[arg(long)]
-    force: bool,
+    #[command(flatten)]
+    confirm: ConfirmArgs,
 }
 
 enum Mode {
@@ -157,34 +157,119 @@ fn check_wipe_scope(config: &RootConfig, state_path: &std::path::Path) -> miette
     Ok(())
 }
 
-fn confirm_wipe(state_path: &std::path::Path, force: bool) -> miette::Result<()> {
-    if force {
-        return Ok(());
-    }
-
-    if !std::io::stdin().is_terminal() {
-        bail!(
-            "in-place rebuild wipes {} and no terminal is attached to confirm it; pass --force",
-            state_path.display(),
-        );
-    }
-
-    eprint!(
-        "about to wipe {} and rebuild it from the local archive; continue? [y/N] ",
-        state_path.display(),
+/// What an in-place rebuild rewrites, for its `--yes` refusal.
+fn in_place_rewrites(
+    config: &RootConfig,
+    state_path: &std::path::Path,
+    rewrite_logs: bool,
+) -> String {
+    let mut rewrites = format!(
+        "the state store, to rebuild it from the local archive:\n  {}",
+        state_path.display()
     );
 
-    let mut answer = String::new();
-    std::io::stdin()
-        .read_line(&mut answer)
-        .into_diagnostic()
-        .context("reading confirmation")?;
-
-    if !matches!(answer.trim(), "y" | "Y" | "yes" | "YES") {
-        bail!("aborted");
+    if let Some(wal) = config.wal_path() {
+        rewrites.push_str(&format!(
+            "\nthe WAL's entries, reset to the chain's origin and reseeded at the rebuilt \
+             tip:\n  {}",
+            wal.display()
+        ));
     }
 
-    Ok(())
+    if let (true, Some(archive)) = (rewrite_logs, config.storage.archive_path()) {
+        rewrites.push_str(&format!(
+            "\nthe archive's log rows and index entries, rewritten from its blocks:\n  {}",
+            archive.display()
+        ));
+    }
+
+    rewrites
+}
+
+/// Lock the state store at `state_path` against every view and writer,
+/// refusing while one holds it.
+fn lock_out_state(state_path: &std::path::Path) -> miette::Result<Option<LockOut>> {
+    dolos_fjall::view::lock_out(state_path).map_err(|error| {
+        if !error.is_locked() {
+            return miette::miette!(
+                "locking the state store at {}: {error}",
+                state_path.display()
+            );
+        }
+
+        let views = dolos_fjall::view::live_views(state_path);
+        let held = if views.is_empty() {
+            format!("  {}", state_path.display())
+        } else {
+            views
+                .iter()
+                .map(|view| format!("  {}", view.display()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        miette::miette!(
+            help = "dataset in use by another dolos process (stop it, then run the rebuild again)",
+            "a dolos process holds the state store:\n{held}",
+        )
+    })
+}
+
+/// The in-place rebuild's state store, held against every view and writer
+/// from before any store opens until it is wiped.
+struct InPlace {
+    state_path: PathBuf,
+    lock: Option<LockOut>,
+}
+
+impl InPlace {
+    /// The checks an in-place rebuild passes before any store opens, so a
+    /// refusal writes nothing.
+    fn prepare(config: &RootConfig, args: &Args) -> miette::Result<Self> {
+        let Some(state_path) = config.storage.state_path() else {
+            bail!(
+                "the configured state store is `storage.state.type = \"ephemeral\"`, so there \
+                 is no on-disk state store to rebuild in place; use --ephemeral or --target"
+            );
+        };
+
+        // A trailing separator would have the wipe follow a link at the store.
+        let state_path: PathBuf = state_path.components().collect();
+
+        if std::fs::symlink_metadata(&state_path).is_ok_and(|metadata| metadata.is_symlink()) {
+            bail!(
+                "refusing the in-place wipe: the state store {} is a symbolic link, and the wipe \
+                 would empty what it points at; set `storage.state.path` to that folder itself, \
+                 or rebuild into --target",
+                state_path.display(),
+            );
+        }
+
+        check_wipe_scope(config, &state_path)?;
+        args.confirm
+            .require(&in_place_rewrites(config, &state_path, args.rewrite_logs))?;
+
+        let lock = lock_out_state(&state_path)?;
+
+        Ok(Self { state_path, lock })
+    }
+
+    /// Reset the WAL to origin, then wipe the state store, still held.
+    fn wipe(
+        self,
+        config: &RootConfig,
+    ) -> miette::Result<WalStoreBackend<dolos_cardano::CardanoDelta>> {
+        let wal = open_store("wal", crate::common::open_wal_store(config))?;
+
+        wal.reset_to(&ChainPoint::Origin)
+            .into_diagnostic()
+            .context("resetting the WAL to origin")?;
+
+        super::reset::remove_held(&self.state_path, self.lock.into_iter().collect())
+            .with_context(|| format!("wiping the state store at {}", self.state_path.display()))?;
+
+        Ok(wal)
+    }
 }
 
 /// Check the archive is usable as a replay source and return its tip point.
@@ -408,17 +493,36 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
     };
 
     if args.stop_epoch.is_some() && matches!(mode, Mode::InPlace) {
-        bail!(
+        return Err(Usage::new(
             "--stop-epoch needs --target or --ephemeral: a partial in-place state cannot be \
-             reconciled with the live stores"
-        );
+             reconciled with the live stores",
+            None,
+        )
+        .into());
     }
 
     if args.chunk == 0 {
-        bail!("--chunk must be at least 1");
+        return Err(Usage::new("--chunk must be at least 1", None).into());
     }
 
-    let archive = open_store("archive", crate::common::open_archive_store(config))?;
+    // Refused before any store opens, so a refusal writes nothing.
+    let in_place = match &mode {
+        Mode::InPlace => Some(InPlace::prepare(config, args)?),
+        _ => None,
+    };
+
+    if let Mode::Target(path) = &mode {
+        if path.exists() && path.read_dir().into_diagnostic()?.next().is_some() {
+            bail!(
+                "--target {} is not empty; pick a fresh directory",
+                path.display(),
+            );
+        }
+    }
+
+    // Held for the run, so no node starts on the dataset meanwhile; the
+    // state it rebuilds may be missing, the archive it replays may not.
+    let archive = dolos::storage::open_existing_archive(config, Access::Mutate)?;
 
     let tip = preflight(&archive)?;
 
@@ -436,43 +540,14 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
 
     let (state, wal) = match &mode {
         Mode::InPlace => {
-            let Some(state_path) = config.storage.state_path() else {
-                bail!(
-                    "the configured state store is `storage.state.type = \"ephemeral\"`, so \
-                     there is no on-disk state store to rebuild in place; use --ephemeral or \
-                     --target"
-                );
-            };
-
-            check_wipe_scope(config, &state_path)?;
-            confirm_wipe(&state_path, args.force)?;
-
-            let wal = open_store("wal", crate::common::open_wal_store(config))?;
-
-            wal.reset_to(&ChainPoint::Origin)
-                .into_diagnostic()
-                .context("resetting the WAL to origin")?;
-
-            if state_path.exists() {
-                std::fs::remove_dir_all(&state_path)
-                    .into_diagnostic()
-                    .with_context(|| {
-                        format!("wiping the state store at {}", state_path.display())
-                    })?;
-            }
+            let in_place = in_place.expect("an in-place rebuild prepares its state store");
+            let wal = in_place.wipe(config)?;
 
             let state = open_store("state", crate::common::open_state_store(config))?;
 
             (state, Some(wal))
         }
         Mode::Target(path) => {
-            if path.exists() && path.read_dir().into_diagnostic()?.next().is_some() {
-                bail!(
-                    "--target {} is not empty; pick a fresh directory",
-                    path.display(),
-                );
-            }
-
             let preset = match config.storage.state.kind {
                 StoreType::Fjall { preset } => preset.into(),
                 StoreType::Ephemeral => dolos_fjall::Preset::default(),
@@ -656,6 +731,81 @@ mod tests {
                 "chunk size {chunk_size}"
             );
         }
+    }
+
+    fn args(rewrite_logs: bool) -> Args {
+        Args {
+            target: None,
+            ephemeral: false,
+            rewrite_logs,
+            stop_epoch: None,
+            chunk: 500,
+            confirm: ConfirmArgs { yes: true },
+        }
+    }
+
+    /// The state stays locked from the checks to the wipe: no view starts
+    /// while the WAL moves and the store goes, nor while any of it goes.
+    #[test]
+    fn an_in_place_rebuild_holds_the_state_until_it_is_wiped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = dir.path().join("data");
+
+        let state = config.storage.state_path().unwrap();
+        drop(dolos_fjall::StateStore::open(&state, Default::default()).unwrap());
+
+        let in_place = InPlace::prepare(&config, &args(false)).unwrap();
+
+        let error = dolos_fjall::view::View::of(&state, &state).err().unwrap();
+        assert!(error.is_locked(), "{error:?}");
+
+        let (hook, calls) = super::super::reset::tests::assert_held(vec![state.clone()]);
+        drop(super::super::reset::tests::while_removing(hook, || in_place.wipe(&config)).unwrap());
+
+        assert!(calls.get() > 0);
+        assert!(!state.exists());
+        assert!(dolos_fjall::view::lock_out(&state).unwrap().is_none());
+    }
+
+    /// A linked state, written with a trailing separator or not, refuses an
+    /// in-place rebuild, which would empty the folder it points at.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_state_refuses_an_in_place_rebuild() {
+        for written in ["state", "state/"] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+            config.storage.path = dir.path().join("data");
+            config.storage.state.path = Some(PathBuf::from(written));
+
+            let elsewhere = dir.path().join("elsewhere");
+            drop(dolos_fjall::StateStore::open(&elsewhere, Default::default()).unwrap());
+            std::fs::create_dir_all(&config.storage.path).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, config.storage.path.join("state")).unwrap();
+
+            let before = std::fs::read_dir(&elsewhere).unwrap().count();
+
+            let error = InPlace::prepare(&config, &args(false)).err().unwrap();
+            assert!(
+                error.to_string().contains("symbolic link"),
+                "{written}: {error}"
+            );
+            assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), before);
+            assert!(dolos_fjall::view::lock_out(&elsewhere).unwrap().is_some());
+        }
+    }
+
+    /// The refusal names the archive only when its rows are rewritten.
+    #[test]
+    fn the_archive_is_named_only_when_its_logs_are_rewritten() {
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = PathBuf::from("/data");
+        let state = config.storage.state_path().unwrap();
+        let archive = config.storage.archive_path().unwrap().display().to_string();
+
+        assert!(!in_place_rewrites(&config, &state, false).contains(&archive));
+        assert!(in_place_rewrites(&config, &state, true).contains(&archive));
     }
 
     #[test]

@@ -919,7 +919,7 @@ mod tests {
 
     /// A first-mint list an earlier boundary sealed, naming a subject the
     /// index lacks (as a seal before the index did), is left alone by a later
-    /// boundary: only `dolos doctor rebuild-state --rewrite-logs` rewrites it.
+    /// boundary: only `dolos data rebuild --rewrite-logs` rewrites it.
     #[test]
     fn a_later_boundary_leaves_a_pre_index_list_alone() {
         use dolos_core::{ArchiveStore as _, ArchiveWriter as _, Domain as _};

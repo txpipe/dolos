@@ -71,7 +71,7 @@ impl DRepExpiry {
 /// ([`DRepState::leaves_state_at`]), and a later registration makes a fresh
 /// row. Indexes 1 and 7 held fields that left the record; they must not be
 /// reused.
-#[derive(Debug, Encode, Decode, Clone, PartialEq, Eq)]
+#[derive(Debug, Encode, Decode, Clone, PartialEq, Eq, Serialize)]
 pub struct DRepState {
     #[n(0)]
     pub registered_at: Option<(BlockSlot, TxOrder)>,
