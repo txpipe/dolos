@@ -2049,10 +2049,10 @@ fn macos_refuses_system_scope() {
         .unwrap();
 
     assert_eq!(output.status.code(), Some(2), "{output:?}");
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("--system"),
-        "{output:?}"
-    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--system"), "{output:?}");
+    // In the help alone, not the message.
+    assert!(stderr.contains("LaunchAgent"), "{output:?}");
 }
 
 /// The binary itself, run by name from a `PATH` holding only a symlink to it
@@ -2388,9 +2388,10 @@ mod command_line {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(dir.join("dolos.toml"), "secret = not-toml-hunter2\n").unwrap();
 
-        for args in [
-            &["service", "install", "--system"][..],
-            &["service", "uninstall", "--system"],
+        // Each help names a word its message does not.
+        for (args, help) in [
+            (&["service", "install", "--system"][..], "<file>"),
+            (&["service", "uninstall", "--system"], "NAME"),
         ] {
             let output = sandbox.dolos(&dir, args).output().unwrap();
 
@@ -2403,6 +2404,7 @@ mod command_line {
             // macOS refuses `--system` before it would.
             if cfg!(target_os = "linux") {
                 assert!(stderr(&output).contains("--config"), "{output:?}");
+                assert!(stderr(&output).contains(help), "{output:?}");
             }
         }
 
