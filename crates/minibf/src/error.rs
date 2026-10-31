@@ -20,6 +20,7 @@ pub enum Error {
     InvalidBlockHash,
     InvalidEpochNumber,
     NumberNotInteger,
+    EpochNumberNotInteger,
     InvalidSlotNumber,
     SlotNumberNotInteger,
     InvalidXpub,
@@ -155,6 +156,15 @@ impl IntoResponse for Error {
                 )),
             )
                 .into_response(),
+            Error::EpochNumberNotInteger => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::new(
+                    400,
+                    "Bad Request",
+                    "params/epoch_number must be integer",
+                )),
+            )
+                .into_response(),
             Error::InvalidSlotNumber => (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorBody::new(
@@ -241,7 +251,7 @@ impl IntoResponse for Error {
                 Json(ErrorBody::new(
                     400,
                     "Bad Request",
-                    "Invalid path.",
+                    "Invalid path. Please check https://docs.txpipe.io/dolos/apis/minibf",
                 )),
             )
                 .into_response(),

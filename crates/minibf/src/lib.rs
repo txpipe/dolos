@@ -795,7 +795,7 @@ mod route_prefix_tests {
             json!({
                 "status_code": 400,
                 "error": "Bad Request",
-                "message": "Invalid path.",
+                "message": "Invalid path. Please check https://docs.txpipe.io/dolos/apis/minibf",
             }),
             "{path}"
         );
@@ -866,6 +866,8 @@ mod tests {
         "/blocks/latest/nope",
         "/blocks/epoch/2/slot",
         "/blocks//latest",
+        "/blocks/",
+        "/blocks//",
     ];
 
     #[tokio::test]
@@ -888,7 +890,7 @@ mod tests {
                 json!({
                     "status_code": 400,
                     "error": "Bad Request",
-                    "message": "Invalid path.",
+                    "message": "Invalid path. Please check https://docs.txpipe.io/dolos/apis/minibf",
                 }),
                 "unexpected body for {path}"
             );
