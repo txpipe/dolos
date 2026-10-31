@@ -1210,10 +1210,12 @@ mod tests {
         let root = dir.path();
         symlink(root.join("missing"), root.join("dangling")).unwrap();
         symlink(root.join("loop"), root.join("loop")).unwrap();
+        fs::write(root.join("file"), "").unwrap();
+        symlink(root.join("file"), root.join("to-file")).unwrap();
         fs::create_dir(root.join("real")).unwrap();
         symlink(root.join("real"), root.join("link")).unwrap();
 
-        for scope in ["dangling", "dangling/systemd/user", "loop"] {
+        for scope in ["dangling", "dangling/systemd/user", "loop", "to-file"] {
             let started = Instant::now();
             let error = Lock::take(&root.join(scope), PATIENCE, true).err().unwrap();
 
