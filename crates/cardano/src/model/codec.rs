@@ -291,7 +291,8 @@ mod tests {
     }
 
     /// A key spelled twice is refused, also when the second spelling uses a
-    /// longer head and so sorts after the first.
+    /// longer head and so sorts after the first, with or without other keys
+    /// between the two.
     #[test]
     fn repeated_keys_are_refused() {
         use crate::model::{AddressStats, Committee, PParamValue};
@@ -318,6 +319,8 @@ mod tests {
             ))),
             refusal::<PParamValue>(&bytes("82 1827 a2 01 8101 1801 8102")),
             refusal::<AddressStats>(&bytes("82 a2 40 820102 5800 820304 05")),
+            refusal::<MaybeMap>(&bytes("82 a3 01 01 02 02 1801 03 f5")),
+            refusal::<AddressStats>(&bytes("82 a3 40 820102 4161 820304 5800 820506 05")),
         ];
 
         for err in refusals {
