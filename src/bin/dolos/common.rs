@@ -21,7 +21,6 @@ use dolos::core::Genesis;
 use dolos::engine::{DomainBuildError, DomainBuilder};
 use dolos::prelude::*;
 use dolos::storage;
-use dolos::sync::SyncLimit;
 
 pub type Stores = storage::Stores<dolos_cardano::CardanoDelta>;
 
@@ -114,33 +113,6 @@ pub fn open_genesis(config: &RootConfig) -> miette::Result<Genesis> {
         .genesis()
         .into_diagnostic()
         .context("loading genesis")
-}
-
-/// When `daemon` stops.
-#[derive(Debug, Clone, Default, clap::Args)]
-pub struct StopArgs {
-    /// Stop once the ledger reaches this epoch, on its first block: the only
-    /// state a Stelae snapshot of that epoch is cut from
-    #[arg(long, value_name = "N")]
-    pub stop_epoch: Option<u64>,
-
-    /// Stop pulling once the upstream tip is reached
-    #[arg(long, conflicts_with = "max_blocks")]
-    pub until_tip: bool,
-
-    /// Stop pulling after this many blocks
-    #[arg(long, value_name = "N")]
-    pub max_blocks: Option<u64>,
-}
-
-impl StopArgs {
-    pub fn sync_limit(&self) -> SyncLimit {
-        match (self.until_tip, self.max_blocks) {
-            (true, _) => SyncLimit::UntilTip,
-            (false, Some(blocks)) => SyncLimit::MaxBlocks(blocks),
-            (false, None) => SyncLimit::NoLimit,
-        }
-    }
 }
 
 pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {

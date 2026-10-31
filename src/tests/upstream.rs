@@ -64,6 +64,7 @@ fn test_mainnet_upstream() {
         "relays-new.cardano-mainnet.iohk.io:3001".into(),
         764824073,
         crate::sync::SyncLimit::default(),
+        Default::default(),
         wal,
     );
 

@@ -23,8 +23,10 @@ When running in this mode, Dolos will focus on a single task: synchronizing its 
 To start _Dolos_ in `sync` mode, use the following command:
 
 ```sh
-dolos sync
+dolos sync catchup
 ```
+
+`sync catchup` pulls blocks until it reaches the tip the upstream peer reports, and exits 0 once the WAL and the state have committed that point; a tip that moves on meanwhile is not waited for. It prints that target to stderr when it fixes it, and the committed point when it exits. A disconnect is retried as `[sync.retry]` allows; running out of retries, an interruption or any other error exits 1. With `--follow` it keeps following the chain past the target instead, and never exits on its own.
 
 ## `serve` mode
 
@@ -38,16 +40,14 @@ dolos serve
 
 ## Stopping
 
-`daemon` and `sync` run until they are stopped. To stop on a condition instead, pass it as an argument; it is not part of the configuration:
+`daemon` runs until it is stopped, and so does `sync catchup --follow`; `sync catchup` alone stops at the upstream tip. To stop a sync at an epoch instead, pass it as an argument; it is not part of the configuration:
 
 | argument | effect |
 | -------- | ------ |
-| `--until-tip` | stop pulling once the upstream tip is reached |
-| `--max-blocks N` | stop pulling after `N` blocks |
-| `--stop-epoch N` | stop once the ledger reaches epoch `N`, on its first block |
+| `--stop-epoch N` | stop once the ledger reaches epoch `N`, on its first block, and exit 0; reached before the upstream tip, it wins |
 
 ```sh
-dolos sync --until-tip
+dolos sync catchup --follow --stop-epoch 120
 ```
 
 ## Summary of Modes

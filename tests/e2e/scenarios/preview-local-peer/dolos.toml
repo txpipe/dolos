@@ -1,0 +1,20 @@
+compatibility = "v2-alpha.1"
+
+[chain]
+protocol = "cardano"
+network = "preview"
+
+# The test serves a synthetic chain from this port.
+[upstream]
+peer_address = "127.0.0.1:6610"
+
+# A peer that stops is not waited for.
+[sync.retry]
+max_retries = 0
+backoff_unit_seconds = 0
+backoff_factor = 1
+max_backoff_seconds = 0
+dismissible = false
+
+[storage]
+path = "data"

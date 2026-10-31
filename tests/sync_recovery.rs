@@ -1019,6 +1019,76 @@ fn a_dump_is_bounded_unless_told_otherwise() {
     assert_eq!(table_rows(&stdout(&output)), (entries, 2));
 }
 
+/// The long options a command's `--help` lists, in order.
+fn listed_options(help: &str) -> Vec<&str> {
+    help.lines()
+        .skip_while(|line| !line.starts_with("Options:"))
+        .skip(1)
+        .filter(|line| line.trim_start().starts_with('-'))
+        .filter_map(|line| line.split_whitespace().find(|word| word.starts_with("--")))
+        .collect()
+}
+
+#[test]
+fn catchup_takes_only_follow_and_stop_epoch_and_daemon_no_stop_flag() {
+    let node = Node::new();
+
+    let output = node.run(&["sync", "catchup", "--help"]);
+    assert_eq!(code(&output), Some(0));
+    assert_eq!(
+        listed_options(&stdout(&output)),
+        ["--follow", "--stop-epoch", "--config", "--help"],
+        "{}",
+        stdout(&output)
+    );
+
+    let output = node.run(&["daemon", "--help"]);
+    assert_eq!(code(&output), Some(0));
+    assert_eq!(
+        listed_options(&stdout(&output)),
+        ["--config", "--help"],
+        "{}",
+        stdout(&output)
+    );
+
+    for removed in [
+        &["daemon", "--stop-epoch", "1"][..],
+        &["daemon", "--until-tip"],
+        &["daemon", "--max-blocks", "1"],
+        &["sync", "catchup", "--until-tip"],
+    ] {
+        let output = node.run(removed);
+        assert_eq!(code(&output), Some(2), "{removed:?}");
+    }
+}
+
+/// An emulator produces the chain itself: there is no upstream tip to catch
+/// up to, so only `--follow` syncs from one.
+#[test]
+fn catchup_refuses_an_emulator_upstream_without_follow() {
+    let node = Node::new();
+    node.write_chain(&node.custom_chain(2, Vec::new()));
+
+    let config_path = node.config_path();
+    let mut document: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    document["upstream"] =
+        toml::from_str("type = \"emulator\"\nblock_production_interval = 1").unwrap();
+    std::fs::write(&config_path, toml::to_string(&document).unwrap()).unwrap();
+
+    let output = node.run(&["sync", "catchup"]);
+    assert_eq!(code(&output), Some(2), "{}", stderr_words(&output));
+    assert!(
+        stderr_words(&output).contains("an emulator upstream has no tip to catch up to"),
+        "{}",
+        stderr_words(&output)
+    );
+    assert!(
+        !node.root.path().join("data").exists(),
+        "the refusal opened the stores"
+    );
+}
+
 /// The commands under `dolos sync --help`.
 fn listed_commands(help: &str) -> Vec<&str> {
     help.lines()

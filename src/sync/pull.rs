@@ -11,7 +11,7 @@ use pallas::network::miniprotocols::chainsync::{HeaderContent, NextResponse, Tip
 use pallas::network::miniprotocols::Point;
 use tracing::{debug, info, warn};
 
-use super::SyncLimit;
+use super::{SyncLimit, SyncProgress};
 use crate::adapters::WalAdapter;
 use crate::prelude::*;
 
@@ -41,50 +41,11 @@ pub enum WorkUnit {
     Await,
 }
 
-pub enum PullQuota {
-    WaitingTip,
-    Unlimited,
-    BlockQuota(u64),
-    Reached,
-}
-
-impl PullQuota {
-    fn should_quit(&self) -> bool {
-        matches!(self, Self::Reached)
-    }
-
-    fn on_tip(&mut self) {
-        if let Self::WaitingTip = self {
-            *self = Self::Reached;
-        }
-    }
-
-    fn consume_blocks(&mut self, count: u64) {
-        if let Self::BlockQuota(x) = self {
-            let new = x.saturating_sub(count);
-
-            if new == 0 {
-                *self = Self::Reached;
-            } else {
-                *self = Self::BlockQuota(new);
-            }
-        }
-    }
-}
-
-impl From<SyncLimit> for PullQuota {
-    fn from(limit: SyncLimit) -> Self {
-        match limit {
-            SyncLimit::UntilTip => Self::WaitingTip,
-            SyncLimit::NoLimit => Self::Unlimited,
-            SyncLimit::MaxBlocks(blocks) => Self::BlockQuota(blocks),
-        }
-    }
-}
-
 pub struct Worker {
     peer_session: PeerClient,
     chain: ChainFragment,
+    /// The tip the peer reported last.
+    tip: ChainPoint,
 }
 
 impl Worker {
@@ -134,10 +95,12 @@ impl Worker {
                     debug!(%point, "header received from upstream peer");
                     gathered += 1;
 
-                    stage.track_tip(&tip);
+                    self.track_tip(&tip, stage);
                 }
                 NextResponse::RollBackward(point, tip) => {
                     debug!(?point, "rollback sent by upstream peer");
+
+                    self.track_tip(&tip, stage);
 
                     let chain_point = ChainPoint::from(point);
 
@@ -147,8 +110,6 @@ impl Worker {
                         }
                         RollbackResult::Handled => (),
                     }
-
-                    stage.track_tip(&tip);
                 }
                 NextResponse::Await => break,
             }
@@ -195,10 +156,14 @@ impl Worker {
 
         debug!(len = blocks.len(), "block batch pulled from peer");
 
-        stage.quota.consume_blocks(blocks.len() as u64);
         stage.flush_blocks(blocks).await?;
 
         Ok(())
+    }
+
+    fn track_tip(&mut self, tip: &Tip, stage: &Stage) {
+        self.tip = ChainPoint::from(tip.0.clone());
+        stage.chain_tip.set(tip.0.slot_or_default() as i64);
     }
 }
 
@@ -234,7 +199,7 @@ impl gasket::framework::Worker<Stage> for Worker {
 
         debug!("finding intersect");
 
-        let (point, _) = peer_session
+        let (point, tip) = peer_session
             .chainsync()
             .find_intersect(candidates)
             .await
@@ -249,15 +214,18 @@ impl gasket::framework::Worker<Stage> for Worker {
         let worker = Self {
             peer_session,
             chain: ChainFragment::start(ChainPoint::from(intersection)),
+            tip: ChainPoint::from(tip.0),
         };
 
         Ok(worker)
     }
 
     async fn schedule(&mut self, stage: &mut Stage) -> Result<WorkSchedule<WorkUnit>, WorkerError> {
-        if stage.quota.should_quit() {
-            warn!("quota reached, stopping sync");
-            return Ok(WorkSchedule::Done);
+        if stage.limit == SyncLimit::CatchUp && stage.progress.target().is_some() {
+            // Nothing past the target is pulled. The apply stage ends the
+            // pipeline once it commits the target; until then this stage
+            // waits, so that its end is never taken for the pipeline's.
+            std::future::pending::<()>().await;
         }
 
         let client = self.peer_session.chainsync();
@@ -283,8 +251,10 @@ impl gasket::framework::Worker<Stage> for Worker {
             PullResult::Empty => (),
         }
 
-        if !self.peer_session.chainsync().has_agency() {
-            stage.quota.on_tip();
+        if !self.peer_session.chainsync().has_agency()
+            && stage.progress.fix_target(self.tip.clone())
+        {
+            info!(tip = %self.tip, "reached the upstream tip, the catch-up target");
         }
 
         Ok(())
@@ -298,7 +268,8 @@ pub struct Stage {
     network_magic: u64,
     block_fetch_batch_size: usize,
     wal: WalAdapter,
-    quota: PullQuota,
+    limit: SyncLimit,
+    progress: Arc<SyncProgress>,
 
     pub downstream: DownstreamPort,
 
@@ -315,12 +286,14 @@ impl Stage {
         peer_address: String,
         network_magic: u64,
         limit: SyncLimit,
+        progress: Arc<SyncProgress>,
         wal: WalAdapter,
     ) -> Self {
         Self {
             peer_address,
             network_magic,
-            quota: limit.into(),
+            limit,
+            progress,
             block_fetch_batch_size: config.pull_batch_size,
             wal,
             downstream: Default::default(),
@@ -349,9 +322,5 @@ impl Stage {
             .or_panic()?;
 
         Ok(())
-    }
-
-    fn track_tip(&self, tip: &Tip) {
-        self.chain_tip.set(tip.0.slot_or_default() as i64);
     }
 }

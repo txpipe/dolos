@@ -630,12 +630,10 @@ The registry inputs apply to `dolos bootstrap stelae`, `dolos snapshot inspect` 
 
 ### Stopping
 
-`dolos daemon` and `dolos sync` run until stopped, unless told otherwise:
+`dolos daemon` runs until stopped. `dolos sync catchup` stops once the stores commit the upstream tip it reached, or with `--follow` runs until stopped, unless told otherwise:
 
 | argument | effect |
 | -------- | ------ |
-| `--until-tip` | stop pulling once the upstream tip is reached |
-| `--max-blocks N` | stop pulling after `N` blocks |
 | `--stop-epoch N` | stop once the ledger reaches epoch `N`, on its first block |
 
 <Aside type="note">
