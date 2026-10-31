@@ -10,10 +10,10 @@ use std::process::Command;
 
 use dolos_cardano::networks::{KnownNetwork, ResolvedNetwork};
 use dolos_core::config::{
-    load, load_checked, ArchiveStoreConfig, CacheConfig, ChainConfig, ConfigError, CustomUtxo,
-    FjallPreset, GenesisConfig, HistoryConfig, HistoryMode, HistoryWindow, LoggingConfig,
-    MempoolConfig, Protocol, RetryConfig, RootConfig, StateStoreConfig, StoreType, SyncConfig,
-    TelemetryConfig, UpstreamConfig, MIGRATION_GUIDE_URL,
+    load, load_checked, override_variables, ArchiveStoreConfig, CacheConfig, ChainConfig,
+    ConfigError, CustomUtxo, FjallPreset, GenesisConfig, HistoryConfig, HistoryMode, HistoryWindow,
+    LoggingConfig, MempoolConfig, Protocol, RetryConfig, RootConfig, StateStoreConfig, StoreType,
+    SyncConfig, TelemetryConfig, UpstreamConfig, MIGRATION_GUIDE_URL,
 };
 use dolos_core::Genesis;
 use serial_test::serial;
@@ -1353,6 +1353,34 @@ fn variables(
         .iter()
         .map(|(name, value)| (*name, std::ffi::OsStr::new(*value)))
         .collect()
+}
+
+/// The overrides a process started without them would not read, by name,
+/// for a warning that reads the same each time.
+#[test]
+#[serial]
+fn override_variables_are_listed_in_order() {
+    let names = [
+        "DOLOS_UPSTREAM__PEER_ADDRESS",
+        "DOLOS_STORAGE__PATH",
+        "DOLOS_SERVE__MINIBF__LISTEN_ADDRESS",
+        "DOLOS_CHAIN__NETWORK",
+        "DOLOS_SYNC__PULL_BATCH_SIZE",
+        "DOLOS_LOGGING__MAX_LEVEL",
+        "DOLOS_MEMPOOL__PATH",
+    ];
+    let mut set: Vec<_> = names
+        .iter()
+        .map(|name| (*name, std::ffi::OsStr::new("x")))
+        .collect();
+    // Not an override: it names no key within a table.
+    set.push(("DOLOS_MITHRIL_AGGREGATOR", std::ffi::OsStr::new("x")));
+
+    let listed = with_env(&set, override_variables).unwrap();
+
+    let mut sorted = names.to_vec();
+    sorted.sort();
+    assert_eq!(listed, sorted);
 }
 
 /// Every overridden key is one `full.toml` sets, so the file losing shows.

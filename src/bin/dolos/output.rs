@@ -89,6 +89,15 @@ pub struct Usage {
     help: Option<String>,
 }
 
+impl Usage {
+    pub fn new(message: impl Into<String>, help: Option<String>) -> Self {
+        Self {
+            message: message.into(),
+            help,
+        }
+    }
+}
+
 impl miette::Diagnostic for Usage {
     fn help<'a>(&'a self) -> Option<Box<dyn Display + 'a>> {
         self.help
