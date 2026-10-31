@@ -1502,8 +1502,8 @@ const MOVED_TO_ARGUMENTS: [(&str, &str); 3] = [
     ),
     (
         "snapshot",
-        "`stelae-publisher digest|verify --state-epochs` (the download URL left with `dolos \
-         bootstrap snapshot`)",
+        "`stelae-publisher digest --state-epochs-file` (and `verify --reproduce`), one epoch per \
+         line; the download URL has no successor",
     ),
     (
         "stelae",

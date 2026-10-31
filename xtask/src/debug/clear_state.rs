@@ -31,7 +31,7 @@ pub fn clear_state(config: &RootConfig, namespace: &str) -> Result<()> {
         );
     };
 
-    let state = super::open(config, Access::Mutate)?.state;
+    let state = super::open_state(config, Access::Mutate)?;
     let writer = state.start_writer()?;
 
     let all_keys = state

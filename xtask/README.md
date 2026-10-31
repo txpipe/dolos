@@ -157,7 +157,12 @@ cargo xtask debug clear-state --config dolos.toml --namespace accounts
 - `copy-wal` appends a slot range of the WAL to another WAL file.
 - `update-entity` replaces one entity of `epochs`, `accounts`, `pools` or
   `dreps`, printing the value it held; `--dry-run` prints it and writes nothing.
+  It writes by default: the old `dolos doctor update-entity` wrote only with
+  `--execute`.
 - `clear-state` deletes every entity of `eras`, `epochs`, `accounts` or `pools`.
+
+`update-entity` and `clear-state` open the state store alone, leaving the WAL
+and the archive untouched.
 
 ### `e2e-test`
 

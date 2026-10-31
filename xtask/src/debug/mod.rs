@@ -3,12 +3,16 @@
 //! Each command opens the dataset of the `dolos.toml` it is given as it is on
 //! disk, with the library's `open_existing_stores`: it creates, bootstraps and
 //! catches up nothing, and refuses a store that is missing or that another
-//! process holds, naming its path. Stop the node first.
+//! process holds, naming its path. Stop the node first. The commands that
+//! write touch the state only, and open nothing else, so that a writable open
+//! cannot migrate or wipe a WAL from another version.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use dolos::storage::{open_existing_stores, Access, Stores};
+use dolos::storage::{
+    open_existing_state, open_existing_stores, Access, StateStoreBackend, Stores,
+};
 use dolos_cardano::CardanoDelta;
 use dolos_core::config::RootConfig;
 
@@ -64,4 +68,8 @@ pub fn load_config(path: &Path) -> Result<RootConfig> {
 
 fn open(config: &RootConfig, access: Access) -> Result<Stores<CardanoDelta>> {
     open_existing_stores::<CardanoDelta>(config, access).context("opening the node's stores")
+}
+
+fn open_state(config: &RootConfig, access: Access) -> Result<StateStoreBackend> {
+    open_existing_state(config, access).context("opening the node's state store")
 }

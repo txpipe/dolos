@@ -962,13 +962,7 @@ where
         None => MempoolBackend::Ephemeral(dolos_core::builtin::EphemeralMempool::new()),
     };
 
-    let state_path = config.storage.state_path().unwrap_or_default();
-
-    if matches!(config.storage.state.kind, StoreType::Fjall { .. }) {
-        fjall_existing(&state_path)?;
-    }
-
-    let state = open_state_at(config, &state_path, access)?;
+    let state = existing_state(config, access)?;
 
     let archive = if !config.keeps_archive() {
         ArchiveStoreBackend::noop()
@@ -989,6 +983,28 @@ where
         archive,
         mempool,
     })
+}
+
+/// The state store alone of a dataset that is already there, opened as
+/// [`open_existing_stores`] opens it. A command that touches only the state
+/// leaves the WAL, the archive and the mempool closed, so a writable open
+/// cannot migrate or wipe them.
+pub fn open_existing_state(
+    config: &RootConfig,
+    access: Access,
+) -> Result<StateStoreBackend, OpenError> {
+    existing(&config.storage.path)?;
+    existing_state(config, access)
+}
+
+fn existing_state(config: &RootConfig, access: Access) -> Result<StateStoreBackend, OpenError> {
+    let path = config.storage.state_path().unwrap_or_default();
+
+    if matches!(config.storage.state.kind, StoreType::Fjall { .. }) {
+        fjall_existing(&path)?;
+    }
+
+    Ok(open_state_at(config, &path, access)?)
 }
 
 /// [`redb_opened`], with an observing open refused for want of a repair,

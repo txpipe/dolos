@@ -79,7 +79,7 @@ pub fn update_entity(
         Access::Mutate
     };
 
-    let state = super::open(config, access)?.state;
+    let state = super::open_state(config, access)?;
 
     let old = state
         .read_entities(ns, &[&key])?

@@ -7141,6 +7141,7 @@ dependencies = [
  "dolos-fjall",
  "dolos-flatfiles",
  "dolos-minibf",
+ "dolos-redb3",
  "dolos-testing",
  "hdrhistogram",
  "hex",
