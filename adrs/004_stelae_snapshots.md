@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted
 
 > **This is the decision record, not the specification.** It states the
 > problem — the friction of the tarball-shaped snapshot — and the adoption
@@ -66,12 +66,12 @@ None of those four goals is Cardano-specific, and neither are the mechanisms tha
 ## Limitations
 
 - **Snapshots exist only at epoch boundaries.** A restored node must chain-sync the partial current epoch from a relay — up to ~5 days of blocks on mainnet (minutes to a few hours of sync). Mid-epoch state-only tip refreshes are a possible follow-up using the same format.
-- **The state tip does not delta.** Every publish re-uploads the full state layers (~several GB on mainnet); every restore downloads them. Content-identical layers dedupe by digest, but reward distribution at each boundary touches most account entities, so in practice the tip is re-transferred. This matches the status quo (full snapshot per bootstrap) and only affects the tip, not history. Content-defined chunking of the state stream is a possible v2 optimization.
+- **The state tip does not delta.** Every publish re-uploads the full state layers (~several GB on mainnet); every restore downloads them. Content-identical layers dedupe by digest, but reward distribution at each boundary touches most account entities, so in practice the tip is re-transferred. This matches the status quo (full snapshot per bootstrap) and only affects the tip, not history. Content-defined chunking of the state stream is a possible later optimization.
 - **State history has the granularity of the configured list, and no finer.** Retained dumps make "the state as of epoch E" recoverable for the epochs a publisher named, at the cost of one full state set per retained epoch in the registry — which is why the list stays around 10–20 rather than per-epoch. An epoch nobody retained is not recoverable from steles at all, only by replay. Attestation inherits the same granularity: a signature over an inscription attests the dumps that inscription carries, so an epoch added to the list later is attested only from the publish that first cuts or backfills it, never retroactively. **Reproduction stops at the same line.** `verify --reproduce` rebuilds the dump cut at the stele's own sequence — it is the tip, and the tip is in the stores — but a dump for a closed epoch is not in a store standing at the tip and never will be, so it is carried forward from the document under verification and taken on trust. A retained dump's provenance therefore rests on signatures rather than on independent reproduction, which is the same footing `history` has always been on. A publisher that adopts a list before backfilling publishes short dumps and a warning per (kind, epoch) until a backfill run produces them.
-- **The index hash scheme becomes a compatibility surface.** From the v2 data-model freeze on, changing the xxh3-64 scheme, bucket semantics or dimension set requires a new media-type version; changes made before it kept `.v1` (decision 0063). Old epochs can be backfilled by recomputing index layers from the (permanently available) blocks layers, so the migration path exists, but it is a real cost.
+- **The index hash scheme is a compatibility surface.** Changing the xxh3-64 scheme, bucket semantics or dimension set requires a new media-type version. Old epochs can be backfilled by recomputing index layers from the (permanently available) blocks layers, so the migration path exists, but it is a real cost.
 - **Profile evolution is a second compatibility surface.** The profile major version and the payload media-type version move together, independently of the protocol version, and clients reject profile majors they do not implement. That is the price of the extension point: three version axes (protocol schema, profile, media type) must be kept coherent, and the conformance suite is what keeps them honest.
-- **Determinism depends on deterministic entity encoding.** Entity minicbor values are copied verbatim, so any map-ordering or shard-merge nondeterminism in ledger code would break cross-party digests. The one-time audit this called for is **done**: writing a fully-populated canary for every namespace (`crates/snapshot/tests/field_registry.rs`) reads every field of every model type a stele can carry, and the suite's repeated-construction assertion is what keeps the property from regressing. It found one real defect — `RollingStats::registered_pools` was a `HashSet`, whose per-instance iteration order made the `epochs` namespace irreproducible across publishers of identical state — now an ordered set. Two encodings are deliberate and deterministic rather than defects: `PoolEpochLog::relative_size` is an IEEE-754 `f64` (the profile's only float, inside an opaque entity value rather than in a framed record), and `RationalNumber` carries CBOR tag 30, likewise only inside entity values. The independent-builds digest comparison in CI remains the standing enforcement for what a canary cannot reach.
-- **Registry trust is not consensus trust.** Signatures prove that named parties attest to the inscription; they do not provide Mithril-style stake-based certification. The two mechanisms remain complementary bootstrap options.
+- **Determinism depends on deterministic entity encoding.** Entity minicbor values are copied verbatim, so any map-ordering or shard-merge nondeterminism in ledger code would break cross-party digests. A fully-populated canary for every namespace (`crates/snapshot/tests/field_registry.rs`) reads every field of every model type a stele can carry, and the suite's repeated-construction assertion keeps the property from regressing; what a canary cannot reach is caught only by comparing independent publishers' inscription digests. Two encodings are deliberate and deterministic: `PoolEpochLog::relative_size` is an IEEE-754 `f64` (the profile's only float, inside an opaque entity value rather than in a framed record), and `RationalNumber` carries CBOR tag 30, likewise only inside entity values.
+- **Registry trust is not consensus trust.** Signatures prove that named parties attest to the inscription; they do not provide Mithril-style stake-based certification. The two mechanisms remain complementary bootstrap options. Signing itself is specified and not yet built, so until it is, a stele's trust rests on the registry and on independent reproduction.
 - **Stake-level verification of block data depends on Mithril artifacts.** The digests layer pins content, but checking those digests against a stake-based certificate requires a Mithril aggregator (or a mirror of its digest route and certificate chain) for the merkle proofs. Without one — and on networks without Mithril, where the layer is simply absent — trust in block data rests on inscription signatures alone.
 
 ## Performance Impact
@@ -140,10 +140,12 @@ this record deliberately duplicates neither:
   `dolos-snapshot` crate that implements it.
 
 What remains below is what only this repository can say: how Dolos adopted
-the protocol — where the code lives, what the operator surface is, and the
-phases the work shipped in.
+the protocol — where the code went, the operator surface and the phases the
+work was planned in. **These subsections are historical**: they record the
+adoption as it stood when it was planned and specify nothing. The tree,
+`dolos --help` and the documentation site describe the current surface.
 
-### Code layout
+### Code layout (historical)
 
 The extraction has happened: the protocol crate (`stelae`) and the
 profile-generic lifecycle machinery (`stelae-driver`) live in
@@ -179,7 +181,7 @@ The Dolos-side crate keeps the name `snapshot` because that is this project's wo
 
 Everything is built against the engine-agnostic core traits (`ArchiveStore`, `StateStore`, `IndexStore` and their writers, `seed_wal_from_state`, `CardanoConfig.stop_epoch`). The store APIs the initial design listed as missing — `StateStore::iter_utxos()`, epoch-ranged iteration of archive tag/exact records, `IndexWriter::append_prehashed` — have all since landed in `dolos-core` and its backends.
 
-### CLI and configuration
+### CLI and configuration (historical)
 
 - `dolos snapshot digest` — compute and print the canonical inscription and its sha256 from local stores (what independent verifiers run and sign).
 - `dolos snapshot verify | inspect`; `sign --key FILE` belongs to the signature
@@ -219,7 +221,7 @@ Two shapes are refusals rather than precedence rules, checked once the configura
 
 The resolution is `dolos::common::stele_registry_auth`, a pure function of `[stelae.registry]` that hands the answer to the transport as a value. Another host embedding `stelae` decides its own credential sources, and this specification constrains none of them.
 
-### Development phases
+### Development phases (historical)
 
 **1a. Stelae core** — `crates/stelae`: framing, inscription (schema, JCS, digest, history invariant), the `Profile` trait and naming rules, streaming digest/compression, signatures. Verified by CBOR-seq roundtrip and write→read→write byte-identity property tests, a JCS inscription golden test, history-invariant tests (gap/duplicate/out-of-order → reject), fail-closed tests (unknown generic key, unknown profile, higher profile major), and a toy non-Dolos profile exercising the full path.
 
