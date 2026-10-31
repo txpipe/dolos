@@ -1502,13 +1502,13 @@ const MOVED_TO_ARGUMENTS: [(&str, &str); 3] = [
     ),
     (
         "snapshot",
-        "`dolos snapshot … --state-epochs` (the download URL left with `dolos bootstrap \
-         snapshot`)",
+        "`stelae-publisher digest|verify --state-epochs` (the download URL left with `dolos \
+         bootstrap snapshot`)",
     ),
     (
         "stelae",
         "`--registry-user` / `DOLOS_STELAE_USER`, `DOLOS_STELAE_PASSWORD`, `DOLOS_STELAE_TOKEN` \
-         and `--registry-credentials-file` on `dolos bootstrap stelae` and `dolos snapshot`",
+         and `--registry-credentials-file` on `dolos bootstrap stelae`",
     ),
 ];
 

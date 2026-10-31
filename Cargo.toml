@@ -29,12 +29,10 @@ tokio-stream.workspace = true
 tokio-util.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
-tower.workspace = true
 tracing.workspace = true
 trait-variant.workspace = true
 xxhash-rust.workspace = true
 axum = { version = "0.8.4", optional = true }
-http-body-util = { version = "0.1.2", optional = true }
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
 opentelemetry-otlp.workspace = true
@@ -166,7 +164,6 @@ grpc = ["tonic", "tonic-web", "tonic-reflection", "tower-http/cors"]
 minibf = [
     "dolos-minibf",
     "axum",
-    "http-body-util",
     "tower-http/cors",
     "tower-http/trace",
     "tower-http/normalize-path",
@@ -174,7 +171,6 @@ minibf = [
 minikupo = [
     "dolos-minikupo",
     "axum",
-    "http-body-util",
     "tower-http/cors",
     "tower-http/trace",
     "tower-http/normalize-path",

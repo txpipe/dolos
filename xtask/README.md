@@ -139,6 +139,26 @@ version comparison and reporting. Start with the [perf overview](perf/README.md)
 then choose [storage](perf/storage.md), [minibf](perf/minibf.md) or
 [HTTP calibration](perf/http.md). Rust microbenchmarks remain under `cargo bench`.
 
+### `debug`
+
+Maintainer tooling over a node's stores, moved out of the `dolos` CLI. Each
+command takes the node's `dolos.toml` with `--config PATH` and opens its stores
+as they are on disk, creating and catching up nothing. **Stop the node first**:
+a store another process holds is refused with its path.
+
+```
+cargo xtask debug find-seq --config dolos.toml --slot 100 --hash <hex>
+cargo xtask debug copy-wal --config dolos.toml --output wal.redb [--since SLOT] [--until SLOT]
+cargo xtask debug update-entity --config dolos.toml --namespace epochs --cbor-hex <hex> [--key <hex>] [--dry-run]
+cargo xtask debug clear-state --config dolos.toml --namespace accounts
+```
+
+- `find-seq` prints the WAL entry that holds a block, or `can't find block`.
+- `copy-wal` appends a slot range of the WAL to another WAL file.
+- `update-entity` replaces one entity of `epochs`, `accounts`, `pools` or
+  `dreps`, printing the value it held; `--dry-run` prints it and writes nothing.
+- `clear-state` deletes every entity of `eras`, `epochs`, `accounts` or `pools`.
+
 ### `e2e-test`
 
 Run the e2e smoke + sync test suites.
