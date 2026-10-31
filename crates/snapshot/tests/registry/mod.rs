@@ -25,7 +25,8 @@
 //! which is what catches renumbering and silent width drift. The last entry is
 //! the current revision and the only one a constructor still reproduces; older
 //! ones are bytes and nothing else, because the type that produced them is
-//! gone.
+//! gone. History starts at the v2 freeze, which restarted every revision at 1
+//! (decision 0063).
 //!
 //! A retained canary is never deleted and never edited. If a change makes an
 //! old canary undecodable, the change is breaking: it needs a media-type
@@ -190,133 +191,55 @@ pub fn registry() -> Vec<Entry> {
             enc_dreps,
             DRepState,
             canaries::drep_state,
-            // Revision 2 moves the key, unpadded and exact (decision 0051);
-            // the value is unchanged. `voting_power` and `anchor`, which
-            // minibf now derives, leave revision 2 in place and `expiry`
-            // stops being optional: the v2 freeze resets every revision to 1.
-            &[
-                Pinned {
-                    rev: 1,
-                    hex: include_str!("goldens/dreps.rev1.hex"),
-                },
-                Pinned {
-                    rev: 2,
-                    hex: include_str!("goldens/dreps.rev2.hex"),
-                },
-            ]
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/dreps.rev1.hex"),
+            }]
         ),
         entity_entry!(
             enc_epochs,
             EpochState,
             canaries::epoch_state,
-            // Revision 1 is retained as a decode witness and nothing more: it
-            // is *one* of the orderings pre-fix code could emit for
-            // `RollingStats::registered_pools`, which was a hash container and
-            // therefore had no single encoding. Stores synced before the fix
-            // hold rows of this shape, so today's reader must still accept
-            // them — which is exactly what a retained canary asserts, and all
-            // it asserts.
-            // Revision 3 moves the key, unpadded and exact (decision 0051);
-            // the value is unchanged. Revision 4 appends the epoch's active
-            // stake and the ESTART shards' carried tally. Field 20, the EWRAP
-            // finalize mark, joins revision 4 in place: the v2 freeze resets
-            // every revision to 1. The rolling and end stats fields no reader
-            // used, and the `set` and `go` copies of `rolling` and `pparams`,
-            // leave revision 4 in place for the same reason.
-            &[
-                Pinned {
-                    rev: 1,
-                    hex: include_str!("goldens/epochs.rev1.hex"),
-                },
-                Pinned {
-                    rev: 2,
-                    hex: include_str!("goldens/epochs.rev2.hex"),
-                },
-                Pinned {
-                    rev: 3,
-                    hex: include_str!("goldens/epochs.rev3.hex"),
-                },
-                Pinned {
-                    rev: 4,
-                    hex: include_str!("goldens/epochs.rev4.hex"),
-                },
-            ]
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/epochs.rev1.hex"),
+            }]
         ),
         entity_entry!(
             enc_eras,
             EraState,
             canaries::era_summary,
-            // Revision 2 moves the key, unpadded and exact (decision 0051);
-            // the value is unchanged.
-            &[
-                Pinned {
-                    rev: 1,
-                    hex: include_str!("goldens/eras.rev1.hex"),
-                },
-                Pinned {
-                    rev: 2,
-                    hex: include_str!("goldens/eras.rev2.hex"),
-                },
-            ]
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/eras.rev1.hex"),
+            }]
         ),
         entity_entry!(
             enc_first_mint_chunks,
             FirstMintChunk,
             canaries::first_mint_chunk,
-            // Revision 2 moves the key, unpadded and exact (decision 0051);
-            // the value is unchanged.
-            &[
-                Pinned {
-                    rev: 1,
-                    hex: include_str!("goldens/first-mint-chunks.rev1.hex"),
-                },
-                Pinned {
-                    rev: 2,
-                    hex: include_str!("goldens/first-mint-chunks.rev2.hex"),
-                },
-            ]
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/first-mint-chunks.rev1.hex"),
+            }]
         ),
         entity_entry!(
             enc_gov,
             GovState,
             canaries::gov_state,
-            // Revision 3 appends each snapshot DRep's newest deregistration.
-            // Revision 4 moves the key, unpadded and exact (decision 0051);
-            // the value is unchanged. Field 9, the dissolved committee, joins
-            // revision 4 in place: the v2 freeze resets every revision to 1.
-            &[
-                Pinned {
-                    rev: 1,
-                    hex: include_str!("goldens/gov.rev1.hex"),
-                },
-                Pinned {
-                    rev: 2,
-                    hex: include_str!("goldens/gov.rev2.hex"),
-                },
-                Pinned {
-                    rev: 3,
-                    hex: include_str!("goldens/gov.rev3.hex"),
-                },
-                Pinned {
-                    rev: 4,
-                    hex: include_str!("goldens/gov.rev4.hex"),
-                },
-            ]
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/gov.rev1.hex"),
+            }]
         ),
         entity_entry!(
             enc_metadata_labels,
             MetadataLabelState,
             canaries::metadata_label_state,
-            &[
-                Pinned {
-                    rev: 1,
-                    hex: include_str!("goldens/metadata-labels.rev1.hex"),
-                },
-                Pinned {
-                    rev: 2,
-                    hex: include_str!("goldens/metadata-labels.rev2.hex"),
-                },
-            ]
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/metadata-labels.rev1.hex"),
+            }]
         ),
         entity_entry!(
             enc_pending_mirs,
@@ -349,56 +272,19 @@ pub fn registry() -> Vec<Entry> {
             enc_pools,
             PoolState,
             canaries::pool_state,
-            // Revision 2 moves the key, unpadded and exact (decision 0051);
-            // the value is unchanged. Revision 3 appends the stake,
-            // delegators and live pledge each snapshot freezes with. Field
-            // 17, the calidus key, joins revision 3 in place, and
-            // `blocks_minted_total` and `register_slot`, which minibf now
-            // derives, leave it in place: the v2 freeze resets every revision
-            // to 1.
-            &[
-                Pinned {
-                    rev: 1,
-                    hex: include_str!("goldens/pools.rev1.hex"),
-                },
-                Pinned {
-                    rev: 2,
-                    hex: include_str!("goldens/pools.rev2.hex"),
-                },
-                Pinned {
-                    rev: 3,
-                    hex: include_str!("goldens/pools.rev3.hex"),
-                },
-            ]
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/pools.rev1.hex"),
+            }]
         ),
         entity_entry!(
             enc_proposals,
             ProposalState,
             canaries::proposal_state,
-            // Revision 2 retires the vote histories at indexes 13..=15 for
-            // bounded entries at 16..=18. Revision 1 still decodes, its
-            // histories skipped. Revision 3 appends each vote's transaction
-            // index to the bounded entries.
-            // Revision 4 moves the key, unpadded and exact (decision 0051);
-            // the value is unchanged.
-            &[
-                Pinned {
-                    rev: 1,
-                    hex: include_str!("goldens/proposals.rev1.hex"),
-                },
-                Pinned {
-                    rev: 2,
-                    hex: include_str!("goldens/proposals.rev2.hex"),
-                },
-                Pinned {
-                    rev: 3,
-                    hex: include_str!("goldens/proposals.rev3.hex"),
-                },
-                Pinned {
-                    rev: 4,
-                    hex: include_str!("goldens/proposals.rev4.hex"),
-                },
-            ]
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/proposals.rev1.hex"),
+            }]
         ),
         entity_entry!(
             enc_pruned_accounts,
@@ -413,18 +299,10 @@ pub fn registry() -> Vec<Entry> {
             enc_first_mints,
             FirstMintSet,
             canaries::first_mint_set,
-            // Revision 2 moves the key, unpadded and exact (decision 0051);
-            // the value is unchanged.
-            &[
-                Pinned {
-                    rev: 1,
-                    hex: include_str!("goldens/first-mints.rev1.hex"),
-                },
-                Pinned {
-                    rev: 2,
-                    hex: include_str!("goldens/first-mints.rev2.hex"),
-                },
-            ]
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/first-mints.rev1.hex"),
+            }]
         ),
         entity_entry!(
             enc_account_stats,
@@ -529,25 +407,13 @@ pub fn registry() -> Vec<Entry> {
             enc_pool_epochs,
             PoolEpochLog,
             canaries::pool_epoch_log,
-            // Revision 2 moves the key, unpadded and exact (decision 0051);
-            // the value is unchanged. `declared_pledge` and `operator_share`
-            // leave revision 2 in place: the v2 freeze resets every revision
-            // to 1.
-            &[
-                Pinned {
-                    rev: 1,
-                    hex: include_str!("goldens/pool-epochs.rev1.hex"),
-                },
-                Pinned {
-                    rev: 2,
-                    hex: include_str!("goldens/pool-epochs.rev2.hex"),
-                },
-            ]
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/pool-epochs.rev1.hex"),
+            }]
         ),
         Entry {
             ns: UTXOS,
-            // The creation position (slot, tx index) joins revision 1 in
-            // place: the v2 freeze resets every revision to 1.
             history: &[Pinned {
                 rev: 1,
                 hex: include_str!("goldens/utxos.rev1.hex"),

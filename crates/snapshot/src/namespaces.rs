@@ -85,15 +85,8 @@ pub const NAMESPACES: [Namespace; 31] = [
 /// `crates/snapshot/tests/field_registry.rs`, which fails the build when a
 /// record's field table moves without its revision, or the other way round.
 ///
-/// `epochs` reached 2 when `RollingStats::registered_pools` stopped being a
-/// `HashSet`, whose per-instance iteration order made the namespace's bytes
-/// irreproducible across publishers of identical state. The keys of `dreps`,
-/// `epochs`, `eras`, `first-mint-chunks`, `first-mints`, `gov`,
-/// `metadata-labels`, `pool-epochs`, `pools` and `proposals` stopped being
-/// padded or truncated to a fixed width (decision 0051), and each of those
-/// moved one revision for it. `epochs` (4) and `pools` (3) then gained the
-/// active-stake distribution ESTART freezes: `EpochState.active_stake` and
-/// `estart_tally`, and the frozen tally on each `PoolSnapshot`. Kept beside
+/// The v2 freeze restarted every revision at 1 (decision 0063); from it on,
+/// every encoding change moves its namespace's revision again. Kept beside
 /// [`NAMESPACES`], in the same order, and held to it by
 /// `every_namespace_has_a_schema_rev` below.
 pub const SCHEMA_REVS: [(Namespace, u64); 31] = [
@@ -108,24 +101,24 @@ pub const SCHEMA_REVS: [(Namespace, u64); 31] = [
     (DatumState::NS, 1),
     (DRepEpochLog::NS, 1),
     (DRepSightingState::NS, 1),
-    (DRepState::NS, 2),
-    (EpochState::NS, 4),
-    (EraState::NS, 2),
-    (FirstMintChunk::NS, 2),
-    (FirstMintSet::NS, 2),
+    (DRepState::NS, 1),
+    (EpochState::NS, 1),
+    (EraState::NS, 1),
+    (FirstMintChunk::NS, 1),
+    (FirstMintSet::NS, 1),
     (FirstScriptChunk::NS, 1),
     (FirstScriptSet::NS, 1),
-    (GovState::NS, 4),
-    (MetadataLabelState::NS, 2),
+    (GovState::NS, 1),
+    (MetadataLabelState::NS, 1),
     (PaymentAddressChunk::NS, 1),
     (PaymentAddressSet::NS, 1),
     (PaymentStats::NS, 1),
     (PendingMirState::NS, 1),
     (PendingRewardState::NS, 1),
     (PolicyMintChunk::NS, 1),
-    (PoolEpochLog::NS, 2),
-    (PoolState::NS, 3),
-    (ProposalState::NS, 4),
+    (PoolEpochLog::NS, 1),
+    (PoolState::NS, 1),
+    (ProposalState::NS, 1),
     (PrunedAccountState::NS, 1),
     (UTXOS, 1),
 ];
