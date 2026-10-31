@@ -208,7 +208,7 @@ impl Machine {
 
         Install {
             name,
-            binary: self.binary(),
+            binary: locate_binary(None, None, None, &self.binary()).unwrap(),
             config_file: instance.file.clone(),
             config: &instance.config,
             start,
@@ -1886,7 +1886,9 @@ fn the_binary_is_recorded_by_the_path_it_was_run_as() {
     std::os::unix::fs::symlink(real.parent().unwrap(), root.join("hop")).unwrap();
 
     let locate = |invoked: Option<&str>, path: Option<&OsStr>, exe: &Path| {
-        locate_binary(invoked.map(OsStr::new), path, Some(root), exe).unwrap()
+        let located = locate_binary(invoked.map(OsStr::new), path, Some(root), exe).unwrap();
+        assert_eq!(located.canonical, real, "{invoked:?}, {exe:?}");
+        located.as_run
     };
     let path = std::env::join_paths([other.parent().unwrap(), link.parent().unwrap()]).unwrap();
 
@@ -1910,7 +1912,9 @@ fn the_binary_is_recorded_by_the_path_it_was_run_as() {
 
     // Without a working directory, a relative name is passed over.
     let without_cwd = |invoked: Option<&str>, path: Option<&OsStr>| {
-        locate_binary(invoked.map(OsStr::new), path, None, &real).unwrap()
+        locate_binary(invoked.map(OsStr::new), path, None, &real)
+            .unwrap()
+            .as_run
     };
     assert_eq!(without_cwd(Some("dolos"), Some(&path)), link);
     assert_eq!(without_cwd(Some("./bin/dolos"), None), real);
@@ -1931,7 +1935,7 @@ fn system_units_run_the_canonical_binary() {
         let runner = Recorder::default();
         let backend = machine.backend(kind, &runner);
         let request = Install {
-            binary: link.clone(),
+            binary: locate_binary(Some(link.as_os_str()), None, None, &machine.binary()).unwrap(),
             ..machine.request(&preview, None, false)
         };
         let installed = install(backend.as_ref(), &request).unwrap();
@@ -1945,6 +1949,56 @@ fn system_units_run_the_canonical_binary() {
         assert_eq!(installed.binary, runs, "{kind:?}");
         assert!(contents.contains(runs.to_str().unwrap()), "{kind:?}");
         assert!(!contents.contains(not.to_str().unwrap()), "{kind:?}");
+    }
+}
+
+/// The link the binary was run by may lead elsewhere by the time the unit is
+/// written, swapped by its owner: a system unit runs the binary that was
+/// located, never what the link leads to then.
+#[test]
+fn a_system_unit_ignores_a_link_swapped_after_locating() {
+    let machine = Machine::new();
+    let preview = machine.instance("preview", "data", 3000);
+    let home = machine.home();
+    std::fs::create_dir_all(home.join("evil")).unwrap();
+    std::fs::write(home.join("evil/dolos"), "not dolos").unwrap();
+
+    let opt = machine.binary().parent().unwrap().to_path_buf();
+
+    // A link to the binary, and one to its directory.
+    for (link, to, swapped_to, invoked) in [
+        ("dolos", machine.binary(), home.join("evil/dolos"), "dolos"),
+        ("bin", opt, home.join("evil"), "bin/dolos"),
+    ] {
+        let link = home.join(link);
+        std::os::unix::fs::symlink(&to, &link).unwrap();
+
+        let invoked = home.join(invoked);
+        let binary =
+            locate_binary(Some(invoked.as_os_str()), None, None, &machine.binary()).unwrap();
+        assert_eq!(binary.as_run, invoked);
+
+        let swap = home.join("swap");
+        std::os::unix::fs::symlink(&swapped_to, &swap).unwrap();
+        std::fs::rename(&swap, &link).unwrap();
+
+        let runner = Recorder::default();
+        let backend = machine.backend(Kind::SystemdSystem, &runner);
+        let request = Install {
+            binary,
+            ..machine.request(&preview, None, false)
+        };
+        let installed = install(backend.as_ref(), &request).unwrap();
+        let contents = std::fs::read_to_string(&installed.file).unwrap();
+
+        assert_eq!(installed.binary, machine.binary(), "{link:?}");
+        assert!(
+            contents.contains(&format!("ExecStart={} ", machine.binary().display())),
+            "{contents}"
+        );
+        assert!(!contents.contains("evil"), "{contents}");
+
+        uninstall(backend.as_ref(), &installed.name).unwrap();
     }
 }
 
@@ -2366,27 +2420,51 @@ mod command_line {
         }
 
         let preview = sandbox.machine.instance("preview", "data", 3000);
-        let output = sandbox
-            .dolos(
-                preview.file.parent().unwrap(),
-                &["--config", "dolos.toml", "service", "install", "--system"],
-            )
-            .output()
-            .unwrap();
+        let dir = preview.file.parent().unwrap();
 
         // The paths the unit would record: root never follows a link to the
         // binary, and a rule copied from it names the configuration's file.
         let binary = std::fs::canonicalize(env!("CARGO_BIN_EXE_dolos")).unwrap();
+        let config = format!("--config {}", preview.file.display());
 
-        assert_eq!(output.status.code(), Some(1), "{output:?}");
-        assert!(
-            stderr(&output).contains(&flat(&format!(
-                "sudo {} --config {} service install --system",
-                binary.display(),
-                preview.file.display()
-            ))),
-            "{output:?}"
-        );
+        // Uninstalling by name reads no configuration, not even one that
+        // would not parse.
+        let unparsable = sandbox.machine.root().join("unparsable");
+        std::fs::create_dir(&unparsable).unwrap();
+        std::fs::write(unparsable.join("dolos.toml"), "not toml").unwrap();
+
+        for (dir, args, hint) in [
+            (
+                dir,
+                &["--config", "dolos.toml", "service", "install", "--system"][..],
+                format!("{config} service install --system"),
+            ),
+            (
+                dir,
+                &[
+                    "--config",
+                    "./dolos.toml",
+                    "service",
+                    "uninstall",
+                    "--system",
+                ],
+                format!("{config} service uninstall --system"),
+            ),
+            (
+                &unparsable,
+                &["service", "uninstall", "--system", "cardano-preview"],
+                "service uninstall --system cardano-preview".into(),
+            ),
+        ] {
+            let output = sandbox.dolos(dir, args).output().unwrap();
+
+            assert_eq!(output.status.code(), Some(1), "{output:?}");
+            assert!(
+                stderr(&output).contains(&flat(&format!("sudo {} {hint}", binary.display()))),
+                "{output:?}"
+            );
+        }
+
         assert!(sandbox.calls().is_empty());
         assert!(!sandbox.machine.root().join("etc").exists());
     }

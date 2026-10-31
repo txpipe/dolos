@@ -8,7 +8,7 @@
 //! any `dolos.toml` in it are the invoking user's.
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use clap::{Parser, Subcommand};
 use dolos::service::{self, Name, ServiceBackend, ServiceError};
@@ -134,8 +134,12 @@ fn refused(config: Option<&Path>) -> impl FnOnce(ServiceError) -> miette::Report
 /// records: a sudo rule copied from it pins both.
 fn as_root(config: Option<&Path>) -> String {
     let binary = binary()
-        .and_then(|binary| service::binary_for(service::Scope::System, &binary).into_diagnostic())
-        .map(PathBuf::into_os_string)
+        .map(|binary| {
+            binary
+                .for_scope(service::Scope::System)
+                .as_os_str()
+                .to_owned()
+        })
         .unwrap_or_else(|_| "dolos".into());
     let config =
         config.map(|config| service::without_dots(config).unwrap_or_else(|_| config.into()));
@@ -220,8 +224,8 @@ fn load(config_file: &Path) -> miette::Result<RootConfig> {
         .context("loading configuration")
 }
 
-/// The running binary, by the path it was run as.
-fn binary() -> miette::Result<PathBuf> {
+/// The running binary, located once.
+fn binary() -> miette::Result<service::Binary> {
     let exe = std::env::current_exe().into_diagnostic()?;
     // Only a relative path needs it, and it may have been removed.
     let cwd = std::env::current_dir().ok();

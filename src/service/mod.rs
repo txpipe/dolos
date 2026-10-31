@@ -428,9 +428,8 @@ fn io_error(path: &Path) -> impl FnOnce(io::Error) -> ServiceError + '_ {
 /// What [`install`] is asked to install.
 pub struct Install<'a> {
     pub name: Name,
-    /// The `dolos` binary, by absolute path; see [`binary_for`] for the path
-    /// the service runs it by.
-    pub binary: PathBuf,
+    /// The running `dolos` binary, from [`locate_binary`].
+    pub binary: Binary,
     /// The configuration file, whose directory becomes the working directory.
     pub config_file: PathBuf,
     /// The configuration, as loaded from `config_file`.
@@ -538,11 +537,10 @@ pub fn install(
     let working_dir = config_file
         .parent()
         .map_or_else(|| PathBuf::from("/"), Path::to_path_buf);
-    let binary = binary_for(backend.scope(), &request.binary).map_err(io_error(&request.binary))?;
 
     let unit = Unit {
         name: request.name.clone(),
-        binary,
+        binary: request.binary.for_scope(backend.scope()).to_path_buf(),
         config: config_file,
         working_dir,
     };
@@ -764,6 +762,9 @@ fn ours(file: &Path) -> bool {
 /// Any user who can open the directory can lock it.
 const PATIENCE: Duration = Duration::from_secs(30);
 
+/// How long [`Lock::take`] waits before making its directory again.
+const RETRY: Duration = Duration::from_millis(5);
+
 /// An exclusive lock on a scope's directory, held until dropped.
 struct Lock {
     _handle: fs::File,
@@ -782,10 +783,17 @@ impl Lock {
         loop {
             if create {
                 match create_dirs(dir) {
-                    Ok(made) => created.extend(made),
+                    Ok(made) => {
+                        // Outermost first, and each once: one made again
+                        // after a failed install removed it is removed once.
+                        created.extend(made);
+                        created.sort();
+                        created.dedup();
+                    }
                     // Removed by a failed install while this one made it.
                     Err(error) if removed_meanwhile(&error, dir) && Instant::now() < deadline => {
-                        continue
+                        std::thread::sleep(RETRY);
+                        continue;
                     }
                     Err(error) => return Err(io_error(dir)(error)),
                 }
@@ -800,7 +808,8 @@ impl Lock {
                 Err(error)
                     if error.kind() == io::ErrorKind::NotFound && Instant::now() < deadline =>
                 {
-                    continue
+                    std::thread::sleep(RETRY);
+                    continue;
                 }
                 Err(error) => return Err(io_error(dir)(error)),
             };
@@ -882,12 +891,19 @@ fn create_dirs(dir: &Path) -> io::Result<Vec<PathBuf>> {
 }
 
 /// Whether [`create_dirs`] failed as it does when a directory it makes, or
-/// finds, is removed meanwhile, rather than on a file in the way.
+/// finds, is removed meanwhile, rather than on something in the way of `dir`
+/// or an ancestor.
 fn removed_meanwhile(error: &io::Error, dir: &Path) -> bool {
     matches!(
         error.kind(),
         io::ErrorKind::NotFound | io::ErrorKind::AlreadyExists | io::ErrorKind::InvalidInput
-    ) && !fs::metadata(dir).is_ok_and(|found| !found.is_dir())
+    ) && !dir.ancestors().any(in_the_way)
+}
+
+/// Whether something at `path` is not a directory and leads to none: a file,
+/// or a link that is dangling or loops. An install makes only directories.
+fn in_the_way(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|found| !found.is_dir() && !path.is_dir())
 }
 
 /// Removes the directories [`create_dirs`] created, when they are still
@@ -933,29 +949,40 @@ pub fn shell_quote(word: &str) -> Cow<'_, str> {
     }
 }
 
-/// The path a `scope` service runs `binary` by: as given for the user's, and
-/// canonical for a system service. Under `sudo`, the name `dolos` was run by
-/// may be a link its invoker owns, which root would then follow at every
-/// start.
-pub fn binary_for(scope: Scope, binary: &Path) -> io::Result<PathBuf> {
-    match scope {
-        Scope::User => Ok(binary.to_path_buf()),
-        Scope::System => fs::canonicalize(binary),
+/// The running `dolos` binary, located once by [`locate_binary`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Binary {
+    /// By the absolute path it was run as.
+    pub as_run: PathBuf,
+    /// By its canonical path, resolved when it was located.
+    pub canonical: PathBuf,
+}
+
+impl Binary {
+    /// The path a `scope` service runs it by: as run for the user's, and
+    /// canonical for a system service. Under `sudo`, the name `dolos` was run
+    /// by may be a link its invoker owns, and may lead elsewhere by now, which
+    /// root would then follow at every start.
+    pub fn for_scope(&self, scope: Scope) -> &Path {
+        match scope {
+            Scope::User => &self.as_run,
+            Scope::System => &self.canonical,
+        }
     }
 }
 
-/// The running `dolos` binary, by an absolute path naming it as it was run:
-/// `invoked` (`argv[0]`), against `cwd` or found on `path` (`PATH`), when it
-/// leads to `exe`, the running binary. Otherwise `exe`. Linux reports the
-/// running binary through its symlinks, into a versioned directory a package
-/// manager's upgrade removes (Homebrew's `Cellar/dolos/<version>`), while the
-/// name it was run by stays.
+/// The running `dolos` binary, canonically and by an absolute path naming it
+/// as it was run: `invoked` (`argv[0]`), against `cwd` or found on `path`
+/// (`PATH`), when it leads to `exe`, the running binary. Otherwise `exe`.
+/// Linux reports the running binary through its symlinks, into a versioned
+/// directory a package manager's upgrade removes (Homebrew's
+/// `Cellar/dolos/<version>`), while the name it was run by stays.
 pub fn locate_binary(
     invoked: Option<&OsStr>,
     path: Option<&OsStr>,
     cwd: Option<&Path>,
     exe: &Path,
-) -> io::Result<PathBuf> {
+) -> io::Result<Binary> {
     let absolute = |path: &Path| match cwd {
         _ if path.is_absolute() => Some(path.to_path_buf()),
         Some(cwd) => Some(cwd.join(path)),
@@ -989,7 +1016,10 @@ pub fn locate_binary(
         .filter_map(|candidate| without_dots(&candidate).ok())
         .find(|candidate| fs::canonicalize(candidate).is_ok_and(|found| found == real));
 
-    Ok(found.unwrap_or(real))
+    Ok(Binary {
+        as_run: found.unwrap_or_else(|| real.clone()),
+        canonical: real,
+    })
 }
 
 /// `path`, absolute, without `.` and `..`: each `..` steps out of where the
@@ -1021,11 +1051,12 @@ fn home() -> Result<PathBuf, ServiceError> {
         .ok_or(ServiceError::NoHome)
 }
 
-#[cfg(test)]
+// Windows opens no directory as a file, and `Lock` is reached only on Linux
+// and macOS.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn dots_go_as_the_kernel_resolves_them_and_links_stay() {
         let dir = tempfile::tempdir().unwrap();
@@ -1043,9 +1074,6 @@ mod tests {
         assert_eq!(resolve("link/../x/../../link"), root.join("link"));
     }
 
-    // Windows opens no directory as a file, and `Lock` is reached only on
-    // Linux and macOS.
-    #[cfg(unix)]
     #[test]
     fn a_held_scope_is_waited_for_then_given_up() {
         let dir = tempfile::tempdir().unwrap();
@@ -1076,7 +1104,6 @@ mod tests {
 
     /// A waiter whose lock outlived its directory waits for the one made in
     /// its place, which another install may hold by then.
-    #[cfg(unix)]
     #[test]
     fn a_directory_made_again_is_waited_for_again() {
         let dir = tempfile::tempdir().unwrap();
@@ -1107,14 +1134,17 @@ mod tests {
     }
 
     /// Failed installs remove the directories they made while others make
-    /// them; those make them again rather than give up.
-    #[cfg(unix)]
+    /// them, under a link to a directory; those make them again rather than
+    /// give up, and count each made again once: undoing, a second removal
+    /// could take the one another install has made and locked since.
     #[test]
     fn a_directory_removed_while_it_is_made_is_made_again() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let dir = tempfile::tempdir().unwrap();
-        let scope = dir.path().join("a/b/c/d");
+        fs::create_dir(dir.path().join("real")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
+        let scope = dir.path().join("link/a/b/c/d");
         let done = AtomicBool::new(false);
 
         std::thread::scope(|threads| {
@@ -1132,7 +1162,13 @@ mod tests {
                 .map(|_| {
                     threads.spawn(|| {
                         for _ in 0..100 {
-                            Lock::take(&scope, PATIENCE, true).unwrap().unwrap();
+                            let lock = Lock::take(&scope, PATIENCE, true).unwrap().unwrap();
+                            let created = &lock.created;
+
+                            assert!(
+                                created.windows(2).all(|pair| pair[0] < pair[1]),
+                                "{created:?}"
+                            );
                         }
                     })
                 })
@@ -1150,7 +1186,6 @@ mod tests {
     }
 
     /// A file where the directory goes is no race, and is not waited on.
-    #[cfg(unix)]
     #[test]
     fn a_file_in_place_of_the_directory_fails_at_once() {
         let dir = tempfile::tempdir().unwrap();
@@ -1162,5 +1197,64 @@ mod tests {
 
         assert!(matches!(error, ServiceError::Io { .. }), "{error}");
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// Nor is a link that leads to no directory, at the directory or at an
+    /// ancestor still to be made, as one into an unmounted volume; a link to
+    /// a directory is followed.
+    #[test]
+    fn a_link_leading_nowhere_fails_at_once() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        symlink(root.join("missing"), root.join("dangling")).unwrap();
+        symlink(root.join("loop"), root.join("loop")).unwrap();
+        fs::create_dir(root.join("real")).unwrap();
+        symlink(root.join("real"), root.join("link")).unwrap();
+
+        for scope in ["dangling", "dangling/systemd/user", "loop"] {
+            let started = Instant::now();
+            let error = Lock::take(&root.join(scope), PATIENCE, true).err().unwrap();
+
+            assert!(matches!(error, ServiceError::Io { .. }), "{scope}: {error}");
+            assert!(started.elapsed() < Duration::from_secs(5), "{scope}");
+        }
+
+        let lock = Lock::take(&root.join("link/systemd/user"), Duration::ZERO, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            lock.created,
+            [root.join("link/systemd"), root.join("link/systemd/user")]
+        );
+        assert!(root.join("real/systemd/user").is_dir());
+    }
+
+    /// A failure that looks like a removal but persists is retried only until
+    /// the patience runs out. No file name holds a NUL, so creating one fails
+    /// as a removal might, every time.
+    #[test]
+    fn a_persisting_failure_is_given_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let scope = dir.path().join("sco\0pe/user");
+        let error = io::Error::from(io::ErrorKind::InvalidInput);
+        assert!(removed_meanwhile(&error, &scope));
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let started = Instant::now();
+
+        std::thread::spawn(move || {
+            let given_up = Lock::take(&scope, Duration::from_millis(300), true).err();
+            let _ = sender.send(given_up);
+        });
+
+        let error = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("still retrying after 10 s")
+            .unwrap();
+
+        assert!(matches!(error, ServiceError::Io { .. }), "{error}");
+        assert!(started.elapsed() >= Duration::from_millis(300));
     }
 }
