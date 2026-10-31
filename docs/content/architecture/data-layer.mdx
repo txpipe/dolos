@@ -26,7 +26,7 @@ Under the configured `storage.path`, a running node maintains three on-disk stor
 
 ## Store identity
 
-Each on-disk state and archive store records, when it is created, the compatibility identifier of the contract the binary that created it writes: the current entry of the `compatibility` values the release reads (`v2-alpha.1` for this release). The state store keeps it under the key `identity` in its `state-cursor` keyspace; the archive keeps it in the `archive-meta` keyspace of its index database.
+Each on-disk state and archive store records, when it is created, the compatibility identifier of the contract the binary that created it writes: the current entry of the `compatibility` values the release reads (`v2-alpha.2` for this release). The state store keeps it under the key `identity` in its `state-cursor` keyspace; the archive keeps it in the `archive-meta` keyspace of its index database.
 
 Every command that opens a state or archive store checks it before anything else:
 
@@ -263,7 +263,7 @@ The widest keys are Byron addresses: 17 live UTxOs sit at addresses of 3 kB to 2
 
 ### The compatibility identity
 
-The data model above is the contract `v2-alpha.1`, the one compatibility identifier this release reads. Each state and archive store records it when created, under `identity` in `state-cursor` and in `archive-meta`, and a store holding data that records none, or one recording another, is refused at open, as [Store identity](#store-identity) describes.
+The data model above is the contract `v2-alpha.2`, the one compatibility identifier this release reads. It replaces `v2-alpha.1` in a one-time amendment of the frozen model, which removed fields, renumbered others to close their index gaps and cleared the sync cursors from published rows, so a store recording `v2-alpha.1` is refused and rebuilt. Each state and archive store records it when created, under `identity` in `state-cursor` and in `archive-meta`, and a store holding data that records none, or one recording another, is refused at open, as [Store identity](#store-identity) describes.
 
 ### New eras
 
