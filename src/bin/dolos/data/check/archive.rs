@@ -1,5 +1,5 @@
-//! Archive block continuity — the same walk `doctor wal-integrity` does, but
-//! over the store that actually feeds queries.
+//! Archive block continuity — the same walk `sync status` does over the WAL,
+//! but over the store that actually feeds queries.
 //!
 //! The rule itself is not restated here. [`dolos_cardano::consensus::
 //! check_extension`] is what the pull stage and the apply stage's batch guard

@@ -235,7 +235,7 @@ fn observing_a_dataset_a_crash_left_is_unclean() {
     );
 
     let help = miette::Diagnostic::help(&error).unwrap().to_string();
-    assert!(help.contains("`dolos sync`"), "{help}");
+    assert!(help.contains("`dolos sync recover`"), "{help}");
 
     assert_unchanged(&before, &files(&node.config.storage.path));
 
@@ -554,7 +554,7 @@ fn a_dataset_a_running_daemon_holds_is_in_use() {
         );
     }
 
-    let output = node.run(&["doctor", "check"]);
+    let output = node.run(&["sync", "status"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert_eq!(output.status.code(), Some(1), "{stderr}");
