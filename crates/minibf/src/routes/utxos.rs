@@ -2,7 +2,6 @@ use axum::http::StatusCode;
 use pallas::ledger::traverse::MultiEraOutput;
 use std::{collections::HashSet, sync::Arc};
 
-use dolos_cardano::indexes::AsyncCardanoQueryExt as _;
 use dolos_core::{Domain, StateStore as _, Tag, TagEntry, TagOrder, TagStart, TxoRef, UtxoValue};
 
 use crate::{
@@ -520,19 +519,6 @@ where
             builder
         };
 
-        let key: Vec<u8> = builder.txo_ref().into();
-        let consumed_by = domain
-            .query()
-            .tx_by_spent_txo(&key)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        let builder = if let Some(consumed_by) = consumed_by {
-            builder.with_consumed_by(consumed_by)
-        } else {
-            builder
-        };
-
         out.push(<UtxoOutputModelBuilder<'_> as IntoModel<T>>::into_model(
             builder,
         )?);
@@ -545,15 +531,24 @@ where
 mod tests {
     use std::collections::BTreeMap;
 
+    use axum::{body::Body, http::Request};
+
     use blockfrost_openapi::models::address_utxo_content_inner::AddressUtxoContentInner;
     use dolos_cardano::indexes::{
         utxo_dimensions, utxo_index_delta_from_utxo_delta, utxo_tags, CardanoStateIndexExt as _,
     };
     use dolos_core::{
-        async_query::BlockMetaResolver, EraCbor, MempoolStore as _, MempoolTx, StateStore,
-        StateWriter as _, UtxoIndexDelta, UtxoPosition, UtxoSetDelta,
+        async_query::BlockMetaResolver, config::MinibfConfig, import::ImportExt as _,
+        ArchiveStore as _, ArchiveWriter as _, ChainPoint, EraCbor, MempoolStore as _, MempoolTx,
+        StateStore, StateWriter as _, UtxoIndexDelta, UtxoPosition, UtxoSetDelta,
     };
-    use dolos_testing::{synthetic::SyntheticBlockConfig, TestAddress, MIN_UTXO_AMOUNT};
+    use dolos_testing::{
+        measured::MeasuredStores,
+        synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
+        toy_domain::{MemoryStores, ToyDomain, ToyStores as _},
+        TestAddress, MIN_UTXO_AMOUNT,
+    };
+    use http_body_util::BodyExt as _;
     use pallas::{
         crypto::hash::Hash,
         ledger::{
@@ -562,6 +557,7 @@ mod tests {
             traverse::{Era, MultiEraTx},
         },
     };
+    use tower::util::ServiceExt as _;
 
     use crate::test_support::TestApp;
 
@@ -1165,5 +1161,251 @@ mod tests {
 
             assert_eq!(walk(&app, &path, order, 1).await, expected, "order={order}");
         }
+    }
+
+    fn pagination(order: Order, count: usize, page: u64) -> Pagination {
+        Pagination {
+            count,
+            page,
+            order,
+            ..Default::default()
+        }
+    }
+
+    async fn utxo_page(app: &TestApp, stake_address: &str, query: &str) -> Vec<String> {
+        let path = format!("/accounts/{stake_address}/utxos?{query}");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status for {path}: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let page: Vec<AddressUtxoContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse account utxos");
+
+        page.into_iter()
+            .map(|x| format!("{}#{}", x.tx_hash, x.output_index))
+            .collect()
+    }
+
+    /// Every page size, in both orders, must slice the same sequence the
+    /// single full page returns. The default fixture puts three of the
+    /// account's outputs in each block, so small pages cut through blocks.
+    #[tokio::test]
+    async fn pages_concatenate_to_the_full_listing() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.clone();
+
+        for order in ["asc", "desc"] {
+            let full = utxo_page(&app, &stake_address, &format!("order={order}&count=100")).await;
+            assert!(full.len() > 3, "fixture too small to cut through a block");
+
+            for count in [1, 2, 4] {
+                let mut walked = Vec::new();
+                for page in 1.. {
+                    let rows = utxo_page(
+                        &app,
+                        &stake_address,
+                        &format!("order={order}&count={count}&page={page}"),
+                    )
+                    .await;
+                    if rows.is_empty() {
+                        break;
+                    }
+                    walked.extend(rows);
+                }
+
+                assert_eq!(walked, full, "order={order} count={count}");
+            }
+        }
+    }
+
+    /// On a rolling-history node the archive index keeps a pruned block's
+    /// slot until the sweep, but the block's rows have no block data. Pages
+    /// must still slice the same sequence as the single full page.
+    #[tokio::test]
+    async fn pages_concatenate_while_the_index_outlives_pruned_blocks() {
+        let cfg = SyntheticBlockConfig {
+            block_count: 8,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+        // undo drops the bodies and keeps the index, as between two sweeps
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
+            let writer = domain.archive().start_writer().unwrap();
+            for block in vectors.blocks.iter().take(3) {
+                writer.undo(&ChainPoint::Slot(block.slot)).unwrap();
+            }
+            writer.commit().unwrap();
+        });
+        let stake_address = app.vectors().stake_address.clone();
+
+        for order in ["asc", "desc"] {
+            let full = utxo_page(&app, &stake_address, &format!("order={order}&count=100")).await;
+            assert_eq!(full.len(), 24, "the pruned blocks' rows must stay listed");
+
+            for count in [1, 2, 4, 5] {
+                let mut walked = Vec::new();
+                for page in 1.. {
+                    let rows = utxo_page(
+                        &app,
+                        &stake_address,
+                        &format!("order={order}&count={count}&page={page}"),
+                    )
+                    .await;
+                    if rows.is_empty() {
+                        break;
+                    }
+                    walked.extend(rows);
+                }
+
+                assert_eq!(walked, full, "order={order} count={count}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn many_spent_refs_are_walked_once() {
+        let block_count = 4 * MAX_WINDOW + 100;
+        let (blocks, vectors, chain_config) = build_synthetic_blocks(SyntheticBlockConfig {
+            block_count,
+            txs_per_block: 1,
+            slot: 1,
+            ..Default::default()
+        });
+        let domain = ToyDomain::with_stores(
+            Arc::new(dolos_cardano::include::preview::load()),
+            chain_config,
+            None,
+            None,
+            MeasuredStores::new(MemoryStores::open()),
+        );
+        domain.import_blocks(blocks).unwrap();
+        let address = Address::from_bech32(&vectors.address).unwrap().to_vec();
+        let tag = Tag::new(utxo_dimensions::ADDRESS, address);
+        let facade = Facade {
+            inner: domain,
+            config: MinibfConfig::new("[::]:0".parse().unwrap()),
+        };
+        let entries = facade
+            .state()
+            .utxos_by_tag_page(
+                tag.dimension,
+                &tag.key,
+                TagOrder::Asc,
+                TagStart::Skip(0),
+                usize::MAX,
+            )
+            .unwrap();
+        assert_eq!(entries.len(), block_count);
+
+        let spent: Vec<_> = entries[99..block_count - 1]
+            .iter()
+            .map(|entry| entry.txo.clone())
+            .collect();
+        let writer = facade.state().start_writer().unwrap();
+        writer
+            .apply_utxoset(&UtxoSetDelta {
+                consumed_utxo: facade.state().get_utxos(spent).unwrap(),
+                ..Default::default()
+            })
+            .unwrap();
+        writer.commit().unwrap();
+
+        for order in [Order::Asc, Order::Desc] {
+            let mut live: Vec<_> = entries[..99]
+                .iter()
+                .chain(&entries[block_count - 1..])
+                .map(|entry| entry.txo.to_string())
+                .collect();
+            if let Order::Desc = order {
+                live.reverse();
+            }
+
+            for count in [99, 100] {
+                let pagination = pagination(order, count, 1);
+                let expected: Vec<_> = live
+                    .iter()
+                    .skip(pagination.skip())
+                    .take(count)
+                    .cloned()
+                    .collect();
+                facade.state().counters.reset();
+                let actual: Vec<AddressUtxoContentInner> =
+                    load_tag_page(&facade, &tag, &pagination).await.unwrap();
+                let actual: Vec<_> = actual
+                    .into_iter()
+                    .map(|row| format!("{}#{}", row.tx_hash, row.output_index))
+                    .collect();
+                assert_eq!(actual, expected);
+                assert_eq!(actual.len(), count);
+                let work = facade.state().counters.snapshot();
+                assert_eq!(
+                    work.utxo_reads,
+                    (count
+                        + if count == 100 || matches!(order, Order::Desc) {
+                            block_count - 100
+                        } else {
+                            0
+                        }) as u64
+                );
+                assert_eq!(work.utxo_refs, work.utxo_reads);
+                assert_eq!(work.block_reads, actual.len() as u64);
+                assert_eq!(work.exact_lookups, 0);
+                assert_eq!(work.tip_reads, 0);
+            }
+        }
+    }
+
+    /// Block reads follow the rows a page returns, not the rows the address
+    /// holds: a one-row page reads a twentieth of what the twenty-row page
+    /// reads.
+    #[tokio::test]
+    async fn a_page_fetches_only_its_own_blocks() {
+        let block_count = 20;
+        let (blocks, vectors, chain_config) = build_synthetic_blocks(SyntheticBlockConfig {
+            block_count,
+            txs_per_block: 1,
+            slot: 1,
+            ..Default::default()
+        });
+        let domain = ToyDomain::with_stores(
+            Arc::new(dolos_cardano::include::preview::load()),
+            chain_config,
+            None,
+            None,
+            MeasuredStores::new(MemoryStores::open()),
+        );
+        domain
+            .import_blocks(blocks)
+            .expect("import synthetic blocks");
+
+        let router = crate::build_router(
+            MinibfConfig::new("[::]:0".parse().expect("listen address")),
+            domain.clone(),
+        );
+
+        let mut block_reads = Vec::new();
+        for count in [1, 100] {
+            domain.archive().counters.reset();
+            let path = format!("/addresses/{}/utxos?count={count}", vectors.address);
+            let res = router
+                .clone()
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+
+            let bytes = res.into_body().collect().await.unwrap().to_bytes();
+            let rows: Vec<AddressUtxoContentInner> = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(rows.len(), count.min(block_count));
+
+            block_reads.push(domain.archive().counters.snapshot().block_reads);
+        }
+
+        assert!(block_reads[0] > 0);
+        assert_eq!(block_reads[1], block_reads[0] * block_count as u64);
     }
 }
