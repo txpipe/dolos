@@ -824,9 +824,10 @@ fn reset_resolves_a_relative_storage_path() {
     std::fs::write(&config_path, relative).unwrap();
 
     let refused = node.run_in_root(&["data", "reset"]);
+    let listed = std::path::Path::new("data").join("state");
     assert_eq!(refused.status.code(), Some(2), "{}", stderr(&refused));
     assert!(
-        stderr(&refused).contains("data/state"),
+        stderr(&refused).contains(&listed.display().to_string()),
         "{}",
         stderr(&refused)
     );
