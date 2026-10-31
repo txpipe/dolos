@@ -223,13 +223,11 @@ fn files(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     files
 }
 
-/// The node reports healthy at `tip`: its WAL passes the integrity scan, and
-/// the WAL, state and archive all stand on `tip`.
+/// The node reports healthy at `tip`: `sync status` finds its WAL intact and
+/// the stores in agreement, and the WAL, state and archive all stand on `tip`.
 fn assert_healthy_at(node: &Node, tip: &ChainPoint) {
-    assert_ok(&node.run(&["doctor", "wal-integrity"]));
-
-    let summary: dolos::cli::DataSummary =
-        serde_json::from_str(&assert_ok(&node.run(&["data", "summary"]))).unwrap();
+    let status = node.run(&["sync", "status", "--format", "json"]);
+    let summary: dolos::cli::DataSummary = serde_json::from_str(&assert_ok(&status)).unwrap();
 
     assert_eq!(summary.wal.tip_slot, Some(tip.slot()));
     assert_eq!(summary.state.tip_slot, Some(tip.slot()));

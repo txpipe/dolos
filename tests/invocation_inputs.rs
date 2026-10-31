@@ -465,8 +465,35 @@ fn digest_refuses_stores_off_the_boundary() {
 
     assert!(!output.status.success(), "{message}");
     assert!(message.contains("epoch-0 boundary cut"), "{message}");
-    assert!(message.contains("dolos sync --stop-epoch 1"), "{message}");
+    // The renderer wraps the hint inside `--stop-epoch`, at its hyphen.
+    let squeezed: String = message.split_whitespace().collect();
+    assert!(
+        squeezed.contains("dolossynccatchup--follow--stop-epoch1"),
+        "{message}"
+    );
     assert!(!inscription.exists(), "a refused digest wrote a document");
+}
+
+/// The help of `snapshot digest` and of `verify --reproduce` names the sync
+/// that leaves the stores on an epoch's first block.
+#[test]
+fn the_snapshot_help_names_the_sync_to_a_boundary() {
+    let node = Node::new();
+
+    for args in [
+        &["snapshot", "digest", "--help"][..],
+        &["snapshot", "verify", "--help"],
+    ] {
+        let output = node.run(args);
+        let help = String::from_utf8_lossy(&output.stdout);
+        let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(output.status.success(), "{args:?}: {}", stderr(&output));
+        assert!(
+            help.contains("as `dolos sync catchup --follow --stop-epoch` leaves them"),
+            "{args:?}: {help}"
+        );
+    }
 }
 
 /// `snapshot digest` one block past the boundary is refused as it plans, before
@@ -499,8 +526,10 @@ fn digest_refuses_stores_past_the_boundary_as_it_plans() {
         message.contains("restore the stele for this epoch"),
         "{message}"
     );
+    // The renderer can wrap the hint inside `--stop-epoch`, at its hyphen.
+    let squeezed: String = message.split_whitespace().collect();
     assert!(
-        message.contains("dolos sync --stop-epoch set to the following epoch"),
+        squeezed.contains("dolossynccatchup--follow--stop-epochsettothefollowingepoch"),
         "{message}"
     );
     assert!(

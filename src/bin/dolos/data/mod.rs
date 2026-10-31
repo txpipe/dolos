@@ -7,14 +7,12 @@ mod compute_nonce;
 mod compute_spdd;
 mod copy_wal;
 mod dump;
-mod dump_wal;
 mod find_seq;
 mod housekeeping;
 mod inspect;
 mod rebuild;
 mod reset;
 mod stats;
-mod summary;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -32,10 +30,6 @@ pub enum Command {
     Reset(reset::Args),
     /// rebuilds the state store by replaying the local archive
     Rebuild(rebuild::Args),
-    /// shows a summary of managed data
-    Summary(summary::Args),
-    /// dumps data from the WAL
-    DumpWal(dump_wal::Args),
     /// clears data from the state
     ClearState(clear_state::Args),
     /// computes the SPDD for the current epoch
@@ -67,8 +61,6 @@ pub fn run(
         Command::Housekeeping(x) => housekeeping::run(config, x)?,
         Command::Reset(x) => reset::run(config, x)?,
         Command::Rebuild(x) => rebuild::run(config, x, feedback)?,
-        Command::Summary(x) => summary::run(config, x)?,
-        Command::DumpWal(x) => dump_wal::run(config, x)?,
         Command::ClearState(x) => clear_state::run(config, x)?,
         Command::ComputeSpdd(x) => compute_spdd::run(config, x)?,
         Command::ComputeNonce(x) => compute_nonce::run(config, x)?,

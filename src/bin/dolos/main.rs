@@ -43,7 +43,8 @@ enum Command {
     /// Run the node in all its glory
     Daemon(daemon::Args),
 
-    /// Just sync from upstream peer
+    /// Sync from the upstream peer, and inspect, recover or roll back the WAL
+    #[command(arg_required_else_help = true)]
     Sync(sync::Args),
 
     /// Just serve data through apis
@@ -120,10 +121,10 @@ fn run() -> Result<()> {
 
     match args.command {
         Command::Daemon(args) => daemon::run(load()?, &args),
-        Command::Sync(args) => sync::run(&load()?, &args),
+        Command::Sync(args) => sync::run(&load()?, &args, &feedback),
         Command::Serve(args) => serve::run(load()?, &args),
         Command::Eval(args) => eval::run(&load()?, &args),
-        Command::Doctor(args) => doctor::run(&load()?, &args, &feedback),
+        Command::Doctor(args) => doctor::run(&load()?, &args),
         Command::Snapshot(args) => snapshot::run(&load()?, &args),
         Command::Cache(args) => cache::run(&load()?, &args),
         Command::Config(args) => config::run(config_file, &args),
