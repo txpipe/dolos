@@ -540,19 +540,22 @@ fn without_yes_an_in_place_rebuild_refuses_before_touching_anything() {
     assert_eq!(InstanceContents::read(&node), before);
 }
 
-/// A live view of the state refuses an in-place rebuild before the WAL
-/// moves: the wipe would empty the store under its reader.
+/// A live view of the state refuses an in-place rebuild before any store
+/// opens: the wipe would empty the store under its reader.
 #[test]
 fn a_live_view_of_the_state_refuses_an_in_place_rebuild() {
     let node = Node::new();
     node.sync();
 
     let before = InstanceContents::read(&node);
+    let archive = node.config.storage.archive_path().unwrap();
+    let archive_files = read_dir_bytes(&archive);
     let state = node.config.storage.state_path().unwrap();
     let view = dolos_fjall::view::View::of(&state, &state).unwrap();
 
     let output = rebuild(&node, &["--yes"]);
     assert_eq!(output.status.code(), Some(1));
+    assert_eq!(read_dir_bytes(&archive), archive_files);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("holds the state store"), "{stderr}");
@@ -562,6 +565,28 @@ fn a_live_view_of_the_state_refuses_an_in_place_rebuild() {
 
     drop(view);
     assert_eq!(InstanceContents::read(&node), before);
+}
+
+/// A `--target` holding anything is refused before the archive opens for
+/// writing, which would rewrite its files.
+#[test]
+fn a_target_holding_files_is_refused_before_the_archive_opens() {
+    let node = Node::new();
+    node.sync();
+
+    let archive = node.config.storage.archive_path().unwrap();
+    let archive_files = read_dir_bytes(&archive);
+
+    let target = node.root.path().join("rebuilt-state");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("notes"), b"the operator's").unwrap();
+
+    let output = rebuild(&node, &["--target", &target.display().to_string()]);
+    assert_eq!(output.status.code(), Some(1));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("not empty"), "{stderr}");
+    assert_eq!(read_dir_bytes(&archive), archive_files);
 }
 
 /// A zero chunk imports no blocks, so the replay would end instantly. In

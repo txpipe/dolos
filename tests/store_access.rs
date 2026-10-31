@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{PoisonError, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
 
 use dolos::storage::{open_existing_stores, Access, OpenError, Stores};
@@ -18,6 +19,19 @@ use dolos_core::{
     ArchiveStore as _, ChainPoint, LogValue, StateStore as _, WalStore as _,
 };
 use node::Node;
+
+/// Taken shared by every test here that starts a process, and exclusively
+/// by [`a_held_store_is_in_use`].
+///
+/// redb 3.1 never unlocks a read-only database: its shared lock goes with
+/// its file. A child started on Linux holds a copy of every open file until
+/// it executes, so one another test starts just as an observing open closes
+/// keeps that open's lock, and the next open of the store finds it in use.
+static SPAWNING: RwLock<()> = RwLock::new(());
+
+fn spawning() -> RwLockReadGuard<'static, ()> {
+    SPAWNING.read().unwrap_or_else(PoisonError::into_inner)
+}
 
 fn open(node: &Node, access: Access) -> Result<Stores<CardanoDelta>, OpenError> {
     open_existing_stores::<CardanoDelta>(&node.config, access)
@@ -74,6 +88,8 @@ fn crashing() -> Option<RootConfig> {
 /// and exits through [`exit_holding`]. Dropping a handle would shut its file
 /// down cleanly.
 fn crash(node: &Node, test: &str) {
+    let _spawning = spawning();
+
     let output = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", test, "--nocapture"])
         .env(CRASHING, node.config_path())
@@ -444,6 +460,8 @@ fn a_missing_mempool_file_opens_in_memory() {
 /// the open, naming that store.
 #[test]
 fn a_held_store_is_in_use() {
+    let _alone = SPAWNING.write().unwrap_or_else(PoisonError::into_inner);
+
     let node = Node::with_tables("[mempool]\npersistent = true\n");
     node.sync();
 
@@ -538,6 +556,8 @@ fn spawn_daemon(node: &Node, port: u16) -> Daemon {
     ignore = "the debug feature's console subscriber panics a daemon built without tokio_unstable"
 )]
 fn a_dataset_a_running_daemon_holds_is_in_use() {
+    let _spawning = spawning();
+
     let port = free_port();
     let node = Node::with_tables(&format!(
         "[serve.minibf]\nlisten_address = \"127.0.0.1:{port}\"\n"

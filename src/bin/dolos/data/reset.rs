@@ -1,10 +1,10 @@
 //! `dolos data reset`: remove every store the node keeps under its storage
 //! path, leaving the configuration and anything else there.
 
-use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use dolos_core::config::RootConfig;
+use dolos_fjall::view::LockOut;
 use miette::{Context as _, IntoDiagnostic};
 
 use crate::output::ConfirmArgs;
@@ -18,7 +18,7 @@ pub struct Args {
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing_warnings()?;
 
-    let mut removal = managed_paths(config)?;
+    let removal = managed_paths(config)?;
 
     if removal.paths.is_empty() {
         println!("no store under {} to remove", config.storage.path.display());
@@ -28,31 +28,128 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     args.confirm
         .require(&format!("these stores:\n{}", format_paths(&removal.paths)))?;
 
-    for path in std::mem::take(&mut removal.paths) {
-        removal.remove(&path)?;
-        println!("removed {}", path.display());
-    }
-
-    Ok(())
+    removal.remove_all(remove_held, |path| println!("removed {}", path.display()))
 }
 
 /// Where a ranged `bootstrap snapshot` download stages its chunks.
 const SNAPSHOT_STAGING_DIR: &str = ".dolos-snapshot-tmp";
 
-/// The stores a reset removes, and the locks keeping every view and writer
-/// off the fjall ones meanwhile.
+/// The stores a reset removes under `root`, and the locks keeping every
+/// view and writer off the fjall ones meanwhile.
 struct Removal {
+    root: PathBuf,
     paths: Vec<PathBuf>,
-    locks: Vec<(PathBuf, File)>,
+    locks: Vec<(PathBuf, LockOut)>,
 }
 
 impl Removal {
-    /// Remove `path`, releasing first the locks of the stores it holds:
-    /// Windows removes no file a handle holds open.
-    fn remove(&mut self, path: &Path) -> miette::Result<()> {
-        self.locks.retain(|(store, _)| !store.starts_with(path));
-        remove(path)
+    /// Remove every store in turn with `remove`, handing it the locks of the
+    /// fjall stores it holds, and name each to `removed` once it is gone.
+    /// Each is checked again just before: a link swapped in since the first
+    /// checks stops the reset rather than being followed.
+    fn remove_all(
+        self,
+        mut remove: impl FnMut(&Path, Vec<LockOut>) -> miette::Result<()>,
+        mut removed: impl FnMut(&Path),
+    ) -> miette::Result<()> {
+        let Self {
+            root,
+            paths,
+            mut locks,
+        } = self;
+
+        for path in paths {
+            recheck(&root, &path)?;
+
+            let (held, rest): (Vec<_>, Vec<_>) = locks
+                .into_iter()
+                .partition(|(store, _)| store.starts_with(&path));
+            locks = rest;
+
+            remove(&path, held.into_iter().map(|(_, lock)| lock).collect())?;
+            removed(&path);
+        }
+
+        Ok(())
     }
+}
+
+/// Remove the store at `path` while `held` keep the fjall databases in it
+/// locked, so no view starts on a store half removed. Unix removes a file a
+/// handle holds open, so the whole store goes under the locks; elsewhere
+/// everything but the lock files goes first, then the locks are released
+/// and the rest goes.
+pub(super) fn remove_held(path: &Path, held: Vec<LockOut>) -> miette::Result<()> {
+    if cfg!(unix) {
+        remove(path)?;
+    } else {
+        let kept: Vec<PathBuf> = held.iter().map(|lock| lock.path().to_path_buf()).collect();
+        remove_except(path, &kept)?;
+    }
+
+    drop(held);
+
+    remove(path)
+}
+
+/// Remove everything under `dir` but `kept` and the folders holding them.
+fn remove_except(dir: &Path, kept: &[PathBuf]) -> miette::Result<()> {
+    if !kept.iter().any(|file| file.starts_with(dir)) {
+        return remove(dir);
+    }
+
+    let entries = std::fs::read_dir(dir)
+        .into_diagnostic()
+        .with_context(|| format!("removing {}", dir.display()))?;
+
+    for entry in entries {
+        let entry = entry.into_diagnostic()?;
+        let path = entry.path();
+
+        if kept.contains(&path) {
+            continue;
+        }
+
+        if entry.file_type().into_diagnostic()?.is_dir() {
+            remove_except(&path, kept)?;
+        } else {
+            remove(&path)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Refuse `path` if, since the checks, it or a folder on the way to it below
+/// `root` became a symbolic link, or it resolves outside the root. One
+/// already gone has nothing left to check.
+fn recheck(root: &Path, path: &Path) -> miette::Result<()> {
+    if std::fs::symlink_metadata(path).is_err() {
+        return Ok(());
+    }
+
+    let mut changed = links_on_the_way(root, path).into_diagnostic()?;
+    changed.extend(resolved_outside(root, &[path.to_path_buf()]).into_diagnostic()?);
+
+    if changed.is_empty() {
+        return Ok(());
+    }
+
+    let listed = format_paths(&changed);
+
+    miette::bail!(
+        "{} changed during the reset: it is now reached through a symbolic link, or resolves \
+         outside the storage root {}:\n{listed}\nThe reset stopped there; remove the remaining \
+         stores by hand, then run `dolos bootstrap`",
+        path.display(),
+        root.display(),
+    );
+}
+
+/// `path` rebuilt from its components, without a trailing separator: through
+/// one, every check below would read a link at the store as its target.
+fn clean(path: PathBuf) -> PathBuf {
+    path.components().collect()
 }
 
 /// The stores under the storage root that exist, in the order they are
@@ -64,8 +161,7 @@ impl Removal {
 /// the configuration places elsewhere is left behind. The fjall stores stay
 /// locked against views and writers until they are removed.
 fn managed_paths(config: &RootConfig) -> miette::Result<Removal> {
-    // A trailing separator would have the link check read the link's target.
-    let root: PathBuf = config.storage.path.components().collect();
+    let root = clean(config.storage.path.clone());
 
     if std::fs::symlink_metadata(&root).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         miette::bail!(
@@ -169,6 +265,7 @@ fn managed_paths(config: &RootConfig) -> miette::Result<Removal> {
     }
 
     Ok(Removal {
+        root,
         paths: managed,
         locks,
     })
@@ -188,6 +285,7 @@ fn store_paths(config: &RootConfig) -> Vec<PathBuf> {
     let first: Vec<PathBuf> = [config.wal_path(), storage.state_path()]
         .into_iter()
         .flatten()
+        .map(clean)
         .collect();
 
     let mut rest: Vec<PathBuf> = [
@@ -202,6 +300,7 @@ fn store_paths(config: &RootConfig) -> Vec<PathBuf> {
     ]
     .into_iter()
     .flatten()
+    .map(clean)
     .collect();
 
     rest.extend(views_of(config));
@@ -237,11 +336,13 @@ fn fjall_databases(config: &RootConfig) -> Vec<(PathBuf, PathBuf)> {
     let state = config
         .storage
         .state_path()
+        .map(clean)
         .map(|store| (store.clone(), store));
 
     let archive = config
         .storage
         .archive_path()
+        .map(clean)
         .map(|store| (store.clone(), store.join("index")));
 
     [state, archive].into_iter().flatten().collect()
@@ -453,13 +554,7 @@ mod tests {
 
     /// What `data reset --yes` does once its checks pass.
     fn reset(config: &RootConfig) -> miette::Result<()> {
-        let mut removal = managed_paths(config)?;
-
-        for path in std::mem::take(&mut removal.paths) {
-            removal.remove(&path)?;
-        }
-
-        Ok(())
+        managed_paths(config)?.remove_all(remove_held, |_| {})
     }
 
     #[test]
@@ -822,15 +917,173 @@ mod tests {
         let root = dir.path().join("data");
         old_store_under(&root);
 
-        let mut removal = managed_paths(&config_over(&root)).unwrap();
+        let removal = managed_paths(&config_over(&root)).unwrap();
         let view = root.join(".state.view-a1b2");
         assert!(removal.paths.contains(&view));
 
         std::fs::remove_dir_all(&view).unwrap();
 
-        for path in std::mem::take(&mut removal.paths) {
-            removal.remove(&path).unwrap();
+        removal.remove_all(remove_held, |_| {}).unwrap();
+    }
+
+    /// Each fjall store is removed while its lock is still held, so no view
+    /// starts on a store half removed.
+    #[test]
+    fn the_stores_stay_locked_while_they_are_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("data");
+        let stores = fjall_stores_under(&root);
+        let mut locked = Vec::new();
+
+        managed_paths(&config_over(&root))
+            .unwrap()
+            .remove_all(
+                |path, held| {
+                    for (store, database) in &stores {
+                        if store.starts_with(path) {
+                            assert_eq!(held.len(), 1, "{}", path.display());
+
+                            let error = dolos_fjall::view::View::of(database, store).err();
+                            assert!(error.unwrap().is_locked(), "{}", store.display());
+
+                            locked.push(store.clone());
+                        }
+                    }
+
+                    remove_held(path, held)
+                },
+                |_| {},
+            )
+            .unwrap();
+
+        assert_eq!(locked.len(), stores.len());
+        assert!(stores.iter().all(|(store, _)| !store.exists()));
+    }
+
+    /// The stores a release before v2 wrote as single redb files.
+    #[test]
+    fn removes_stores_kept_as_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("data");
+        std::fs::create_dir_all(&root).unwrap();
+
+        for store in ["state", "archive", "wal"] {
+            std::fs::write(root.join(store), b"a redb file").unwrap();
         }
+
+        reset(&config_over(&root)).unwrap();
+
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+    }
+
+    /// A store path written with a trailing separator, over a link at the
+    /// store, refuses the reset as the same path without one does.
+    #[cfg(unix)]
+    #[test]
+    fn refuses_a_linked_store_written_with_a_trailing_separator() {
+        type Set = fn(&mut RootConfig);
+
+        let at_store: [(Set, &str); 3] = [
+            (
+                |config| config.storage.state.path = Some(PathBuf::from("state/")),
+                "state",
+            ),
+            (
+                |config| config.sync.wal_path = Some(PathBuf::from("wal/")),
+                "wal",
+            ),
+            (
+                |config| config.storage.cache.path = Some(PathBuf::from("cache/")),
+                "cache",
+            ),
+        ];
+
+        for (set, store) in at_store {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("data");
+            let theirs = dir.path().join("victim").join("theirs");
+
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::create_dir_all(theirs.parent().unwrap()).unwrap();
+            std::fs::write(&theirs, b"the operator's").unwrap();
+            std::os::unix::fs::symlink(theirs.parent().unwrap(), root.join(store)).unwrap();
+
+            let mut config = config_over(&root);
+            set(&mut config);
+
+            assert_refused(&config, &[theirs], "symbolic link");
+        }
+    }
+
+    /// A folder on the way to a store swapped for a link after the checks
+    /// stops the reset before it reaches through the link.
+    #[cfg(unix)]
+    #[test]
+    fn refuses_a_link_swapped_in_after_the_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("data");
+        old_store_under(&root);
+
+        let archive = root.join("hdd").join("archive");
+        std::fs::create_dir_all(&archive).unwrap();
+        std::fs::write(archive.join("000000.segment"), b"a store").unwrap();
+
+        let theirs = dir.path().join("victim").join("archive").join("theirs");
+        std::fs::create_dir_all(theirs.parent().unwrap()).unwrap();
+        std::fs::write(&theirs, b"the operator's").unwrap();
+
+        let mut config = config_over(&root);
+        config.storage.archive.path = Some(PathBuf::from("hdd/archive"));
+        let removal = managed_paths(&config).unwrap();
+
+        std::fs::rename(root.join("hdd"), dir.path().join("moved")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("victim"), root.join("hdd")).unwrap();
+
+        let error = removal.remove_all(remove_held, |_| {}).unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains("changed during the reset"), "{message}");
+        assert!(theirs.is_file());
+    }
+
+    /// Off Unix the lock files outlive the rest of their stores; the
+    /// removal there is exercised everywhere.
+    #[test]
+    fn removing_all_but_the_lock_files_keeps_their_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("archive");
+        let lock = archive.join("index").join("lock");
+
+        for file in [
+            &lock,
+            &archive.join("index").join("journal"),
+            &archive.join("000000.segment"),
+        ] {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, b"").unwrap();
+        }
+
+        remove_except(&archive, std::slice::from_ref(&lock)).unwrap();
+
+        let mut left: Vec<_> = walk(&archive);
+        left.sort();
+        assert_eq!(left, [lock]);
+    }
+
+    fn walk(dir: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+
+            if path.is_dir() {
+                found.extend(walk(&path));
+            } else {
+                found.push(path);
+            }
+        }
+
+        found
     }
 
     /// A relative storage path, the default `data` among them, resolves

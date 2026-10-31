@@ -132,14 +132,29 @@ fn footprint_to_json(footprint: &TableFootprint) -> serde_json::Value {
     })
 }
 
+/// Whether the folder the archive keeps its segments in holds anything.
+fn holds_segments(config: &RootConfig) -> bool {
+    config
+        .storage
+        .blocks_path()
+        .or_else(|| config.storage.archive_path())
+        .and_then(|path| std::fs::read_dir(path).ok())
+        .is_some_and(|mut entries| entries.next().is_some())
+}
+
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     // Each store the dataset holds, so one that holds only an archive is
     // reported too; with neither, the state's absence is the refusal. An
-    // archive index without its segments is a broken archive, not none.
+    // archive index without its segments, or segments without their index,
+    // is a broken archive, not none.
     let index = config.storage.archive_path().map(|path| path.join("index"));
 
     let archive = match dolos::storage::open_existing_archive(config, Access::Observe) {
-        Err(OpenError::Missing { path }) if Some(&path) == index.as_ref() => None,
+        Err(OpenError::Missing { path })
+            if Some(&path) == index.as_ref() && !holds_segments(config) =>
+        {
+            None
+        }
         archive => Some(archive?),
     };
 

@@ -912,6 +912,21 @@ fn stats_refuses_an_archive_without_its_segments() {
     assert!(!segments.exists());
 }
 
+/// Archive segments whose index is gone are reported broken, not left out
+/// of `stats`.
+#[test]
+fn stats_refuses_archive_segments_without_their_index() {
+    let (node, _) = populated();
+    let archive = node.config.storage.archive_path().unwrap();
+    std::fs::remove_dir_all(archive.join("index")).unwrap();
+
+    let stats = dolos(&node, &["data", "stats", "--format", "json"]);
+    assert_eq!(stats.status.code(), Some(1), "{}", stderr(&stats));
+    assert!(stderr(&stats).contains("no store at"), "{}", stderr(&stats));
+    assert!(stderr(&stats).contains("index"), "{}", stderr(&stats));
+    assert!(!archive.join("index").exists());
+}
+
 /// `--offset` skips records read, never one that fails to: the failure
 /// reaches the caller whatever the offset.
 #[test]

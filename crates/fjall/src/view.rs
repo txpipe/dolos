@@ -151,25 +151,46 @@ pub fn live_views(store: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// A database held against every view and writer until it drops.
+pub struct LockOut {
+    path: PathBuf,
+    _lock: File,
+}
+
+impl LockOut {
+    /// The lock file held, which the database keeps until it is removed.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 /// Hold the database at `database` against every view and writer until the
 /// returned lock drops: no view starts while it is held, and it fails with
 /// [`fjall::Error::Locked`] while a writer or a view, even one still
-/// mirroring, holds the database. `None` when no database is there.
-pub fn lock_out(database: &Path) -> Result<Option<File>, Error> {
-    let lock_path = database.join(LOCK_FILE);
+/// mirroring, holds the database. `None` when no database is there, a file
+/// in its place included.
+pub fn lock_out(database: &Path) -> Result<Option<LockOut>, Error> {
+    let path = database.join(LOCK_FILE);
 
-    let lock = match File::open(&lock_path) {
+    let lock = match File::open(&path) {
         Ok(lock) => lock,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(io_error(&lock_path, error)),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None)
+        }
+        Err(error) => return Err(io_error(&path, error)),
     };
 
     lock.try_lock().map_err(|error| match error {
         TryLockError::WouldBlock => Error::Fjall(fjall::Error::Locked),
-        TryLockError::Error(error) => io_error(&lock_path, error),
+        TryLockError::Error(error) => io_error(&path, error),
     })?;
 
-    Ok(Some(lock))
+    Ok(Some(LockOut { path, _lock: lock }))
 }
 
 /// The folder views of `store` live in, and the name each starts with.
@@ -569,6 +590,11 @@ mod tests {
 
         assert!(lock_out(&path).unwrap().is_none());
 
+        // A file where the database would be, as a v1 redb store is.
+        fs::write(&path, b"a redb file").unwrap();
+        assert!(lock_out(&path).unwrap().is_none());
+        fs::remove_file(&path).unwrap();
+
         let held = database(&path);
         assert!(lock_out(&path).err().unwrap().is_locked());
         drop(held);
@@ -578,6 +604,7 @@ mod tests {
         drop(view);
 
         let lock = lock_out(&path).unwrap().unwrap();
+        assert_eq!(lock.path(), path.join(LOCK_FILE));
         assert!(View::of(&path, &path).err().unwrap().is_locked());
         assert!(views(dir.path()).is_empty());
 
