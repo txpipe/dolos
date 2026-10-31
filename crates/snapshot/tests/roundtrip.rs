@@ -12,7 +12,7 @@ use common::*;
 use dolos_core::{ExactKind, ExactRecord, IndexRecord, MAX_EXACT_KEY_LEN};
 use dolos_snapshot::{
     layers::{blocks, indexes, logs, state},
-    shards_for, DolosProfile, Error, Scope, BLOCKS, DIGESTS, INDEXES, LOG_KINDS,
+    shard_byte_for, shards_for, DolosProfile, Error, Scope, BLOCKS, DIGESTS, INDEXES, LOG_KINDS,
 };
 use stelae::{
     dir::SteleDir,
@@ -140,6 +140,7 @@ fn logs_round_trip_through_a_layer_per_namespace() {
 fn state_round_trips_through_a_layer_per_kind_and_shard() {
     for (kind, ns, shard) in common::state_layers() {
         let shards = shards_for(ns).expect("a state namespace");
+        let byte = shard_byte_for(ns).expect("a state namespace");
         let records = common::state(ns, shard);
 
         let decoded = roundtrip(
@@ -150,7 +151,7 @@ fn state_round_trips_through_a_layer_per_kind_and_shard() {
             |bytes| state::decode(ns, bytes),
         );
 
-        let mut order = state::OrderCheck::for_shard(shard, shards);
+        let mut order = state::OrderCheck::for_shard(shard, shards, byte);
         for record in &decoded {
             order.check(record).unwrap();
         }

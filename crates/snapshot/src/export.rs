@@ -876,9 +876,11 @@ where
     // that ran in sequence overlap instead. The tip shards are
     // not offered to the predecessor; the dumps among them are. See
     // [`Predecessor::landed`].
-    for (kind, ns, shards) in STATE_KINDS {
+    for (kind, ns, shards, shard_byte) in STATE_KINDS {
         jobs.push(Job::light(move || {
-            write_state_kind(stele, plan, state, kind, ns, shards, previous, cursor)
+            write_state_kind(
+                stele, plan, state, kind, ns, shards, shard_byte, previous, cursor,
+            )
         }));
     }
 
@@ -1566,7 +1568,7 @@ fn carried_dumps(plan: &Plan, previous: &dyn Predecessor) -> Result<usize, Error
     let mut total = 0;
 
     for epoch in plan.adoptable_dumps() {
-        for (kind, _, shards) in STATE_KINDS {
+        for (kind, _, shards, _) in STATE_KINDS {
             for shard in 0..shards {
                 let spec = plan.dump_scope(epoch, shard).layer_spec(kind)?;
 
@@ -2101,7 +2103,8 @@ fn route_index<K: RecordSink>(
 /// [`export`] queues one of these per [`STATE_KINDS`] entry, in table order —
 /// the inscription's order — and within a kind every shard is written
 /// ascending. The kind's shard sinks stay open while its namespace is walked
-/// once and each record is routed by [`crate::shard_of`]; the alternative —
+/// once and each record is routed by [`crate::shard_of`] on the kind's shard
+/// byte; the alternative —
 /// sixteen passes over `utxos`, or one pass buffering into sixteen buckets —
 /// is either sixteen full scans of a mainnet-sized set or the whole of it in
 /// memory. Each kind reads its own namespace and nothing else's, which is what
@@ -2156,6 +2159,7 @@ fn write_state_kind<W: SteleWriter, S: StateStore>(
     kind: &'static str,
     ns: Namespace,
     shards: u8,
+    shard_byte: usize,
     previous: &dyn Predecessor,
     cursor: &Cursor<'_>,
 ) -> Result<Vec<LayerDescriptor>, Error> {
@@ -2191,7 +2195,7 @@ fn write_state_kind<W: SteleWriter, S: StateStore>(
 
         positions.push(cursor.open(kind, &spec.scope));
         sinks.push(sink(stele, &spec)?);
-        orders.push(state::OrderCheck::for_shard(shard, shards));
+        orders.push(state::OrderCheck::for_shard(shard, shards, shard_byte));
     }
 
     let mut records = cursor.records();
@@ -2205,6 +2209,7 @@ fn write_state_kind<W: SteleWriter, S: StateStore>(
                 &mut orders,
                 ns,
                 shards,
+                shard_byte,
                 state::utxo(&txo, &value)?,
             )?;
             records.tick();
@@ -2218,6 +2223,7 @@ fn write_state_kind<W: SteleWriter, S: StateStore>(
                 &mut orders,
                 ns,
                 shards,
+                shard_byte,
                 state::entity(&key, &value),
             )?;
             records.tick();
@@ -2305,7 +2311,8 @@ fn adopt_dump(
     Ok(layers)
 }
 
-/// Send one state record to the shard its key belongs to under `ns`'s count.
+/// Send one state record to the shard its key belongs to under `ns`'s count
+/// and shard byte.
 ///
 /// The shard's own `OrderCheck` is what catches a routing mistake. Without it a
 /// misrouted record still restores — the write path dispatches on the kind, not
@@ -2316,9 +2323,10 @@ fn route<K: RecordSink>(
     orders: &mut [state::OrderCheck],
     ns: Namespace,
     shards: u8,
+    shard_byte: usize,
     record: state::StateRecord,
 ) -> Result<(), Error> {
-    let shard = state::shard_of(&record.key, shards) as usize;
+    let shard = state::shard_of(&record.key, shards, shard_byte) as usize;
 
     orders[shard].check(&record)?;
     sinks[shard].write_record(&state::encode(ns, &record)?)?;
