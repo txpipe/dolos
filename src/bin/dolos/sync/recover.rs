@@ -73,9 +73,9 @@ impl Recovery {
                 .retain(|step| step.store != RecoveredStore::Archive);
         }
 
-        // An emptied rolling archive lacks nothing the WAL's blocks do not
-        // bring, so replaying them leaves it whole; with none to replay, it
-        // waits for a sync.
+        // An emptied rolling archive is whole again with whatever blocks reach
+        // it next, so replaying the WAL's blocks refills it; with none to
+        // replay, it waits for a sync.
         if positions.archive_refills() {
             plan.steps
                 .retain(|step| step.store != RecoveredStore::Archive || step.entries > 0);
@@ -661,5 +661,87 @@ mod tests {
         let recovery = decide(&short, true);
         assert_eq!(recovery.action, Action::Refuse);
         assert!(recovery.refusal.unwrap().contains("no block hash"));
+    }
+
+    /// A state lag beside an emptied rolling archive: the WAL brings both
+    /// stores to its tip, so nothing is discarded, flag or not.
+    #[test]
+    fn a_state_lag_beside_an_emptied_rolling_archive_is_replayed() {
+        let mut lagging = positions(100, 200, 150, None);
+        lagging.archive_rolling = true;
+
+        for discard_wal in [false, true] {
+            let recovery = decide(&lagging, discard_wal);
+            assert_eq!(recovery.action, Action::Replay);
+            assert!(recovery.plan.covers_lag);
+            assert_eq!(recovery.plan.steps.len(), 2);
+            assert!(recovery.remains.is_empty(), "{:?}", recovery.remains);
+        }
+    }
+
+    /// A state behind a WAL reset past it, beside an emptied rolling archive:
+    /// the WAL holds no block for either store, and the state still needs the
+    /// flag.
+    #[test]
+    fn a_state_behind_a_reset_point_beside_an_emptied_rolling_archive_needs_discarding() {
+        let mut reset = positions(200, 200, 150, None);
+        reset.archive_rolling = true;
+
+        let step = |store, from| RecoveryStep {
+            store,
+            from,
+            to: point(200),
+            entries: 0,
+            covered: false,
+        };
+
+        let plan = RecoveryPlan {
+            wal: reset.wal_tip.clone(),
+            state: reset.state.clone(),
+            archive: None,
+            covers_lag: false,
+            steps: vec![
+                step(RecoveredStore::State, Some(150)),
+                step(RecoveredStore::Archive, None),
+            ],
+        };
+
+        let recovery = Recovery::decide(plan.clone(), &reset, false);
+        assert_eq!(recovery.action, Action::NeedsDiscard);
+        assert_eq!(recovery.plan.steps.len(), 1);
+
+        let recovery = Recovery::decide(plan, &reset, true);
+        assert_eq!(recovery.action, Action::DiscardWal);
+    }
+
+    /// A WAL holding Origin alone beside a state with no cursor: genesis was
+    /// interrupted between its two commits, and a boot runs it again.
+    #[test]
+    fn an_interrupted_genesis_needs_nothing() {
+        let interrupted = Positions {
+            wal_start: Some(ChainPoint::Origin),
+            wal_tip: Some(ChainPoint::Origin),
+            wal_history: None,
+            rollback_floor: None,
+            state: None,
+            archive: None,
+            archive_kept: true,
+            archive_rolling: false,
+        };
+
+        let plan = RecoveryPlan {
+            wal: Some(ChainPoint::Origin),
+            state: None,
+            archive: None,
+            covers_lag: true,
+            steps: vec![],
+        };
+
+        for discard_wal in [false, true] {
+            let recovery = Recovery::decide(plan.clone(), &interrupted, discard_wal);
+            assert_eq!(recovery.action, Action::None);
+            assert_eq!(recovery.gap, None);
+            assert!(recovery.remains.is_empty(), "{:?}", recovery.remains);
+        }
     }
 }
