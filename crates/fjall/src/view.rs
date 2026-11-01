@@ -37,10 +37,11 @@ const MIRROR: &str = "db";
 /// is held: no writer compacts away a table under the view. It also holds
 /// its own folder's lock, which tells a later view that it is not stale.
 pub struct View {
+    database: PathBuf,
     dir: PathBuf,
     mirror: PathBuf,
     lock: Option<File>,
-    _database_lock: File,
+    _database_lock: same_file::Handle,
 }
 
 impl View {
@@ -54,12 +55,10 @@ impl View {
         let lock_path = database.join(LOCK_FILE);
         let database_lock = File::open(&lock_path).map_err(|error| io_error(&lock_path, error))?;
 
-        database_lock
-            .try_lock_shared()
-            .map_err(|error| match error {
-                TryLockError::WouldBlock => Error::Fjall(fjall::Error::Locked),
-                TryLockError::Error(error) => io_error(&lock_path, error),
-            })?;
+        #[cfg(test)]
+        tests::opened(&lock_path);
+
+        let database_lock = lock_opened(database_lock, &lock_path, Shared::Yes)?;
 
         sweep(&parent, &prefix);
 
@@ -71,6 +70,7 @@ impl View {
 
         // Built before the mirror, so a failure part-way removes the folder.
         let mut view = Self {
+            database,
             mirror: dir.join(MIRROR),
             dir,
             lock: None,
@@ -84,7 +84,7 @@ impl View {
         lock.lock().map_err(|error| view_error(&lock_path, error))?;
         view.lock = Some(lock);
 
-        mirror(&database, &view.mirror, false)?;
+        mirror(&view.database, &view.mirror, false)?;
 
         let lock_path = view.mirror.join(LOCK_FILE);
         File::create(&lock_path).map_err(|error| view_error(&lock_path, error))?;
@@ -95,6 +95,14 @@ impl View {
     /// Where fjall opens the mirror.
     pub fn path(&self) -> &Path {
         &self.mirror
+    }
+
+    /// The database's own path for `path` inside the mirror.
+    pub fn source_of(&self, path: &Path) -> PathBuf {
+        match path.strip_prefix(&self.mirror) {
+            Ok(relative) => self.database.join(relative),
+            Err(_) => path.to_path_buf(),
+        }
     }
 }
 
@@ -121,6 +129,98 @@ pub fn remove_views(store: &Path) {
         if let Err(error) = remove(&dir, None) {
             tracing::warn!(path = %dir.display(), %error, "could not remove a read-only view");
         }
+    }
+}
+
+/// The views beside `store` a live view holds: their folders' locks are
+/// held. A writer opening the store would wait them out; a caller removing
+/// the store must not.
+pub fn live_views(store: &Path) -> Vec<PathBuf> {
+    let Ok((parent, prefix)) = beside(store) else {
+        return Vec::new();
+    };
+
+    views_in(&parent, &prefix)
+        .into_iter()
+        .filter(|dir| {
+            File::open(dir.join(VIEW_LOCK_FILE))
+                .is_ok_and(|lock| matches!(lock.try_lock(), Err(TryLockError::WouldBlock)))
+        })
+        .collect()
+}
+
+/// A database held against every view and writer until it drops.
+pub struct LockOut {
+    path: PathBuf,
+    _lock: same_file::Handle,
+}
+
+impl LockOut {
+    /// The lock file held, which the database keeps until it is removed.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// Hold the database at `database` against every view and writer until the
+/// returned lock drops: no view starts while it is held, and it fails with
+/// [`fjall::Error::Locked`] while a writer or a view, even one still
+/// mirroring, holds the database. `None` when no database is there, a file
+/// in its place included.
+pub fn lock_out(database: &Path) -> Result<Option<LockOut>, Error> {
+    let path = database.join(LOCK_FILE);
+
+    let lock = match File::open(&path) {
+        Ok(lock) => lock,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None)
+        }
+        Err(error) => return Err(io_error(&path, error)),
+    };
+
+    #[cfg(test)]
+    tests::opened(&path);
+
+    let lock = lock_opened(lock, &path, Shared::No)?;
+
+    Ok(Some(LockOut { path, _lock: lock }))
+}
+
+#[derive(Clone, Copy)]
+enum Shared {
+    Yes,
+    No,
+}
+
+/// Lock `file`, opened from the lock file at `path`, and keep it only while
+/// it is still the file there: one a removal unlinked since it was opened
+/// guards nothing, and a store made anew there locks a file of its own, so
+/// it fails as a held database does.
+fn lock_opened(file: File, path: &Path, shared: Shared) -> Result<same_file::Handle, Error> {
+    let locked = match shared {
+        Shared::Yes => file.try_lock_shared(),
+        Shared::No => file.try_lock(),
+    };
+
+    locked.map_err(|error| match error {
+        TryLockError::WouldBlock => Error::Fjall(fjall::Error::Locked),
+        TryLockError::Error(error) => io_error(path, error),
+    })?;
+
+    let held = same_file::Handle::from_file(file).map_err(|error| io_error(path, error))?;
+
+    match same_file::Handle::from_path(path) {
+        Ok(current) if current == held => Ok(held),
+        Ok(_) => Err(Error::Fjall(fjall::Error::Locked)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Err(Error::Fjall(fjall::Error::Locked))
+        }
+        Err(error) => Err(io_error(path, error)),
     }
 }
 
@@ -313,7 +413,29 @@ pub(crate) fn left_by_a_kill(database: &Path, store: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
-    use std::collections::BTreeMap;
+    use std::{cell::RefCell, collections::BTreeMap};
+
+    type Hook = Box<dyn FnMut(&Path)>;
+
+    thread_local! {
+        static OPENED: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    /// Called with a lock file's path once it is open, before it is locked.
+    pub(super) fn opened(path: &Path) {
+        OPENED.with_borrow_mut(|hook| {
+            if let Some(hook) = hook {
+                hook(path);
+            }
+        });
+    }
+
+    fn while_opening<T>(hook: impl FnMut(&Path) + 'static, run: impl FnOnce() -> T) -> T {
+        OPENED.set(Some(Box::new(hook)));
+        let result = run();
+        OPENED.set(None);
+        result
+    }
 
     fn files(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
         let mut found = BTreeMap::new();
@@ -491,6 +613,119 @@ mod tests {
         });
 
         assert!(views(dir.path()).is_empty());
+    }
+
+    /// Only a view whose folder a live view holds is live: a killed
+    /// observer's is not, and a closed one's is gone.
+    #[test]
+    fn only_a_held_view_is_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        written(&path);
+
+        let view = View::of(&path, &path).unwrap();
+        let killed = left_by_a_kill(&path, &path);
+
+        assert_eq!(live_views(&path), [view.path().parent().unwrap()]);
+
+        drop(view);
+
+        assert!(live_views(&path).is_empty());
+        assert_eq!(views(dir.path()), [killed]);
+    }
+
+    /// A lock-out fails while a writer or a view holds the database, and no
+    /// view starts while it holds it.
+    #[test]
+    fn a_lock_out_excludes_writers_and_views() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+
+        assert!(lock_out(&path).unwrap().is_none());
+
+        // A file where the database would be, as a v1 redb store is.
+        fs::write(&path, b"a redb file").unwrap();
+        assert!(lock_out(&path).unwrap().is_none());
+        fs::remove_file(&path).unwrap();
+
+        let held = database(&path);
+        assert!(lock_out(&path).err().unwrap().is_locked());
+        drop(held);
+
+        let view = View::of(&path, &path).unwrap();
+        assert!(lock_out(&path).err().unwrap().is_locked());
+        drop(view);
+
+        let lock = lock_out(&path).unwrap().unwrap();
+        assert_eq!(lock.path(), path.join(LOCK_FILE));
+        assert!(View::of(&path, &path).err().unwrap().is_locked());
+        assert!(views(dir.path()).is_empty());
+
+        drop(lock);
+        drop(View::of(&path, &path).unwrap());
+    }
+
+    /// A lock file opened before its store was removed and made anew, then
+    /// locked, as an observer racing a wipe would, holds nothing: the lock
+    /// fails as a held database's does, shared or not.
+    #[test]
+    fn a_lock_on_a_removed_lock_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        written(&path);
+
+        for shared in [Shared::Yes, Shared::No] {
+            let stale = File::open(path.join(LOCK_FILE)).unwrap();
+
+            fs::remove_dir_all(&path).unwrap();
+            written(&path);
+
+            let error = lock_opened(stale, &path.join(LOCK_FILE), shared)
+                .err()
+                .unwrap();
+            assert!(error.is_locked(), "{error:?}");
+
+            let fresh = File::open(path.join(LOCK_FILE)).unwrap();
+            drop(lock_opened(fresh, &path.join(LOCK_FILE), shared).unwrap());
+        }
+
+        let stale = File::open(path.join(LOCK_FILE)).unwrap();
+        fs::remove_dir_all(&path).unwrap();
+
+        let error = lock_opened(stale, &path.join(LOCK_FILE), Shared::No)
+            .err()
+            .unwrap();
+        assert!(error.is_locked(), "{error:?}");
+    }
+
+    /// A store made anew between a view's or a lock-out's open of the lock
+    /// file and its lock is refused as a held one: the lock taken guards
+    /// the file removed with the old store.
+    #[test]
+    fn a_store_replaced_before_the_lock_is_taken_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        written(&path);
+
+        let replace = |path: PathBuf| {
+            move |_: &Path| {
+                fs::remove_dir_all(&path).unwrap();
+                written(&path);
+            }
+        };
+
+        let error = while_opening(replace(path.clone()), || View::of(&path, &path))
+            .err()
+            .unwrap();
+        assert!(error.is_locked(), "{error:?}");
+
+        let error = while_opening(replace(path.clone()), || lock_out(&path))
+            .err()
+            .unwrap();
+        assert!(error.is_locked(), "{error:?}");
+
+        drop(View::of(&path, &path).unwrap());
+        drop(lock_out(&path).unwrap().unwrap());
     }
 
     /// A writer's open removes every view beside the store, a killed

@@ -13,11 +13,12 @@ use dolos_cardano::{
 use dolos_core::{config::RootConfig, LogEntity, LogRangeOf};
 use miette::{IntoDiagnostic, WrapErr};
 use pallas::ledger::{addresses::Network as AddressNetwork, primitives::conway::DRep};
+use serde::Serialize;
 
-use crate::data::OutputFormat;
+use super::{Bounds, Layout, Output};
+use crate::output::{emit_record, Format};
 use dolos::prelude::*;
 use dolos_cardano::pallas_extras;
-use tracing_subscriber::{filter::Targets, prelude::*};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -25,30 +26,36 @@ pub struct Args {
     #[arg(long)]
     namespace: String,
 
-    /// output format
-    #[arg(long, value_enum, default_value = "default")]
-    format: OutputFormat,
+    /// the first epoch whose logs to dump
+    #[arg(long, value_name = "EPOCH")]
+    from_epoch: Option<u64>,
 
-    /// number of logs to skip
-    #[arg(long, default_value = "0")]
-    skip: usize,
+    /// the last epoch whose logs to dump
+    #[arg(long, value_name = "EPOCH")]
+    to_epoch: Option<u64>,
 
-    /// number of logs to dump
-    #[arg(long, default_value = "100")]
-    take: usize,
+    #[command(flatten)]
+    bounds: Bounds,
 
-    /// start log epoch (inclusive)
-    #[arg(long)]
-    epoch_start: Option<u64>,
-
-    /// end log epoch (exclusive)
-    #[arg(long)]
-    epoch_end: Option<u64>,
+    #[command(flatten)]
+    output: Output,
 }
+
+const NAMESPACES: [&str; 9] = [
+    "pool-epochs",
+    "drep-epochs",
+    "dreps",
+    "pools",
+    "proposals",
+    "account-epochs",
+    "account-epochs/rewards",
+    "epochs",
+    "epochs/pparams",
+];
 
 struct RowContext {
     network: AddressNetwork,
-    format: OutputFormat,
+    layout: Layout,
     summary: Option<ChainSummary>,
 }
 
@@ -56,12 +63,15 @@ struct RowContext {
 type KeyOf<T> = <<T as TableRow>::Log as LogEntity>::Key;
 
 trait TableRow: Sized {
-    /// The log this view renders.
-    type Log: LogEntity;
+    /// The log this view renders, and what a JSON line carries.
+    type Log: LogEntity + Serialize;
+
+    /// Whether the view has a dbsync layout.
+    const DBSYNC: bool = true;
 
     fn view(log: Self::Log) -> Self;
 
-    fn header(format: OutputFormat) -> Vec<&'static str>;
+    fn header(format: Layout) -> Vec<&'static str>;
 
     /// The row this record renders as, or empty where it has nothing to say in
     /// this view.
@@ -87,9 +97,9 @@ impl TableRow for EpochState {
         log
     }
 
-    fn header(format: OutputFormat) -> Vec<&'static str> {
+    fn header(format: Layout) -> Vec<&'static str> {
         match format {
-            OutputFormat::Default => vec![
+            Layout::Table => vec![
                 "number",
                 "version",
                 "nonce",
@@ -107,7 +117,7 @@ impl TableRow for EpochState {
                 "effective_rewards",
                 "unspendable_rewards",
             ],
-            OutputFormat::Dbsync => vec![
+            Layout::Dbsync => vec![
                 "epoch_no",
                 "protocol_major",
                 "treasury",
@@ -123,8 +133,8 @@ impl TableRow for EpochState {
     }
 
     fn row(&self, _slot: BlockSlot, _key: &(), ctx: &RowContext) -> Vec<String> {
-        match ctx.format {
-            OutputFormat::Default => {
+        match ctx.layout {
+            Layout::Table => {
                 let pparams = self.pparams.live();
                 let rolling = self.rolling.live();
 
@@ -177,7 +187,7 @@ impl TableRow for EpochState {
                     ),
                 ]
             }
-            OutputFormat::Dbsync => {
+            Layout::Dbsync => {
                 let nonce = self
                     .nonces
                     .as_ref()
@@ -238,13 +248,15 @@ const POOL_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("pool");
 impl TableRow for PoolEpochLog {
     type Log = PoolEpochLog;
 
+    const DBSYNC: bool = false;
+
     fn view(log: Self::Log) -> Self {
         log
     }
 
-    fn header(format: OutputFormat) -> Vec<&'static str> {
-        if matches!(format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for stakes logs (#1032)");
+    fn header(format: Layout) -> Vec<&'static str> {
+        if matches!(format, Layout::Dbsync) {
+            unreachable!("dbsync format not supported for stakes logs (#1032)");
         }
         vec![
             //"pool hex",
@@ -259,8 +271,8 @@ impl TableRow for PoolEpochLog {
     }
 
     fn row(&self, slot: BlockSlot, pool: &PoolKey, ctx: &RowContext) -> Vec<String> {
-        if matches!(ctx.format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for stakes logs (#1032)");
+        if matches!(ctx.layout, Layout::Dbsync) {
+            unreachable!("dbsync format not supported for stakes logs (#1032)");
         }
         let pool_bech32 = bech32::encode::<bech32::Bech32>(POOL_HRP, pool.0.as_ref()).unwrap();
 
@@ -282,13 +294,15 @@ impl TableRow for PoolEpochLog {
 impl TableRow for PoolState {
     type Log = PoolState;
 
+    const DBSYNC: bool = false;
+
     fn view(log: Self::Log) -> Self {
         log
     }
 
-    fn header(format: OutputFormat) -> Vec<&'static str> {
-        if matches!(format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for pools logs");
+    fn header(format: Layout) -> Vec<&'static str> {
+        if matches!(format, Layout::Dbsync) {
+            unreachable!("dbsync format not supported for pools logs");
         }
         vec![
             "pool bech32",
@@ -300,8 +314,8 @@ impl TableRow for PoolState {
     }
 
     fn row(&self, slot: BlockSlot, pool: &PoolKey, ctx: &RowContext) -> Vec<String> {
-        if matches!(ctx.format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for pools logs");
+        if matches!(ctx.layout, Layout::Dbsync) {
+            unreachable!("dbsync format not supported for pools logs");
         }
         let pool_bech32 = bech32::encode::<bech32::Bech32>(POOL_HRP, pool.0.as_ref()).unwrap();
 
@@ -328,20 +342,22 @@ const DREP_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("drep");
 impl TableRow for DRepEpochLog {
     type Log = DRepEpochLog;
 
+    const DBSYNC: bool = false;
+
     fn view(log: Self::Log) -> Self {
         log
     }
 
-    fn header(format: OutputFormat) -> Vec<&'static str> {
-        if matches!(format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for drep-epochs logs");
+    fn header(format: Layout) -> Vec<&'static str> {
+        if matches!(format, Layout::Dbsync) {
+            unreachable!("dbsync format not supported for drep-epochs logs");
         }
         vec!["drep", "epoch", "voting power", "registered"]
     }
 
     fn row(&self, slot: BlockSlot, drep: &DRepKey, ctx: &RowContext) -> Vec<String> {
-        if matches!(ctx.format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for drep-epochs logs");
+        if matches!(ctx.layout, Layout::Dbsync) {
+            unreachable!("dbsync format not supported for drep-epochs logs");
         }
         let drep = match drep.0 {
             DRep::Abstain => "drep_always_abstain".to_string(),
@@ -365,13 +381,15 @@ impl TableRow for DRepEpochLog {
 impl TableRow for DRepState {
     type Log = DRepState;
 
+    const DBSYNC: bool = false;
+
     fn view(log: Self::Log) -> Self {
         log
     }
 
-    fn header(format: OutputFormat) -> Vec<&'static str> {
-        if matches!(format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for dreps logs");
+    fn header(format: Layout) -> Vec<&'static str> {
+        if matches!(format, Layout::Dbsync) {
+            unreachable!("dbsync format not supported for dreps logs");
         }
         vec![
             "drep",
@@ -383,8 +401,8 @@ impl TableRow for DRepState {
     }
 
     fn row(&self, slot: BlockSlot, drep: &DRepKey, ctx: &RowContext) -> Vec<String> {
-        if matches!(ctx.format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for dreps logs");
+        if matches!(ctx.layout, Layout::Dbsync) {
+            unreachable!("dbsync format not supported for dreps logs");
         }
 
         let at =
@@ -406,13 +424,15 @@ impl TableRow for DRepState {
 impl TableRow for ProposalState {
     type Log = ProposalState;
 
+    const DBSYNC: bool = false;
+
     fn view(log: Self::Log) -> Self {
         log
     }
 
-    fn header(format: OutputFormat) -> Vec<&'static str> {
-        if matches!(format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for proposals logs");
+    fn header(format: Layout) -> Vec<&'static str> {
+        if matches!(format, Layout::Dbsync) {
+            unreachable!("dbsync format not supported for proposals logs");
         }
         vec![
             "proposal",
@@ -425,8 +445,8 @@ impl TableRow for ProposalState {
     }
 
     fn row(&self, slot: BlockSlot, key: &ProposalKey, ctx: &RowContext) -> Vec<String> {
-        if matches!(ctx.format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for proposals logs");
+        if matches!(ctx.layout, Layout::Dbsync) {
+            unreachable!("dbsync format not supported for proposals logs");
         }
 
         let epoch = |x: Option<u64>| x.map_or("-".to_string(), |x| x.to_string());
@@ -457,9 +477,9 @@ impl TableRow for AccountEpochLog {
         log
     }
 
-    fn header(format: OutputFormat) -> Vec<&'static str> {
+    fn header(format: Layout) -> Vec<&'static str> {
         match format {
-            OutputFormat::Default => vec![
+            Layout::Table => vec![
                 "slot",
                 "stake",
                 "pool",
@@ -468,7 +488,7 @@ impl TableRow for AccountEpochLog {
                 "leader rewards",
                 "deposit refunds",
             ],
-            OutputFormat::Dbsync => vec!["stake", "pool", "lovelace"],
+            Layout::Dbsync => vec!["stake", "pool", "lovelace"],
         }
     }
 
@@ -479,8 +499,8 @@ impl TableRow for AccountEpochLog {
             .map(render_pool)
             .unwrap_or_else(|| "-".to_string());
 
-        match ctx.format {
-            OutputFormat::Default => vec![
+        match ctx.layout {
+            Layout::Table => vec![
                 slot.to_string(),
                 stake,
                 pool,
@@ -493,7 +513,7 @@ impl TableRow for AccountEpochLog {
                 render_pool_amounts(&self.leader_rewards),
                 render_pool_amounts(&self.deposit_refunds),
             ],
-            OutputFormat::Dbsync => match (self.active_stake, self.pool_id) {
+            Layout::Dbsync => match (self.active_stake, self.pool_id) {
                 (Some(amount), Some(_)) => vec![stake, pool, amount.to_string()],
                 _ => Vec::new(),
             },
@@ -516,10 +536,10 @@ impl TableRow for AccountEpochRewards {
         AccountEpochRewards(log)
     }
 
-    fn header(format: OutputFormat) -> Vec<&'static str> {
+    fn header(format: Layout) -> Vec<&'static str> {
         match format {
-            OutputFormat::Default => vec!["epoch", "stake", "pool", "type", "amount"],
-            OutputFormat::Dbsync => vec!["stake", "pool", "amount", "type", "earned_epoch"],
+            Layout::Table => vec!["epoch", "stake", "pool", "type", "amount"],
+            Layout::Dbsync => vec!["stake", "pool", "amount", "type", "earned_epoch"],
         }
     }
 
@@ -555,15 +575,15 @@ impl TableRow for AccountEpochRewards {
             .chain(refunds)
             // The `> 0` filter the three reward dumps already applied.
             .filter(|(_, amount, _)| *amount > 0)
-            .map(|(pool, amount, kind)| match ctx.format {
-                OutputFormat::Default => vec![
+            .map(|(pool, amount, kind)| match ctx.layout {
+                Layout::Table => vec![
                     epoch.clone(),
                     stake.clone(),
                     render_pool(pool),
                     kind.to_string(),
                     amount.to_string(),
                 ],
-                OutputFormat::Dbsync => vec![
+                Layout::Dbsync => vec![
                     stake.clone(),
                     render_pool(pool),
                     amount.to_string(),
@@ -608,9 +628,9 @@ impl TableRow for EpochPParams {
         EpochPParams(log)
     }
 
-    fn header(format: OutputFormat) -> Vec<&'static str> {
+    fn header(format: Layout) -> Vec<&'static str> {
         match format {
-            OutputFormat::Default | OutputFormat::Dbsync => vec![
+            Layout::Table | Layout::Dbsync => vec![
                 "epoch_no",
                 "protocol_major",
                 "protocol_minor",
@@ -684,20 +704,18 @@ impl TableRow for EpochPParams {
 enum Formatter<T: TableRow> {
     Table(Table, PhantomData<T>),
     Csv,
-    // TODO
-    // Json,
 }
 
 impl<T: TableRow> Formatter<T> {
-    fn new(format: OutputFormat) -> Self {
+    fn new(format: Layout) -> Self {
         match format {
-            OutputFormat::Default => {
+            Layout::Table => {
                 let mut table = Table::new();
-                table.set_header(T::header(OutputFormat::Default));
+                table.set_header(T::header(Layout::Table));
                 Self::Table(table, PhantomData::<T>)
             }
-            OutputFormat::Dbsync => {
-                println!("{}", T::header(OutputFormat::Dbsync).join(","));
+            Layout::Dbsync => {
+                println!("{}", T::header(Layout::Dbsync).join(","));
                 Self::Csv
             }
         }
@@ -722,55 +740,63 @@ impl<T: TableRow> Formatter<T> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// One log record, as a JSON line.
+#[derive(Serialize)]
+struct Record<'a, T> {
+    slot: BlockSlot,
+    key: String,
+    value: &'a T,
+}
+
 fn dump_logs<T: TableRow>(
     archive: &impl ArchiveStore,
-    skip: usize,
-    take: usize,
+    bounds: &Bounds,
+    format: Format,
     ctx: &RowContext,
-    start_slot: Option<u64>,
-    end_slot: Option<u64>,
-    range: Option<std::ops::Range<BlockSlot>>,
+    slots: (Option<u64>, Option<u64>, Option<std::ops::Range<BlockSlot>>),
 ) -> miette::Result<()> {
-    let mut formatter = Formatter::<T>::new(ctx.format);
+    if ctx.layout == Layout::Dbsync && !T::DBSYNC {
+        return Err(crate::output::Usage::new(
+            format!("the {} namespace has no dbsync layout", T::Log::NS),
+            None,
+        )
+        .into());
+    }
 
-    let mut skipped = 0usize;
-    let mut taken = 0usize;
-    let take_limit = if take == 0 { None } else { Some(take) };
+    let (start_slot, end_slot, range) = slots;
 
-    archive
+    let within = |slot: BlockSlot| {
+        start_slot.is_none_or(|start| slot >= start) && end_slot.is_none_or(|end| slot < end)
+    };
+
+    let logs = archive
         .iter_logs_typed::<T::Log>(range.map(LogRangeOf::slots))
         .into_diagnostic()
         .wrap_err("iterating logs")?
-        .for_each(|x| match x {
-            Ok((log_slot, key, value)) => {
-                if let Some(start) = start_slot {
-                    if log_slot < start {
-                        return;
-                    }
-                }
-                if let Some(end) = end_slot {
-                    if log_slot >= end {
-                        return;
-                    }
-                }
+        .filter(|log| log.as_ref().map_or(true, |(slot, _, _)| within(*slot)));
 
-                if skipped < skip {
-                    skipped += 1;
-                    return;
-                }
+    let logs = bounds.apply_fallible(logs);
 
-                if let Some(limit) = take_limit {
-                    if taken >= limit {
-                        return;
-                    }
-                }
+    if format == Format::Json {
+        for log in logs {
+            let (slot, key, value) = log.into_diagnostic()?;
 
-                formatter.write(log_slot, key, T::view(value), ctx);
-                taken += 1;
-            }
-            Err(e) => panic!("{e}"),
-        });
+            emit_record(&Record {
+                slot,
+                key: EntityKey::of(&key).to_string(),
+                value: &value,
+            })?;
+        }
+
+        return Ok(());
+    }
+
+    let mut formatter = Formatter::<T>::new(ctx.layout);
+
+    for log in logs {
+        let (slot, key, value) = log.into_diagnostic()?;
+        formatter.write(slot, key, T::view(value), ctx);
+    }
 
     formatter.flush();
 
@@ -778,19 +804,24 @@ fn dump_logs<T: TableRow>(
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
-    setup_tracing_for_format(config, args.format)?;
+    let output = args.output.checked()?;
+    output.setup_tracing()?;
 
-    let archive = crate::common::open_archive_store(config)?;
+    if !NAMESPACES.contains(&args.namespace.as_str()) {
+        return Err(super::unknown_namespace("log", &args.namespace, &NAMESPACES).into());
+    }
+
+    let archive = super::observe_archive(config)?;
     let genesis = crate::common::open_genesis(config)?;
     let network = dolos_cardano::network_from_genesis(&genesis);
 
-    let use_epoch_filter = args.epoch_start.is_some() || args.epoch_end.is_some();
+    let use_epoch_filter = args.from_epoch.is_some() || args.to_epoch.is_some();
 
     // The stakes and reward views head a column `epoch`, and only the summary
-    // turns the log's slot key into one, so they pay the state-store open in
-    // every format.
+    // turns the log's slot key into one, so they pay the summary read in
+    // every layout.
     let need_summary = use_epoch_filter
-        || matches!(args.format, OutputFormat::Dbsync)
+        || matches!(output.layout, Layout::Dbsync)
         || matches!(
             args.namespace.as_str(),
             "pool-epochs"
@@ -801,7 +832,8 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
                 | "account-epochs/rewards"
         );
     let summary = if need_summary {
-        let state = crate::common::open_state_store(config)?;
+        let state = super::observe_state(config)?;
+
         Some(load_chain_summary_from_state(&state).map_err(|err| miette::miette!("{err:?}"))?)
     } else {
         None
@@ -809,65 +841,39 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
     let ctx = RowContext {
         network,
-        format: args.format,
+        layout: output.layout,
         summary,
     };
 
-    let (start_slot, end_slot, range) = if use_epoch_filter {
+    let slots = if use_epoch_filter {
         let summary = ctx
             .summary
             .as_ref()
             .expect("chain summary available for epoch filtering");
-        log_epoch_range_to_key_range(summary, args.epoch_start, args.epoch_end)
+
+        // `--to-epoch` is inclusive: the range ends where the next epoch starts.
+        let end = args.to_epoch.map(|epoch| epoch.saturating_add(1));
+
+        log_epoch_range_to_key_range(summary, args.from_epoch, end)
     } else {
         (None, None, None)
     };
 
-    let (skip, take) = (args.skip, args.take);
+    let archive = &archive;
+    let (bounds, format) = (&args.bounds, output.format.format);
 
     match args.namespace.as_str() {
-        "pool-epochs" => {
-            dump_logs::<PoolEpochLog>(&archive, skip, take, &ctx, start_slot, end_slot, range)?
+        "pool-epochs" => dump_logs::<PoolEpochLog>(archive, bounds, format, &ctx, slots),
+        "drep-epochs" => dump_logs::<DRepEpochLog>(archive, bounds, format, &ctx, slots),
+        "dreps" => dump_logs::<DRepState>(archive, bounds, format, &ctx, slots),
+        "pools" => dump_logs::<PoolState>(archive, bounds, format, &ctx, slots),
+        "proposals" => dump_logs::<ProposalState>(archive, bounds, format, &ctx, slots),
+        "account-epochs" => dump_logs::<AccountEpochLog>(archive, bounds, format, &ctx, slots),
+        "account-epochs/rewards" => {
+            dump_logs::<AccountEpochRewards>(archive, bounds, format, &ctx, slots)
         }
-        "drep-epochs" => {
-            dump_logs::<DRepEpochLog>(&archive, skip, take, &ctx, start_slot, end_slot, range)?
-        }
-        "dreps" => dump_logs::<DRepState>(&archive, skip, take, &ctx, start_slot, end_slot, range)?,
-        "pools" => dump_logs::<PoolState>(&archive, skip, take, &ctx, start_slot, end_slot, range)?,
-        "proposals" => {
-            dump_logs::<ProposalState>(&archive, skip, take, &ctx, start_slot, end_slot, range)?
-        }
-        "account-epochs" => {
-            dump_logs::<AccountEpochLog>(&archive, skip, take, &ctx, start_slot, end_slot, range)?
-        }
-        "account-epochs/rewards" => dump_logs::<AccountEpochRewards>(
-            &archive, skip, take, &ctx, start_slot, end_slot, range,
-        )?,
-        "epochs" => {
-            dump_logs::<EpochState>(&archive, skip, take, &ctx, start_slot, end_slot, range)?
-        }
-        "epochs/pparams" => {
-            dump_logs::<EpochPParams>(&archive, skip, take, &ctx, start_slot, end_slot, range)?
-        }
-        _ => todo!(),
+        "epochs" => dump_logs::<EpochState>(archive, bounds, format, &ctx, slots),
+        "epochs/pparams" => dump_logs::<EpochPParams>(archive, bounds, format, &ctx, slots),
+        _ => unreachable!("checked against NAMESPACES"),
     }
-
-    Ok(())
-}
-
-fn setup_tracing_for_format(config: &RootConfig, format: OutputFormat) -> miette::Result<()> {
-    if matches!(format, OutputFormat::Dbsync) {
-        let filter = Targets::new().with_default(tracing::Level::ERROR);
-
-        tracing_subscriber::registry()
-            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-            .with(filter)
-            .init();
-
-        tracing_log::LogTracer::init().ok();
-
-        return Ok(());
-    }
-
-    crate::common::setup_tracing(&config.logging, config.telemetry.as_ref())
 }

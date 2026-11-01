@@ -132,14 +132,14 @@ fn assert_archive_is_frames_and_reads_back(workspace: &ScenarioWorkspace) {
     // A second process opens the store from nothing but the directory and
     // lists every block the index names.
     let output = prepare_scenario_process(workspace)
-        .args(["data", "dump-blocks"])
+        .args(["data", "dump", "blocks", "--limit", "0"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
         .expect("failed to dump blocks");
     assert!(
         output.status.success(),
-        "dump-blocks failed: {}",
+        "data dump blocks failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let listed = String::from_utf8_lossy(&output.stdout)

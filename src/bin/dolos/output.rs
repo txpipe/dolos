@@ -7,6 +7,8 @@ use std::io::Write as _;
 use miette::IntoDiagnostic;
 use serde::Serialize;
 
+mod json;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum Format {
     #[default]
@@ -29,7 +31,7 @@ pub trait Report: Display {
 
 impl<T: Serialize + Display> Report for T {
     fn to_json(&self) -> serde_json::Result<serde_json::Value> {
-        serde_json::to_value(self)
+        json::to_value(self)
     }
 }
 
@@ -46,14 +48,11 @@ pub fn emit(report: &dyn Report, args: &FormatArgs) -> miette::Result<()> {
     }
 }
 
-/// Write one record of a dump to stdout as one JSON line, so a dump streams
-/// however long it runs.
-#[cfg(feature = "utils")]
-pub fn emit_json_line(record: &impl Serialize) -> miette::Result<()> {
-    let mut stdout = std::io::stdout().lock();
-    let json = serde_json::to_string(record).into_diagnostic()?;
+/// Write one record of a stream to stdout as one JSON object on one line.
+pub fn emit_record(record: &impl Serialize) -> miette::Result<()> {
+    let json = json::to_value(record).into_diagnostic()?;
 
-    writeln!(stdout, "{json}").into_diagnostic()
+    writeln!(std::io::stdout().lock(), "{json}").into_diagnostic()
 }
 
 /// The process exit codes. Clap exits 2 itself on a malformed command line.
@@ -96,10 +95,10 @@ pub struct Usage {
 }
 
 impl Usage {
-    pub fn new(message: impl Into<String>, help: impl Into<String>) -> Self {
+    pub fn new(message: impl Into<String>, help: Option<String>) -> Self {
         Self {
             message: message.into(),
-            help: Some(help.into()),
+            help,
         }
     }
 }

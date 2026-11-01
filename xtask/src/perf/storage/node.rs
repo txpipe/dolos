@@ -19,7 +19,7 @@
 //! and the era summary the block mappers need along with the archive, and
 //! reads the chain from its first block, which is why the immutable
 //! directory has to be a contiguous chain from chunk 00000. The scan is
-//! `dolos data dump-blocks` over the corpus's contiguous tail, the node's own
+//! `dolos data dump blocks` over the corpus's contiguous tail, the node's own
 //! iterator over every frame, run while the server is down because the store
 //! is exclusively locked.
 
@@ -143,6 +143,9 @@ pub struct Bin {
     pub storage_version: String,
     /// The binary reads the configuration file of before v2.
     pub legacy_config: bool,
+    /// The binary predates the v2 `data` group, whatever configuration it
+    /// reads: assumed from the version until [`Bin::probe_cli`] asks it.
+    pub legacy_cli: bool,
 }
 
 impl Bin {
@@ -165,7 +168,31 @@ impl Bin {
             path: PathBuf::from(path),
             storage_version: version.to_string(),
             legacy_config,
+            legacy_cli: legacy_config,
         })
+    }
+
+    /// Ask the binary which `data` commands it has: one that lists no
+    /// `rebuild` under `data --help` predates the v2 `data` group, as
+    /// builds from v2 configuration up to it do.
+    pub fn probe_cli(&mut self) -> io::Result<()> {
+        // Uncoloured, so each subcommand starts its line as plain text.
+        let output = Command::new(&self.path)
+            .args(["data", "--help"])
+            .env("NO_COLOR", "1")
+            .env_remove("CLICOLOR_FORCE")
+            .output()?;
+
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "{} data --help exited with {}",
+                self.label, output.status
+            )));
+        }
+
+        self.legacy_cli = !lists_subcommand(&String::from_utf8_lossy(&output.stdout), "rebuild");
+
+        Ok(())
     }
 
     fn identity(&self) -> io::Result<Value> {
@@ -824,7 +851,7 @@ fn run_reads(
 ) -> io::Result<Value> {
     debug_assert!(
         !params.scan,
-        "the scan runs through dump-blocks, not the server"
+        "the scan runs through data dump blocks, not the server"
     );
     let threads = params.threads.max(1);
     let before = pid_counters(server_pid);
@@ -1106,25 +1133,77 @@ fn read_import_metrics(path: &Path) -> io::Result<Option<Value>> {
     Ok(Some(metrics))
 }
 
+/// Whether clap's `help` lists `name` among its subcommands, styled or not.
+fn lists_subcommand(help: &str, name: &str) -> bool {
+    strip_styles(help)
+        .lines()
+        .any(|line| line.split_whitespace().next() == Some(name))
+}
+
+/// `text` without its ANSI escape sequences.
+fn strip_styles(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut chars = text.chars();
+
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            plain.push(c);
+            continue;
+        }
+
+        if chars.next() == Some('[') {
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        }
+    }
+
+    plain
+}
+
+/// `data dump blocks` over `first..=last`, every block, or `data
+/// dump-blocks` for a binary that predates the v2 `data` group, whose `--to`
+/// is exclusive.
+fn scan_args(bin: &Bin, first: u64, last: u64) -> Vec<String> {
+    let (first, last, past) = (first.to_string(), last.to_string(), (last + 1).to_string());
+
+    let args: Vec<&str> = if bin.legacy_cli {
+        vec!["data", "dump-blocks", "--from", &first, "--to", &past]
+    } else {
+        vec![
+            "data",
+            "dump",
+            "blocks",
+            "--limit",
+            "0",
+            "--from-slot",
+            &first,
+            "--to-slot",
+            &last,
+        ]
+    };
+
+    args.into_iter().map(String::from).collect()
+}
+
 impl Instance {
-    /// `dolos data dump-blocks` over the whole corpus, measured: the node's
+    /// `dolos data dump blocks` over the whole corpus, measured: the node's
     /// own iterator over every frame, with its output discarded.
     fn scan(&self, bin: &Bin, keys: &Keys, params: &ReadParams) -> io::Result<Value> {
         let tail = &keys.keys[keys.contiguous_tail()..];
         let first = tail[0].slot;
         let last = tail[tail.len() - 1].slot;
         let mut cmd = self.command(bin);
-        cmd.args(["data", "dump-blocks", "--from"])
-            .arg(first.to_string())
-            .arg("--to")
-            .arg(last.to_string());
+        cmd.args(scan_args(bin, first, last));
         let started = Instant::now();
         let mut child = cmd.spawn()?;
         let usage = wait_child(&mut child)?;
         let wall = started.elapsed().as_secs_f64();
         if usage.status != 0 {
             return Err(io::Error::other(format!(
-                "{} dump-blocks exited with {}",
+                "{} data dump blocks exited with {}",
                 bin.label, usage.status
             )));
         }
@@ -1220,9 +1299,9 @@ fn summary(m: &Value) -> String {
     }
 }
 
-pub fn run(args: NodeArgs) -> anyhow::Result<()> {
-    let bins: Vec<Bin> = args
-        .bins
+/// The binaries under measurement, each asked which `data` commands it has.
+fn parse_bins(specs: &[String]) -> anyhow::Result<Vec<Bin>> {
+    specs
         .iter()
         .map(|b| {
             let mut bin = Bin::parse(b).map_err(anyhow::Error::msg)?;
@@ -1231,9 +1310,15 @@ pub fn run(args: NodeArgs) -> anyhow::Result<()> {
                 .path
                 .canonicalize()
                 .map_err(|e| anyhow::anyhow!("{}: {e}", bin.path.display()))?;
+            bin.probe_cli()
+                .map_err(|e| anyhow::anyhow!("{}: {e}", bin.path.display()))?;
             Ok(bin)
         })
-        .collect::<anyhow::Result<_>>()?;
+        .collect()
+}
+
+pub fn run(args: NodeArgs) -> anyhow::Result<()> {
+    let bins = parse_bins(&args.bins)?;
     let selection = Selection::parse(&args.workloads).map_err(anyhow::Error::msg)?;
     let threads: Vec<usize> = super::parse_list(&args.threads)?;
     let regimes: Vec<Regime> = args
@@ -1489,6 +1574,108 @@ mod tests {
         assert!(!b.legacy_config);
         assert!(Bin::parse("nolabel").is_err());
         assert!(Bin::parse("=path").is_err());
+    }
+
+    #[test]
+    fn a_binary_before_v2_takes_the_commands_it_knows() {
+        let legacy = Bin::parse("baseline=/tmp/dolos-old:v4").unwrap();
+        let current = Bin::parse("candidate=target/release/dolos").unwrap();
+
+        assert_eq!(
+            scan_args(&legacy, 3, 9),
+            ["data", "dump-blocks", "--from", "3", "--to", "10"]
+        );
+        assert_eq!(
+            scan_args(&current, 3, 9),
+            [
+                "data",
+                "dump",
+                "blocks",
+                "--limit",
+                "0",
+                "--from-slot",
+                "3",
+                "--to-slot",
+                "9"
+            ]
+        );
+    }
+
+    /// A binary is asked which `data` commands it has: a v2-configuration
+    /// build from before the v2 `data` group takes the older names too.
+    #[cfg(unix)]
+    #[test]
+    fn the_binary_says_which_data_commands_it_has() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+
+        let fake = |name: &str, listed: &str| fake_bin(dir.path(), name, listed);
+
+        let mut before =
+            Bin::parse(&format!("main={}", fake("before", "dump-blocks").display())).unwrap();
+        assert!(!before.legacy_cli);
+        before.probe_cli().unwrap();
+        assert!(before.legacy_cli);
+        assert_eq!(scan_args(&before, 3, 9)[..2], ["data", "dump-blocks"]);
+
+        let mut after =
+            Bin::parse(&format!("pr={}:v4", fake("after", "rebuild").display())).unwrap();
+        assert!(after.legacy_cli);
+        after.probe_cli().unwrap();
+        assert!(!after.legacy_cli && after.legacy_config);
+        assert_eq!(scan_args(&after, 3, 9)[..3], ["data", "dump", "blocks"]);
+
+        let bins = parse_bins(&[
+            format!("main={}", fake("parsed-before", "dump-blocks").display()),
+            format!("pr={}:v4", fake("parsed-after", "rebuild").display()),
+        ])
+        .unwrap();
+        assert!(bins[0].legacy_cli && !bins[1].legacy_cli);
+
+        let failing = dir.path().join("failing");
+        std::fs::write(&failing, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&failing, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(parse_bins(&[format!("broken={}", failing.display())]).is_err());
+    }
+
+    /// Help styled for a terminal, as `CLICOLOR_FORCE` asks of clap, lists
+    /// the same commands.
+    #[cfg(unix)]
+    #[test]
+    fn styled_help_lists_the_same_commands() {
+        let help = "\x1b[1m\x1b[4mCommands:\x1b[0m\n  \x1b[1mrebuild\x1b[0m  rebuilds\n";
+        assert!(lists_subcommand(help, "rebuild"));
+        assert!(!lists_subcommand(help, "dump-blocks"));
+
+        // Asked uncoloured: the stand-in refuses otherwise.
+        let dir = tempfile::tempdir().unwrap();
+        let path = fake_bin(dir.path(), "styled", "rebuild");
+        let script = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            &path,
+            script.replacen("\n", "\n[ -n \"$NO_COLOR\" ] || exit 3\n", 1),
+        )
+        .unwrap();
+
+        let mut bin = Bin::parse(&format!("pr={}", path.display())).unwrap();
+        bin.probe_cli().unwrap();
+        assert!(!bin.legacy_cli);
+    }
+
+    /// A stand-in binary whose `data --help` lists `listed`.
+    #[cfg(unix)]
+    fn fake_bin(dir: &Path, name: &str, listed: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let path = dir.join(name);
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\nprintf 'Commands:\\n  stats  Show\\n  {listed}  Do\\n'\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
     }
 
     #[test]
