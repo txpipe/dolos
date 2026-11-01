@@ -1,6 +1,8 @@
 //! A node-to-node peer over a synthetic chain, for a node under test to sync
 //! from: chain-sync and block-fetch over TCP, a tip that can keep advancing,
 //! a stop that closes every connection, and faults that close one session.
+//! A node of another network gets the handshake's refusal before the
+//! connection closes.
 //!
 //! Block `n` sits at slot `n`, chained from block `n - 1`; block 1 has no
 //! parent. The chain never forks.
@@ -17,8 +19,10 @@ use pallas::network::facades::{KeepAliveLoop, PeerServer};
 use pallas::network::miniprotocols::{
     blockfetch,
     chainsync::{self, ClientRequest, HeaderContent, Tip},
+    handshake::n2n::VersionTable,
     txsubmission, Point,
 };
+use pallas::network::multiplexer::Bearer;
 use tokio::sync::watch;
 
 use crate::blocks::make_conway_block_with_prev;
@@ -30,7 +34,8 @@ pub struct PeerOptions {
     pub initial_blocks: u64,
     /// Add a block this often; never when `None`.
     pub produce_every: Option<Duration>,
-    /// Stop, closing every connection, once this many headers were sent.
+    /// Stop, closing every connection, once this many headers were sent;
+    /// none is sent past it.
     pub stop_after_headers: Option<usize>,
     /// Close the session instead of answering these intersection requests,
     /// numbered from 1 across sessions.
@@ -40,10 +45,17 @@ pub struct PeerOptions {
     pub close_first_session_after_headers: Option<usize>,
     /// Close every session on its first request for the next update.
     pub close_at_first_request: bool,
+    /// Close a session this long after it answered a request with an await,
+    /// unless a block arrives first.
+    pub close_after_await: Option<Duration>,
     /// Close the session on any block-fetch request.
     pub refuse_block_fetch: bool,
-    /// Close every session that starts tx-submission, once it does.
-    pub close_tx_submission: bool,
+    /// Close every session that starts tx-submission this long after it
+    /// does, asking for nothing.
+    pub close_tx_submission: Option<Duration>,
+    /// In these tx-submission sessions, numbered from 1, ask for transaction
+    /// ids once, then close the session once the node replies.
+    pub request_tx_ids_at: Vec<usize>,
     /// Serve this block's body as bytes that decode as no block.
     pub corrupt_body: Option<u64>,
 }
@@ -196,16 +208,24 @@ struct Shared {
 }
 
 impl Shared {
-    fn header_sent(&self) {
+    /// Count a header sent; true once the fixture stops on it.
+    fn header_sent(&self) -> bool {
         let sent = self.headers_sent.fetch_add(1, Ordering::SeqCst) + 1;
 
-        if self
+        let stopped = self
             .options
             .stop_after_headers
-            .is_some_and(|limit| sent >= limit)
-        {
+            .is_some_and(|limit| sent >= limit);
+
+        if stopped {
             self.stop.send_replace(true);
         }
+
+        stopped
+    }
+
+    fn stopped(&self) -> bool {
+        *self.stop.borrow()
     }
 }
 
@@ -342,11 +362,8 @@ async fn serve(
 
     let accept = async {
         loop {
-            match PeerServer::accept(&listener, magic).await {
-                Ok(peer) => {
-                    tokio::spawn(session(peer, shared.clone()));
-                }
-                Err(_) => continue,
+            if let Ok((bearer, _)) = Bearer::accept_tcp(&listener).await {
+                tokio::spawn(handshake(bearer, magic, shared.clone()));
             }
         }
     };
@@ -355,6 +372,28 @@ async fn serve(
         _ = stop.wait_for(|stopped| *stopped) => (),
         _ = produce => (),
         _ = accept => (),
+    }
+}
+
+/// Answer the handshake, then serve the session. pallas's
+/// `PeerServer::accept` aborts a refused connection right after queueing the
+/// refusal, which the node then rarely reads; this holds it until the node
+/// closes it, or for at most ten seconds.
+async fn handshake(bearer: Bearer, magic: u64, shared: Arc<Shared>) {
+    let mut peer = PeerServer::new(bearer);
+
+    match peer
+        .handshake()
+        .handshake(VersionTable::v7_and_above(magic))
+        .await
+    {
+        Ok(Some(_)) => session(peer, shared).await,
+        Ok(None) => {
+            let closed = peer.chainsync().recv_while_idle();
+            let _ = tokio::time::timeout(Duration::from_secs(10), closed).await;
+            peer.plexer.abort().await;
+        }
+        Err(_) => peer.plexer.abort().await,
     }
 }
 
@@ -402,6 +441,10 @@ async fn serve_chainsync(
     let mut headers = 0;
 
     while let Some(request) = server.recv_while_idle().await? {
+        if shared.stopped() {
+            return Ok(());
+        }
+
         match request {
             ClientRequest::Intersect(points) => {
                 let number = shared.intersects.fetch_add(1, Ordering::SeqCst) + 1;
@@ -440,7 +483,16 @@ async fn serve_chainsync(
                     Some(block) => block,
                     None => {
                         server.send_await_reply().await?;
-                        chain.wait_for_block(next).await
+
+                        let block = chain.wait_for_block(next);
+
+                        match options.close_after_await {
+                            Some(delay) => match tokio::time::timeout(delay, block).await {
+                                Ok(block) => block,
+                                Err(_) => return Ok(()),
+                            },
+                            None => block.await,
+                        }
                     }
                 };
 
@@ -450,7 +502,10 @@ async fn serve_chainsync(
 
                 next += 1;
                 headers += 1;
-                shared.header_sent();
+
+                if shared.header_sent() {
+                    return Ok(());
+                }
 
                 if session == Some(1) && options.close_first_session_after_headers == Some(headers)
                 {
@@ -480,15 +535,29 @@ async fn serve_blockfetch(
 }
 
 /// Count each session that starts tx-submission, and close it there when told
-/// to. The fixture holds no transactions, so it never asks for any.
+/// to. Unless told to ask once, the fixture asks for no transactions.
 async fn serve_txsubmission(mut server: txsubmission::Server, shared: &Shared) {
-    if server.wait_for_init().await.is_ok() {
-        shared.tx_submissions.fetch_add(1, Ordering::SeqCst);
-
-        if shared.options.close_tx_submission {
-            return;
-        }
+    if server.wait_for_init().await.is_err() {
+        return std::future::pending().await;
     }
 
-    std::future::pending().await
+    let number = shared.tx_submissions.fetch_add(1, Ordering::SeqCst) + 1;
+    let options = &shared.options;
+
+    if options.request_tx_ids_at.contains(&number) {
+        if server
+            .acknowledge_and_request_tx_ids(false, 0, 1)
+            .await
+            .is_ok()
+        {
+            let _ = server.receive_next_reply().await;
+        }
+
+        return;
+    }
+
+    match options.close_tx_submission {
+        Some(delay) => tokio::time::sleep(delay).await,
+        None => std::future::pending().await,
+    }
 }

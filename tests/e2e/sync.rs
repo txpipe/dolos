@@ -33,7 +33,8 @@ fn daemon_syncs(workspace: &ScenarioWorkspace) {
         .expect("failed to query process status")
         .is_none());
 
-    shutdown_gracefully(&mut guard);
+    let status = shutdown_gracefully(&mut guard);
+    assert!(status.success(), "a stopped daemon exits 0: {status}");
 
     let after = fetch_summary(workspace);
 
@@ -222,7 +223,6 @@ fn catchup_fails_once_its_upstream_stops(workspace: &ScenarioWorkspace) {
     let log = read_log(workspace, "catchup.log");
 
     assert_eq!(status.code(), Some(1), "{log}");
-    assert!(peer.is_stopped());
     assert_eq!(printed_target(&log), None, "{log}");
     assert!(
         log.contains("the sync ended before the stores committed the catch-up target"),
@@ -234,6 +234,15 @@ fn catchup_fails_once_its_upstream_stops(workspace: &ScenarioWorkspace) {
         log.contains("the pull stage gave up on the upstream peer"),
         "{log}"
     );
+
+    // The fixture's thread may still be closing its sockets.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !peer.is_stopped() {
+        assert!(Instant::now() < deadline, "the peer never stopped");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(peer.headers_sent(), 50);
 }
 
 /// The scenario, serving minibf on its second port as well.
@@ -302,7 +311,7 @@ fn follow_fails_once_the_submit_stage_gives_up(workspace: &ScenarioWorkspace) {
         workspace,
         PeerOptions {
             initial_blocks: 10,
-            close_tx_submission: true,
+            close_tx_submission: Some(Duration::ZERO),
             ..Default::default()
         },
     );

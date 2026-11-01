@@ -2,7 +2,7 @@
 
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
@@ -230,14 +230,15 @@ pub fn assert_file_released(workspace: &ScenarioWorkspace, relative_path: &str) 
     assert!(std::fs::metadata(path).is_err());
 }
 
-pub fn shutdown_gracefully(handle: &mut Child) {
+/// SIGTERM the process and wait for its exit.
+pub fn shutdown_gracefully(handle: &mut Child) -> ExitStatus {
     nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(handle.id() as i32),
         nix::sys::signal::Signal::SIGTERM,
     )
     .expect("failed to kill process");
 
-    handle.wait().expect("failed to wait for process");
+    handle.wait().expect("failed to wait for process")
 }
 
 /// A custom scenario runs on preview's genesis under preview's magic, its

@@ -62,10 +62,12 @@ impl Worker {
         WorkerError::Restart
     }
 
-    /// The session delivered something: the failed attempts start again.
+    /// The session delivered something: the failed attempts start again,
+    /// the submit stage's too.
     fn deliver(&mut self, stage: &Stage) {
         self.delivered = true;
         stage.attempts.reset();
+        stage.progress.note_delivery();
     }
 
     /// Receive the next chainsync response, using the appropriate method

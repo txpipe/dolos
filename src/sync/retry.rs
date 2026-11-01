@@ -11,6 +11,8 @@ use std::time::Duration;
 use dolos_core::config::RetryConfig;
 use gasket::framework::WorkerError;
 use pallas::network::facades;
+use pallas::network::miniprotocols::{blockfetch, chainsync, handshake, txsubmission};
+use pallas::network::multiplexer;
 use tracing::{error, warn};
 
 use super::{SyncProgress, UpstreamFailure};
@@ -19,9 +21,9 @@ use super::{SyncProgress, UpstreamFailure};
 #[derive(Debug, Clone)]
 pub(super) struct Failure {
     cause: String,
-    /// Whether it failed in the handshake, which a peer of another network
-    /// refuses.
-    handshake: bool,
+    /// Whether the peer refused the handshake, as a peer of another network
+    /// does.
+    refused: bool,
 }
 
 impl Failure {
@@ -32,15 +34,17 @@ impl Failure {
     pub fn message(cause: String) -> Self {
         Self {
             cause,
-            handshake: false,
+            refused: false,
         }
     }
 
-    /// A connection that failed, in its handshake or before it.
+    /// A connection that failed, in its handshake or before it. Only a
+    /// refusal is the peer's answer; a connection that drops during the
+    /// handshake fails like any other.
     pub fn connecting(error: &facades::Error) -> Self {
-        let (detail, handshake) = match error {
+        let (detail, refused) = match error {
             facades::Error::HandshakeProtocol(inner) => {
-                (format!("{error}: {}", with_sources(inner)), true)
+                (format!("{error}: {}", with_sources(inner)), false)
             }
             facades::Error::IncompatibleVersion => (error.to_string(), true),
             error => (with_sources(error), false),
@@ -48,7 +52,7 @@ impl Failure {
 
         Self {
             cause: format!("connecting: {detail}"),
-            handshake,
+            refused,
         }
     }
 }
@@ -59,29 +63,72 @@ impl fmt::Display for Failure {
     }
 }
 
-/// An error and every cause under it.
+/// An error and every cause under it, the multiplexer's included, which
+/// pallas's mini-protocol errors hold without naming it as their source.
 fn with_sources(error: &(dyn StdError + 'static)) -> String {
     let mut text = error.to_string();
-    let mut source = error.source();
+    let mut last = error;
 
-    while let Some(cause) = source {
+    while let Some(cause) = last.source() {
         text.push_str(": ");
         text.push_str(&cause.to_string());
-        source = cause.source();
+        last = cause;
+    }
+
+    if let Some(plexer) = plexer_error(last) {
+        text.push_str(": ");
+        text.push_str(&describe_plexer(plexer));
     }
 
     text
 }
 
+fn plexer_error<'a>(error: &'a (dyn StdError + 'static)) -> Option<&'a multiplexer::Error> {
+    if let Some(chainsync::ClientError::Plexer(inner)) = error.downcast_ref() {
+        return Some(inner);
+    }
+
+    if let Some(blockfetch::ClientError::Plexer(inner)) = error.downcast_ref() {
+        return Some(inner);
+    }
+
+    if let Some(txsubmission::Error::Plexer(inner)) = error.downcast_ref() {
+        return Some(inner);
+    }
+
+    if let Some(handshake::Error::Plexer(inner)) = error.downcast_ref() {
+        return Some(inner);
+    }
+
+    None
+}
+
+/// What the multiplexer says, with the detail its own message leaves out.
+fn describe_plexer(error: &multiplexer::Error) -> String {
+    match error {
+        multiplexer::Error::BearerIo(io) => format!("the connection failed: {io}"),
+        multiplexer::Error::EmptyBearer | multiplexer::Error::AgentDequeue => {
+            "the connection closed".into()
+        }
+        multiplexer::Error::Decoding(detail) => format!("a message did not decode: {detail}"),
+        multiplexer::Error::Encoding(detail) => format!("a message did not encode: {detail}"),
+        error => error.to_string(),
+    }
+}
+
 /// A stage's failed attempts in a row at the upstream peer. Attempt `n` in a
 /// row waits `backoff(n)`, whatever failed; the one past `max_retries` gives
-/// up, recording why.
+/// up, recording why. A pull session that delivers between two attempts
+/// starts the count again: the peer serves the sync, and giving up on it
+/// would not help.
 pub(super) struct Attempts {
     stage: &'static str,
     peer_address: String,
     retry: RetryConfig,
     progress: Arc<SyncProgress>,
     failures: Cell<usize>,
+    /// The pull stage's deliveries when the last attempt failed.
+    deliveries: Cell<u64>,
 }
 
 impl Attempts {
@@ -97,6 +144,7 @@ impl Attempts {
             retry,
             progress,
             failures: Cell::new(0),
+            deliveries: Cell::new(0),
         }
     }
 
@@ -108,6 +156,12 @@ impl Attempts {
     /// Count a failed attempt and wait its backoff; past the last retry,
     /// record why and end the stage.
     pub async fn failed(&self, failure: Failure) -> Result<(), WorkerError> {
+        let deliveries = self.progress.deliveries();
+
+        if self.deliveries.replace(deliveries) != deliveries {
+            self.reset();
+        }
+
         let failures = self.failures.get() + 1;
         self.failures.set(failures);
 
@@ -142,7 +196,7 @@ impl Attempts {
                 "the {} stage gave up on the upstream peer {}{attempts}: {failure}",
                 self.stage, self.peer_address
             ),
-            handshake: failure.handshake,
+            refused: failure.refused,
         });
 
         Err(WorkerError::Panic)

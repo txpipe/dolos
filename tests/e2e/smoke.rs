@@ -53,7 +53,8 @@ fn daemon_runs(workspace: &ScenarioWorkspace) {
         .expect("failed to query process status")
         .is_none());
 
-    shutdown_gracefully(&mut guard);
+    let status = shutdown_gracefully(&mut guard);
+    assert!(status.success(), "a stopped daemon exits 0: {status}");
 
     if workspace.expect_ports() {
         assert_port_released(workspace, 0);

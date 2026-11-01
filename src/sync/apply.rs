@@ -45,6 +45,10 @@ pub struct Stage {
 
     #[metric]
     wal_count: gasket::metrics::Counter,
+
+    /// Housekeeping rounds over, each with the target check after it.
+    #[metric]
+    housekeeping_count: gasket::metrics::Counter,
 }
 
 impl Stage {
@@ -62,6 +66,7 @@ impl Stage {
             upstream: Default::default(),
             block_count: Default::default(),
             wal_count: Default::default(),
+            housekeeping_count: Default::default(),
         }
     }
 
@@ -171,6 +176,10 @@ impl gasket::framework::Worker<Stage> for Worker {
 
         if !stage.progress.stop_epoch_reached() {
             stage.check_target()?;
+        }
+
+        if let WorkUnit::Housekeeping = unit {
+            stage.housekeeping_count.inc(1);
         }
 
         Ok(())

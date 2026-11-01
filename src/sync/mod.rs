@@ -3,7 +3,7 @@ use dolos_core::config::{
     EmulatorConfig, PeerConfig, RetryConfig, RootConfig, SyncConfig, UpstreamConfig,
 };
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::watch;
@@ -43,6 +43,8 @@ pub struct SyncProgress {
     caught_up: AtomicBool,
     stop_epoch_reached: AtomicBool,
     upstream_failure: OnceLock<UpstreamFailure>,
+    /// How many times the pull stage's sessions delivered something.
+    deliveries: AtomicU64,
 }
 
 /// Why a stage gave up on the upstream peer.
@@ -50,9 +52,9 @@ pub struct SyncProgress {
 pub struct UpstreamFailure {
     /// The stage, the peer, the attempts and the last one's cause.
     pub message: String,
-    /// Whether the last attempt failed in the handshake, which a peer of
-    /// another network refuses.
-    pub handshake: bool,
+    /// Whether the peer refused the last attempt's handshake, as a peer of
+    /// another network does.
+    pub refused: bool,
 }
 
 impl fmt::Display for UpstreamFailure {
@@ -68,6 +70,7 @@ impl Default for SyncProgress {
             caught_up: AtomicBool::new(false),
             stop_epoch_reached: AtomicBool::new(false),
             upstream_failure: OnceLock::new(),
+            deliveries: AtomicU64::new(0),
         }
     }
 }
@@ -127,6 +130,16 @@ impl SyncProgress {
 
     fn record_upstream_failure(&self, failure: UpstreamFailure) {
         let _ = self.upstream_failure.set(failure);
+    }
+
+    /// A pull session delivered a block or reached the tip: the peer serves
+    /// the sync.
+    fn note_delivery(&self) {
+        self.deliveries.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn deliveries(&self) -> u64 {
+        self.deliveries.load(Ordering::SeqCst)
     }
 }
 

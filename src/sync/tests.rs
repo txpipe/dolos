@@ -9,6 +9,7 @@ use dolos_core::config::{ArchiveStoreConfig, ChainConfig, RetryConfig, StateStor
 use dolos_testing::blocks::make_conway_block_with_prev;
 use dolos_testing::peer::{PeerFixture, PeerOptions};
 use gasket::messaging::OutputPort;
+use gasket::metrics::Reading;
 use gasket::runtime::{StagePhase, Tether, TetherState};
 use itertools::Itertools as _;
 
@@ -72,6 +73,19 @@ impl Stages {
 
     fn names(&self) -> Vec<&str> {
         self.0.iter().map(Tether::name).collect()
+    }
+
+    /// The housekeeping rounds the apply stage is over with.
+    fn housekeeping_rounds(&self) -> u64 {
+        self.0
+            .iter()
+            .filter_map(|tether| tether.read_metrics().ok())
+            .flatten()
+            .find_map(|(name, reading)| match (name, reading) {
+                ("housekeeping_count", Reading::Count(count)) => Some(count),
+                _ => None,
+            })
+            .unwrap_or(0)
     }
 
     fn teardown(self) {
@@ -163,6 +177,48 @@ fn apply_alone(
     let tether = gasket::runtime::spawn_stage(apply, policy);
 
     (feed, Stages(vec![tether]))
+}
+
+/// A submit stage on its own toward `address`, with its own progress.
+fn submit_alone(
+    config: &RootConfig,
+    address: String,
+    domain: &DomainAdapter,
+) -> (Arc<SyncProgress>, Stages) {
+    let progress = Arc::new(SyncProgress::default());
+
+    let submit = submit::Stage::new(
+        address,
+        PREVIEW_MAGIC,
+        domain.mempool().clone(),
+        &config.sync.retry,
+        progress.clone(),
+    );
+
+    let tether = gasket::runtime::spawn_stage(submit, define_gasket_policy(&config.sync.retry));
+
+    (progress, Stages(vec![tether]))
+}
+
+/// An address nothing listens on.
+fn closed_port() -> std::net::SocketAddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap()
+}
+
+/// An address that accepts every connection and closes it at once, like a
+/// proxy whose backend is down.
+fn accepting_and_closing() -> std::net::SocketAddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            drop(stream);
+        }
+    });
+
+    address
 }
 
 fn send_blocks(feed: &mut OutputPort<PullEvent>, blocks: Vec<RawBlock>) {
@@ -346,7 +402,11 @@ fn a_catch_up_whose_peer_stops_ends_without_success_once_retries_run_out() {
     });
     stages.teardown();
 
-    assert!(peer.is_stopped());
+    // The fixture's thread may still be closing its sockets.
+    wait_until("the peer stops", Duration::from_secs(5), || {
+        peer.is_stopped()
+    });
+    assert_eq!(peer.headers_sent(), 5);
     assert!(
         progress.target().is_none(),
         "the peer stopped short of its tip"
@@ -658,9 +718,45 @@ fn a_peer_of_another_network_is_given_up_in_the_handshake() {
     let failure = progress
         .upstream_failure()
         .expect("the upstream was given up");
-    assert!(failure.handshake, "{failure}");
+    assert!(failure.refused, "{failure}");
     assert!(
-        failure.message.contains("connecting: handshake"),
+        failure
+            .message
+            .ends_with("connecting: handshake version not accepted"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn a_connection_dropped_in_the_handshake_is_no_refusal() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, domain) = domain_over(temp.path(), no_backoff(0));
+
+    let pipeline = sync(
+        &config.sync,
+        PREVIEW_MAGIC,
+        accepting_and_closing().to_string(),
+        SyncLimit::CatchUp,
+        domain.clone(),
+    )
+    .unwrap();
+
+    let (progress, stages) = (pipeline.progress, Stages(pipeline.tethers));
+
+    wait_until("the pull stage ends", Duration::from_secs(30), || {
+        stages.ended("pull")
+    });
+    stages.teardown();
+
+    let failure = progress
+        .upstream_failure()
+        .expect("the upstream was given up");
+    assert!(!failure.refused, "{failure}");
+    assert!(
+        failure.message.ends_with(
+            "connecting: handshake protocol error: error while sending or receiving data \
+             through the channel: the connection closed"
+        ),
         "{failure}"
     );
 }
@@ -672,7 +768,7 @@ fn a_follow_whose_peer_closes_every_tx_submission_gives_up_on_it() {
 
     let peer = peer(PeerOptions {
         initial_blocks: 20,
-        close_tx_submission: true,
+        close_tx_submission: Some(Duration::ZERO),
         ..Default::default()
     });
 
@@ -685,8 +781,10 @@ fn a_follow_whose_peer_closes_every_tx_submission_gives_up_on_it() {
     let pull_ended = stages.ended("pull");
     stages.teardown();
 
+    // The pull stage's deliveries on its way to the tip may start the count
+    // again once or twice; past the tip it delivers nothing more.
     assert!(!pull_ended, "only the submit stage's sessions were closed");
-    assert_eq!(peer.tx_submissions(), 2, "one session and one retry");
+    assert!(peer.tx_submissions() >= 2, "one session and one retry");
 
     let failure = progress
         .upstream_failure()
@@ -701,6 +799,127 @@ fn a_follow_whose_peer_closes_every_tx_submission_gives_up_on_it() {
         failure.message.contains("after 2 failed attempts in a row"),
         "{failure}"
     );
+}
+
+#[test]
+fn a_follow_whose_pull_keeps_delivering_keeps_retrying_tx_submission() {
+    let temp = tempfile::tempdir().unwrap();
+
+    // A second between attempts, during which the pull stage delivers the
+    // blocks the peer produces.
+    let (config, domain) = domain_over(temp.path(), backing_off(1, 1, 1));
+
+    // Like a real node, the peer asks for nothing at first; the link drops
+    // every session before it would.
+    let peer = peer(PeerOptions {
+        initial_blocks: 20,
+        produce_every: Some(Duration::from_millis(100)),
+        close_tx_submission: Some(Duration::from_millis(200)),
+        ..Default::default()
+    });
+
+    let (progress, stages) = start(&config, &peer, SyncLimit::Follow, &domain);
+
+    wait_until(
+        "four tx-submission sessions failed",
+        Duration::from_secs(30),
+        || peer.tx_submissions() > 4 || stages.any_ended(),
+    );
+
+    let ended = stages.any_ended();
+    stages.teardown();
+
+    assert!(!ended, "{:?}", progress.upstream_failure());
+    assert_eq!(progress.upstream_failure(), None);
+}
+
+#[test]
+fn a_tx_submission_session_the_peer_asked_in_starts_the_count_again() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, domain) = domain_over(temp.path(), no_backoff(1));
+
+    // Sessions 2 and 4 ask once and close; the rest close at once. Each
+    // asking session starts the count again, so only sessions 5 and 6 fail
+    // twice in a row.
+    let peer = peer(PeerOptions {
+        close_tx_submission: Some(Duration::ZERO),
+        request_tx_ids_at: vec![2, 4],
+        ..Default::default()
+    });
+
+    let (progress, stages) = submit_alone(&config, peer.address().to_string(), &domain);
+
+    wait_until("the submit stage ends", Duration::from_secs(30), || {
+        stages.any_ended()
+    });
+    stages.teardown();
+
+    assert_eq!(peer.tx_submissions(), 6);
+
+    let failure = progress
+        .upstream_failure()
+        .expect("the upstream was given up");
+    assert!(
+        failure.message.contains("after 2 failed attempts in a row"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn a_submit_stage_whose_peer_is_unreachable_gives_up_on_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, domain) = domain_over(temp.path(), no_backoff(1));
+
+    let (progress, stages) = submit_alone(&config, closed_port().to_string(), &domain);
+
+    wait_until("the submit stage ends", Duration::from_secs(30), || {
+        stages.any_ended()
+    });
+    stages.teardown();
+
+    let failure = progress
+        .upstream_failure()
+        .expect("the upstream was given up");
+    assert!(
+        failure
+            .message
+            .starts_with("the submit stage gave up on the upstream peer"),
+        "{failure}"
+    );
+    assert!(
+        failure.message.contains(
+            "after 2 failed attempts in a row; the last: connecting: error connecting bearer"
+        ),
+        "{failure}"
+    );
+}
+
+#[test]
+fn a_follow_at_the_tip_whose_peer_drops_idle_sessions_keeps_reconnecting() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, domain) = domain_over(temp.path(), no_backoff(0));
+
+    // Reaching the tip is a delivery: every session does, before the peer
+    // drops it, so none counts.
+    let peer = peer(PeerOptions {
+        initial_blocks: 20,
+        close_after_await: Some(Duration::from_millis(50)),
+        ..Default::default()
+    });
+
+    let (progress, stages) = start(&config, &peer, SyncLimit::Follow, &domain);
+
+    wait_until(
+        "four sessions reach the tip",
+        Duration::from_secs(30),
+        || peer.intersects() >= 4 || stages.any_ended(),
+    );
+
+    let ended = stages.any_ended();
+    stages.teardown();
+
+    assert!(!ended, "{:?}", progress.upstream_failure());
+    assert_eq!(progress.upstream_failure(), None);
 }
 
 #[test]
@@ -737,12 +956,16 @@ fn the_apply_stage_ends_a_catch_up_once_a_target_it_holds_is_fixed() {
     stages.teardown();
     assert!(progress.succeeded(SyncLimit::CatchUp));
 
-    // Past its first housekeeping tick, no event reaches it and the next
-    // tick is an hour away: only the target's wake can end it.
+    // Past its first housekeeping round, no event reaches it and the next
+    // is an hour away: only the target's wake can end it.
     let progress = Arc::new(SyncProgress::default());
     let (_feed, stages) = apply_alone(&domain, &progress);
 
-    std::thread::sleep(Duration::from_millis(500));
+    wait_until(
+        "the first housekeeping round is over",
+        Duration::from_secs(10),
+        || stages.housekeeping_rounds() >= 1,
+    );
     assert!(!stages.any_ended());
 
     assert!(progress.fix_target(peer.tip()));
@@ -845,6 +1068,34 @@ fn the_target_is_committed_only_where_both_stores_stand_on_it() {
     assert!(committed(&origin, None, None, false));
     assert!(committed(&origin, None, Some(&origin), true));
     assert!(!committed(&origin, Some(&target), Some(&target), false));
+}
+
+#[test]
+fn a_session_cause_says_what_the_multiplexer_saw() {
+    use pallas::network::miniprotocols::chainsync::ClientError;
+    use pallas::network::multiplexer::Error as Plexer;
+
+    let cause = |error: ClientError| retry::Failure::new("chain-sync failed", &error).to_string();
+    let channel = "chain-sync failed: error while sending or receiving data through the channel";
+
+    assert_eq!(
+        cause(ClientError::Plexer(Plexer::Decoding("bad tag".into()))),
+        format!("{channel}: a message did not decode: bad tag")
+    );
+    assert_eq!(
+        cause(ClientError::Plexer(Plexer::BearerIo(
+            std::io::ErrorKind::ConnectionReset.into()
+        ))),
+        format!("{channel}: the connection failed: connection reset")
+    );
+    assert_eq!(
+        cause(ClientError::Plexer(Plexer::AgentDequeue)),
+        format!("{channel}: the connection closed")
+    );
+    assert_eq!(
+        cause(ClientError::IntersectionNotFound),
+        "chain-sync failed: no intersection point found"
+    );
 }
 
 #[test]

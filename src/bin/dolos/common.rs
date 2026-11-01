@@ -388,7 +388,7 @@ pub fn sync_failure(
     ended: &[String],
 ) -> miette::Report {
     match progress.upstream_failure() {
-        Some(failure) if failure.handshake => miette::miette!(
+        Some(failure) if failure.refused => miette::miette!(
             help = "a peer refuses the handshake of a node on another network: check that \
                     `upstream.peer_address` serves the configured chain",
             "{what}: {failure}"

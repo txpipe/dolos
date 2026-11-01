@@ -147,7 +147,10 @@ impl Worker {
     }
 
     /// The peer's next request. A session that ends before the first one
-    /// is a failed attempt; one that ends later reconnects at once.
+    /// is a failed attempt; one that ends later reconnects at once. A real
+    /// node asks only a minute into a session, so a link that drops sessions
+    /// sooner fails every one: the count starts again whenever the pull
+    /// stage delivers meanwhile.
     async fn schedule_next(
         &mut self,
         stage: &Stage,
@@ -269,7 +272,7 @@ pub struct Stage {
     mempool: MempoolBackend,
 
     /// Connections and sessions that failed in a row before the peer sent a
-    /// request.
+    /// request, with no pull delivery between them.
     attempts: Attempts,
 }
 
