@@ -7159,6 +7159,8 @@ dependencies = [
  "toml 0.8.20",
  "tonic 0.12.3",
  "tower 0.4.13",
+ "tracing-log",
+ "tracing-subscriber",
  "vergen-gitcl",
  "xshell",
  "zstd",

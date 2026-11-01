@@ -154,7 +154,8 @@ cargo xtask debug clear-state --config dolos.toml --namespace accounts
 ```
 
 - `find-seq` prints the WAL entry that holds a block, or `can't find block`.
-- `copy-wal` appends a slot range of the WAL to another WAL file.
+- `copy-wal` appends a slot range of the WAL to another WAL file. An output
+  file from another WAL version is wiped first, with a warning.
 - `update-entity` replaces one entity of `epochs`, `accounts`, `pools` or
   `dreps`, printing the value it held; `--dry-run` prints it and writes nothing.
   It writes by default: the old `dolos doctor update-entity` wrote only with
@@ -163,6 +164,8 @@ cargo xtask debug clear-state --config dolos.toml --namespace accounts
 
 `update-entity` and `clear-state` open the state store alone, leaving the WAL
 and the archive untouched.
+Logs go to stderr at the config's `[logging]` level and filter, as the node's
+do; results go to stdout.
 
 ### `e2e-test`
 

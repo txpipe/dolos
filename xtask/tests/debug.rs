@@ -248,6 +248,39 @@ fn copy_wal_writes_the_slot_range() {
     assert_eq!(entries(&output), expected);
 }
 
+/// An output an older release wrote is wiped by the WAL's version check,
+/// which says so on stderr.
+#[test]
+fn copy_wal_onto_an_older_wal_warns_of_the_wipe() {
+    let node = Node::new(10..=20);
+    let older = Node::new(30..=31);
+    let output = older.wal_path();
+
+    older.stamp_wal(CURRENT_WAL_VERSION - 1);
+
+    let copied = node.debug(
+        "copy-wal",
+        &[
+            "--output",
+            output.to_str().unwrap(),
+            "--since",
+            "12",
+            "--until",
+            "15",
+        ],
+    );
+
+    stdout(&copied);
+    assert!(
+        String::from_utf8_lossy(&copied.stderr).contains("wiping WAL data"),
+        "no wipe warning\n{}",
+        String::from_utf8_lossy(&copied.stderr)
+    );
+
+    let slots: Vec<_> = entries(&output).iter().map(|(p, _)| p.slot()).collect();
+    assert_eq!(slots, vec![12, 13, 14, 15]);
+}
+
 #[test]
 fn update_entity_dry_run_writes_nothing() {
     let node = Node::new(10..=10);
