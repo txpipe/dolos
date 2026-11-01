@@ -294,7 +294,9 @@ mod tests {
     }
 
     use super::testing::any_datum_state;
-    use crate::model::testing::{self as root, assert_delta_roundtrip};
+    use crate::model::testing::{
+        self as root, assert_delta_roundtrip, assert_delta_serde_roundtrip,
+    };
     use proptest::prelude::*;
 
     prop_compose! {
@@ -329,6 +331,22 @@ mod tests {
             delta in any_datum_ref_decrement(),
         ) {
             assert_delta_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn datum_ref_increment_serde_roundtrip(
+            entity in prop::option::of(any_datum_state()),
+            delta in any_datum_ref_increment(),
+        ) {
+            assert_delta_serde_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn datum_ref_decrement_serde_roundtrip(
+            entity in prop::option::of(any_datum_state()),
+            delta in any_datum_ref_decrement(),
+        ) {
+            assert_delta_serde_roundtrip(entity, delta);
         }
     }
 }

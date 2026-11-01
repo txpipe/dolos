@@ -1,7 +1,7 @@
 //! Witness-datum refcounts through the real pipeline and its WAL: a datum
 //! stays readable while any live UTxO references its hash, whichever of those
 //! UTxOs carried the datum in its witness set, and rollback restores every
-//! row the block before held.
+//! row the block before held, back to the bootstrap state.
 
 use std::sync::Arc;
 
@@ -72,11 +72,20 @@ fn output(datum_hash: Option<Hash<32>>) -> TransactionOutput<'static> {
 }
 
 fn body(input: &TxoRef, datum_hash: Option<Hash<32>>) -> TransactionBody<'static> {
+    body_from(std::slice::from_ref(input), datum_hash)
+}
+
+fn body_from(inputs: &[TxoRef], datum_hash: Option<Hash<32>>) -> TransactionBody<'static> {
     TransactionBody {
-        inputs: Set::from(vec![TransactionInput {
-            transaction_id: input.0,
-            index: input.1 as u64,
-        }]),
+        inputs: Set::from(
+            inputs
+                .iter()
+                .map(|input| TransactionInput {
+                    transaction_id: input.0,
+                    index: input.1 as u64,
+                })
+                .collect::<Vec<_>>(),
+        ),
         outputs: vec![output(datum_hash)],
         fee: 100_000,
         ttl: None,
@@ -131,6 +140,11 @@ fn spend(input: &TxoRef) -> (TransactionBody<'static>, WitnessSet<'static>) {
     (body(input, None), empty_witness_set())
 }
 
+/// A tx spending every one of `inputs` to one output with no datum.
+fn spend_all(inputs: &[TxoRef]) -> (TransactionBody<'static>, WitnessSet<'static>) {
+    (body_from(inputs, None), empty_witness_set())
+}
+
 fn produced(tx: &TransactionBody) -> TxoRef {
     TxoRef(tx.compute_hash(), 0)
 }
@@ -166,20 +180,25 @@ fn domain(seeds: &[Option<Hash<32>>]) -> ToyDomain {
     )
 }
 
-/// One block per tx, in order.
-fn blocks(
-    txs: Vec<(TransactionBody<'static>, WitnessSet<'static>)>,
-) -> Vec<(ChainPoint, RawBlock)> {
+type Tx = (TransactionBody<'static>, WitnessSet<'static>);
+
+/// One block per entry, each holding its txs in order.
+fn blocks(chain: Vec<Vec<Tx>>) -> Vec<(ChainPoint, RawBlock)> {
     let mut prev = None;
 
-    txs.into_iter()
+    chain
+        .into_iter()
         .enumerate()
-        .map(|(i, (body, witness_set))| {
+        .map(|(i, txs)| {
+            let txs = txs
+                .into_iter()
+                .map(|(body, witness_set)| (body, witness_set, true))
+                .collect();
             let (point, raw) = make_conway_block_with_witnessed_txs_at(
                 10 + 10 * i as u64,
                 i as u64,
                 prev,
-                vec![(body, witness_set, true)],
+                txs,
                 None,
             );
             prev = point.hash();
@@ -220,17 +239,26 @@ fn unknown(refcount: u64) -> Option<DatumState> {
 /// Seeds with no datum, for chains that lock their own.
 const PLAIN_SEEDS: [Option<Hash<32>>; 2] = [None, None];
 
+/// Rolls `chain` forward one tx per block; see `roll_blocks`.
+async fn roll(seeds: &[Option<Hash<32>>], chain: Vec<Tx>, expected: &[Option<DatumState>]) {
+    let chain = chain.into_iter().map(|tx| vec![tx]).collect();
+    roll_blocks(seeds, chain, expected).await;
+}
+
 /// Rolls `chain` forward from a domain configured with `seeds`, checking the
 /// row and the lookup after each block against `expected`, then rolls it
-/// back, checking each block's state is restored exactly.
-async fn roll(
+/// back, checking each block's state is restored exactly, down to the row
+/// bootstrap left.
+async fn roll_blocks(
     seeds: &[Option<Hash<32>>],
-    chain: Vec<(TransactionBody<'static>, WitnessSet<'static>)>,
+    chain: Vec<Vec<Tx>>,
     expected: &[Option<DatumState>],
 ) {
     let domain = domain(seeds);
     let blocks = blocks(chain);
     assert_eq!(blocks.len(), expected.len());
+
+    let bootstrapped = row(&domain);
 
     for (i, ((_, raw), expected)) in blocks.iter().zip(expected).enumerate() {
         domain.roll_forward(raw.clone()).unwrap();
@@ -252,6 +280,13 @@ async fn roll(
             "row after rolling back to block {i}"
         );
     }
+
+    domain.rollback(&ChainPoint::Origin).unwrap();
+    assert_eq!(
+        row(&domain),
+        bootstrapped,
+        "row after rolling back to Origin"
+    );
 }
 
 /// Output A carries the datum's hash and the datum; output B, in a later tx,
@@ -323,6 +358,61 @@ async fn relocking_the_only_output_in_one_tx_keeps_the_datum() {
         &PLAIN_SEEDS,
         vec![a, relock_a, spend_b],
         &[known(1), known(1), None],
+    )
+    .await;
+}
+
+/// Two configured UTxOs carry the datum's hash, so bootstrap counts both and
+/// spending each in turn leaves the datum readable for C until C is spent.
+#[tokio::test]
+async fn every_configured_output_counts_toward_the_datum() {
+    let seeds = [None, Some(datum_hash()), Some(datum_hash())];
+    assert_eq!(row(&domain(&seeds)), unknown(2), "row after bootstrap");
+
+    let c = lock(&seed(0), true);
+    let spend_s1 = spend(&seed(1));
+    let spend_s2 = spend(&seed(2));
+    let spend_c = spend(&produced(&c.0));
+
+    roll(
+        &seeds,
+        vec![c, spend_s1, spend_s2, spend_c],
+        &[known(3), known(2), known(1), None],
+    )
+    .await;
+}
+
+/// One tx spending both UTxOs that reference the datum decrements once for
+/// each, removing the row.
+#[tokio::test]
+async fn spending_two_outputs_in_one_tx_decrements_the_datum_for_each() {
+    let a = lock(&seed(0), true);
+    let b = lock(&seed(1), false);
+    let spend_ab = spend_all(&[produced(&a.0), produced(&b.0)]);
+
+    roll(
+        &PLAIN_SEEDS,
+        vec![a, b, spend_ab],
+        &[known(1), known(2), None],
+    )
+    .await;
+}
+
+/// In one block, T1 spends A, the only UTxO referencing the datum, and a
+/// later T2 locks another output with the hash but not the datum. T1's
+/// decrement applies before T2's increment, as it would with each in its own
+/// block: the row is removed, then counted again without the datum.
+#[tokio::test]
+async fn a_block_applies_its_txs_datum_deltas_in_order() {
+    let a = lock(&seed(0), true);
+    let spend_a = spend(&produced(&a.0));
+    let b = lock(&seed(1), false);
+    let spend_b = spend(&produced(&b.0));
+
+    roll_blocks(
+        &PLAIN_SEEDS,
+        vec![vec![a], vec![spend_a, b], vec![spend_b]],
+        &[known(1), unknown(1), None],
     )
     .await;
 }
