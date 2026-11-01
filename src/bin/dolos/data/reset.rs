@@ -375,15 +375,46 @@ fn same_place(a: &Path, b: &Path) -> bool {
 }
 
 /// `name` in one Unicode form and letter case, folded in full as APFS
-/// takes it: `ß` and `ss`, `ſ` and `s`, `ς` and `σ` are one.
+/// takes it: `ß` and `ss`, `ſ` and `s`, `ς` and `σ` are one. Characters
+/// HFS+ ignores in names are dropped, with every other default-ignorable
+/// one.
 fn folded(name: &std::ffi::OsStr) -> String {
     use unicode_normalization::UnicodeNormalization as _;
 
-    let decomposed: String = name.to_string_lossy().nfd().collect();
+    let decomposed: String = name
+        .to_string_lossy()
+        .chars()
+        .filter(|c| !ignorable(*c))
+        .nfd()
+        .collect();
     unicase::UniCase::unicode(decomposed)
         .to_folded_case()
         .nfd()
         .collect()
+}
+
+/// Whether `c` is a Unicode Default_Ignorable_Code_Point.
+fn ignorable(c: char) -> bool {
+    matches!(
+        c,
+        '\u{ad}'
+            | '\u{34f}'
+            | '\u{61c}'
+            | '\u{115f}'..='\u{1160}'
+            | '\u{17b4}'..='\u{17b5}'
+            | '\u{180b}'..='\u{180f}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{3164}'
+            | '\u{fe00}'..='\u{fe0f}'
+            | '\u{feff}'
+            | '\u{ffa0}'
+            | '\u{fff0}'..='\u{fff8}'
+            | '\u{1bca0}'..='\u{1bca3}'
+            | '\u{1d173}'..='\u{1d17a}'
+            | '\u{e0000}'..='\u{e0fff}'
+    )
 }
 
 /// What the file at `path` is on disk, a link itself rather than what it
@@ -2776,7 +2807,12 @@ pub(super) mod tests {
             ("stra\u{df}e", "strasse"),
             ("\u{3b1}\u{3c2}", "\u{3b1}\u{3c3}"),
             ("\u{fb00}", "ff"),
+            ("\u{fb03}", "ffi"),
+            ("\u{fb04}", "ffl"),
             ("\u{212a}elvin", "kelvin"),
+            ("sta\u{200c}te", "state"),
+            ("\u{feff}state", "state"),
+            ("\u{1f82}", "\u{1f80}\u{300}"),
         ] {
             assert!(within(&root.join(a), &root.join(b)), "{a} {b}");
         }

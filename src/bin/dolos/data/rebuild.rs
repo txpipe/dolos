@@ -142,8 +142,13 @@ fn open_store<T>(what: &str, result: Result<T, Error>) -> miette::Result<T> {
 /// The wipe would take what the first finds, and empty the configured path
 /// of the other two, or leave it dangling. The state and its aside are taken
 /// as the wipe moves and removes them, a link at either itself, not what it
-/// points at.
-fn check_wipe_scope(config: &RootConfig, state_path: &std::path::Path) -> miette::Result<()> {
+/// points at. A `--rewrite-logs` run is in place only, so its refusal
+/// offers no `--target`.
+fn check_wipe_scope(
+    config: &RootConfig,
+    state_path: &std::path::Path,
+    rewrite_logs: bool,
+) -> miette::Result<()> {
     let mut others: Vec<(&str, PathBuf)> = vec![("storage root", config.storage.path.clone())];
 
     if let Some(path) = config.wal_path() {
@@ -190,9 +195,10 @@ fn check_wipe_scope(config: &RootConfig, state_path: &std::path::Path) -> miette
                 bail!(
                     "refusing the in-place wipe: the {what} path {} sits at or under {how} {}; \
                      wiping the state store would take it too; move it elsewhere in the \
-                     configuration, or rebuild into --target",
+                     configuration{}",
                     path.display(),
                     wiped.display(),
+                    or_target(rewrite_logs),
                 );
             }
         }
@@ -235,6 +241,16 @@ fn in_place_rewrites(
     }
 
     rewrites
+}
+
+/// The `--target` alternative a refusal offers, none on a `--rewrite-logs`
+/// run, which cannot take one.
+fn or_target(rewrite_logs: bool) -> &'static str {
+    if rewrite_logs {
+        ""
+    } else {
+        ", or rebuild into --target"
+    }
 }
 
 /// What a stopped wipe or reset left where the state moves aside, if
@@ -288,7 +304,12 @@ impl InPlace {
         let Some(state_path) = config.storage.state_path() else {
             bail!(
                 "the configured state store is `storage.state.type = \"ephemeral\"`, so there \
-                 is no on-disk state store to rebuild in place; use --ephemeral or --target"
+                 is no on-disk state store to rebuild in place; {}",
+                if args.rewrite_logs {
+                    "--rewrite-logs runs in place only, so configure an on-disk state store"
+                } else {
+                    "use --ephemeral or --target"
+                },
             );
         };
 
@@ -302,13 +323,14 @@ impl InPlace {
         if std::fs::symlink_metadata(&state_path).is_ok_and(|metadata| metadata.is_symlink()) {
             bail!(
                 "refusing the in-place wipe: the state store {} is a symbolic link, and the wipe \
-                 would empty what it points at; set `storage.state.path` to that folder itself, \
-                 or rebuild into --target",
+                 would empty what it points at; set `storage.state.path` to that folder \
+                 itself{}",
                 state_path.display(),
+                or_target(args.rewrite_logs),
             );
         }
 
-        check_wipe_scope(config, &state_path)?;
+        check_wipe_scope(config, &state_path, args.rewrite_logs)?;
 
         #[cfg(unix)]
         if !super::reset::mount_points(std::slice::from_ref(&state_path))
@@ -317,8 +339,13 @@ impl InPlace {
         {
             bail!(
                 "refusing the in-place wipe: the state store {} is a mount point, which the \
-                 wipe can neither move aside nor remove; rebuild into --target",
+                 wipe can neither move aside nor remove; {}",
                 state_path.display(),
+                if args.rewrite_logs {
+                    "set `storage.state.path` to a folder under it"
+                } else {
+                    "rebuild into --target"
+                },
             );
         }
 
@@ -949,10 +976,10 @@ mod tests {
         let state_path = config.storage.state_path().unwrap();
 
         config.storage.archive.blocks_path = Some(PathBuf::from("blocks"));
-        assert!(check_wipe_scope(&config, &state_path).is_ok());
+        assert!(check_wipe_scope(&config, &state_path, false).is_ok());
 
         config.storage.archive.blocks_path = Some(PathBuf::from("state/blocks"));
-        let error = check_wipe_scope(&config, &state_path).unwrap_err();
+        let error = check_wipe_scope(&config, &state_path, false).unwrap_err();
         assert!(error.to_string().contains("archive segments"), "{error}");
     }
 
@@ -961,7 +988,8 @@ mod tests {
         let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
         config.storage.path = PathBuf::from("/data");
 
-        let error = check_wipe_scope(&config, std::path::Path::new("/data/db/..")).unwrap_err();
+        let error =
+            check_wipe_scope(&config, std::path::Path::new("/data/db/.."), false).unwrap_err();
         assert!(error.to_string().contains("storage root"), "{error}");
     }
 
@@ -972,7 +1000,7 @@ mod tests {
         config.storage.archive.blocks_path = Some(PathBuf::from("x/../state/segments"));
         let state_path = config.storage.state_path().unwrap();
 
-        let error = check_wipe_scope(&config, &state_path).unwrap_err();
+        let error = check_wipe_scope(&config, &state_path, false).unwrap_err();
         assert!(error.to_string().contains("archive segments"), "{error}");
     }
 
@@ -1009,7 +1037,7 @@ mod tests {
             set(&mut config);
             let state_path = config.storage.state_path().unwrap();
 
-            let error = check_wipe_scope(&config, &state_path).unwrap_err();
+            let error = check_wipe_scope(&config, &state_path, false).unwrap_err();
             let error = error.to_string();
             assert!(
                 error.contains(what) && error.contains("aside"),
@@ -1089,7 +1117,7 @@ mod tests {
                 std::fs::create_dir_all(path).unwrap();
             }
 
-            let error = check_wipe_scope(&config, &state_path).unwrap_err();
+            let error = check_wipe_scope(&config, &state_path, false).unwrap_err();
             assert!(error.to_string().contains(what), "{what}: {error}");
         }
     }
@@ -1130,7 +1158,7 @@ mod tests {
             std::os::unix::fs::symlink(pointed, root.join("alias")).unwrap();
             std::fs::create_dir_all(config.storage.archive_path().unwrap()).unwrap();
 
-            let error = check_wipe_scope(&config, &state_path).unwrap_err();
+            let error = check_wipe_scope(&config, &state_path, false).unwrap_err();
             assert!(
                 error.to_string().contains("the archive path"),
                 "{target}, relative {relative}: {error}"
@@ -1249,14 +1277,14 @@ mod tests {
             }
             std::fs::create_dir_all(config.storage.archive_path().unwrap()).unwrap();
 
-            check_wipe_scope(&config, &state_path).unwrap();
+            check_wipe_scope(&config, &state_path, false).unwrap();
         }
     }
 
     /// A store that does not exist yet, spelled as the aside in another
-    /// Unicode form or in a letter case only full folding matches, refuses
-    /// the wipe, as a volume ignoring both would make it there and then
-    /// remove it.
+    /// Unicode form, in a letter case only full folding matches or with a
+    /// character HFS+ ignores, refuses the wipe, as a volume ignoring the
+    /// difference would make it there and then remove it.
     #[test]
     fn a_missing_store_spelled_as_the_aside_in_another_form_refuses_the_wipe() {
         // The state, and the WAL spelled as its aside.
@@ -1265,6 +1293,12 @@ mod tests {
             ("state", ".\u{17f}tate.reset"),
             ("stra\u{df}e", ".strasse.reset"),
             ("\u{3b1}\u{3c2}", ".\u{3b1}\u{3c3}.reset"),
+            ("\u{fb03}", ".ffi.reset"),
+            ("\u{fb04}", ".ffl.reset"),
+            ("ffi", ".\u{fb03}.reset"),
+            ("state", ".sta\u{200c}te.reset"),
+            ("state", ".\u{feff}state.reset"),
+            ("\u{1f82}", ".\u{1f80}\u{300}.reset"),
         ];
 
         for (state, wal) in cases {
@@ -1277,12 +1311,32 @@ mod tests {
             let state_path = config.storage.state_path().unwrap();
             std::fs::create_dir_all(&state_path).unwrap();
 
-            let error = check_wipe_scope(&config, &state_path).unwrap_err();
+            let error = check_wipe_scope(&config, &state_path, false).unwrap_err();
             let error = error.to_string();
             assert!(
                 error.contains("wal") && error.contains("aside"),
                 "{wal}: {error}"
             );
+        }
+    }
+
+    /// A refusal offers `--target` only to a run that can take it, not to
+    /// `--rewrite-logs`, which runs in place only.
+    #[test]
+    fn a_rewrite_logs_refusal_offers_no_target() {
+        for rewrite_logs in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+            config.storage.path = dir.path().join("data");
+            config.sync.wal_path = Some(PathBuf::from(".state.reset"));
+
+            let state_path = config.storage.state_path().unwrap();
+            std::fs::create_dir_all(&state_path).unwrap();
+
+            let error = check_wipe_scope(&config, &state_path, rewrite_logs).unwrap_err();
+            let error = error.to_string();
+            assert!(error.contains("aside"), "{error}");
+            assert_eq!(error.contains("--target"), !rewrite_logs, "{error}");
         }
     }
 
@@ -1335,7 +1389,7 @@ mod tests {
         std::fs::create_dir_all(&state_path).unwrap();
         assert!(!config.wal_path().unwrap().exists());
 
-        let error = check_wipe_scope(&config, &state_path).unwrap_err();
+        let error = check_wipe_scope(&config, &state_path, false).unwrap_err();
         let error = error.to_string();
         assert!(error.contains("wal") && error.contains("aside"), "{error}");
     }
