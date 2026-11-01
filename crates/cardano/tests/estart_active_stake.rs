@@ -474,6 +474,54 @@ fn the_frozen_distribution_matches_the_account_scan() {
     assert!(logged > 0, "the owned pool logged no live pledge");
 }
 
+/// The active stake of a pool's `PoolEpochLog` epoch, which a pool's relative
+/// size divides by, is stored: RUPD's `active_stake_sum` over the snapshot it
+/// logs equals the `active_stake` of the same epoch's `epochs` row, which
+/// EWRAP archives without its sync cursors.
+#[test]
+fn rupd_active_stake_is_the_epoch_rows() {
+    let domain = seeded(devnet());
+
+    open_next_epoch(&domain).unwrap();
+
+    for round in 1..=2u64 {
+        churn(&domain, round);
+        open_next_epoch(&domain).unwrap();
+    }
+
+    // EWRAP closes epoch 3 and archives its row; ESTART opens epoch 4.
+    churn(&domain, 3);
+    wrap_the_epoch(&domain);
+    open_next_epoch(&domain).unwrap();
+    assert_eq!(epoch_state(&domain).number, 4);
+
+    let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+    let row = domain
+        .archive()
+        .read_log_typed::<EpochState>(summary.epoch_start(3), &())
+        .unwrap()
+        .expect("the epoch row of epoch 3");
+
+    assert_eq!(row.number, 3);
+    assert_eq!(row.set_sync_cursors(), Vec::<&str>::new());
+
+    // RUPD of epoch 4 reads the distribution of epoch 1 and logs epoch 3.
+    let snapshot = StakeSnapshot::load_globals::<ToyDomain>(domain.state(), 4, 1).unwrap();
+
+    assert!(snapshot.active_stake_sum > 0);
+    assert_eq!(snapshot.active_stake_sum, total(&scanned(&domain, 1)));
+    assert_eq!(row.active_stake, Some(snapshot.active_stake_sum));
+
+    run_rupd(&domain);
+
+    let logged: u64 = pool_epoch_logs(&domain, 3)
+        .values()
+        .map(|log| log.total_stake)
+        .sum();
+
+    assert_eq!(Some(logged), row.active_stake);
+}
+
 /// The distribution is counted under the protocol of the epoch it opens:
 /// crossing into Conway drops the pointer stake from the snapshot of the
 /// last Babbage epoch, as the ledger's SNAP on the translated state does.

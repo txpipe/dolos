@@ -582,7 +582,7 @@ fn voted_proposal() -> dolos_cardano::ProposalState {
         canceled_epoch: None,
         deposit: Some(100_000_000),
         reward_account: Some(StakeCredential::AddrKeyhash([0x5e; 28].into())),
-        proposed_in: Some(0),
+        proposed_in: 0,
         parent: None,
         purpose: None,
         anchor: None,

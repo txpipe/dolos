@@ -57,7 +57,7 @@ fn proposal(byte: u8, ratified: Option<Epoch>, canceled: Option<Epoch>) -> Propo
         canceled_epoch: canceled,
         deposit: Some(100_000_000),
         reward_account: Some(credential(byte)),
-        proposed_in: Some(0),
+        proposed_in: 0,
         parent: None,
         purpose: None,
         anchor: None,

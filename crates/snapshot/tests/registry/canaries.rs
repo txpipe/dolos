@@ -28,8 +28,8 @@ use dolos_cardano::{
         EpochValue, EraBoundary, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
         FirstScriptSet, GovDistr, GovRoots, GovState, MetadataLabelState, Nonces, PParamValue,
         PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk, PoolDelegation,
-        PoolEpochLog, PoolParams, PoolSnapshot, PoolState, PoolTally, ProposalAction,
-        ProposalState, PrunedAccountState, RollingStats, ShardProgress, Stake, VoteEntry,
+        PoolEpochLog, PoolParams, PoolSnapshot, PoolState, ProposalAction, ProposalState,
+        PrunedAccountState, RollingStats, Stake, VoteEntry,
     },
     model::{
         AccountStats, AddressStats, AssetMintChunk, AssetMintSet, PaymentAddressChunk,
@@ -138,16 +138,10 @@ pub fn drep_epoch_log() -> DRepEpochLog {
     }
 }
 
-/// The one float in the whole profile.
-///
-/// `relative_size` is pinned at an exactly-representable power of two, so the
-/// golden fixes the IEEE-754 bits and nothing else: a value that needed
-/// rounding would pin the rounding rather than the field.
 pub fn pool_epoch_log() -> PoolEpochLog {
     PoolEpochLog {
         blocks_minted: 42,
         total_stake: 123_456_789_000,
-        relative_size: 0.015625,
         delegators_count: 317,
         live_pledge: 30_000_000_000,
         total_rewards: 4_400_000_000,
@@ -458,6 +452,9 @@ fn end_stats() -> EndStats {
     }
 }
 
+/// The sync cursors are the exception to every `Option` being `Some`: a
+/// published row carries them null and false, and the boundary check refuses
+/// a state that has any set.
 pub fn epoch_state() -> EpochState {
     EpochState {
         number: 402,
@@ -492,32 +489,12 @@ pub fn epoch_state() -> EpochState {
         }),
         end: Some(end_stats()),
         incentives: Some(epoch_incentives(9)),
-        ewrap_progress: Some(ShardProgress {
-            committed: 3,
-            total: 8,
-        }),
-        estart_progress: Some(ShardProgress {
-            committed: 5,
-            total: 8,
-        }),
-        rupd_progress: Some(ShardProgress {
-            committed: 7,
-            total: 8,
-        }),
+        ewrap_progress: None,
+        estart_progress: None,
+        rupd_progress: None,
         active_stake: Some(21_000_000_000_000_000),
-        estart_tally: Some(BTreeMap::from([
-            (hash28(0xc5), pool_tally(1)),
-            (hash28(0xc6), pool_tally(2)),
-        ])),
-        ewrap_finalized: true,
-    }
-}
-
-fn pool_tally(seed: u8) -> PoolTally {
-    PoolTally {
-        stake: 1_000_000_000_000 + seed as u64,
-        delegators: 300 + seed as u64,
-        live_pledge: 50_000_000_000 + seed as u64,
+        estart_tally: None,
+        ewrap_finalized: false,
     }
 }
 
@@ -616,10 +593,11 @@ pub fn gov_state() -> GovState {
     }
 }
 
+/// A complete distribution, every shard merged, as a published row has it.
 fn gov_distr(seed: u8, epoch_offset: Epoch) -> GovDistr {
     GovDistr {
         closing_epoch: 500 + epoch_offset,
-        committed_shards: 6,
+        committed_shards: 8,
         total_shards: 8,
         drep_distr: BTreeMap::from([
             (DRep::Key(hash28(seed)), 111_000_000u64),
@@ -757,7 +735,7 @@ pub fn proposal_state() -> ProposalState {
         canceled_epoch: Some(513),
         deposit: Some(100_000_000_000),
         reward_account: Some(StakeCredential::AddrKeyhash(hash28(0x17))),
-        proposed_in: Some(508),
+        proposed_in: 508,
         parent: Some(gov_action_id(0x18, 4)),
         purpose: Some(dolos_cardano::model::GovPurpose::Committee),
         anchor: Some(anchor(0x19)),
@@ -940,7 +918,6 @@ pub fn every_proposal_action() -> Vec<(&'static str, ProposalAction)> {
                 (StakeCredential::ScriptHash(hash28(0x23)), 2_000_000),
             ]),
         ),
-        ("Other", ProposalAction::Other),
         ("NoConfidence", ProposalAction::NoConfidence),
         (
             "UpdateCommittee",
