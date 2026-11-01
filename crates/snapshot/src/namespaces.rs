@@ -20,7 +20,7 @@ use dolos_cardano::model::{
     AddressStats, AssetMintChunk, AssetMintSet, DRepEpochLog, DRepSightingState, DRepState,
     DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
     FirstScriptSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressChunk,
-    PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk,
+    PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyFirstMintChunk,
     PoolEpochLog, PoolState, ProposalState, PrunedAccountState,
 };
 use dolos_core::{KeyCodec, KeyError, LogEntity, Namespace, StateEntity};
@@ -66,7 +66,7 @@ pub const NAMESPACES: [Namespace; 31] = [
     PaymentStats::NS,
     PendingMirState::NS,
     PendingRewardState::NS,
-    PolicyMintChunk::NS,
+    PolicyFirstMintChunk::NS,
     PoolEpochLog::NS,
     PoolState::NS,
     ProposalState::NS,
@@ -115,7 +115,7 @@ pub const SCHEMA_REVS: [(Namespace, u64); 31] = [
     (PaymentStats::NS, 1),
     (PendingMirState::NS, 1),
     (PendingRewardState::NS, 1),
-    (PolicyMintChunk::NS, 1),
+    (PolicyFirstMintChunk::NS, 1),
     (PoolEpochLog::NS, 1),
     (PoolState::NS, 1),
     (ProposalState::NS, 1),
@@ -166,7 +166,7 @@ pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         | FirstMintChunk::NS
         | FirstScriptChunk::NS
         | PaymentAddressChunk::NS
-        | PolicyMintChunk::NS
+        | PolicyFirstMintChunk::NS
         | PoolEpochLog::NS => {
             return Err(Error::malformed("state", format!("{ns} holds no state")));
         }
@@ -191,7 +191,7 @@ pub fn check_log_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         FirstMintChunk::NS => exact::<<FirstMintChunk as LogEntity>::Key>(key),
         FirstScriptChunk::NS => exact::<<FirstScriptChunk as LogEntity>::Key>(key),
         PaymentAddressChunk::NS => exact::<<PaymentAddressChunk as LogEntity>::Key>(key),
-        PolicyMintChunk::NS => exact::<<PolicyMintChunk as LogEntity>::Key>(key),
+        PolicyFirstMintChunk::NS => exact::<<PolicyFirstMintChunk as LogEntity>::Key>(key),
         PoolEpochLog::NS => exact::<<PoolEpochLog as LogEntity>::Key>(key),
         PoolState::NS => exact::<<PoolState as LogEntity>::Key>(key),
         ProposalState::NS => exact::<<ProposalState as LogEntity>::Key>(key),

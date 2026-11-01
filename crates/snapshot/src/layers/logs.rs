@@ -125,7 +125,7 @@ mod tests {
     use dolos_cardano::model::{
         AccountAddressChunk, AccountStats, AddressStats, AssetMintChunk, DRepEpochLog, DRepState,
         EpochState, FirstMintChunk, FirstScriptChunk, FixedNamespace as _, PaymentAddressChunk,
-        PolicyKey, PolicyMintChunk, PoolEpochLog, PoolKey, PoolState, ProposalState,
+        PolicyFirstMintChunk, PolicyKey, PoolEpochLog, PoolKey, PoolState, ProposalState,
     };
 
     use super::*;
@@ -166,7 +166,7 @@ mod tests {
             (EpochState::NS, 0),
             (FirstMintChunk::NS, 4),
             (FirstScriptChunk::NS, 4),
-            (PolicyMintChunk::NS, 32),
+            (PolicyFirstMintChunk::NS, 32),
             (AssetMintChunk::NS, 36),
             (PoolEpochLog::NS, 28),
             (PoolState::NS, 28),

@@ -27,7 +27,7 @@ use dolos_cardano::{
         DRepEpochLog, DRepExpiry, DRepSightingState, DRepState, DatumState, EndStats, EpochState,
         EpochValue, EraBoundary, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
         FirstScriptSet, GovDistr, GovRoots, GovState, MetadataLabelState, Nonces, PParamValue,
-        PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk, PoolDelegation,
+        PParamsSet, PendingMirState, PendingRewardState, PolicyFirstMintChunk, PoolDelegation,
         PoolEpochLog, PoolParams, PoolSnapshot, PoolState, ProposalAction, ProposalState,
         PrunedAccountState, RollingStats, Stake, VoteEntry,
     },
@@ -200,8 +200,8 @@ pub fn first_mint_chunk() -> FirstMintChunk {
     }
 }
 
-pub fn policy_mint_chunk() -> PolicyMintChunk {
-    PolicyMintChunk {
+pub fn policy_first_mint_chunk() -> PolicyFirstMintChunk {
+    PolicyFirstMintChunk {
         count: 257,
         names: vec![b"first".to_vec().into(), b"second".to_vec().into()],
     }
