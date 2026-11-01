@@ -86,6 +86,13 @@ impl Node {
         self.root.path().join("dolos.toml")
     }
 
+    /// Add a `[logging]` section to `dolos.toml`.
+    fn set_logging(&self, section: &str) {
+        let mut toml = std::fs::read_to_string(self.config_path()).unwrap();
+        toml.push_str(&format!("\n[logging]\n{section}\n"));
+        std::fs::write(self.config_path(), toml).unwrap();
+    }
+
     /// `cargo xtask debug <command> --config dolos.toml <args>`, with no
     /// `DOLOS_` variable inherited to point it at other stores.
     fn debug(&self, command: &str, args: &[&str]) -> Output {
@@ -279,6 +286,91 @@ fn copy_wal_onto_an_older_wal_warns_of_the_wipe() {
 
     let slots: Vec<_> = entries(&output).iter().map(|(p, _)| p.slot()).collect();
     assert_eq!(slots, vec![12, 13, 14, 15]);
+}
+
+/// `copy-wal` onto a WAL an older release wrote, with `logging` as the
+/// config's `[logging]` section; its stderr.
+fn copy_onto_an_older_wal(logging: &str) -> String {
+    let node = Node::new(10..=20);
+    let older = Node::new(30..=31);
+    let output = older.wal_path();
+
+    older.stamp_wal(CURRENT_WAL_VERSION - 1);
+    node.set_logging(logging);
+
+    let copied = node.debug(
+        "copy-wal",
+        &[
+            "--output",
+            output.to_str().unwrap(),
+            "--since",
+            "12",
+            "--until",
+            "15",
+        ],
+    );
+
+    stdout(&copied);
+    String::from_utf8_lossy(&copied.stderr).into_owned()
+}
+
+/// The config's `[logging]` level and filter decide what reaches stderr, as
+/// on the node.
+#[test]
+fn logs_follow_the_configured_level_and_filter() {
+    let quiet = copy_onto_an_older_wal(r#"level = "error""#);
+    assert!(
+        !quiet.contains("wiping WAL data"),
+        "a warning got past level = error\n{quiet}"
+    );
+
+    let filtered = copy_onto_an_older_wal("level = \"error\"\nfilter = \"dolos_redb3=warn\"");
+    assert!(
+        filtered.contains("wiping WAL data"),
+        "the filter was not applied\n{filtered}"
+    );
+}
+
+#[test]
+fn a_malformed_logging_filter_is_refused() {
+    let node = Node::new(10..=10);
+    node.set_logging(r#"filter = "dolos=dbug""#);
+
+    let refused = node.debug(
+        "find-seq",
+        &["--slot", "10", "--hash", &hex::encode(hash(10))],
+    );
+
+    let error = stderr(&refused);
+    assert!(error.contains("logging.filter"), "{error}");
+}
+
+/// An output a newer release wrote is refused, neither wiped nor restamped.
+#[test]
+fn copy_wal_refuses_a_newer_wal() {
+    let node = Node::new(10..=20);
+    let newer = Node::new(30..=31);
+    let output = newer.wal_path();
+    let before = entries(&output);
+
+    newer.stamp_wal(CURRENT_WAL_VERSION + 1);
+
+    stderr(&node.debug(
+        "copy-wal",
+        &[
+            "--output",
+            output.to_str().unwrap(),
+            "--since",
+            "12",
+            "--until",
+            "15",
+        ],
+    ));
+
+    assert_eq!(newer.wal_version(), Some(CURRENT_WAL_VERSION + 1));
+
+    newer.stamp_wal(CURRENT_WAL_VERSION);
+    assert_eq!(entries(&output), before);
 }
 
 #[test]

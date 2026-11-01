@@ -155,7 +155,8 @@ cargo xtask debug clear-state --config dolos.toml --namespace accounts
 
 - `find-seq` prints the WAL entry that holds a block, or `can't find block`.
 - `copy-wal` appends a slot range of the WAL to another WAL file. An output
-  file from another WAL version is wiped first, with a warning.
+  an older release wrote is wiped first, with a warning; one a newer release
+  wrote is refused.
 - `update-entity` replaces one entity of `epochs`, `accounts`, `pools` or
   `dreps`, printing the value it held; `--dry-run` prints it and writes nothing.
   It writes by default: the old `dolos doctor update-entity` wrote only with
