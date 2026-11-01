@@ -56,7 +56,7 @@ pub enum ArchiveError {
     #[error("broken invariant")]
     BrokenInvariant(#[from] BrokenInvariant),
 
-    #[error("storage error")]
+    #[error("storage error: {0}")]
     InternalError(String),
 
     #[error("address decoding error")]

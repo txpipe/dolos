@@ -23,9 +23,14 @@
 //! full-chain validation run on a public network wants `--target` instead.
 //!
 //! The in-place sequence is ordered for crash safety: what a stopped wipe
-//! left aside is removed, and the move aside shown possible, while nothing
-//! has changed yet; the WAL is reset to origin *before* the state store is
-//! wiped, and reseeded to the final cursor only after the replay completes.
+//! left aside is removed, and a folder made and removed where the state moves
+//! aside, while nothing has changed yet. That shows the folder holding the
+//! state writable, not that the state itself may move: an immutable flag or
+//! an access list on it still refuses the move, after the WAL reset, leaving
+//! the state whole over a WAL at origin, which a rerun once it is cleared, or
+//! `dolos sync recover`, repairs. The WAL is reset to origin *before* the
+//! state store is wiped, and reseeded to the final cursor only after the
+//! replay completes.
 //! A crash mid-replay therefore leaves WAL(origin) behind a partial state
 //! cursor, which the next startup refuses loudly (`InconsistentState`); one
 //! during the wipe leaves the state moved aside, so the node starts from
@@ -129,10 +134,12 @@ fn open_store<T>(what: &str, result: Result<T, Error>) -> miette::Result<T> {
 /// The wipe removes `state_path` recursively, and on Unix first moves it
 /// aside to its [`aside`](super::reset::aside), removing what a stopped wipe
 /// left there; so the storage root or any other configured store at or under
-/// either is a configuration this command must not act on. Paths are compared
-/// where `..` resolves, as the OS reaches each, and, for those that exist, by
-/// what they are on disk: a case-insensitive volume, or a link, reaches one
-/// folder under more than one spelling.
+/// either is a configuration this command must not act on. Each path is
+/// compared where the OS reaches it, every link on the way to another store
+/// followed, and by what each folder is on disk: a case-insensitive volume,
+/// or a link, reaches one folder under more than one spelling. The state and
+/// its aside are taken as the wipe moves and removes them, a link at either
+/// itself, not what it points at.
 fn check_wipe_scope(config: &RootConfig, state_path: &std::path::Path) -> miette::Result<()> {
     let mut others: Vec<(&str, PathBuf)> = vec![("storage root", config.storage.path.clone())];
 
@@ -154,15 +161,25 @@ fn check_wipe_scope(config: &RootConfig, state_path: &std::path::Path) -> miette
 
     let state_path = super::reset::resolved(state_path).into_diagnostic()?;
     let aside = super::reset::aside(&state_path)?;
+    let reached = |path: &std::path::Path, follow_last| {
+        super::reset::reached(path, follow_last)
+            .into_diagnostic()
+            .with_context(|| format!("checking where {} leads", path.display()))
+    };
+    let wiped = [
+        (reached(&state_path, false)?, &state_path, "the state path"),
+        (
+            reached(&aside, false)?,
+            &aside,
+            "where the wipe moves the state aside,",
+        ),
+    ];
 
     for (what, path) in others {
-        let at = super::reset::resolved(&path).into_diagnostic()?;
+        let at = reached(&path, true)?;
 
-        for (wiped, how) in [
-            (&state_path, "the state path"),
-            (&aside, "where the wipe moves the state aside,"),
-        ] {
-            if at.starts_with(wiped) || reached_within(&at, wiped) {
+        for (reached, wiped, how) in &wiped {
+            if super::reset::within(&at, reached) {
                 bail!(
                     "refusing the in-place wipe: the {what} path {} sits at or under {how} {}; \
                      wiping the state store would take it too",
@@ -174,34 +191,6 @@ fn check_wipe_scope(config: &RootConfig, state_path: &std::path::Path) -> miette
     }
 
     Ok(())
-}
-
-/// Whether `path`, or a folder it sits in, is the existing folder `wiped`
-/// under another spelling.
-fn reached_within(path: &std::path::Path, wiped: &std::path::Path) -> bool {
-    let Some(wiped) = identity(wiped) else {
-        return false;
-    };
-
-    path.ancestors()
-        .any(|ancestor| identity(ancestor).as_ref() == Some(&wiped))
-}
-
-/// What the file at `path` is on disk, links followed, if it exists.
-#[cfg(unix)]
-fn identity(path: &std::path::Path) -> Option<(u64, u64)> {
-    use std::os::unix::fs::MetadataExt as _;
-
-    std::fs::metadata(path)
-        .ok()
-        .map(|metadata| (metadata.dev(), metadata.ino()))
-}
-
-/// What the file at `path` is on disk, links followed, if it exists: the
-/// path the volume keeps it at, in the letter case it was made with.
-#[cfg(not(unix))]
-fn identity(path: &std::path::Path) -> Option<PathBuf> {
-    std::fs::canonicalize(path).ok()
 }
 
 /// What an in-place rebuild rewrites, for its `--yes` refusal.
@@ -1043,14 +1032,6 @@ mod tests {
         assert!(!left.exists());
     }
 
-    /// Whether the volume holding `dir` takes names in any letter case.
-    fn case_insensitive(dir: &std::path::Path) -> bool {
-        std::fs::create_dir_all(dir.join("probe")).unwrap();
-        let insensitive = dir.join("PROBE").exists();
-        std::fs::remove_dir(dir.join("probe")).unwrap();
-        insensitive
-    }
-
     /// On a case-insensitive volume, a store, or the root, spelled in
     /// another case than the state or its aside refuses the wipe, as it
     /// does spelled alike.
@@ -1083,7 +1064,7 @@ mod tests {
         for (set, what) in cases {
             let dir = tempfile::tempdir().unwrap();
 
-            if !case_insensitive(dir.path()) {
+            if !super::super::reset::tests::case_insensitive(dir.path()) {
                 return;
             }
 
@@ -1105,22 +1086,91 @@ mod tests {
         }
     }
 
-    /// A store reached through a link into the state refuses the wipe,
-    /// which would take what it points at.
+    /// A store reached through a link into the state, or into what a
+    /// stopped wipe left aside, to it or to a folder in it, and a store that
+    /// is such a link, refuse the wipe, which would take what they point at.
     #[cfg(unix)]
     #[test]
-    fn a_store_linked_into_the_state_refuses_the_wipe() {
+    fn a_store_linked_into_the_state_or_its_aside_refuses_the_wipe() {
+        // Where the link `alias` points, and the archive path through it.
+        let cases = [
+            ("state", "alias/archive"),
+            ("state/sub", "alias/archive"),
+            (".state.reset/sub", "alias/archive"),
+            ("state/sub/archive", "alias"),
+            (".state.reset/sub/archive", "alias"),
+        ];
+
+        for (target, archive) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+            config.storage.path = dir.path().join("data");
+            config.storage.archive.path = Some(PathBuf::from(archive));
+
+            let root = config.storage.path.clone();
+            let state_path = config.storage.state_path().unwrap();
+            std::fs::create_dir_all(&state_path).unwrap();
+            std::fs::create_dir_all(root.join(target)).unwrap();
+            std::os::unix::fs::symlink(root.join(target), root.join("alias")).unwrap();
+            std::fs::create_dir_all(config.storage.archive_path().unwrap()).unwrap();
+
+            let error = check_wipe_scope(&config, &state_path).unwrap_err();
+            assert!(error.to_string().contains("archive"), "{target}: {error}");
+        }
+    }
+
+    /// A link a stopped wipe's aside holds, to the root or to the archive,
+    /// is removed, not followed: it neither refuses the wipe nor takes what
+    /// it points at.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_the_aside_is_removed_not_followed() {
+        for target in [None, Some("archive")] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+            config.storage.path = dir.path().join("data");
+
+            let root = config.storage.path.clone();
+            let segment = config
+                .storage
+                .archive_path()
+                .unwrap()
+                .join("000000.segment");
+            std::fs::create_dir_all(segment.parent().unwrap()).unwrap();
+            std::fs::write(&segment, b"a block").unwrap();
+
+            let state = config.storage.state_path().unwrap();
+            drop(dolos_fjall::StateStore::open(&state, Default::default()).unwrap());
+
+            let aside = root.join(".state.reset");
+            let pointed = target.map_or(root.clone(), |target| root.join(target));
+            std::os::unix::fs::symlink(&pointed, &aside).unwrap();
+
+            let in_place = InPlace::prepare(&config, &args(false)).unwrap();
+            drop(in_place.wipe(&config).unwrap());
+
+            assert!(std::fs::symlink_metadata(&aside).is_err(), "{target:?}");
+            assert!(segment.is_file(), "{target:?}");
+        }
+    }
+
+    /// A store that does not exist yet, spelled as where the wipe moves the
+    /// state aside in another case, refuses the wipe: on a volume taking
+    /// both, it would make the store there and then remove it.
+    #[test]
+    fn a_missing_store_spelled_as_the_aside_refuses_the_wipe() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
         config.storage.path = dir.path().join("data");
-        config.storage.archive.path = Some(PathBuf::from("alias/archive"));
+        config.sync.wal_path = Some(PathBuf::from(".STATE.reset"));
 
         let state_path = config.storage.state_path().unwrap();
-        std::fs::create_dir_all(state_path.join("archive")).unwrap();
-        std::os::unix::fs::symlink(&state_path, config.storage.path.join("alias")).unwrap();
+        std::fs::create_dir_all(&state_path).unwrap();
+        assert!(!config.wal_path().unwrap().exists());
 
         let error = check_wipe_scope(&config, &state_path).unwrap_err();
-        assert!(error.to_string().contains("archive"), "{error}");
+        let error = error.to_string();
+        assert!(error.contains("wal") && error.contains("aside"), "{error}");
     }
 
     /// A wipe that cannot clear the state's aside, or move the state there,
@@ -1163,7 +1213,19 @@ mod tests {
             let result = in_place.wipe(&config).map(drop);
             set(0o755);
 
-            assert!(result.is_err(), "sealed aside {sealed_aside}");
+            // Each refused at its own step: clearing the aside, or the probe.
+            let error = result.err().map(|error| error.to_string());
+            let step = if sealed_aside {
+                "removing "
+            } else {
+                "checking "
+            };
+            assert!(
+                error
+                    .as_ref()
+                    .is_some_and(|error| error.starts_with(step) && error.contains(".state.reset")),
+                "sealed aside {sealed_aside}: {error:?}"
+            );
             assert!(
                 !config.wal_path().unwrap().exists(),
                 "sealed aside {sealed_aside}"

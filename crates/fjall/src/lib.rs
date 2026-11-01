@@ -67,10 +67,10 @@ pub enum Error {
     ReadOnly,
 
     /// A database whose `version` is [`REMOVING_VERSION`]: a removal in
-    /// place stopped part-way through it.
+    /// place is going through it, or stopped part-way.
     #[error(
-        "{} was being removed by `dolos data reset` or `dolos data rebuild`, which stopped \
-         part-way; run that command again",
+        "{} is being removed by `dolos data reset` or `dolos data rebuild`; if neither is \
+         still running, it stopped part-way: run that command again",
         .0.display()
     )]
     BeingRemoved(std::path::PathBuf),

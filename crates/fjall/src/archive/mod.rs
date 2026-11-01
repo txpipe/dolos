@@ -1843,9 +1843,8 @@ mod tests {
                 store.truncate_front(&point(100)).err().unwrap(),
             ];
 
-            // The error's Display hides its message, so read its Debug.
             for error in errors {
-                assert!(format!("{error:?}").contains("read-only"), "{error:?}");
+                assert!(error.to_string().contains("read-only"), "{error:?}");
             }
 
             for error in [
@@ -1863,6 +1862,33 @@ mod tests {
 
         let store = ArchiveStore::open(schema(), &path, None, Preset::Standard).unwrap();
         assert_eq!(store.get_tip().unwrap().unwrap().0, 102);
+    }
+
+    /// An archive a stopped removal marked refuses every open, its views'
+    /// included, naming the archive's database and the command to run
+    /// again, a message the archive's own error keeps.
+    #[test]
+    fn an_archive_marked_as_being_removed_names_the_rerun() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive");
+        let index = path.join("index");
+        archived(&path, 100..103);
+        std::fs::write(index.join("version"), crate::REMOVING_VERSION).unwrap();
+
+        for opened in [
+            ArchiveStore::open(schema(), &path, None, Preset::Standard).err(),
+            ArchiveStore::open_view(schema(), &path, None, Preset::Standard).err(),
+        ] {
+            let error = opened.expect("a marked archive does not open");
+
+            assert!(
+                matches!(&error, Error::BeingRemoved(at) if *at == index),
+                "{error:?}"
+            );
+            assert!(ArchiveError::from(error)
+                .to_string()
+                .contains("run that command again"));
+        }
     }
 
     /// The rows of the iterator `make` takes from a read-only open of the

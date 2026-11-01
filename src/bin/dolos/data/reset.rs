@@ -64,10 +64,12 @@ impl Removal {
             // disk: a folder it climbs out of may be gone with a store.
             let path = resolved(&written).into_diagnostic()?;
             let present = recheck(&root, &path)?;
+            let place = reached(&path, false).into_diagnostic()?;
 
-            let (held, rest): (Vec<_>, Vec<_>) = locks
-                .into_iter()
-                .partition(|(store, _)| store.starts_with(&path));
+            let (held, rest): (Vec<_>, Vec<_>) = locks.into_iter().partition(|(store, _)| {
+                store.starts_with(&path)
+                    || reached(store, true).is_ok_and(|store| within(&store, &place))
+            });
             locks = rest;
 
             if !present {
@@ -111,7 +113,9 @@ pub(super) fn remove_held(path: &Path, held: Vec<LockOut>) -> miette::Result<()>
 /// Make the store at `path` ready for [`remove_held`] before anything else
 /// changes: what a stopped wipe or reset left at its [`aside`] goes, and for
 /// a `held` store on Unix, which moves there, a folder made and removed at
-/// the aside shows the move can be made.
+/// the aside shows the folder holding the store writable. That is not
+/// proof the store itself may move: an immutable flag or an access list on
+/// it still refuses the rename.
 pub(super) fn ready_aside(path: &Path, held: bool) -> miette::Result<()> {
     let aside = aside(path)?;
 
@@ -286,6 +290,110 @@ pub(super) fn resolved(path: &Path) -> std::io::Result<PathBuf> {
     }
 
     Ok(reached)
+}
+
+/// Where the OS reaches `path`: made absolute, `.` dropped, each symbolic
+/// link on the way followed, the last only when `follow_last`, and each
+/// `..` taken out of the folder reached before it. Past what exists, the
+/// path is taken as written.
+pub(super) fn reached(path: &Path, follow_last: bool) -> std::io::Result<PathBuf> {
+    /// As many links as Linux follows on the way to one path.
+    const MAX_LINKS: usize = 40;
+
+    let push = |pending: &mut Vec<PathBuf>, path: &Path| {
+        pending.extend(
+            path.components()
+                .rev()
+                .map(|part| PathBuf::from(part.as_os_str())),
+        );
+    };
+
+    let mut pending = Vec::new();
+    push(&mut pending, &std::path::absolute(path)?);
+
+    let mut reached = PathBuf::new();
+    let mut links = 0;
+
+    while let Some(part) = pending.pop() {
+        match part.components().next() {
+            None | Some(Component::CurDir) => {}
+            Some(Component::ParentDir) => {
+                reached.pop();
+            }
+            Some(Component::Normal(name)) => {
+                let next = reached.join(name);
+                let last = pending.iter().all(|part| part == Path::new("."));
+
+                if (follow_last || !last)
+                    && std::fs::symlink_metadata(&next).is_ok_and(|metadata| metadata.is_symlink())
+                {
+                    links += 1;
+
+                    if links > MAX_LINKS {
+                        return Err(std::io::Error::other(format!(
+                            "{} goes through more than {MAX_LINKS} symbolic links",
+                            path.display()
+                        )));
+                    }
+
+                    push(&mut pending, &std::fs::read_link(&next)?);
+                } else {
+                    reached = next;
+                }
+            }
+            Some(root) => reached.push(root.as_os_str()),
+        }
+    }
+
+    Ok(reached)
+}
+
+/// Whether `path` is `wiped` or sits under it, both [`reached`]: folders are
+/// compared by what they are on disk where both exist and, where neither
+/// does, by name in any letter case beside the same folder, as a
+/// case-insensitive volume would take them for one.
+pub(super) fn within(path: &Path, wiped: &Path) -> bool {
+    path.ancestors().any(|ancestor| same_place(ancestor, wiped))
+}
+
+fn same_place(a: &Path, b: &Path) -> bool {
+    match (identity(a), identity(b)) {
+        (Some(a), Some(b)) => a == b,
+        (None, None) => match (a.parent(), a.file_name(), b.parent(), b.file_name()) {
+            (Some(a_in), Some(a_name), Some(b_in), Some(b_name)) => {
+                a_name.to_string_lossy().to_lowercase() == b_name.to_string_lossy().to_lowercase()
+                    && same_place(a_in, b_in)
+            }
+            _ => a == b,
+        },
+        _ => false,
+    }
+}
+
+/// What the file at `path` is on disk, a link itself rather than what it
+/// points at, if it exists.
+#[cfg(unix)]
+fn identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    std::fs::symlink_metadata(path)
+        .ok()
+        .map(|metadata| (metadata.dev(), metadata.ino()))
+}
+
+/// What the file at `path` is on disk, if it exists: the path the volume
+/// keeps it at, a link's own, in any letter case.
+#[cfg(not(unix))]
+fn identity(path: &Path) -> Option<String> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+
+    let at = if metadata.is_symlink() {
+        path.to_path_buf()
+    } else {
+        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    };
+
+    Some(at.to_string_lossy().to_lowercase())
 }
 
 /// Remove everything under `dir` but `kept` and the folders holding them.
@@ -523,17 +631,24 @@ fn store_paths(config: &RootConfig) -> std::io::Result<Vec<PathBuf>> {
 
 /// Every path [`store_paths`] lists, nested ones included, in its order and
 /// each with `..` resolved, so one written through another's folder, as
-/// `archive/../state` is, is neither taken for nested in it nor kept twice.
+/// `archive/../state` is, is neither taken for nested in it nor kept twice,
+/// nor is one spelled in another letter case on a volume taking both.
 fn configured_paths(config: &RootConfig) -> std::io::Result<Vec<(PathBuf, PathBuf)>> {
     let Written { first, rest } = written_paths(config);
 
     let mut paths: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut places: Vec<PathBuf> = Vec::new();
 
     for path in asides_of(config)?.into_iter().chain(first).chain(rest) {
         let at = resolved(&path)?;
+        let place = reached(&path, false)?;
 
-        if !paths.iter().any(|(_, other)| *other == at) {
+        if !places
+            .iter()
+            .any(|other| *other == place || same_place(other, &place))
+        {
             paths.push((path, at));
+            places.push(place);
         }
     }
 
@@ -666,21 +781,21 @@ fn asides_of(config: &RootConfig) -> std::io::Result<Vec<PathBuf>> {
 }
 
 /// The configured stores that resolve at or under where a reset moves
-/// another aside: removing what a stopped reset left there would remove
-/// them, piecewise and unlisted.
+/// another aside, as [`within`] compares them: removing what a stopped reset
+/// left there would remove them, piecewise and unlisted.
 fn stores_at_asides(config: &RootConfig) -> std::io::Result<Vec<PathBuf>> {
     let asides = asides_of(config)?
         .iter()
-        .map(|aside| resolved(aside))
+        .map(|aside| reached(aside, false))
         .collect::<std::io::Result<Vec<_>>>()?;
 
     let Written { first, rest } = written_paths(config);
     let mut found = Vec::new();
 
     for path in first.iter().chain(&rest) {
-        let at = resolved(path)?;
+        let at = reached(path, true)?;
 
-        if asides.iter().any(|aside| at.starts_with(aside)) {
+        if asides.iter().any(|aside| within(&at, aside)) {
             found.push(path.clone());
         }
     }
@@ -1039,6 +1154,14 @@ pub(super) mod tests {
         };
 
         (hook, calls)
+    }
+
+    /// Whether the volume holding `dir` takes names in any letter case.
+    pub(in crate::data) fn case_insensitive(dir: &Path) -> bool {
+        std::fs::create_dir_all(dir.join("probe")).unwrap();
+        let insensitive = dir.join("PROBE").exists();
+        std::fs::remove_dir(dir.join("probe")).unwrap();
+        insensitive
     }
 
     fn config_over(root: &Path) -> RootConfig {
@@ -1961,10 +2084,12 @@ pub(super) mod tests {
         drop(dolos_fjall::StateStore::open(&index, Default::default()).unwrap());
         std::fs::write(archive.join("000000.segment"), b"a store").unwrap();
 
-        // Beside the version, so that one removed with the rest leaves some
-        // behind it, whatever order the folder lists them in.
+        // Beside the version, named to sort before and after it, so that one
+        // removed with the rest leaves some behind it, whatever order the
+        // folder lists them in.
         for file in 0..16 {
             std::fs::write(index.join(format!("{file:02}.extra")), b"a file").unwrap();
+            std::fs::write(index.join(format!("zz{file:02}.extra")), b"a file").unwrap();
         }
 
         let lock = dolos_fjall::view::lock_out(&index.join("keyspaces").join(".."))
@@ -2174,6 +2299,84 @@ pub(super) mod tests {
         config.storage.archive.path = Some(PathBuf::from(".state.reset"));
 
         assert_refused(&config, &kept, "moves another store aside");
+    }
+
+    /// On a volume taking names in any letter case, a store at another
+    /// store's aside spelled in another case is refused as one spelled alike.
+    #[test]
+    fn refuses_a_store_at_another_stores_aside_in_another_case() {
+        let dir = tempfile::tempdir().unwrap();
+
+        if !case_insensitive(dir.path()) {
+            return;
+        }
+
+        let root = dir.path().join("data");
+        let mut kept = old_store_under(&root);
+        let archived = root.join(".STATE.reset").join("index").join("000001.sst");
+        std::fs::create_dir_all(archived.parent().unwrap()).unwrap();
+        std::fs::write(&archived, b"a table").unwrap();
+        kept.push(archived);
+
+        let mut config = config_over(&root);
+        config.storage.archive.path = Some(PathBuf::from(".STATE.reset"));
+
+        assert_refused(&config, &kept, "moves another store aside");
+    }
+
+    /// A view of an archive written with `..` through a missing folder is
+    /// found beside where the archive resolves, and goes with it.
+    #[test]
+    fn a_view_of_an_archive_written_through_a_gone_folder_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("data");
+        let archive = root.join("archive");
+        drop(dolos_fjall::StateStore::open(archive.join("index"), Default::default()).unwrap());
+
+        let view = root.join(".archive.view-a1b2").join("db").join("journal");
+        std::fs::create_dir_all(view.parent().unwrap()).unwrap();
+        std::fs::write(&view, b"a view").unwrap();
+
+        let mut config = config_over(&root);
+        config.storage.archive.path = Some(PathBuf::from("gone/../archive"));
+        assert!(!root.join("gone").exists());
+
+        reset(&config).unwrap();
+
+        assert!(!archive.exists());
+        assert!(!root.join(".archive.view-a1b2").exists());
+    }
+
+    /// Clearing the aside of a store not held proves nothing about moving
+    /// it, which its removal does not: a folder that cannot be written to
+    /// refuses only a held one.
+    #[cfg(unix)]
+    #[test]
+    fn only_a_held_store_proves_it_can_move_aside() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sealed = dir.path().join("sealed");
+        std::fs::create_dir_all(&sealed).unwrap();
+
+        let set = |mode| {
+            std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(mode)).unwrap()
+        };
+        set(0o555);
+
+        // Whoever ignores permissions, as root does, can move it anyway.
+        if std::fs::write(sealed.join("probe"), b"").is_ok() {
+            set(0o755);
+            return;
+        }
+
+        let store = sealed.join("state");
+        let unheld = ready_aside(&store, false);
+        let held = ready_aside(&store, true);
+        set(0o755);
+
+        assert!(unheld.is_ok(), "{unheld:?}");
+        assert!(held.is_err());
     }
 
     /// The mount check covers a store nested in another, which the removal
