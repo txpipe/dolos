@@ -42,9 +42,9 @@ use common::read_both_ways;
 use dolos_cardano::{
     eras::ChainSummary,
     indexes::archive_dimensions,
-    model::{AccountKey, AccountState, EraState, FixedNamespace as _},
+    model::{AccountKey, AccountState, EraState, FixedNamespace as _, GovDistr},
     pallas::ledger::{primitives::StakeCredential, traverse::MultiEraBlock},
-    EraBoundary, EraKey,
+    EpochState, EraBoundary, EraKey, GovState, ShardProgress,
 };
 use dolos_core::{
     builtin::{MemoryArchiveStore, MemoryStateStore},
@@ -1721,6 +1721,89 @@ fn a_discarding_export_reproduces_what_a_publish_stores() {
         .count();
 
     assert_eq!(blobs, distinct_layers(&stored));
+}
+
+/// A tip whose bookkeeping shows a boundary pass in flight is refused before a
+/// layer: a sync cursor left on the epoch row, or a governance distribution
+/// with a shard still to merge. The same stores export once it is finished.
+#[test]
+fn a_tip_with_unfinished_bookkeeping_is_refused_before_a_layer() {
+    let domain: ToyDomain = harness();
+    let plan = plan_for(&domain);
+
+    let epoch = domain
+        .state()
+        .read_entity_typed::<EpochState>(&())
+        .unwrap()
+        .expect("the harness has an epoch row");
+    let gov = domain.state().read_entity_typed::<GovState>(&()).unwrap();
+
+    let write = |epoch: &EpochState, gov: Option<&GovState>| {
+        let writer = domain.state().start_writer().unwrap();
+        writer.write_entity_typed(&(), epoch).unwrap();
+        writer.save_entity_typed::<GovState>(&(), gov).unwrap();
+        writer.commit().unwrap();
+    };
+
+    let refusal = || {
+        let watcher = Arc::new(Watcher::default());
+        let temp = tempfile::tempdir().unwrap();
+        let stele = SteleDir::create(temp.path()).unwrap();
+
+        let refused = export::export(
+            &stele,
+            &plan,
+            domain.archive(),
+            domain.state(),
+            None,
+            &export::First,
+            &watcher.observer(),
+        );
+
+        assert_eq!(watcher.layers(), 0, "a refused export announced a layer");
+
+        match refused {
+            Err(dolos_snapshot::Error::NotABoundary { reason, .. }) => reason,
+            other => panic!("{other:?}"),
+        }
+    };
+
+    let mut mid_rupd = epoch.clone();
+    mid_rupd.rupd_progress = Some(ShardProgress {
+        committed: 3,
+        total: 32,
+    });
+    write(&mid_rupd, gov.as_ref());
+
+    assert_eq!(
+        refusal(),
+        Ineligible::SyncCursorsSet {
+            cursors: vec!["rupd_progress"]
+        }
+    );
+
+    let mut partial = GovDistr::new(epoch.number, 32);
+    partial.committed_shards = 5;
+
+    let mid_ewrap = GovState {
+        distr: Some(partial),
+        ..gov.clone().unwrap_or_default()
+    };
+    write(&epoch, Some(&mid_ewrap));
+
+    assert_eq!(
+        refusal(),
+        Ineligible::IncompleteGovDistr {
+            field: "distr",
+            committed: 5,
+            total: 32,
+        }
+    );
+
+    write(&epoch, gov.as_ref());
+
+    let temp = tempfile::tempdir().unwrap();
+    export_to(temp.path(), &domain);
 }
 
 /// A store set one block past its boundary is refused the same way by every

@@ -107,9 +107,15 @@ Key layouts (decision 0051): every key is the encoding of one typed key struct p
 
 A state row under a log-only namespace (`—` in the state key column) is never written; one that arrives is held to the log's key kind.
 
-`state-gov` carries the one `GovState` value. Field 9, `dissolved_committee`, is the last seated committee while a no-confidence keeps the committee dissolved, as `[committee, auths, action, epoch, seated_by]`: the members and threshold, each member's authorization history as it stood, the enacted `NoConfidence` action id, the first epoch without a seated committee, and the action id that seated the committee, absent for the Conway-genesis committee, which leaves a four-element array. It is absent while a committee is seated.
+`state-gov` carries the one `GovState` value. Fields 6 and 7, `distr` and `prev_distr`, are the stake distributions EWRAP accumulates over its account shards, as `[closing_epoch, committed_shards, total_shards, drep_distr, pool_distr, pool_total]`. The two shard counters are the accumulator's bookkeeping, and their only published meaning is that they are equal: a stele carries a distribution only with every shard merged, and the boundary check refuses a tip where they differ. Field 9, `dissolved_committee`, is the last seated committee while a no-confidence keeps the committee dissolved, as `[committee, auths, action, epoch, seated_by]`: the members and threshold, each member's authorization history as it stood, the enacted `NoConfidence` action id, the first epoch without a seated committee, and the action id that seated the committee, absent for the Conway-genesis committee, which leaves a four-element array. It is absent while a committee is seated.
 
-`state-pools` carries `PoolState` values. Field 17, `calidus`, is the pool's highest-nonce CIP-151 registration signed by its cold key in a valid transaction, as `[pub_key, nonce, tx_hash, slot]`: the 32-byte public key, or null for a revocation (an all-zero key), the registration's nonce, and the transaction and slot that made it. A registration replaces it only with a higher nonce, so a revocation keeps its nonce. It is absent before any registration.
+`state-pools` carries `PoolState` values. Field 4, `calidus`, is the pool's highest-nonce CIP-151 registration signed by its cold key in a valid transaction, as `[pub_key, nonce, tx_hash, slot]`: the 32-byte public key, or null for a revocation (an all-zero key), the registration's nonce, and the transaction and slot that made it. A registration replaces it only with a higher nonce, so a revocation keeps its nonce. It is absent before any registration.
+
+`epochs` carries `EpochState` values: the tip in `state-epochs`, and in `log-epochs` each closed epoch as EWRAP left it, keyed at the epoch's start. Field 12, `active_stake`, is the epoch's active stake: the distribution frozen when epoch `number - 2` closed, summed when the epoch opened. Fields 9, 10 and 11 (`ewrap_progress`, `estart_progress`, `rupd_progress`), 13 (`estart_tally`) and 14 (`ewrap_finalized`) are the sync cursors, crash-recovery state a boundary pass keeps while it runs. They are null, and field 14 false, in every published row: EWRAP writes the `log-epochs` row with them cleared, and the boundary check refuses a tip that has any set.
+
+`proposals` carries `ProposalState` values, live in `state-proposals` and final in `log-proposals`. Field 3, the action, is one of seven variants, `ParamChange`, `HardFork`, `TreasuryWithdrawal`, `NoConfidence`, `UpdateCommittee`, `NewConstitution` and `Info`, at indexes 0 to 6. Field 9, `proposed_in`, the epoch the proposal was submitted in, is always present. Fields 10 to 12 (`parent`, `purpose`, `anchor`) are null when the action has none, and fields 13 to 15 hold the committee, DRep and pool votes.
+
+`log-pool-epochs` carries one `PoolEpochLog` per pool and epoch `e`, keyed at `epoch_start(e)`, as `[blocks_minted, total_stake, delegators_count, live_pledge, total_rewards, fixed_cost, margin_cost]`. `total_stake` is the pool's active stake in `e`. Its share of the `active_stake` in `e`'s `log-epochs` row is the pool's relative size, which a reader derives: the row stores no ratio.
 
 `state-metadata-labels` carries `MetadataLabelState` values as CBOR `[tx_count: uint]`, with `tx_count` at field 0. Its key is the metadata label as an exact 8-byte big-endian u64.
 
@@ -147,7 +153,7 @@ Integers, lengths and tag numbers are in shortest form, and every array, map and
 - **tag 2**, an unsigned bignum: the value's big-endian bytes with no leading zero byte, used only for a value above 2^64 − 1. A smaller value is a plain unsigned integer. The `address-stats` sums are the one field that uses it.
 - **tag 30**, a rational `[numerator, denominator]`: committee thresholds, pool margins, and the protocol-parameter intervals and prices.
 
-One float occurs: `pool-epochs` field 2, `relative_size`, a double-precision float (`fb` and eight bytes), which is removed before the profile is published.
+No value holds a float.
 
 A map's keys are in the order of its key type, the order the in-memory map iterates, not the encoded-key order of RFC 8949 §4.2.1. Each key occurs once.
 
@@ -166,7 +172,7 @@ Within a media-type version, `.v{x}` is a **contract on record content, not an e
 
 Enums are the contract's hard edge and the one place the rule inverts. A minicbor enum refuses a variant index it has never heard of, so **adding a variant to any enum reachable from a record is reader-breaking within `v{x}`**, whatever the field policy says: it requires a media-type version bump on the kinds that carry it, or an explicit waiver recorded in this document.
 
-The contract is enforced by `crates/snapshot/tests/field_registry.rs` and its `tests/registry/` data module, which is where a record shape is actually pinned. Per namespace it holds a **canary** — a fully-populated value, every `Option` `Some` and every collection non-empty — and the hex of its encoding through the production encode path, at that namespace's current `schemas` revision. The suite then asserts, on every build:
+The contract is enforced by `crates/snapshot/tests/field_registry.rs` and its `tests/registry/` data module, which is where a record shape is actually pinned. Per namespace it holds a **canary** — a fully-populated value, every `Option` `Some` and every collection non-empty, except the `epochs` sync cursors, which a published row never carries — and the hex of its encoding through the production encode path, at that namespace's current `schemas` revision. The suite then asserts, on every build:
 
 - the canary still encodes to its pinned bytes, so a renumbering, a removal or a silent width change is a build failure rather than a moved digest with no explanation;
 - the registry's current revision equals `SCHEMA_REVS[ns]`, so a field appended without its revision bump — or a bump with nothing pinning it — fails in either direction;
@@ -199,10 +205,13 @@ The evidence is the stores' own, never configuration and never arithmetic on the
 3. The block before it in the archive, in chain order, is the block its header names as its parent.
 4. That parent stands before `epoch_start(E)`.
 5. The archive ends at the cursor's block.
+6. The state's bookkeeping shows every boundary pass finished: no sync cursor is set on the `epochs` tip, and both `gov` distributions have every shard merged.
 
 Steps 3 and 4 together prove the cursor is the epoch's first block: the parent link rules out anything between the two, however many empty slots separate them. A Byron epoch-boundary block, which shares its slot with the first main block after it, is the epoch's first block — its parent is the last main block of E-1 — while that main block is its second, whose parent is the boundary block in E.
 
 Step 5 keeps the stele to the state. Export reads logs and indexes by slot alone, and blocks applied after the cursor write rows inside the stele's windows: Ewrap closing epoch E keys E's `EpochState` at `epoch_start(E)`, inside the sliver, and epoch rewards and period seals key rows at earlier epoch starts; a main block beside a Byron boundary block shares the cursor's own slot. A sync stopped at E stores nothing past E's first block. An archive that holds more ran on past a rebuilt state, such as `doctor rebuild-state --stop-epoch` over a synced archive, and it is refused.
+
+Step 6 keeps crash-recovery bookkeeping out of the stele. At a finished boundary cut the sync cursors are clear and the shard counters equal, so a tip that shows otherwise is a pass still in flight, and the refusal names what is set.
 
 An archive that cannot show step 3 is **insufficient evidence**, and is refused rather than trusted: one pruned past the parent, or one that begins at the cursor because the node was bootstrapped there. Step 0 already refuses both whenever the first block held is past the chain's first. A pruned archive's first remaining block says nothing about what came before it. The refusal names the cursor and the epoch, and says which store to publish from instead.
 

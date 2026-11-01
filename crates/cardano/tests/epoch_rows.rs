@@ -20,10 +20,9 @@ where
     minicbor::decode(&minicbor::to_vec(value).unwrap()).unwrap()
 }
 
-/// An archived row past epoch 3 carries `next`, `live` and `mark` of `rolling`
-/// and `pparams`, and no `set` or `go` copy of either.
-#[test]
-fn archived_epoch_rows_keep_no_set_or_go_copies() {
+/// The `EpochState` rows EWRAP archives over a synthetic chain crossing several
+/// boundaries.
+fn archived_rows() -> Vec<EpochState> {
     let mut genesis = dolos_cardano::include::devnet::load();
     genesis.force_protocol = Some(9);
     genesis.shelley.epoch_length = Some(500);
@@ -45,12 +44,19 @@ fn archived_epoch_rows_keep_no_set_or_go_copies() {
         ToyDomain::new_with_genesis_and_config(Arc::new(genesis), chain_config, None, None);
     domain.import_blocks(raw).unwrap();
 
-    let rows: Vec<EpochState> = domain
+    domain
         .archive()
         .iter_logs_typed::<EpochState>(None)
         .unwrap()
         .map(|row| row.unwrap().2)
-        .collect();
+        .collect()
+}
+
+/// An archived row past epoch 3 carries `next`, `live` and `mark` of `rolling`
+/// and `pparams`, and no `set` or `go` copy of either.
+#[test]
+fn archived_epoch_rows_keep_no_set_or_go_copies() {
+    let rows = archived_rows();
 
     assert!(
         rows.iter().any(|row| row.number >= 3),
@@ -78,5 +84,24 @@ fn archived_epoch_rows_keep_no_set_or_go_copies() {
         assert_eq!(rolling.go(), None, "epoch {}: rolling go", row.number);
         assert_eq!(pparams.set(), None, "epoch {}: pparams set", row.number);
         assert_eq!(pparams.go(), None, "epoch {}: pparams go", row.number);
+    }
+}
+
+/// EWRAP writes each row from its finalize state, where its own cursor stands
+/// at the last shard and `ewrap_finalized` is set. The archived row keeps
+/// none of the sync cursors.
+#[test]
+fn archived_epoch_rows_carry_no_sync_cursors() {
+    let rows = archived_rows();
+
+    assert!(rows.len() >= 3, "too few boundaries: {}", rows.len());
+
+    for row in &rows {
+        assert_eq!(
+            row.set_sync_cursors(),
+            Vec::<&str>::new(),
+            "epoch {}",
+            row.number
+        );
     }
 }

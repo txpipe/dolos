@@ -92,15 +92,15 @@ pub struct EpochValue<T, const DEEP: bool = true> {
     live: Option<T>,
 
     /// Epoch - 1 version of the value
-    #[n(4)]
+    #[n(3)]
     mark: Option<T>,
 
     /// Epoch - 2 version of the value
-    #[n(5)]
+    #[n(4)]
     set: Option<T>,
 
     /// Epoch - 3 version of the value
-    #[n(6)]
+    #[n(5)]
     go: Option<T>,
 }
 

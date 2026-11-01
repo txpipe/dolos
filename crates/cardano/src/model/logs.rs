@@ -114,38 +114,35 @@ impl AccountEpochLog {
 
 entity_boilerplate!(AccountEpochLog, "account-epochs", log = super::AccountKey);
 
-#[derive(Debug, Clone, PartialEq, Decode, Encode, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
 pub struct PoolEpochLog {
     /// Number of blocks created by pool
     #[n(0)]
     pub blocks_minted: u64,
 
-    /// Total stake in Lovelaces
+    /// Total stake in Lovelaces. Its share of the `active_stake` in the same
+    /// epoch's `epochs` log row is the pool's relative size.
     #[n(1)]
     pub total_stake: u64,
 
-    /// Pool size (percentage) of overall active stake at that epoch
-    #[n(2)]
-    pub relative_size: f64,
-
     /// Number of delegators with stake above zero for epoch
-    #[n(3)]
+    #[n(2)]
     pub delegators_count: u64,
 
     /// Live pledge
-    #[n(6)]
+    #[n(3)]
     pub live_pledge: u64,
 
     /// Total rewards for epoch
-    #[n(8)]
+    #[n(4)]
     pub total_rewards: u64,
 
     /// Fixed cost
-    #[n(10)]
+    #[n(5)]
     pub fixed_cost: u64,
 
     /// Margin cost
-    #[n(11)]
+    #[n(6)]
     pub margin_cost: Option<RationalNumber>,
 }
 
