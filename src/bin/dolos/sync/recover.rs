@@ -357,7 +357,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
             return Err(Usage::new(
                 format!("the WAL cannot bring the stores to its tip: {gap}"),
-                DISCARD_HELP,
+                Some(DISCARD_HELP.into()),
             )
             .into());
         }

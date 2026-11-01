@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use dolos::prelude::*;
 
-use crate::output::{emit_json_line, Format, FormatArgs};
+use crate::output::{emit_record, Format, FormatArgs};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -75,7 +75,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     match args.format.format {
         Format::Json => {
             for entry in entries {
-                emit_json_line(&entry)?;
+                emit_record(&entry)?;
             }
         }
         Format::Text => {

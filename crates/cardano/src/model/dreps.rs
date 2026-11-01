@@ -70,7 +70,7 @@ impl DRepExpiry {
 /// unregistered row no ledger rule reads again to the final-row log
 /// ([`DRepState::leaves_state_at`]), and a later registration makes a fresh
 /// row.
-#[derive(Debug, Encode, Decode, Clone, PartialEq, Eq)]
+#[derive(Debug, Encode, Decode, Clone, PartialEq, Eq, Serialize)]
 pub struct DRepState {
     #[n(0)]
     pub registered_at: Option<(BlockSlot, TxOrder)>,

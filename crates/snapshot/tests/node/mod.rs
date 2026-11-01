@@ -296,7 +296,7 @@ pub fn step_past_boundary<B: ToyStores>(domain: &ToyDomain<B>) -> dolos_core::Ch
 
 /// Append one empty block to `domain`'s archive, a few slots after the state
 /// cursor and chained onto its block, leaving the cursor where it is. Where a
-/// `doctor rebuild-state --stop-epoch` leaves a node: a full archive beside a
+/// `data rebuild --stop-epoch` leaves a node: a full archive beside a
 /// boundary state.
 pub fn extend_archive_past_cursor<B: ToyStores>(domain: &ToyDomain<B>) -> dolos_core::ChainPoint {
     let cursor = domain.state().read_cursor().unwrap().unwrap();

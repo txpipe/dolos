@@ -482,7 +482,7 @@ fn plant_store_markers(dir: &Path) -> Vec<PathBuf> {
 /// that only reads.
 const STORE_COMMANDS: [&[&str]; 4] = [
     &["bootstrap", "immutabledb", "--force", "--source", "db"],
-    &["doctor", "rebuild-state", "--force"],
+    &["data", "rebuild", "--yes"],
     &["sync", "recover", "--discard-wal"],
     &["sync", "status"],
 ];

@@ -53,8 +53,10 @@ The runner creates fresh disposable instances. Binary specs are
 `LABEL=PATH[:STORAGE_VERSION]`. Without a version the binary gets a v2
 configuration file. A version marks a binary that predates v2 configuration,
 such as v1 or v2.0.0-alpha.0, and gives it the older file with that
-`storage.version`; the baseline above is one, at v4. Historical raw revision
-`9165dbd8` needs `:v3`; that is a compression baseline, not a redb comparison.
+`storage.version`; the baseline above is one, at v4. Each binary is asked
+which `data` commands it has: one whose `data --help` lists no `rebuild`,
+whatever configuration it reads, scans with the command before the v2 `data`
+group (`data dump-blocks`). Historical raw revision `9165dbd8` needs `:v3`; that is a compression baseline, not a redb comparison.
 The network magic defaults to the `networkMagic` of the genesis in `--genesis`;
 `--magic` overrides it.
 
@@ -63,8 +65,8 @@ replay that writes the state and the archive, so every binary must have that
 command, and its records do not pair with the archive-only `data
 import-archive` records of earlier binaries. `live` models one-block commits
 through the same replay over the corpus's first `--live-blocks` blocks, **not**
-daemon sync. `read` uses `dump-blocks` and UTxO RPC point/page queries; `mixed`
-combines RPC point/page reads. This runner does not append while serving: use
+daemon sync. `read` uses `data dump blocks` and UTxO RPC point/page queries;
+`mixed` combines RPC point/page reads. This runner does not append while serving: use
 the store's `concurrent` preset or [minibf live replay](minibf.md#live-replay).
 
 The immutable corpus must be a contiguous chain from chunk `00000`, which a

@@ -129,7 +129,7 @@ fn run() -> Result<()> {
         Command::Sync(args) => sync::run(&load()?, &args, &feedback),
         Command::Serve(args) => serve::run(load()?, &args),
         Command::Eval(args) => eval::run(&load()?, &args),
-        Command::Doctor(args) => doctor::run(&load()?, &args, &feedback),
+        Command::Doctor(args) => doctor::run(&load()?, &args),
         Command::Snapshot(args) => snapshot::run(&load()?, &args),
         Command::Cache(args) => cache::run(&load()?, &args),
         Command::Config(args) => config::run(config_file, &args),

@@ -2,6 +2,7 @@ use pallas::{
     codec::minicbor::{self, Decode, Encode},
     ledger::primitives::conway::RationalNumber,
 };
+use serde::Serialize;
 
 use super::pools::PoolHash;
 
@@ -45,7 +46,7 @@ use super::pools::PoolHash;
 /// sorted by pool id, then amount, whatever their order in memory, because the
 /// ledger holds them in a `HashMap` and a stele's bytes have to be reproducible
 /// across publishers.
-#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default, Serialize)]
 pub struct AccountEpochLog {
     /// Active stake in Lovelaces, at the snapshot epoch the boundary rewards.
     #[n(0)]
@@ -114,7 +115,7 @@ impl AccountEpochLog {
 
 entity_boilerplate!(AccountEpochLog, "account-epochs", log = super::AccountKey);
 
-#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default, Serialize)]
 pub struct PoolEpochLog {
     /// Number of blocks created by pool
     #[n(0)]
@@ -155,7 +156,7 @@ entity_boilerplate!(PoolEpochLog, "pool-epochs", log = super::PoolKey);
 /// keyed by `(epoch_start(n), drep)`, like the `epochs` log. Koios labels that
 /// distribution `epoch_no = n + 1`, the key's epoch plus one, and the
 /// boundary closing `n + 1` tallies it.
-#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default, Serialize)]
 pub struct DRepEpochLog {
     /// Stake in Lovelaces the distribution attributes to the DRep.
     #[n(0)]
