@@ -302,7 +302,7 @@ How a pipeline stage retries a step that failed.
 
 Retry `n` waits `backoff_unit_seconds × backoff_factor^n` seconds, at most `max_backoff_seconds`. Once `max_retries` is reached the stage stops, unless `dismissible` is on, which skips the failed step and carries on.
 
-Toward the upstream peer, the failed step is an attempt: a connection, an intersection, or a session that ends before it delivers a block, the tip, or a header past every one an earlier session received. `max_retries` failed attempts in a row are retried, and one more stops the sync; `dismissible` does not apply. A session that delivered something reconnects at once, and the count starts again.
+The stages that talk to the upstream peer count failed attempts in a row instead: the pull stage (chain-sync and block-fetch) and, under `sync catchup --follow` and in `dolos daemon`, the submit stage (tx-submission). A failed attempt is a connection that fails, an intersection the pull stage cannot find, or a session that ends before it delivers anything: a block or the upstream tip for the pull stage, headers alone not counting, and the peer's first request for the submit stage. Attempt `n` in a row waits `backoff_unit_seconds × backoff_factor^n` seconds, at most `max_backoff_seconds`, whatever failed. `max_retries` failed attempts in a row are retried, and one more stops the sync, which exits 1, in `dolos daemon` too; `dismissible` does not apply. A session that delivered something reconnects at once, and the count starts again.
 
 ```toml
 [sync]
@@ -632,7 +632,7 @@ The registry inputs apply to `dolos bootstrap stelae`, `dolos snapshot inspect` 
 
 ### Stopping
 
-`dolos daemon` runs until stopped. `dolos sync catchup` stops once the stores commit the upstream tip it reached, or with `--follow` runs until stopped, unless told otherwise:
+`dolos daemon` runs until stopped, or until its sync gives up on the upstream peer under [`sync.retry`](#syncretry), when it exits 1. `dolos sync catchup` stops once the stores commit the upstream tip it reached, or with `--follow` runs until stopped or until it gives up the same way, unless told otherwise:
 
 | argument | effect |
 | -------- | ------ |

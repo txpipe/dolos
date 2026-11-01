@@ -1096,15 +1096,39 @@ fn catchup_refuses_an_emulator_upstream_without_follow() {
     );
 }
 
+/// Shorten the emulator node's epochs to `slots`, with a security parameter
+/// and an active slot coefficient whose stability windows fit in one.
+fn shorten_epochs(node: &Node, slots: u64) {
+    let edit = |file: &str, change: &dyn Fn(&mut serde_json::Value)| {
+        let path = node.root.path().join(file);
+        let mut genesis = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        change(&mut genesis);
+        std::fs::write(&path, serde_json::to_string(&genesis).unwrap()).unwrap();
+    };
+
+    edit("shelley.json", &|genesis| {
+        genesis["epochLength"] = slots.into();
+        genesis["securityParam"] = 1.into();
+        genesis["activeSlotsCoeff"] = 0.5.into();
+    });
+
+    edit("byron.json", &|genesis| {
+        genesis["protocolConsts"]["k"] = 1.into();
+    });
+}
+
 /// With a stop epoch, `sync catchup` syncs from an emulator until the ledger
-/// reaches it: the emulator is not refused.
+/// reaches it, and exits 0: the emulator is not refused, and its run has no
+/// catch-up target to wait for.
 #[test]
 #[cfg_attr(
     feature = "debug",
     ignore = "the debug feature's console subscriber panics a sync built without tokio_unstable"
 )]
-fn catchup_syncs_from_an_emulator_toward_a_stop_epoch() {
+fn catchup_syncs_from_an_emulator_to_a_stop_epoch() {
     let node = emulator_node();
+    shorten_epochs(&node, 10);
+
     let log = node.root.path().join("catchup.log");
 
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_dolos"))
@@ -1116,22 +1140,24 @@ fn catchup_syncs_from_an_emulator_toward_a_stop_epoch() {
         .spawn()
         .unwrap();
 
-    // Running a while after it opened the stores, it is syncing: neither
-    // the command nor the pipeline refused the emulator.
-    let data = node.root.path().join("data");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while !data.exists() && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    std::thread::sleep(std::time::Duration::from_secs(3));
+    // One block a second, ten slots an epoch.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
 
-    let exited = child.try_wait().unwrap();
-    let _ = child.kill();
-    let _ = child.wait();
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("{}", std::fs::read_to_string(&log).unwrap());
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
 
     let log = std::fs::read_to_string(&log).unwrap();
-    assert!(data.exists(), "the sync never opened the stores: {log}");
-    assert_eq!(exited, None, "{log}");
+    assert!(status.success(), "{status}: {log}");
+    assert!(!log.contains("target:"), "{log}");
 }
 
 /// The commands under `dolos sync --help`.

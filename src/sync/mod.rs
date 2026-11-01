@@ -2,6 +2,7 @@ use dolos_cardano::networks::ResolvedNetwork;
 use dolos_core::config::{
     EmulatorConfig, PeerConfig, RetryConfig, RootConfig, SyncConfig, UpstreamConfig,
 };
+use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -13,6 +14,7 @@ use crate::prelude::*;
 pub mod apply;
 pub mod emulator;
 pub mod pull;
+mod retry;
 pub mod submit;
 
 #[cfg(test)]
@@ -40,7 +42,23 @@ pub struct SyncProgress {
     target: watch::Sender<Option<ChainPoint>>,
     caught_up: AtomicBool,
     stop_epoch_reached: AtomicBool,
-    upstream_failure: OnceLock<String>,
+    upstream_failure: OnceLock<UpstreamFailure>,
+}
+
+/// Why a stage gave up on the upstream peer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpstreamFailure {
+    /// The stage, the peer, the attempts and the last one's cause.
+    pub message: String,
+    /// Whether the last attempt failed in the handshake, which a peer of
+    /// another network refuses.
+    pub handshake: bool,
+}
+
+impl fmt::Display for UpstreamFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
 }
 
 impl Default for SyncProgress {
@@ -77,9 +95,9 @@ impl SyncProgress {
         self.stop_epoch_reached() || (limit == SyncLimit::CatchUp && self.caught_up())
     }
 
-    /// Why the pull stage gave up on the upstream peer, if it did.
-    pub fn upstream_failure(&self) -> Option<&str> {
-        self.upstream_failure.get().map(String::as_str)
+    /// Why a stage gave up on the upstream peer, if one did: the first to.
+    pub fn upstream_failure(&self) -> Option<&UpstreamFailure> {
+        self.upstream_failure.get()
     }
 
     /// Fix the target at `tip`; only the first call counts, so a tip that
@@ -107,8 +125,8 @@ impl SyncProgress {
         self.stop_epoch_reached.store(true, Ordering::SeqCst);
     }
 
-    fn record_upstream_failure(&self, cause: String) {
-        let _ = self.upstream_failure.set(cause);
+    fn record_upstream_failure(&self, failure: UpstreamFailure) {
+        let _ = self.upstream_failure.set(failure);
     }
 }
 
@@ -242,7 +260,13 @@ pub fn sync(
     // peer session, whose end would end the catch-up while the apply stage
     // still drains toward the target.
     if limit == SyncLimit::Follow {
-        let submit = submit::Stage::new(peer_address, network_magic, domain.mempool().clone());
+        let submit = submit::Stage::new(
+            peer_address,
+            network_magic,
+            domain.mempool().clone(),
+            &config.retry,
+            progress.clone(),
+        );
         tethers.push(gasket::runtime::spawn_stage(submit, policy.clone()));
     }
 

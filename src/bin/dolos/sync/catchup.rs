@@ -33,15 +33,18 @@ impl Args {
         }
     }
 
-    /// What the sync ends on, said of a sync that ended without it.
-    fn unmet(&self) -> &'static str {
-        match (self.sync_limit(), self.stop_epoch) {
-            (SyncLimit::CatchUp, None) => "before the stores committed the catch-up target",
-            (SyncLimit::CatchUp, Some(_)) => {
+    /// What the sync ends on, said of a sync that ended without it. An
+    /// emulator upstream has no catch-up target, only a stop epoch.
+    fn unmet(&self, emulator: bool) -> &'static str {
+        let target = self.sync_limit() == SyncLimit::CatchUp && !emulator;
+
+        match (target, self.stop_epoch) {
+            (true, None) => "before the stores committed the catch-up target",
+            (true, Some(_)) => {
                 "before the stores committed the catch-up target or the ledger reached the stop epoch"
             }
-            (SyncLimit::Follow, None) => "while following the chain",
-            (SyncLimit::Follow, Some(_)) => "before the ledger reached the stop epoch",
+            (false, Some(_)) => "before the ledger reached the stop epoch",
+            (false, None) => "while following the chain",
         }
     }
 }
@@ -52,11 +55,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 #[tokio::main]
 pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     let limit = args.sync_limit();
+    let emulator = matches!(config.upstream, Some(UpstreamConfig::Emulator(_)));
 
-    if limit == SyncLimit::CatchUp
-        && args.stop_epoch.is_none()
-        && matches!(config.upstream, Some(UpstreamConfig::Emulator(_)))
-    {
+    if limit == SyncLimit::CatchUp && args.stop_epoch.is_none() && emulator {
         return Err(Usage::new(
             "an emulator upstream has no tip to catch up to",
             "pass `--follow` or `--stop-epoch` to sync from it",
@@ -75,7 +76,7 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     let progress = sync.progress;
     let daemon = Daemon::new(sync.tethers);
 
-    let interrupted = wait(&daemon, &progress);
+    let end = wait(&daemon, &progress);
     daemon.teardown();
 
     eprintln!("committed: {}", committed(&domain));
@@ -84,40 +85,41 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         return Ok(());
     }
 
-    if interrupted {
-        return Err(miette::miette!("interrupted {}", args.unmet()));
-    }
+    let unmet = args.unmet(emulator);
 
-    match progress.upstream_failure() {
-        Some(failure) => Err(miette::miette!(
-            help = "`[sync.retry]` sets how many failed attempts in a row are retried, \
-                    and the backoff between them",
-            "the sync ended {}: {failure}",
-            args.unmet()
-        )),
-        None => Err(miette::miette!(
-            help = "the log above names the stage that failed",
-            "the sync ended {}",
-            args.unmet()
+    match end {
+        End::Interrupted => Err(miette::miette!("interrupted {unmet}")),
+        End::Stopped(stages) => Err(crate::common::sync_failure(
+            &format!("the sync ended {unmet}"),
+            &progress,
+            &stages,
         )),
     }
 }
 
+/// How the pipeline ended.
+enum End {
+    /// A signal ended it.
+    Interrupted,
+    /// These stages ended on their own.
+    Stopped(Vec<String>),
+}
+
 /// Wait for the pipeline to end, saying when the target is fixed and when it
-/// is committed. Returns whether a signal ended it.
-fn wait(daemon: &Daemon, progress: &SyncProgress) -> bool {
+/// is committed.
+fn wait(daemon: &Daemon, progress: &SyncProgress) -> End {
     let mut said = Said::default();
 
     loop {
         said.update(progress);
 
         if daemon.is_terminated() {
-            return true;
+            return End::Interrupted;
         }
 
         if daemon.has_ended() {
             said.update(progress);
-            return false;
+            return End::Stopped(crate::common::ended_stages(daemon));
         }
 
         std::thread::sleep(POLL_INTERVAL);

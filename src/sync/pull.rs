@@ -1,19 +1,17 @@
-use std::cell::Cell;
-use std::fmt::Display;
 use std::sync::Arc;
-use std::time::Duration;
 
 use dolos_cardano::consensus::{ChainFragment, RollbackResult};
-use dolos_core::config::{RetryConfig, SyncConfig};
-use dolos_core::{BlockSlot, ChainPoint};
+use dolos_core::config::SyncConfig;
+use dolos_core::ChainPoint;
 use gasket::framework::*;
 use itertools::Itertools;
 use pallas::ledger::traverse::MultiEraHeader;
 use pallas::network::facades::PeerClient;
 use pallas::network::miniprotocols::chainsync::{HeaderContent, NextResponse, Tip};
 use pallas::network::miniprotocols::Point;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
+use super::retry::{Attempts, Failure};
 use super::{SyncLimit, SyncProgress};
 use crate::adapters::WalAdapter;
 use crate::prelude::*;
@@ -49,19 +47,25 @@ pub struct Worker {
     chain: ChainFragment,
     /// The tip the peer reported last.
     tip: ChainPoint,
-    /// Whether this session delivered something new: a block, the tip, or a
-    /// header past every one an earlier session received.
-    progressed: bool,
+    /// Whether this session delivered something: a block, or the tip.
+    /// Headers alone are not enough: a peer whose chain grows sends new ones
+    /// to every session, and may never serve their blocks.
+    delivered: bool,
     /// Why this session failed, once it has.
-    lost: Option<String>,
+    lost: Option<Failure>,
 }
 
 impl Worker {
     /// Note why the session failed, for the stage to reconnect or give up.
-    fn lose(&mut self, what: &str, error: impl Display) -> WorkerError {
-        warn!(%error, "{what}");
-        self.lost = Some(format!("{what}: {error}"));
+    fn lose(&mut self, what: &str, error: &(dyn std::error::Error + 'static)) -> WorkerError {
+        self.lost = Some(Failure::new(what, error));
         WorkerError::Restart
+    }
+
+    /// The session delivered something: the failed attempts start again.
+    fn deliver(&mut self, stage: &Stage) {
+        self.delivered = true;
+        stage.attempts.reset();
     }
 
     /// Receive the next chainsync response, using the appropriate method
@@ -75,7 +79,7 @@ impl Worker {
             client.recv_while_must_reply().await
         };
 
-        next.map_err(|error| self.lose("chain-sync failed", error))
+        next.map_err(|error| self.lose("chain-sync failed", &error))
     }
 
     /// Gather up to `max_headers` headers from the upstream peer.
@@ -104,20 +108,12 @@ impl Worker {
 
                     if let Err(error) = self.chain.roll_forward(point.clone(), prev_hash) {
                         return Err(
-                            self.lose("the upstream sent a header that does not chain", error)
+                            self.lose("the upstream sent a header that does not chain", &error)
                         );
                     }
 
                     debug!(%point, "header received from upstream peer");
                     gathered += 1;
-
-                    if stage
-                        .furthest_header
-                        .is_none_or(|furthest| point.slot() > furthest)
-                    {
-                        stage.furthest_header = Some(point.slot());
-                        self.progressed = true;
-                    }
 
                     self.track_tip(&tip, stage);
                 }
@@ -174,12 +170,12 @@ impl Worker {
             [] => return Ok(()),
         };
 
-        let blocks = fetched.map_err(|error| self.lose("block-fetch failed", error))?;
+        let blocks = fetched.map_err(|error| self.lose("block-fetch failed", &error))?;
 
         debug!(len = blocks.len(), "block batch pulled from peer");
 
         stage.flush_blocks(blocks).await?;
-        self.progressed = true;
+        self.deliver(stage);
 
         Ok(())
     }
@@ -197,7 +193,7 @@ impl Worker {
         }
 
         if !self.peer_session.chainsync().has_agency() {
-            self.progressed = true;
+            self.deliver(stage);
 
             if stage.progress.fix_target(self.tip.clone()) {
                 info!(tip = %self.tip, "reached the upstream tip, the catch-up target");
@@ -211,33 +207,14 @@ impl Worker {
         self.tip = ChainPoint::from(tip.0.clone());
         stage.chain_tip.set(tip.0.slot_or_default() as i64);
     }
-}
 
-#[async_trait::async_trait(?Send)]
-impl gasket::framework::Worker<Stage> for Worker {
-    async fn bootstrap(stage: &Stage) -> Result<Self, WorkerError> {
-        debug!("finding intersection candidates");
-
-        let mut candidates = stage
-            .wal
-            .intersect_candidates(5)
-            .or_panic()?
-            .into_iter()
-            .map(TryFrom::try_from)
-            .filter_map(|x| x.ok())
-            .collect_vec();
-
-        if candidates.is_empty() {
-            candidates.push(Point::Origin);
-        }
-
+    /// Connect to the peer and find the intersection: one attempt.
+    async fn open(stage: &Stage, candidates: Vec<Point>) -> Result<Self, Failure> {
         debug!("connecting to peer");
 
-        let mut peer_session =
-            match PeerClient::connect(&stage.peer_address, stage.network_magic).await {
-                Ok(session) => session,
-                Err(error) => return Err(stage.attempt_failed(format!("connecting: {error}"))),
-            };
+        let mut peer_session = PeerClient::connect(&stage.peer_address, stage.network_magic)
+            .await
+            .map_err(|error| Failure::connecting(&error))?;
 
         info!(
             address = stage.peer_address,
@@ -247,29 +224,51 @@ impl gasket::framework::Worker<Stage> for Worker {
 
         debug!("finding intersect");
 
-        let (point, tip) = match peer_session.chainsync().find_intersect(candidates).await {
+        let found = peer_session.chainsync().find_intersect(candidates).await;
+
+        let (point, tip) = match found {
             Ok(found) => found,
             Err(error) => {
                 peer_session.abort().await;
-                return Err(stage.attempt_failed(format!("finding the intersection: {error}")));
+                return Err(Failure::new("finding the intersection", &error));
             }
         };
 
-        let intersection = point
-            .ok_or(Error::message("couldn't find intersect"))
-            .or_panic()?;
+        let tip = ChainPoint::from(tip.0);
+
+        let Some(intersection) = point else {
+            peer_session.abort().await;
+
+            return Err(Failure::message(format!(
+                "finding the intersection: the peer, at {tip}, holds none of the WAL's recent points"
+            )));
+        };
 
         info!(?intersection, "found intersection");
 
-        let worker = Self {
+        Ok(Self {
             peer_session,
             chain: ChainFragment::start(ChainPoint::from(intersection)),
-            tip: ChainPoint::from(tip.0),
-            progressed: false,
+            tip,
+            delivered: false,
             lost: None,
-        };
+        })
+    }
+}
 
-        Ok(worker)
+#[async_trait::async_trait(?Send)]
+impl gasket::framework::Worker<Stage> for Worker {
+    /// Retried here rather than by gasket, so that a failed connection or
+    /// intersection waits the backoff of its place in the count.
+    async fn bootstrap(stage: &Stage) -> Result<Self, WorkerError> {
+        loop {
+            let candidates = stage.intersect_candidates()?;
+
+            match Self::open(stage, candidates).await {
+                Ok(worker) => return Ok(worker),
+                Err(failure) => stage.attempts.failed(failure).await?,
+            }
+        }
     }
 
     async fn schedule(&mut self, stage: &mut Stage) -> Result<WorkSchedule<WorkUnit>, WorkerError> {
@@ -298,25 +297,20 @@ impl gasket::framework::Worker<Stage> for Worker {
             return result;
         };
 
-        // A session that delivered something reconnects at once; one that
-        // delivered nothing counts as a failed attempt.
-        if self.progressed {
-            stage.failures.set(0);
-            return Err(WorkerError::Restart);
-        }
-
-        let cause = self
+        let failure = self
             .lost
             .take()
-            .unwrap_or_else(|| "the session failed".into());
+            .unwrap_or_else(|| Failure::message("the session failed".into()));
 
-        match stage.count_failure(cause) {
-            Some(backoff) => {
-                tokio::time::sleep(backoff).await;
-                Err(WorkerError::Restart)
-            }
-            None => Err(WorkerError::Panic),
+        // A session that delivered something reconnects at once; one that
+        // delivered nothing is a failed attempt.
+        if self.delivered {
+            warn!(cause = %failure, "the upstream session ended, reconnecting");
+        } else {
+            stage.attempts.failed(failure).await?;
         }
+
+        Err(WorkerError::Restart)
     }
 }
 
@@ -329,13 +323,10 @@ pub struct Stage {
     wal: WalAdapter,
     limit: SyncLimit,
     progress: Arc<SyncProgress>,
-    retry: RetryConfig,
 
-    /// Attempts in a row that failed before their session delivered
-    /// anything new: a connection, an intersection, or a session.
-    failures: Cell<usize>,
-    /// The slot of the furthest header any session received.
-    furthest_header: Option<BlockSlot>,
+    /// Connections, intersections and sessions that failed in a row before
+    /// their session delivered anything.
+    attempts: Attempts,
 
     pub downstream: DownstreamPort,
 
@@ -356,13 +347,16 @@ impl Stage {
         wal: WalAdapter,
     ) -> Self {
         Self {
+            attempts: Attempts::new(
+                "pull",
+                peer_address.clone(),
+                config.retry.clone(),
+                progress.clone(),
+            ),
             peer_address,
             network_magic,
             limit,
             progress,
-            retry: config.retry.clone(),
-            failures: Cell::new(0),
-            furthest_header: None,
             block_fetch_batch_size: config.pull_batch_size,
             wal,
             downstream: Default::default(),
@@ -371,44 +365,23 @@ impl Stage {
         }
     }
 
-    /// Count a failed attempt, and return the backoff before the next one,
-    /// or none once `[sync.retry]` allows no more, recording why.
-    fn count_failure(&self, cause: String) -> Option<Duration> {
-        let failures = self.failures.get() + 1;
-        self.failures.set(failures);
+    /// The points the WAL offers for an intersection, Origin when it holds
+    /// none.
+    fn intersect_candidates(&self) -> Result<Vec<Point>, WorkerError> {
+        let mut candidates = self
+            .wal
+            .intersect_candidates(5)
+            .or_panic()?
+            .into_iter()
+            .map(TryFrom::try_from)
+            .filter_map(|x| x.ok())
+            .collect_vec();
 
-        if failures <= self.retry.max_retries {
-            info!(
-                failures,
-                max_retries = self.retry.max_retries,
-                "retrying the upstream peer"
-            );
-            return Some(backoff(&self.retry, failures));
+        if candidates.is_empty() {
+            candidates.push(Point::Origin);
         }
 
-        error!(failures, %cause, "giving up on the upstream peer");
-
-        let address = &self.peer_address;
-        self.progress.record_upstream_failure(if failures == 1 {
-            format!("gave up on the upstream peer {address}: {cause}")
-        } else {
-            format!(
-                "gave up on the upstream peer {address} after {failures} failed attempts in a row; the last: {cause}"
-            )
-        });
-
-        None
-    }
-
-    /// A failed connection or intersection: retried by gasket, which backs
-    /// off, until the count runs out.
-    fn attempt_failed(&self, cause: String) -> WorkerError {
-        warn!(%cause, "upstream attempt failed");
-
-        match self.count_failure(cause) {
-            Some(_) => WorkerError::Retry,
-            None => WorkerError::Panic,
-        }
+        Ok(candidates)
     }
 
     async fn flush_blocks(&mut self, blocks: Vec<BlockBody>) -> Result<(), WorkerError> {
@@ -432,13 +405,4 @@ impl Stage {
 
         Ok(())
     }
-}
-
-/// Retry `n` waits `backoff_unit_seconds × backoff_factor^n`, at most
-/// `max_backoff_seconds`, as gasket's own retries do.
-pub(super) fn backoff(retry: &RetryConfig, n: usize) -> Duration {
-    let units = u64::from(retry.backoff_factor).saturating_pow(n as u32);
-    let backoff = retry.backoff_unit_seconds.saturating_mul(units);
-
-    Duration::from_secs(backoff.min(retry.max_backoff_seconds))
 }

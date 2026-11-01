@@ -19,6 +19,8 @@ pub async fn run(config: RootConfig, _args: &Args) -> miette::Result<()> {
         .into_diagnostic()
         .context("bootstrapping sync pipeline")?;
 
+    let progress = sync.progress;
+
     let sync = tokio::spawn(crate::common::run_pipeline(
         gasket::daemon::Daemon::new(sync.tethers),
         exit.clone(),
@@ -44,9 +46,19 @@ pub async fn run(config: RootConfig, _args: &Args) -> miette::Result<()> {
 
     let outcome = crate::common::monitor_drivers(drivers, exit.clone()).await;
 
-    sync.await.unwrap();
+    let ended = sync.await.unwrap();
 
     warn!("shutdown complete");
+
+    // The daemon has no stop condition: a sync that ends on its own failed,
+    // which a supervisor reads from the exit status.
+    if let Some(ended) = ended {
+        return Err(crate::common::sync_failure(
+            "the sync stopped",
+            &progress,
+            &ended,
+        ));
+    }
 
     outcome.into_diagnostic().context("serving clients")
 }

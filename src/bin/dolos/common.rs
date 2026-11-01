@@ -332,27 +332,87 @@ pub fn hook_exit_token() -> CancellationToken {
     cancel
 }
 
-pub async fn run_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationToken) {
-    loop {
+/// Run the pipeline until it ends or `exit` is cancelled, then tear it down.
+/// Returns the stages that ended on their own when one did, which is a
+/// failure: `exit` is then cancelled, so the rest of the process winds down.
+pub async fn run_pipeline(
+    pipeline: gasket::daemon::Daemon,
+    exit: CancellationToken,
+) -> Option<Vec<String>> {
+    let ended = loop {
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(5)) => {
-                if pipeline.should_stop() {
-                    debug!("pipeline should stop");
-
-                    // trigger cancel so that stages stop early
+                if pipeline.has_ended() {
+                    warn!("the sync pipeline ended");
                     exit.cancel();
-                    break;
+                    break Some(ended_stages(&pipeline));
+                }
+
+                if pipeline.is_terminated() {
+                    debug!("termination requested");
+                    exit.cancel();
+                    break None;
                 }
             }
             _ = exit.cancelled() => {
                 debug!("exit requested");
-                break;
+                break None;
             }
         }
-    }
+    };
 
     debug!("shutting down pipeline");
     pipeline.teardown();
+
+    ended
+}
+
+/// The names of the pipeline's stages that have ended.
+pub fn ended_stages(pipeline: &gasket::daemon::Daemon) -> Vec<String> {
+    use gasket::runtime::{StagePhase, TetherState};
+
+    pipeline
+        .tethers()
+        .filter(|tether| {
+            !matches!(tether.check_state(), TetherState::Alive(phase) if phase != StagePhase::Ended)
+        })
+        .map(|tether| tether.name().to_string())
+        .collect()
+}
+
+/// The error for a sync whose pipeline ended on its own, said after `what`:
+/// why a stage gave up on the upstream peer, or else which stages stopped.
+pub fn sync_failure(
+    what: &str,
+    progress: &dolos::sync::SyncProgress,
+    ended: &[String],
+) -> miette::Report {
+    match progress.upstream_failure() {
+        Some(failure) if failure.handshake => miette::miette!(
+            help = "a peer refuses the handshake of a node on another network: check that \
+                    `upstream.peer_address` serves the configured chain",
+            "{what}: {failure}"
+        ),
+        Some(failure) => miette::miette!(
+            help = "`[sync.retry]` sets how many failed attempts in a row are retried, \
+                    and the backoff between them",
+            "{what}: {failure}"
+        ),
+        None => miette::miette!(
+            help = "the log above says why",
+            "{what}: {}",
+            stopped(ended)
+        ),
+    }
+}
+
+/// `the pull stage stopped`, `the pull and apply stages stopped`.
+fn stopped(stages: &[String]) -> String {
+    match stages {
+        [] => "the pipeline stopped".into(),
+        [stage] => format!("the {stage} stage stopped"),
+        [init @ .., last] => format!("the {} and {last} stages stopped", init.join(", ")),
+    }
 }
 
 /// Drains the serving drivers, cancelling the rest once any one of them fails.

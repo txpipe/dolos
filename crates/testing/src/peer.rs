@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dolos_core::{ChainPoint, RawBlock};
 use pallas::ledger::traverse::{Era, MultiEraBlock};
@@ -17,7 +17,7 @@ use pallas::network::facades::{KeepAliveLoop, PeerServer};
 use pallas::network::miniprotocols::{
     blockfetch,
     chainsync::{self, ClientRequest, HeaderContent, Tip},
-    Point,
+    txsubmission, Point,
 };
 use tokio::sync::watch;
 
@@ -42,6 +42,8 @@ pub struct PeerOptions {
     pub close_at_first_request: bool,
     /// Close the session on any block-fetch request.
     pub refuse_block_fetch: bool,
+    /// Close every session that starts tx-submission, once it does.
+    pub close_tx_submission: bool,
     /// Serve this block's body as bytes that decode as no block.
     pub corrupt_body: Option<u64>,
 }
@@ -187,7 +189,9 @@ struct Shared {
     next_requests: AtomicUsize,
     headers_sent: AtomicUsize,
     intersects: AtomicUsize,
+    intersected_at: Mutex<Vec<Instant>>,
     sessions: AtomicUsize,
+    tx_submissions: AtomicUsize,
     stop: watch::Sender<bool>,
 }
 
@@ -227,7 +231,9 @@ impl PeerFixture {
             next_requests: AtomicUsize::new(0),
             headers_sent: AtomicUsize::new(0),
             intersects: AtomicUsize::new(0),
+            intersected_at: Mutex::new(Vec::new()),
             sessions: AtomicUsize::new(0),
+            tx_submissions: AtomicUsize::new(0),
             stop: watch::Sender::new(false),
         });
 
@@ -277,6 +283,16 @@ impl PeerFixture {
     /// including those answered by closing the session.
     pub fn intersects(&self) -> usize {
         self.shared.intersects.load(Ordering::SeqCst)
+    }
+
+    /// When each intersection request arrived, in order.
+    pub fn intersection_times(&self) -> Vec<Instant> {
+        self.shared.intersected_at.lock().unwrap().clone()
+    }
+
+    /// The sessions that started tx-submission so far.
+    pub fn tx_submissions(&self) -> usize {
+        self.shared.tx_submissions.load(Ordering::SeqCst)
     }
 
     /// Whether the fixture has stopped, by [`Self::stop`] or after
@@ -351,7 +367,7 @@ async fn session(peer: PeerServer, shared: Arc<Shared>) {
         chainsync,
         blockfetch,
         keepalive,
-        txsubmission: _txsubmission,
+        txsubmission,
         peersharing: _peersharing,
         handshake: _handshake,
         ..
@@ -359,10 +375,11 @@ async fn session(peer: PeerServer, shared: Arc<Shared>) {
 
     let keepalive = KeepAliveLoop::server(keepalive).spawn();
 
-    // Either side ending closes the connection.
+    // Any protocol ending closes the connection.
     tokio::select! {
         _ = serve_chainsync(chainsync, &shared) => (),
         _ = serve_blockfetch(blockfetch, &shared) => (),
+        _ = serve_txsubmission(txsubmission, &shared) => (),
     }
 
     keepalive.abort();
@@ -388,6 +405,7 @@ async fn serve_chainsync(
         match request {
             ClientRequest::Intersect(points) => {
                 let number = shared.intersects.fetch_add(1, Ordering::SeqCst) + 1;
+                shared.intersected_at.lock().unwrap().push(Instant::now());
 
                 if options.close_at_intersects.contains(&number) {
                     return Ok(());
@@ -459,4 +477,18 @@ async fn serve_blockfetch(
     }
 
     Ok(())
+}
+
+/// Count each session that starts tx-submission, and close it there when told
+/// to. The fixture holds no transactions, so it never asks for any.
+async fn serve_txsubmission(mut server: txsubmission::Server, shared: &Shared) {
+    if server.wait_for_init().await.is_ok() {
+        shared.tx_submissions.fetch_add(1, Ordering::SeqCst);
+
+        if shared.options.close_tx_submission {
+            return;
+        }
+    }
+
+    std::future::pending().await
 }

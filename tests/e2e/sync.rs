@@ -114,13 +114,12 @@ fn local_peer(workspace: &ScenarioWorkspace, options: PeerOptions) -> PeerFixtur
     .expect("failed to start the local peer")
 }
 
-/// `dolos sync catchup <args>`, its stderr written to `log` in the workspace,
-/// where no pipe can fill and stall it.
-fn spawn_catchup(workspace: &ScenarioWorkspace, args: &[&str], log: &str) -> ProcessGuard {
+/// `dolos <args>`, its stderr written to `log` in the workspace, where no
+/// pipe can fill and stall it.
+fn spawn_dolos(workspace: &ScenarioWorkspace, args: &[&str], log: &str) -> ProcessGuard {
     let stderr = std::fs::File::create(workspace.path().join(log)).expect("failed to create log");
 
     let handle = prepare_scenario_process(workspace)
-        .args(["sync", "catchup"])
         .args(args)
         .stdout(Stdio::null())
         .stderr(stderr)
@@ -128,6 +127,12 @@ fn spawn_catchup(workspace: &ScenarioWorkspace, args: &[&str], log: &str) -> Pro
         .expect("failed to spawn process");
 
     ProcessGuard::new(handle)
+}
+
+/// `dolos sync catchup <args>`, logged as [`spawn_dolos`] does.
+fn spawn_catchup(workspace: &ScenarioWorkspace, args: &[&str], log: &str) -> ProcessGuard {
+    let args = [&["sync", "catchup"], args].concat();
+    spawn_dolos(workspace, &args, log)
 }
 
 /// The log, every run of whitespace one space, so a diagnostic the renderer
@@ -224,8 +229,96 @@ fn catchup_fails_once_its_upstream_stops(workspace: &ScenarioWorkspace) {
         "{log}"
     );
 
-    // The pull stage gave up on the peer: only it records that.
+    // A catch-up runs no submit stage: the pull stage gave up on the peer.
+    assert!(
+        log.contains("the pull stage gave up on the upstream peer"),
+        "{log}"
+    );
+}
+
+/// The scenario, serving minibf on its second port as well.
+fn serve_minibf(workspace: &ScenarioWorkspace) {
+    let path = workspace.path().join("dolos.toml");
+    let mut config = std::fs::read_to_string(&path).expect("failed to read the config");
+
+    config.push_str(&format!(
+        "\n[serve.minibf]\nlisten_address = \"127.0.0.1:{}\"\n",
+        workspace.port(1)
+    ));
+
+    std::fs::write(&path, config).expect("failed to write the config");
+}
+
+/// A serving daemon whose sync gives up on its upstream exits 1 with the
+/// cause, so that a supervisor restarts it.
+fn daemon_fails_once_its_sync_gives_up(workspace: &ScenarioWorkspace) {
+    serve_minibf(workspace);
+
+    // Every session closes on its first request, delivering nothing.
+    let peer = local_peer(
+        workspace,
+        PeerOptions {
+            initial_blocks: 10,
+            close_at_first_request: true,
+            ..Default::default()
+        },
+    );
+
+    let mut guard = spawn_dolos(workspace, &["daemon"], "daemon.log");
+    wait_for_tcp_port(workspace, 1, Duration::from_secs(60));
+
+    let status = wait_for_exit(&mut guard, Duration::from_secs(60));
+    let log = read_log(workspace, "daemon.log");
+
+    assert_eq!(status.code(), Some(1), "{log}");
+    assert!(
+        log.contains("the sync stopped: the pull stage gave up on the upstream peer"),
+        "{log}"
+    );
+    assert!(peer.intersects() >= 1);
+}
+
+/// A daemon whose upstream refuses every connection exits 1 too.
+fn daemon_fails_once_its_upstream_is_unreachable(workspace: &ScenarioWorkspace) {
+    // Nothing listens on the scenario's upstream port.
+    let mut guard = spawn_dolos(workspace, &["daemon"], "daemon.log");
+
+    let status = wait_for_exit(&mut guard, Duration::from_secs(60));
+    let log = read_log(workspace, "daemon.log");
+
+    assert_eq!(status.code(), Some(1), "{log}");
     assert!(log.contains("gave up on the upstream peer"), "{log}");
+    // The cause under pallas's own label.
+    assert!(
+        log.contains("connecting: error connecting bearer: Connection refused"),
+        "{log}"
+    );
+}
+
+/// `sync catchup --follow` whose peer drops every tx-submission session, and
+/// nothing else, ends on the submit stage's give-up, which it names.
+fn follow_fails_once_the_submit_stage_gives_up(workspace: &ScenarioWorkspace) {
+    let peer = local_peer(
+        workspace,
+        PeerOptions {
+            initial_blocks: 10,
+            close_tx_submission: true,
+            ..Default::default()
+        },
+    );
+
+    let mut guard = spawn_catchup(workspace, &["--follow"], "follow.log");
+    let status = wait_for_exit(&mut guard, Duration::from_secs(60));
+    let log = read_log(workspace, "follow.log");
+
+    assert_eq!(status.code(), Some(1), "{log}");
+    assert!(
+        log.contains(
+            "the sync ended while following the chain: the submit stage gave up on the upstream peer"
+        ),
+        "{log}"
+    );
+    assert_eq!(peer.tx_submissions(), 1, "no retries are configured");
 }
 
 /// `sync catchup --follow` runs on past the target it commits, until Ctrl-C
@@ -326,6 +419,21 @@ test_for_scenario!(
 test_for_scenario!(
     follow_runs_past_the_target_for_preview_local_peer,
     follow_runs_past_the_target,
+    7
+);
+test_for_scenario!(
+    daemon_fails_once_its_sync_gives_up_for_preview_local_peer,
+    daemon_fails_once_its_sync_gives_up,
+    7
+);
+test_for_scenario!(
+    daemon_fails_once_its_upstream_is_unreachable_for_preview_local_peer,
+    daemon_fails_once_its_upstream_is_unreachable,
+    7
+);
+test_for_scenario!(
+    follow_fails_once_the_submit_stage_gives_up_for_preview_local_peer,
+    follow_fails_once_the_submit_stage_gives_up,
     7
 );
 

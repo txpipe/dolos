@@ -56,7 +56,7 @@ In this guide we're going to learn how to go from zero to a running Dolos instan
 
 3. ### Running
 
-    Run the following command to start Dolos in `daemon` mode. This will keep runnig forever while syncing the chain from the upstream node and serving data through the APIs. 
+    Run the following command to start Dolos in `daemon` mode. It syncs the chain from the upstream node and serves data through the APIs until it is stopped, or until its sync gives up on the upstream peer under `[sync.retry]`, when it exits 1.
 
     ```sh
     dolos daemon

@@ -52,7 +52,7 @@ The node checks the file's `compatibility` declaration before anything else, and
 | `upstream.peer_address`, or `upstream.block_production_interval` | `upstream.type = "peer"` (the default) with `peer_address`, defaulted per known network; or `type = "emulator"` with `block_production_interval`, on a custom network only |
 | `[storage.wal]` (`backend`, `path`, `cache`) | `sync.wal_path`; the WAL is on disk exactly when the state is `fjall` |
 | `sync.max_rollback` | removed: the rollback window is the protocol's |
-| root `[retries]` (`backoff_unit_sec`, `max_backoff_sec`, …) | `[sync.retry]` (`backoff_unit_seconds`, `max_backoff_seconds`, …) |
+| root `[retries]` (`backoff_unit_sec`, `max_backoff_sec`, …) | `[sync.retry]` (`backoff_unit_seconds`, `max_backoff_seconds`, …); toward the upstream peer, `max_retries` counts failed attempts in a row, sessions that deliver nothing included, and running out of them stops `dolos daemon` too, with exit 1 |
 | `sync.max_history`; archive `backend = "no_op"` | `history.mode` (`none`, `rolling`, `full`) and, for `rolling`, `window = { unit = "slot", value = … }` |
 | state `max_history` | removed: managed by the node |
 | store `backend` (`fjall`, `redb`, `in_memory`) | store `type = "fjall"` or `"ephemeral"` |
