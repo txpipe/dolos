@@ -120,6 +120,12 @@ fn lock(input: &TxoRef, witnessed: bool) -> (TransactionBody<'static>, WitnessSe
     (body(input, Some(datum_hash())), witness_set)
 }
 
+/// A tx spending `input` to one output locked by the datum's hash, without
+/// the datum in its witness set.
+fn relock(input: &TxoRef) -> (TransactionBody<'static>, WitnessSet<'static>) {
+    (body(input, Some(datum_hash())), empty_witness_set())
+}
+
 /// A tx spending `input` to an output with no datum.
 fn spend(input: &TxoRef) -> (TransactionBody<'static>, WitnessSet<'static>) {
     (body(input, None), empty_witness_set())
@@ -129,22 +135,24 @@ fn produced(tx: &TransactionBody) -> TxoRef {
     TxoRef(tx.compute_hash(), 0)
 }
 
-fn domain() -> ToyDomain {
+/// A domain whose configured UTxOs are the seeds, the one at each index
+/// carrying the datum hash given for it.
+fn domain(seeds: &[Option<Hash<32>>]) -> ToyDomain {
     let mut config = dolos_cardano::CardanoLogicConfig::default();
 
-    for index in 0..2 {
+    for (index, datum_hash) in seeds.iter().enumerate() {
         let cbor = minicbor::to_vec(TransactionOutput::PostAlonzo(KeepRaw::from(
             PostAlonzoTransactionOutput {
                 address: address(0x0f).into(),
                 value: Value::Coin(10 * ADA),
-                datum_option: None,
+                datum_option: datum_hash.map(|hash| KeepRaw::from(DatumOption::Hash(hash))),
                 script_ref: None,
             },
         )))
         .unwrap();
 
         config.custom_utxos.push(CustomUtxo {
-            ref_: seed(index),
+            ref_: seed(index as u32),
             era: Some(Era::Conway.into()),
             cbor,
         });
@@ -202,14 +210,25 @@ fn known(refcount: u64) -> Option<DatumState> {
     })
 }
 
-/// Rolls `chain` forward, checking the row and the lookup after each block
-/// against `expected`, then rolls it back, checking each block's state is
-/// restored exactly.
+fn unknown(refcount: u64) -> Option<DatumState> {
+    Some(DatumState {
+        refcount,
+        bytes: vec![],
+    })
+}
+
+/// Seeds with no datum, for chains that lock their own.
+const PLAIN_SEEDS: [Option<Hash<32>>; 2] = [None, None];
+
+/// Rolls `chain` forward from a domain configured with `seeds`, checking the
+/// row and the lookup after each block against `expected`, then rolls it
+/// back, checking each block's state is restored exactly.
 async fn roll(
+    seeds: &[Option<Hash<32>>],
     chain: Vec<(TransactionBody<'static>, WitnessSet<'static>)>,
     expected: &[Option<DatumState>],
 ) {
-    let domain = domain();
+    let domain = domain(seeds);
     let blocks = blocks(chain);
     assert_eq!(blocks.len(), expected.len());
 
@@ -246,6 +265,7 @@ async fn spending_the_witnessed_output_keeps_the_datum_for_another() {
     let spend_b = spend(&produced(&b.0));
 
     roll(
+        &PLAIN_SEEDS,
         vec![a, b, spend_a, spend_b],
         &[known(1), known(2), known(1), None],
     )
@@ -262,14 +282,47 @@ async fn spending_an_unwitnessed_output_keeps_the_datum_for_another() {
     let spend_b = spend(&produced(&b.0));
     let spend_a = spend(&produced(&a.0));
 
-    let unknown = Some(DatumState {
-        refcount: 1,
-        bytes: vec![],
-    });
+    roll(
+        &PLAIN_SEEDS,
+        vec![b, a, spend_b, spend_a],
+        &[unknown(1), known(2), known(1), None],
+    )
+    .await;
+}
+
+/// A configured UTxO S carrying the datum's hash is counted at bootstrap, so
+/// spending it leaves the datum readable for an output C that a later tx
+/// locked and witnessed.
+#[tokio::test]
+async fn spending_a_configured_output_keeps_the_datum_for_another() {
+    let seeds = [None, Some(datum_hash())];
+    assert_eq!(row(&domain(&seeds)), unknown(1), "row after bootstrap");
+
+    let c = lock(&seed(0), true);
+    let spend_s = spend(&seed(1));
+    let spend_c = spend(&produced(&c.0));
 
     roll(
-        vec![b, a, spend_b, spend_a],
-        &[unknown, known(2), known(1), None],
+        &seeds,
+        vec![c, spend_s, spend_c],
+        &[known(2), known(1), None],
+    )
+    .await;
+}
+
+/// One tx spends A, the only UTxO referencing the datum, and produces B
+/// with the datum's hash but not the datum. Its increment comes before its
+/// decrement, so the row keeps the datum's bytes while B is live.
+#[tokio::test]
+async fn relocking_the_only_output_in_one_tx_keeps_the_datum() {
+    let a = lock(&seed(0), true);
+    let relock_a = relock(&produced(&a.0));
+    let spend_b = spend(&produced(&relock_a.0));
+
+    roll(
+        &PLAIN_SEEDS,
+        vec![a, relock_a, spend_b],
+        &[known(1), known(1), None],
     )
     .await;
 }

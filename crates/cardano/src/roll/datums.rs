@@ -4,8 +4,13 @@
 //! system. A datum's row counts the live UTxOs whose datum option is its hash:
 //! producing one increments the count and consuming one decrements it, so the
 //! two always pair up, and the row is removed when the count reaches zero.
-//! The row holds the datum's bytes once a transaction producing one of those
-//! UTxOs witnesses it, and empty bytes until then.
+//! The configured UTxOs are counted at bootstrap. The row holds the datum's
+//! bytes once a transaction producing one of those UTxOs witnesses it, and
+//! empty bytes until then.
+//!
+//! A transaction's decrements are emitted after its increments, so a
+//! transaction that spends the last UTxO referencing a datum and produces
+//! another keeps the datum's bytes.
 //!
 //! Inline datums (`DatumOption::Data`) are not reference counted.
 
@@ -30,21 +35,36 @@ use crate::{DatumRefDecrement, DatumRefIncrement};
 /// 1. Collects witness datums from `tx.plutus_data()` into a temporary map
 /// 2. For every output with `DatumOption::Hash`, emits `DatumRefIncrement`,
 ///    with the datum when the transaction witnesses it
-/// 3. For every input with `DatumOption::Hash`, emits `DatumRefDecrement`
+/// 3. For every input with `DatumOption::Hash`, emits `DatumRefDecrement` once
+///    the transaction's outputs are visited: at the next transaction or at the
+///    block's flush
 #[derive(Default)]
 pub struct DatumVisitor {
     /// Witness datums collected from current transaction's plutus_data()
     witness_datums: HashMap<Hash<32>, Vec<u8>>,
+
+    /// The current transaction's decrements, held until its increments
+    pending_decrements: Vec<DatumRefDecrement>,
+}
+
+impl DatumVisitor {
+    fn emit_decrements(&mut self, deltas: &mut WorkDeltas) {
+        for decrement in self.pending_decrements.drain(..) {
+            deltas.add_for_entity(decrement);
+        }
+    }
 }
 
 impl BlockVisitor for DatumVisitor {
     fn visit_tx(
         &mut self,
-        _deltas: &mut WorkDeltas,
+        deltas: &mut WorkDeltas,
         _block: &MultiEraBlock,
         tx: &MultiEraTx,
         _utxos: &HashMap<TxoRef, OwnedMultiEraOutput>,
     ) -> Result<(), ChainError> {
+        self.emit_decrements(deltas);
+
         // Clear and collect witness datums for this transaction
         self.witness_datums.clear();
 
@@ -83,7 +103,7 @@ impl BlockVisitor for DatumVisitor {
 
     fn visit_input(
         &mut self,
-        deltas: &mut WorkDeltas,
+        _deltas: &mut WorkDeltas,
         _block: &MultiEraBlock,
         _tx: &MultiEraTx,
         _input: &MultiEraInput,
@@ -91,8 +111,15 @@ impl BlockVisitor for DatumVisitor {
     ) -> Result<(), ChainError> {
         // Check if the consumed UTxO had a datum hash
         if let Some(DatumOption::Hash(datum_hash)) = resolved.datum() {
-            deltas.add_for_entity(DatumRefDecrement::new(datum_hash));
+            self.pending_decrements
+                .push(DatumRefDecrement::new(datum_hash));
         }
+
+        Ok(())
+    }
+
+    fn flush(&mut self, deltas: &mut WorkDeltas) -> Result<(), ChainError> {
+        self.emit_decrements(deltas);
 
         Ok(())
     }
