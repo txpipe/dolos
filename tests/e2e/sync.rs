@@ -11,9 +11,9 @@ use common::*;
 fn daemon_syncs(workspace: &ScenarioWorkspace) {
     println!("e2e sync start: {}", workspace.name());
 
+    // No store exists before the daemon runs, so there is nothing to read
+    // first: it starts from genesis.
     write_custom_genesis(workspace);
-
-    let before = fetch_summary(workspace);
 
     let mut cmd = prepare_scenario_process(workspace);
 
@@ -37,14 +37,6 @@ fn daemon_syncs(workspace: &ScenarioWorkspace) {
 
     let after = fetch_summary(workspace);
 
-    let before_tip = before
-        .wal
-        .tip_slot
-        .into_iter()
-        .chain(before.archive.tip_slot)
-        .chain(before.state.tip_slot)
-        .max()
-        .unwrap_or_default();
     let after_tip = after
         .wal
         .tip_slot
@@ -55,13 +47,13 @@ fn daemon_syncs(workspace: &ScenarioWorkspace) {
         .unwrap_or_default();
 
     assert!(
-        after_tip > before_tip,
-        "expected tip to advance slots for {}, before={before_tip}, after={after_tip}",
+        after_tip > 0,
+        "expected tip to advance past genesis for {}, after={after_tip}",
         workspace.name()
     );
 }
 
-/// `dolos sync --stop-epoch 1` from genesis ends once the ledger enters
+/// `dolos sync catchup --stop-epoch 1` from genesis ends once the ledger enters
 /// epoch 1, so the state tip is past the first epoch boundary. Chain-sync
 /// asks for one header at a time, so the run takes minutes over a remote
 /// relay.
@@ -71,7 +63,7 @@ fn sync_passes_the_first_epoch_boundary(workspace: &ScenarioWorkspace) {
     let mut cmd = prepare_scenario_process(workspace);
 
     let handle = cmd
-        .args(["sync", "--stop-epoch", "1"])
+        .args(["sync", "catchup", "--stop-epoch", "1"])
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()

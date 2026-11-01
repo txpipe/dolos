@@ -141,7 +141,7 @@ fn a_forced_restore_replaces_a_store_this_release_refuses() {
     drop(unmarked);
 
     for refused in [
-        node.run(&["data", "summary"]),
+        node.run(&["sync", "status"]),
         node.bootstrap_headless(&["--skip-if-data"]),
         node.bootstrap_headless(&[]),
         node.run(&["bootstrap", "immutabledb", "--source", "db", "--continue"]),

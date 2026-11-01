@@ -28,10 +28,11 @@ impl Node {
     fn unopened() -> Self {
         let root = tempfile::tempdir().unwrap();
         let data = toml::Value::String(root.path().join("data").display().to_string());
+        let compatibility = dolos_core::compat::SUPPORTED_CONTRACTS[0];
 
         let toml = format!(
             r#"
-            compatibility = "v2-alpha.1"
+            compatibility = "{compatibility}"
 
             [chain]
             protocol = "cardano"

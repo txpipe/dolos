@@ -17,8 +17,8 @@ use dolos_cardano::{
 use dolos_core::config::{ConfigError, RootConfig};
 pub use dolos_core::ReplayProgress;
 use dolos_core::{
-    BootstrapExt as _, ChainLogic as _, ChainPoint, Domain as _, DomainError, Genesis,
-    ImportExt as _, QueryLimiter, RawBlock, StateStore as _,
+    builtin::NoDiskTier, BootstrapExt as _, ChainLogic as _, ChainPoint, Domain as _, DomainError,
+    Genesis, ImportExt as _, QueryLimiter, RawBlock, StateStore as _, TieredCache,
 };
 use dolos_snapshot::source::{SnapshotSource, StoreSnapshot};
 
@@ -96,7 +96,37 @@ impl<'a> DomainBuilder<'a> {
         Ok(())
     }
 
+    /// A domain over `stores` as they stand, for a command that repairs or
+    /// rolls them back itself: no initialization work, catch-up or integrity
+    /// check runs, and the cache keeps no disk tier, so its file is left
+    /// alone.
+    pub fn assemble(&self, stores: &Stores) -> Result<DomainAdapter, DomainBuildError> {
+        self.check()?;
+
+        self.assemble_with(stores, |limiter| {
+            Ok(TieredCache::new(
+                &self.config.storage.cache,
+                storage::CacheDiskBackend::Off(NoDiskTier),
+                limiter,
+            ))
+        })
+    }
+
     fn build_with_stores(&self, stores: &Stores) -> Result<DomainAdapter, DomainBuildError> {
+        let domain = self.assemble_with(stores, |limiter| {
+            storage::open_cache_store(self.config, limiter).map_err(DomainBuildError::Storage)
+        })?;
+
+        domain.bootstrap().map_err(DomainBuildError::Bootstrap)?;
+
+        Ok(domain)
+    }
+
+    fn assemble_with(
+        &self,
+        stores: &Stores,
+        cache: impl FnOnce(QueryLimiter) -> Result<storage::CacheBackend, DomainBuildError>,
+    ) -> Result<DomainAdapter, DomainBuildError> {
         let network =
             ResolvedNetwork::resolve(&self.config.chain).map_err(DomainBuildError::Chain)?;
 
@@ -114,10 +144,9 @@ impl<'a> DomainBuilder<'a> {
 
         let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
         let query_limiter = QueryLimiter::new(self.config.serve.max_concurrent_queries);
-        let cache = storage::open_cache_store(self.config, query_limiter.clone())
-            .map_err(DomainBuildError::Storage)?;
+        let cache = cache(query_limiter.clone())?;
 
-        let domain = DomainAdapter {
+        Ok(DomainAdapter {
             compatibility: self.config.compatibility(),
             storage_config: Arc::new(self.config.storage.clone()),
             history_config: self.config.history,
@@ -131,11 +160,7 @@ impl<'a> DomainBuilder<'a> {
             cache,
             tip_broadcast,
             query_limiter,
-        };
-
-        domain.bootstrap().map_err(DomainBuildError::Bootstrap)?;
-
-        Ok(domain)
+        })
     }
 }
 

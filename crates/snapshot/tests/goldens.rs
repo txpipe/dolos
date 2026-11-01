@@ -42,7 +42,7 @@ use stelae_driver::digests;
 /// `(kind, diffId, records, uncompressedSize)`, in inscription order.
 ///
 /// `records` counts the protocol's header record, as a descriptor does.
-const GOLDEN_LAYERS: [(&str, &str, u64, u64); 69] = [
+const GOLDEN_LAYERS: [(&str, &str, u64, u64); 71] = [
     (
         BLOCKS,
         "sha256:14a05418723da3c0b4117b5f30ef07d96887b3e12eae114988ff299a654ff106",
@@ -189,13 +189,25 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 69] = [
     ),
     (
         "state-accounts",
-        "sha256:b83b89a357ff5ab3f738c2b3ef238fc757d11ec59103caa7518d008de458d7b3",
+        "sha256:40df38609b006a940277252e98278b5c92ed810099fab8b1212c867fd3547d93",
         2,
         87,
     ),
     (
         "state-accounts",
-        "sha256:f0d22f5dba398a9dc1a019aadb87397abfe163d0c4c204c540379681cd25ed12",
+        "sha256:7aebf53154d03564f7c8a3794c4b89a89e0f4dc820ca2ecfa902fa50531db9b7",
+        2,
+        87,
+    ),
+    (
+        "state-accounts",
+        "sha256:a2854bc5e33a08c268ee7cccea699e801bd16b5562595447898fd8c6c3447af7",
+        2,
+        87,
+    ),
+    (
+        "state-accounts",
+        "sha256:de61beb9ed1c2b1ef2c3c3bbfc93a11b1578efced6e3997fe244497ee36d9c96",
         2,
         87,
     ),
@@ -461,7 +473,7 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 69] = [
 
 /// The stele's identity: sha256 of the canonical inscription.
 const GOLDEN_INSCRIPTION: &str =
-    "sha256:b23cc8c90f4b1f2b4753f7d2957ccda7f86b8d60ec6ed88e959f1a0eb3fa5128";
+    "sha256:4fda068b81379036b64d9232067e149463d1acab0aeb11230899f0f8243e602a";
 
 fn history() -> Vec<HistoryEntry> {
     vec![
@@ -732,12 +744,18 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#"{"diffId":"sha256:9b8ac7a591e85ccd8db28fed9a68a56f382b148eb103a3e368c3275a6ae50d18","kind":"state-account-stats","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-account-stats.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":100},"#,
-    r#"{"diffId":"sha256:b83b89a357ff5ab3f738c2b3ef238fc757d11ec59103caa7518d008de458d7b3","kind":"state-accounts","#,
+    r#"{"diffId":"sha256:40df38609b006a940277252e98278b5c92ed810099fab8b1212c867fd3547d93","kind":"state-accounts","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-accounts.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":8},"uncompressedSize":87},"#,
-    r#"{"diffId":"sha256:f0d22f5dba398a9dc1a019aadb87397abfe163d0c4c204c540379681cd25ed12","kind":"state-accounts","#,
+    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":87},"#,
+    r#"{"diffId":"sha256:7aebf53154d03564f7c8a3794c4b89a89e0f4dc820ca2ecfa902fa50531db9b7","kind":"state-accounts","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-accounts.v1+zstd","records":2,"#,
-    r#""scope":{"shard":8},"uncompressedSize":87},"#,
+    r#""scope":{"epoch":4,"shard":1},"uncompressedSize":87},"#,
+    r#"{"diffId":"sha256:a2854bc5e33a08c268ee7cccea699e801bd16b5562595447898fd8c6c3447af7","kind":"state-accounts","#,
+    r#""mediaType":"application/vnd.dolos.stelae.state-accounts.v1+zstd","records":2,"#,
+    r#""scope":{"shard":0},"uncompressedSize":87},"#,
+    r#"{"diffId":"sha256:de61beb9ed1c2b1ef2c3c3bbfc93a11b1578efced6e3997fe244497ee36d9c96","kind":"state-accounts","#,
+    r#""mediaType":"application/vnd.dolos.stelae.state-accounts.v1+zstd","records":2,"#,
+    r#""scope":{"shard":1},"uncompressedSize":87},"#,
     r#"{"diffId":"sha256:7e213415880a0204a489ba415e224c44f119e64c630417dbb18fbf1ba9188f5a","kind":"state-address-stats","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-address-stats.v1+zstd","records":2,"#,
     r#""scope":{"epoch":4,"shard":0},"uncompressedSize":129},"#,

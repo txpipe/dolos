@@ -6,7 +6,7 @@
 //! reports every disagreement it finds rather than stopping at the first.
 //!
 //! It is the at-rest complement of the sync-time guards, not a replacement:
-//! `dolos doctor wal-integrity` still owns the WAL, and nothing here runs
+//! `dolos sync status` still owns the WAL, and nothing here runs
 //! during sync or repairs anything it finds.
 //!
 //! Each check lives in its own module and exposes a pure function over the
@@ -369,8 +369,8 @@ mod tests {
         kinds
     }
 
-    /// A state cursor pushed past everything else — the shape `dolos doctor
-    /// reset-wal` exists to repair.
+    /// A state cursor pushed past everything else — the shape `dolos sync
+    /// recover --discard-wal` exists to repair.
     #[test]
     fn a_state_cursor_ahead_of_the_stores_is_reported() {
         let domain = ToyDomain::new(None, None);

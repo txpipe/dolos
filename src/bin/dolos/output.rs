@@ -46,6 +46,16 @@ pub fn emit(report: &dyn Report, args: &FormatArgs) -> miette::Result<()> {
     }
 }
 
+/// Write one record of a dump to stdout as one JSON line, so a dump streams
+/// however long it runs.
+#[cfg(feature = "utils")]
+pub fn emit_json_line(record: &impl Serialize) -> miette::Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    let json = serde_json::to_string(record).into_diagnostic()?;
+
+    writeln!(stdout, "{json}").into_diagnostic()
+}
+
 /// The process exit codes. Clap exits 2 itself on a malformed command line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -55,10 +65,6 @@ pub enum ExitCode {
     /// The command line asks for something the command won't do as given.
     Usage = 2,
     /// The command ran and found the node or its data unhealthy.
-    #[allow(
-        dead_code,
-        reason = "the first check that reports it lands with the sync group"
-    )]
     Unhealthy = 3,
 }
 
@@ -89,6 +95,15 @@ pub struct Usage {
     help: Option<String>,
 }
 
+impl Usage {
+    pub fn new(message: impl Into<String>, help: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            help: Some(help.into()),
+        }
+    }
+}
+
 impl miette::Diagnostic for Usage {
     fn help<'a>(&'a self) -> Option<Box<dyn Display + 'a>> {
         self.help
@@ -98,19 +113,11 @@ impl miette::Diagnostic for Usage {
 }
 
 /// What a command found wrong with the node or its data; exits 3.
-#[allow(
-    dead_code,
-    reason = "the first check that reports it lands with the sync group"
-)]
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 #[error("{0}")]
 pub struct Unhealthy(pub String);
 
 /// `--yes`, for a command that destroys data.
-#[allow(
-    dead_code,
-    reason = "the first destructive command ported lands with the data group"
-)]
 #[derive(Debug, Clone, Default, clap::Args)]
 pub struct ConfirmArgs {
     /// Go ahead with what the command destroys
@@ -118,10 +125,6 @@ pub struct ConfirmArgs {
     pub yes: bool,
 }
 
-#[allow(
-    dead_code,
-    reason = "the first destructive command ported lands with the data group"
-)]
 impl ConfirmArgs {
     /// Refuse, naming `what` would be destroyed, unless `--yes` was given.
     pub fn require(&self, what: &str) -> Result<(), Usage> {

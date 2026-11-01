@@ -40,13 +40,16 @@ use std::{
 
 use common::read_both_ways;
 use dolos_cardano::{
-    eras::ChainSummary, indexes::archive_dimensions, model::EraState,
-    pallas::ledger::traverse::MultiEraBlock, EraBoundary, EraKey,
+    eras::ChainSummary,
+    indexes::archive_dimensions,
+    model::{AccountKey, AccountState, EraState, FixedNamespace as _, GovDistr},
+    pallas::ledger::{primitives::StakeCredential, traverse::MultiEraBlock},
+    EpochState, EraBoundary, EraKey, GovState, ShardProgress,
 };
 use dolos_core::{
     builtin::{MemoryArchiveStore, MemoryStateStore},
     ArchiveError, ArchiveStore, ArchiveWriter as _, BlockBody, BlockSlot, ChainPoint, Domain,
-    EntityRecord, ExactRecord, IndexRecord, KeyRange, LogKey, Namespace, StateStore,
+    EntityKey, EntityRecord, ExactRecord, IndexRecord, KeyRange, LogKey, Namespace, StateStore,
     StateWriter as _, TagRecord,
 };
 use dolos_snapshot::{
@@ -330,7 +333,7 @@ fn a_harness_domain_exports_a_complete_stele() {
     // harness never wrote still publishes its shards, empty.
     for kind in [BLOCKS, INDEXES]
         .into_iter()
-        .chain(STATE_KINDS.into_iter().map(|(kind, _, _)| kind))
+        .chain(STATE_KINDS.into_iter().map(|(kind, _, _, _)| kind))
     {
         assert!(
             inscription.layers_of_kind(kind).next().is_some(),
@@ -497,7 +500,7 @@ fn every_layer_reads_back_as_the_store_yields_it() {
 
     let mut records = 0usize;
 
-    for (kind, ns, shards) in STATE_KINDS {
+    for (kind, ns, shards, shard_byte) in STATE_KINDS {
         let written: Vec<_> = inscription.layers_of_kind(kind).collect();
 
         // Exactly the shards the kind's spec'd count promises, always: an empty
@@ -517,7 +520,7 @@ fn every_layer_reads_back_as_the_store_yields_it() {
 
             let expected: Vec<state::StateRecord> = carried
                 .iter()
-                .filter(|record| state::shard_of(&record.key, shards) as usize == shard)
+                .filter(|record| state::shard_of(&record.key, shards, shard_byte) as usize == shard)
                 .cloned()
                 .collect();
 
@@ -531,6 +534,69 @@ fn every_layer_reads_back_as_the_store_yields_it() {
         records > 0,
         "the fixture produced no state, so the layers prove nothing"
     );
+}
+
+/// Accounts spread over the `state-accounts` shards by the first byte of
+/// their credential hash, not into the one shard their shared CBOR header
+/// would pick.
+#[test]
+fn accounts_export_into_the_shard_of_their_hash() {
+    let domain: ToyDomain = harness();
+
+    let seeded: Vec<(StakeCredential, u8)> = [
+        (false, 0x0a),
+        (true, 0x1b),
+        (false, 0x5c),
+        (true, 0xa0),
+        (false, 0xf3),
+    ]
+    .into_iter()
+    .map(|(script, first)| {
+        let mut hash = [0x66; 28];
+        hash[0] = first;
+        let credential = match script {
+            false => StakeCredential::AddrKeyhash(hash.into()),
+            true => StakeCredential::ScriptHash(hash.into()),
+        };
+        (credential, first >> 4)
+    })
+    .collect();
+
+    let writer = domain.state().start_writer().unwrap();
+    for (credential, _) in &seeded {
+        writer
+            .write_entity_typed(
+                &AccountKey::from(credential),
+                &AccountState::new(0, credential.clone()),
+            )
+            .unwrap();
+    }
+    writer.commit().unwrap();
+
+    let temp = tempfile::tempdir().unwrap();
+    let inscription = export_to(temp.path(), &domain);
+
+    let stele = SteleDir::open(temp.path()).unwrap();
+    let index = stele.blob_index().unwrap();
+
+    let mut found: BTreeMap<Vec<u8>, u8> = BTreeMap::new();
+
+    for descriptor in inscription.layers_of_kind("state-accounts") {
+        let shard = descriptor.scope["shard"].as_u64().unwrap() as u8;
+
+        for raw in read_both_ways(&stele, &index, descriptor) {
+            let record = state::decode(AccountState::NS, &raw).unwrap();
+            found.insert(record.key, shard);
+        }
+    }
+
+    for (credential, shard) in &seeded {
+        let key = EntityKey::of(&AccountKey::from(credential));
+        assert_eq!(found.get(key.as_ref()), Some(shard), "{credential:?}");
+    }
+
+    let occupied: std::collections::BTreeSet<u8> = found.values().copied().collect();
+    assert!(occupied.len() > 1, "accounts collapsed into {occupied:?}");
 }
 
 fn expected_blocks<B: ToyStores>(
@@ -984,7 +1050,7 @@ fn a_dump_cut_at_the_sequence_is_the_tips_own_blob() {
     // Per kind: the dump's shards ascending, then the tip's.
     let mut expected: Vec<(String, serde_json::Value)> = Vec::new();
 
-    for (kind, _, shards) in STATE_KINDS {
+    for (kind, _, shards, _) in STATE_KINDS {
         for shard in 0..shards {
             expected.push((
                 kind.to_owned(),
@@ -1655,6 +1721,89 @@ fn a_discarding_export_reproduces_what_a_publish_stores() {
         .count();
 
     assert_eq!(blobs, distinct_layers(&stored));
+}
+
+/// A tip whose bookkeeping shows a boundary pass in flight is refused before a
+/// layer: a sync cursor left on the epoch row, or a governance distribution
+/// with a shard still to merge. The same stores export once it is finished.
+#[test]
+fn a_tip_with_unfinished_bookkeeping_is_refused_before_a_layer() {
+    let domain: ToyDomain = harness();
+    let plan = plan_for(&domain);
+
+    let epoch = domain
+        .state()
+        .read_entity_typed::<EpochState>(&())
+        .unwrap()
+        .expect("the harness has an epoch row");
+    let gov = domain.state().read_entity_typed::<GovState>(&()).unwrap();
+
+    let write = |epoch: &EpochState, gov: Option<&GovState>| {
+        let writer = domain.state().start_writer().unwrap();
+        writer.write_entity_typed(&(), epoch).unwrap();
+        writer.save_entity_typed::<GovState>(&(), gov).unwrap();
+        writer.commit().unwrap();
+    };
+
+    let refusal = || {
+        let watcher = Arc::new(Watcher::default());
+        let temp = tempfile::tempdir().unwrap();
+        let stele = SteleDir::create(temp.path()).unwrap();
+
+        let refused = export::export(
+            &stele,
+            &plan,
+            domain.archive(),
+            domain.state(),
+            None,
+            &export::First,
+            &watcher.observer(),
+        );
+
+        assert_eq!(watcher.layers(), 0, "a refused export announced a layer");
+
+        match refused {
+            Err(dolos_snapshot::Error::NotABoundary { reason, .. }) => reason,
+            other => panic!("{other:?}"),
+        }
+    };
+
+    let mut mid_rupd = epoch.clone();
+    mid_rupd.rupd_progress = Some(ShardProgress {
+        committed: 3,
+        total: 32,
+    });
+    write(&mid_rupd, gov.as_ref());
+
+    assert_eq!(
+        refusal(),
+        Ineligible::SyncCursorsSet {
+            cursors: vec!["rupd_progress"]
+        }
+    );
+
+    let mut partial = GovDistr::new(epoch.number, 32);
+    partial.committed_shards = 5;
+
+    let mid_ewrap = GovState {
+        distr: Some(partial),
+        ..gov.clone().unwrap_or_default()
+    };
+    write(&epoch, Some(&mid_ewrap));
+
+    assert_eq!(
+        refusal(),
+        Ineligible::IncompleteGovDistr {
+            field: "distr",
+            committed: 5,
+            total: 32,
+        }
+    );
+
+    write(&epoch, gov.as_ref());
+
+    let temp = tempfile::tempdir().unwrap();
+    export_to(temp.path(), &domain);
 }
 
 /// A store set one block past its boundary is refused the same way by every

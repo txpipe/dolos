@@ -18,6 +18,7 @@ mod feedback;
 mod output;
 mod registry;
 mod serve;
+mod service;
 mod sync;
 
 #[cfg(feature = "utils")]
@@ -35,7 +36,8 @@ enum Command {
     /// Run the node in all its glory
     Daemon(daemon::Args),
 
-    /// Just sync from upstream peer
+    /// Sync from the upstream peer, and inspect, recover or roll back the WAL
+    #[command(arg_required_else_help = true)]
     Sync(sync::Args),
 
     /// Just serve data through apis
@@ -53,6 +55,9 @@ enum Command {
 
     /// Fill, clear, inspect and check the cache, with the node stopped
     Cache(cache::Args),
+
+    /// Install the node as an OS service, or uninstall it
+    Service(service::Args),
 
     /// Fill the node's stores from a Stelae snapshot, Mithril or a local
     /// ImmutableDB
@@ -88,7 +93,8 @@ fn run() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let args = Cli::parse();
-    let config_file = crate::common::config_file(args.config.as_deref());
+    let explicit_config = args.config.as_deref();
+    let config_file = crate::common::config_file(explicit_config);
 
     let feedback = crate::feedback::Feedback::default();
 
@@ -98,11 +104,12 @@ fn run() -> Result<()> {
 
     match args.command {
         Command::Daemon(args) => daemon::run(load()?, &args),
-        Command::Sync(args) => sync::run(&load()?, &args),
+        Command::Sync(args) => sync::run(&load()?, &args, &feedback),
         Command::Serve(args) => serve::run(load()?, &args),
         Command::Doctor(args) => doctor::run(&load()?, &args, &feedback),
         Command::Cache(args) => cache::run(&load()?, &args),
         Command::Config(args) => config::run(config_file, &args),
+        Command::Service(args) => service::run(explicit_config, &args),
 
         // the init command is special because it knows how to execute with or without a valid
         // configuration, that is why we pass the whole result and let the command logic decide what

@@ -1,7 +1,7 @@
 //! Cursor coherence — the cheapest check, and the one that explains most of
 //! the others when it fails.
 //!
-//! `dolos data summary` already prints these tips; this check asserts the
+//! `dolos sync status` already prints these tips; this check asserts the
 //! relationships between them. The apply pipeline commits a block to the
 //! stores in a fixed order (`sync::run_lifecycle`): WAL, then state, then
 //! archive. Every rule below follows from that order, so a violation names
@@ -63,8 +63,8 @@ pub fn check_cursors(tips: &Tips) -> Vec<Issue> {
                 CHECK,
                 format!(
                     "the WAL reaches slot {wal_tip} but the archive holds no blocks; the archive \
-                     commit never ran — `dolos doctor catchup-stores` replays the WAL into the \
-                     other stores"
+                     commit never ran — `dolos sync recover` replays the WAL into the other \
+                     stores"
                 ),
             ));
         }
