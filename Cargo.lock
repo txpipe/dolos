@@ -1465,6 +1465,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "trait-variant",
+ "unicase",
  "unicode-normalization",
  "vergen-gitcl",
  "xxhash-rust",

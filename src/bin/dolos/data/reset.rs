@@ -297,6 +297,12 @@ pub(super) fn resolved(path: &Path) -> std::io::Result<PathBuf> {
 /// `..` taken out of the folder reached before it. Past what exists, the
 /// path is taken as written.
 pub(super) fn reached(path: &Path, follow_last: bool) -> std::io::Result<PathBuf> {
+    walk(path, follow_last).map(|(reached, _)| reached)
+}
+
+/// Where [`reached`] takes `path`, and each symbolic link it follows on the
+/// way, where the link sits.
+pub(super) fn walk(path: &Path, follow_last: bool) -> std::io::Result<(PathBuf, Vec<PathBuf>)> {
     /// As many links as Linux follows on the way to one path.
     const MAX_LINKS: usize = 40;
 
@@ -312,7 +318,7 @@ pub(super) fn reached(path: &Path, follow_last: bool) -> std::io::Result<PathBuf
     push(&mut pending, &std::path::absolute(path)?);
 
     let mut reached = PathBuf::new();
-    let mut links = 0;
+    let mut links = Vec::new();
 
     while let Some(part) = pending.pop() {
         match part.components().next() {
@@ -327,9 +333,7 @@ pub(super) fn reached(path: &Path, follow_last: bool) -> std::io::Result<PathBuf
                 if (follow_last || !last)
                     && std::fs::symlink_metadata(&next).is_ok_and(|metadata| metadata.is_symlink())
                 {
-                    links += 1;
-
-                    if links > MAX_LINKS {
+                    if links.len() == MAX_LINKS {
                         return Err(std::io::Error::other(format!(
                             "{} goes through more than {MAX_LINKS} symbolic links",
                             path.display()
@@ -337,6 +341,7 @@ pub(super) fn reached(path: &Path, follow_last: bool) -> std::io::Result<PathBuf
                     }
 
                     push(&mut pending, &std::fs::read_link(&next)?);
+                    links.push(next);
                 } else {
                     reached = next;
                 }
@@ -345,7 +350,7 @@ pub(super) fn reached(path: &Path, follow_last: bool) -> std::io::Result<PathBuf
         }
     }
 
-    Ok(reached)
+    Ok((reached, links))
 }
 
 /// Whether `path` is `wiped` or sits under it, both [`reached`]: folders are
@@ -369,11 +374,16 @@ fn same_place(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// `name` in one Unicode form and letter case.
+/// `name` in one Unicode form and letter case, folded in full as APFS
+/// takes it: `ß` and `ss`, `ſ` and `s`, `ς` and `σ` are one.
 fn folded(name: &std::ffi::OsStr) -> String {
     use unicode_normalization::UnicodeNormalization as _;
 
-    name.to_string_lossy().to_lowercase().nfc().collect()
+    let decomposed: String = name.to_string_lossy().nfd().collect();
+    unicase::UniCase::unicode(decomposed)
+        .to_folded_case()
+        .nfd()
+        .collect()
 }
 
 /// What the file at `path` is on disk, a link itself rather than what it
@@ -2759,6 +2769,34 @@ pub(super) mod tests {
             &root.join("E\u{301}TAT")
         ));
         assert!(!within(&root.join("etat"), &root.join("\u{e9}tat")));
+
+        // Folded in full, as APFS takes names.
+        for (a, b) in [
+            ("\u{17f}tate", "state"),
+            ("stra\u{df}e", "strasse"),
+            ("\u{3b1}\u{3c2}", "\u{3b1}\u{3c3}"),
+            ("\u{fb00}", "ff"),
+            ("\u{212a}elvin", "kelvin"),
+        ] {
+            assert!(within(&root.join(a), &root.join(b)), "{a} {b}");
+        }
+        assert!(!within(&root.join("\u{130}"), &root.join("i")));
+    }
+
+    /// Missing stores spelled in different cases, one under the other's
+    /// spelling, leave the reset to go ahead: only stores that exist nest
+    /// in another as the volume reaches them.
+    #[test]
+    fn missing_stores_spelled_in_another_case_pass_the_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("data");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut config = config_over(&root);
+        config.storage.archive.path = Some(PathBuf::from("x/archive"));
+        config.storage.cache.path = Some(PathBuf::from("X"));
+
+        managed_paths(&config).unwrap();
     }
 
     /// A folder is one place whatever path reaches it: its canonical form

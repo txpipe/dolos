@@ -70,6 +70,7 @@ async-stream = "0.3.5"
 protoc-wkt = "1.0.0"
 indicatif = "0.17.8"
 unicode-normalization = "0.1.25"
+unicase = "2.9"
 comfy-table = { version = "7.1.1", optional = true }
 inquire = { version = "0.9.4", optional = true }
 toml = { version = "0.8.13", optional = true }

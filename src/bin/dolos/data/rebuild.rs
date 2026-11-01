@@ -137,11 +137,12 @@ fn open_store<T>(what: &str, result: Result<T, Error>) -> miette::Result<T> {
 /// either is a configuration this command must not act on. Each path is
 /// compared by what each folder is on disk, as a case-insensitive volume or
 /// a link reaches one folder under more than one spelling, and three ways:
-/// where the OS reaches it, every link on the way followed; with its last
-/// link not followed; and as written, `..` taken out. The wipe would take
-/// what the first finds, and empty the configured path of the other two.
-/// The state and its aside are taken as the wipe moves and removes them, a
-/// link at either itself, not what it points at.
+/// where the OS reaches it, every link on the way followed; each link it
+/// follows on the way, the last included; and as written, `..` taken out.
+/// The wipe would take what the first finds, and empty the configured path
+/// of the other two, or leave it dangling. The state and its aside are taken
+/// as the wipe moves and removes them, a link at either itself, not what it
+/// points at.
 fn check_wipe_scope(config: &RootConfig, state_path: &std::path::Path) -> miette::Result<()> {
     let mut others: Vec<(&str, PathBuf)> = vec![("storage root", config.storage.path.clone())];
 
@@ -163,29 +164,33 @@ fn check_wipe_scope(config: &RootConfig, state_path: &std::path::Path) -> miette
 
     let state_path = super::reset::resolved(state_path).into_diagnostic()?;
     let aside = super::reset::aside(&state_path)?;
-    let reached = |path: &std::path::Path, follow_last| {
-        super::reset::reached(path, follow_last)
+    let reached = |path: &std::path::Path| {
+        super::reset::reached(path, false)
             .into_diagnostic()
             .with_context(|| format!("checking where {} leads", path.display()))
     };
     let wiped = [
-        (reached(&state_path, false)?, &state_path, "the state path"),
+        (reached(&state_path)?, &state_path, "the state path"),
         (
-            reached(&aside, false)?,
+            reached(&aside)?,
             &aside,
             "where the wipe moves the state aside,",
         ),
     ];
 
     for (what, path) in others {
-        let mut ats = vec![reached(&path, true)?, reached(&path, false)?];
+        let (at, mut ats) = super::reset::walk(&path, true)
+            .into_diagnostic()
+            .with_context(|| format!("checking where {} leads", path.display()))?;
+        ats.push(at);
         ats.extend(super::reset::resolved(&path).ok());
 
         for (reached, wiped, how) in &wiped {
             if ats.iter().any(|at| super::reset::within(at, reached)) {
                 bail!(
                     "refusing the in-place wipe: the {what} path {} sits at or under {how} {}; \
-                     wiping the state store would take it too",
+                     wiping the state store would take it too; move it elsewhere in the \
+                     configuration, or rebuild into --target",
                     path.display(),
                     wiped.display(),
                 );
@@ -1134,34 +1139,58 @@ mod tests {
     }
 
     /// A store configured at the state's aside, when the aside is a link,
-    /// or under it, refuses the wipe: the wipe removes the link, leaving
-    /// the configured path empty and the store it pointed at detached.
+    /// or under it, or reaching it through another link or `..` out of one,
+    /// refuses the wipe: the wipe removes the link, leaving the configured
+    /// path empty or dangling and the store it pointed at detached.
     #[cfg(unix)]
     #[test]
     fn a_store_at_a_linked_aside_refuses_the_wipe() {
         type Set = fn(&mut RootConfig);
+        type Links = &'static [(&'static str, &'static str)];
 
-        // The store set at or under the aside, its name in the refusal, and
-        // where the aside link points.
-        let cases: [(Set, &str, &str); 3] = [
+        // The store set at or under the aside, its name in the refusal,
+        // where the aside link points, and other links on the way, each
+        // with the folder it points at.
+        let cases: [(Set, &str, &str, Links); 6] = [
             (
                 |config| config.sync.wal_path = Some(PathBuf::from(".state.reset")),
                 "the wal path",
                 "wal.real",
+                &[],
             ),
             (
                 |config| config.sync.wal_path = Some(PathBuf::from(".state.reset/wal")),
                 "the wal path",
                 "elsewhere",
+                &[],
             ),
             (
                 |config| config.storage.archive.path = Some(PathBuf::from(".state.reset")),
                 "the archive path",
                 "archive.real",
+                &[],
+            ),
+            (
+                |config| config.sync.wal_path = Some(PathBuf::from("alias")),
+                "the wal path",
+                "wal.real",
+                &[("alias", ".state.reset")],
+            ),
+            (
+                |config| config.sync.wal_path = Some(PathBuf::from("alias/wal")),
+                "the wal path",
+                "elsewhere",
+                &[("alias", ".state.reset")],
+            ),
+            (
+                |config| config.sync.wal_path = Some(PathBuf::from("up/../.state.reset")),
+                "the wal path",
+                "wal.real",
+                &[("up", "sub")],
             ),
         ];
 
-        for (set, what, target) in cases {
+        for (set, what, target, links) in cases {
             let dir = tempfile::tempdir().unwrap();
             let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
             config.storage.path = dir.path().join("data");
@@ -1175,6 +1204,11 @@ mod tests {
             std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
             std::fs::write(&kept, b"a store's").unwrap();
             std::os::unix::fs::symlink(root.join(target), root.join(".state.reset")).unwrap();
+
+            for (link, pointed) in links {
+                std::fs::create_dir_all(root.join(pointed)).unwrap();
+                std::os::unix::fs::symlink(root.join(pointed), root.join(link)).unwrap();
+            }
 
             let error = InPlace::prepare(&config, &args(false)).err().unwrap();
             let error = error.to_string();
@@ -1220,22 +1254,36 @@ mod tests {
     }
 
     /// A store that does not exist yet, spelled as the aside in another
-    /// Unicode form, refuses the wipe, as a volume ignoring the form would
-    /// make it there and then remove it.
+    /// Unicode form or in a letter case only full folding matches, refuses
+    /// the wipe, as a volume ignoring both would make it there and then
+    /// remove it.
     #[test]
     fn a_missing_store_spelled_as_the_aside_in_another_form_refuses_the_wipe() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
-        config.storage.path = dir.path().join("data");
-        config.storage.state.path = Some(PathBuf::from("\u{e9}tat"));
-        config.sync.wal_path = Some(PathBuf::from(".e\u{301}tat.reset"));
+        // The state, and the WAL spelled as its aside.
+        let cases = [
+            ("\u{e9}tat", ".e\u{301}tat.reset"),
+            ("state", ".\u{17f}tate.reset"),
+            ("stra\u{df}e", ".strasse.reset"),
+            ("\u{3b1}\u{3c2}", ".\u{3b1}\u{3c3}.reset"),
+        ];
 
-        let state_path = config.storage.state_path().unwrap();
-        std::fs::create_dir_all(&state_path).unwrap();
+        for (state, wal) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+            config.storage.path = dir.path().join("data");
+            config.storage.state.path = Some(PathBuf::from(state));
+            config.sync.wal_path = Some(PathBuf::from(wal));
 
-        let error = check_wipe_scope(&config, &state_path).unwrap_err();
-        let error = error.to_string();
-        assert!(error.contains("wal") && error.contains("aside"), "{error}");
+            let state_path = config.storage.state_path().unwrap();
+            std::fs::create_dir_all(&state_path).unwrap();
+
+            let error = check_wipe_scope(&config, &state_path).unwrap_err();
+            let error = error.to_string();
+            assert!(
+                error.contains("wal") && error.contains("aside"),
+                "{wal}: {error}"
+            );
+        }
     }
 
     /// A link a stopped wipe's aside holds, to the root or to the archive,
