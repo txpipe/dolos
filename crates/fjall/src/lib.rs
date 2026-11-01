@@ -65,6 +65,15 @@ pub enum Error {
     /// A write on a store opened read-only.
     #[error("the store is open read-only")]
     ReadOnly,
+
+    /// A database whose `version` is [`REMOVING_VERSION`]: a removal in
+    /// place stopped part-way through it.
+    #[error(
+        "{} was being removed by `dolos data reset` or `dolos data rebuild`, which stopped \
+         part-way; run that command again",
+        .0.display()
+    )]
+    BeingRemoved(std::path::PathBuf),
 }
 
 impl Error {
@@ -73,6 +82,30 @@ impl Error {
     pub fn is_locked(&self) -> bool {
         matches!(self, Error::Fjall(fjall::Error::Locked))
     }
+}
+
+/// What `dolos data reset` and `dolos data rebuild` put in a database's
+/// `version` file while they remove it in place: no version fjall knows, so
+/// every open of the database fails, with [`Error::BeingRemoved`], until it
+/// is gone.
+pub const REMOVING_VERSION: &[u8] =
+    b"dolos: a reset or rebuild was removing this store; run it again\n";
+
+/// Open the fjall database at `path` with `builder`, naming `database`, the
+/// database `path` mirrors or `path` itself, when a stopped removal left it.
+pub(crate) fn open_database(
+    builder: fjall::DatabaseBuilder<fjall::Database>,
+    path: &std::path::Path,
+    database: impl FnOnce() -> std::path::PathBuf,
+) -> Result<fjall::Database, Error> {
+    builder.open().map_err(|error| match error {
+        fjall::Error::InvalidVersion(_)
+            if std::fs::read(path.join("version")).is_ok_and(|v| v == REMOVING_VERSION) =>
+        {
+            Error::BeingRemoved(database())
+        }
+        error => Error::Fjall(error),
+    })
 }
 
 /// Whether a fjall database lives at `path`: fjall recovers a directory that

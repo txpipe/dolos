@@ -281,7 +281,10 @@ impl ArchiveStore {
         view: Option<Arc<View>>,
     ) -> Result<Self, Error> {
         let tuning = preset.archive();
-        let db = tuning.database.builder(index_path).open()?;
+        let db = crate::open_database(tuning.database.builder(index_path), index_path, || {
+            view.as_ref()
+                .map_or(index_path.to_path_buf(), |view| view.source_of(index_path))
+        })?;
 
         Ok(Self {
             blocks: db.keyspace(keyspace_names::BLOCKS, || tuning.blocks.options())?,

@@ -4,7 +4,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use dolos_core::config::RootConfig;
-use dolos_fjall::view::LockOut;
+use dolos_fjall::{view::LockOut, REMOVING_VERSION};
 use miette::{Context as _, IntoDiagnostic};
 
 use crate::output::ConfirmArgs;
@@ -86,11 +86,6 @@ impl Removal {
 /// whatever keyspace folders are still there, and recovers those.
 const VERSION_FILE: &str = "version";
 
-/// What a removal in place puts in a database's [`VERSION_FILE`]: not a
-/// version fjall knows, so every open refuses the database until it is gone.
-const REMOVING_VERSION: &[u8] =
-    b"dolos: a reset or rebuild was removing this store; run it again\n";
-
 /// Remove the store at `path` while `held` keep the fjall databases in it
 /// locked, so that no part of it is ever left at its path to open as a
 /// store with rows missing, nor to be locked unheld. On Unix the store moves
@@ -111,6 +106,35 @@ pub(super) fn remove_held(path: &Path, held: Vec<LockOut>) -> miette::Result<()>
 
     #[cfg(not(unix))]
     remove_in_place(path, held)
+}
+
+/// Make the store at `path` ready for [`remove_held`] before anything else
+/// changes: what a stopped wipe or reset left at its [`aside`] goes, and for
+/// a `held` store on Unix, which moves there, a folder made and removed at
+/// the aside shows the move can be made.
+pub(super) fn ready_aside(path: &Path, held: bool) -> miette::Result<()> {
+    let aside = aside(path)?;
+
+    remove(&aside)?;
+
+    #[cfg(unix)]
+    if held {
+        std::fs::create_dir(&aside)
+            .and_then(|()| std::fs::remove_dir(&aside))
+            .into_diagnostic()
+            .with_context(|| {
+                format!(
+                    "checking {} can move aside to {} to remove it",
+                    path.display(),
+                    aside.display()
+                )
+            })?;
+    }
+
+    #[cfg(not(unix))]
+    let _ = held;
+
+    Ok(())
 }
 
 /// Move the store at `path` to its [`aside`], then remove it there, with
@@ -209,14 +233,20 @@ fn remove_in_place(path: &Path, held: Vec<LockOut>) -> miette::Result<()> {
 }
 
 /// Replace the fjall version file at `version` with [`REMOVING_VERSION`] in
-/// one rename, so no open of its database succeeds from here on.
+/// one rename, so no open of its database succeeds from here on. The marker
+/// is staged in a file made anew, never through a link found there.
 #[cfg_attr(unix, allow(dead_code))]
 fn refuse_opening(version: &Path) -> miette::Result<()> {
     use std::io::Write as _;
 
     let staged = version.with_file_name(".version.reset");
 
-    let mut file = std::fs::File::create(&staged)
+    gone(std::fs::remove_file(&staged), &staged)?;
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)
         .into_diagnostic()
         .with_context(|| format!("writing {}", staged.display()))?;
     file.write_all(REMOVING_VERSION).into_diagnostic()?;
@@ -579,18 +609,25 @@ fn held_open(path: &Path) -> bool {
         .is_ok_and(|file| matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
 }
 
-/// Each fjall store, and the database a view or a writer of it locks.
+/// Each fjall store, and the database a view or a writer of it locks, where
+/// `..` resolves: written with a last `..`, a store names no folder of its
+/// own to find its views beside. One that cannot resolve is kept as written,
+/// for the checks to refuse.
 fn fjall_databases(config: &RootConfig) -> Vec<(PathBuf, PathBuf)> {
+    let at = |store: PathBuf| resolved(&store).unwrap_or(store);
+
     let state = config
         .storage
         .state_path()
         .map(clean)
+        .map(at)
         .map(|store| (store.clone(), store));
 
     let archive = config
         .storage
         .archive_path()
         .map(clean)
+        .map(at)
         .map(|store| (store.clone(), store.join("index")));
 
     [state, archive].into_iter().flatten().collect()
@@ -616,7 +653,9 @@ fn asides_of(config: &RootConfig) -> std::io::Result<Vec<PathBuf>> {
             continue;
         }
 
-        if let Ok(aside) = aside(path) {
+        // Beside where the path resolves, as the removal moves it: written
+        // with a last `..`, a path names no folder of its own.
+        if let Ok(aside) = aside(&at) {
             if !asides.contains(&aside) {
                 asides.push(aside);
             }
@@ -680,7 +719,9 @@ fn views_beside(store: &Path) -> Vec<PathBuf> {
 /// not an error.
 fn remove(path: &Path) -> miette::Result<()> {
     #[cfg(test)]
-    tests::before_removing(path);
+    if std::fs::symlink_metadata(path).is_ok() {
+        tests::before_removing(path);
+    }
 
     let removed = if path.is_dir() {
         std::fs::remove_dir_all(path)
@@ -832,6 +873,12 @@ pub(super) fn mount_points(paths: &[PathBuf]) -> std::io::Result<Vec<PathBuf>> {
     for path in paths {
         let path = resolved(path)?;
 
+        #[cfg(test)]
+        if tests::taken_for_a_mount_point(&path) {
+            found.push(path);
+            continue;
+        }
+
         let Ok(metadata) = std::fs::symlink_metadata(&path) else {
             continue;
         };
@@ -895,6 +942,21 @@ pub(super) mod tests {
     thread_local! {
         static BEFORE_REMOVING: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static BEFORE_RELEASING: RefCell<Option<Hook>> = const { RefCell::new(None) };
+        static MOUNT_POINTS: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Whether a test has [`mounted`] a filesystem at `path`.
+    pub(super) fn taken_for_a_mount_point(path: &Path) -> bool {
+        MOUNT_POINTS.with_borrow(|mounted| mounted.iter().any(|at| at == path))
+    }
+
+    /// Run `run` with [`mount_points`] taking `mounted` for mount points on
+    /// this thread, as no test can mount one.
+    fn mounted<T>(mounted: Vec<PathBuf>, run: impl FnOnce() -> T) -> T {
+        MOUNT_POINTS.set(mounted);
+        let result = run();
+        MOUNT_POINTS.set(Vec::new());
+        result
     }
 
     /// Called with each path just before it goes, or moves aside.
@@ -1888,9 +1950,9 @@ pub(super) mod tests {
     }
 
     /// Removed in place, a fjall store has its `version` replaced by one
-    /// fjall refuses before anything of it goes, then loses it just before
-    /// its lock file, which goes last, still held. The lock is given with a
-    /// `..`, as the configuration may write it.
+    /// fjall refuses before anything of it goes, then loses it once nothing
+    /// is left but it and its lock file, which goes last, still held. The
+    /// lock is given with a `..`, as the configuration may write it.
     #[test]
     fn in_place_the_version_is_refused_first_and_the_lock_goes_last() {
         let dir = tempfile::tempdir().unwrap();
@@ -1899,6 +1961,12 @@ pub(super) mod tests {
         drop(dolos_fjall::StateStore::open(&index, Default::default()).unwrap());
         std::fs::write(archive.join("000000.segment"), b"a store").unwrap();
 
+        // Beside the version, so that one removed with the rest leaves some
+        // behind it, whatever order the folder lists them in.
+        for file in 0..16 {
+            std::fs::write(index.join(format!("{file:02}.extra")), b"a file").unwrap();
+        }
+
         let lock = dolos_fjall::view::lock_out(&index.join("keyspaces").join(".."))
             .unwrap()
             .unwrap();
@@ -1906,14 +1974,28 @@ pub(super) mod tests {
         let order = std::rc::Rc::new(RefCell::new(Vec::new()));
 
         let hook = {
-            let order = order.clone();
-            let version = index.join(VERSION_FILE);
+            let (order, index) = (order.clone(), index.clone());
+            let (version, lock) = (index.join(VERSION_FILE), index.join("lock"));
 
             move |path: &Path| {
                 held(path);
 
-                if let Ok(written) = std::fs::read(&version) {
-                    assert_eq!(written, REMOVING_VERSION, "at {}", path.display());
+                if path == version {
+                    let left: Vec<_> = std::fs::read_dir(&index)
+                        .unwrap()
+                        .map(|entry| entry.unwrap().path())
+                        .filter(|left| *left != version && *left != lock)
+                        .collect();
+
+                    assert!(left.is_empty(), "the version went before {left:?}");
+                } else if path != lock {
+                    let written = std::fs::read(&version).ok();
+                    assert_eq!(
+                        written.as_deref(),
+                        Some(REMOVING_VERSION),
+                        "at {}",
+                        path.display()
+                    );
                 }
 
                 order.borrow_mut().push(path.to_path_buf());
@@ -2137,6 +2219,71 @@ pub(super) mod tests {
 
         let error = refuse_mount_points(&config).unwrap_err();
         assert!(error.to_string().contains("mount points"), "{error}");
+    }
+
+    /// A store at a mount point refuses the reset before anything goes.
+    #[cfg(unix)]
+    #[test]
+    fn refuses_a_store_at_a_mount_point_before_deleting_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("data");
+        let kept = old_store_under(&root);
+
+        mounted(vec![root.join("archive")], || {
+            assert_refused(&config_over(&root), &kept, "mount points")
+        });
+    }
+
+    /// The marker is staged in a file of its own, not written through a
+    /// link left where it is staged.
+    #[cfg(unix)]
+    #[test]
+    fn the_version_marker_is_written_through_no_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let theirs = dir.path().join("theirs");
+        std::fs::write(&theirs, b"the operator's").unwrap();
+
+        let database = dir.path().join("state");
+        std::fs::create_dir(&database).unwrap();
+        std::fs::write(database.join(VERSION_FILE), b"a version").unwrap();
+        std::os::unix::fs::symlink(&theirs, database.join(".version.reset")).unwrap();
+
+        refuse_opening(&database.join(VERSION_FILE)).unwrap();
+
+        assert_eq!(std::fs::read(&theirs).unwrap(), b"the operator's");
+        assert_eq!(
+            std::fs::read(database.join(VERSION_FILE)).unwrap(),
+            REMOVING_VERSION
+        );
+    }
+
+    /// A state written with a last `..` has its aside beside the folder it
+    /// resolves to: a rerun removes what a stopped reset left there, and a
+    /// store configured there refuses the reset.
+    #[test]
+    fn a_state_written_with_a_last_dot_dot_has_an_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("data");
+        let kept = old_store_under(&root);
+        std::fs::create_dir_all(root.join("state").join("sub")).unwrap();
+
+        let mut config = config_over(&root);
+        config.storage.state.path = Some(PathBuf::from("state/sub/.."));
+
+        let left = root.join(".state.reset").join("version");
+        std::fs::create_dir_all(left.parent().unwrap()).unwrap();
+        std::fs::write(&left, b"a version").unwrap();
+
+        let listed = managed_paths(&config).unwrap().paths;
+        assert!(listed.contains(&root.join(".state.reset")), "{listed:?}");
+
+        let mut at_the_aside = config.clone();
+        at_the_aside.storage.archive.path = Some(PathBuf::from(".state.reset"));
+        assert_refused(&at_the_aside, &kept, "moves another store aside");
+
+        reset(&config).unwrap();
+        assert!(!root.join(".state.reset").exists());
+        assert!(!kept.iter().any(|file| file.exists()));
     }
 
     /// A store that cannot move aside stays where it is, and the reset

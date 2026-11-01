@@ -112,7 +112,10 @@ impl StateStore {
 
     fn open_at(path: &Path, preset: Preset, view: Option<Arc<View>>) -> Result<Self, Error> {
         let tuning = preset.state();
-        let db = tuning.database.builder(path).open()?;
+        let db = crate::open_database(tuning.database.builder(path), path, || {
+            view.as_ref()
+                .map_or(path.to_path_buf(), |view| view.source_of(path))
+        })?;
 
         let store = Self {
             cursor: db.keyspace(keyspace_names::CURSOR, || tuning.cursor.options())?,
@@ -519,6 +522,33 @@ mod tests {
 
         found.sort();
         found
+    }
+
+    /// A store a stopped removal marked refuses every open, its views'
+    /// included, naming the store and the command to run again.
+    #[test]
+    fn a_store_marked_as_being_removed_names_the_rerun() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state");
+        written(&path, 1);
+        std::fs::write(path.join("version"), crate::REMOVING_VERSION).unwrap();
+
+        for opened in [
+            StateStore::open(&path, Preset::Standard).err(),
+            StateStore::open_view(&path, Preset::Standard).err(),
+        ] {
+            let error = opened.expect("a marked store does not open");
+
+            assert!(
+                matches!(&error, Error::BeingRemoved(at) if *at == path),
+                "{error:?}"
+            );
+            assert!(error.to_string().contains("run that command again"));
+        }
+
+        std::fs::write(path.join("version"), b"not a version").unwrap();
+        let error = StateStore::open(&path, Preset::Standard).err().unwrap();
+        assert!(matches!(error, Error::Fjall(_)), "{error:?}");
     }
 
     #[test]

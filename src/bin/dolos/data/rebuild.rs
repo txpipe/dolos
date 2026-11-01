@@ -22,11 +22,15 @@
 //! mode is for bounded replays (`--stop-epoch`) and small chains; a
 //! full-chain validation run on a public network wants `--target` instead.
 //!
-//! The in-place sequence is ordered for crash safety: the WAL is reset to
-//! origin *before* the state store is wiped, and reseeded to the final
-//! cursor only after the replay completes. A crash mid-rebuild therefore
-//! leaves WAL(origin) behind a partial state cursor, which the next startup
-//! refuses loudly (`InconsistentState`); re-running this command recovers.
+//! The in-place sequence is ordered for crash safety: what a stopped wipe
+//! left aside is removed, and the move aside shown possible, while nothing
+//! has changed yet; the WAL is reset to origin *before* the state store is
+//! wiped, and reseeded to the final cursor only after the replay completes.
+//! A crash mid-replay therefore leaves WAL(origin) behind a partial state
+//! cursor, which the next startup refuses loudly (`InconsistentState`); one
+//! during the wipe leaves the state moved aside, so the node starts from
+//! genesis, or, where a store is removed in place, a state every open
+//! refuses as being removed. Re-running this command recovers either.
 //!
 //! An archive whose seals wrote no script or asset entries — one written
 //! before the entity index existed, or by an earlier build that kept the
@@ -126,7 +130,9 @@ fn open_store<T>(what: &str, result: Result<T, Error>) -> miette::Result<T> {
 /// aside to its [`aside`](super::reset::aside), removing what a stopped wipe
 /// left there; so the storage root or any other configured store at or under
 /// either is a configuration this command must not act on. Paths are compared
-/// where `..` resolves, as the OS reaches each.
+/// where `..` resolves, as the OS reaches each, and, for those that exist, by
+/// what they are on disk: a case-insensitive volume, or a link, reaches one
+/// folder under more than one spelling.
 fn check_wipe_scope(config: &RootConfig, state_path: &std::path::Path) -> miette::Result<()> {
     let mut others: Vec<(&str, PathBuf)> = vec![("storage root", config.storage.path.clone())];
 
@@ -156,7 +162,7 @@ fn check_wipe_scope(config: &RootConfig, state_path: &std::path::Path) -> miette
             (&state_path, "the state path"),
             (&aside, "where the wipe moves the state aside,"),
         ] {
-            if at.starts_with(wiped) {
+            if at.starts_with(wiped) || reached_within(&at, wiped) {
                 bail!(
                     "refusing the in-place wipe: the {what} path {} sits at or under {how} {}; \
                      wiping the state store would take it too",
@@ -168,6 +174,34 @@ fn check_wipe_scope(config: &RootConfig, state_path: &std::path::Path) -> miette
     }
 
     Ok(())
+}
+
+/// Whether `path`, or a folder it sits in, is the existing folder `wiped`
+/// under another spelling.
+fn reached_within(path: &std::path::Path, wiped: &std::path::Path) -> bool {
+    let Some(wiped) = identity(wiped) else {
+        return false;
+    };
+
+    path.ancestors()
+        .any(|ancestor| identity(ancestor).as_ref() == Some(&wiped))
+}
+
+/// What the file at `path` is on disk, links followed, if it exists.
+#[cfg(unix)]
+fn identity(path: &std::path::Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    std::fs::metadata(path)
+        .ok()
+        .map(|metadata| (metadata.dev(), metadata.ino()))
+}
+
+/// What the file at `path` is on disk, links followed, if it exists: the
+/// path the volume keeps it at, in the letter case it was made with.
+#[cfg(not(unix))]
+fn identity(path: &std::path::Path) -> Option<PathBuf> {
+    std::fs::canonicalize(path).ok()
 }
 
 /// What an in-place rebuild rewrites, for its `--yes` refusal.
@@ -299,25 +333,21 @@ impl InPlace {
         Ok(Self { state_path, lock })
     }
 
-    /// Reset the WAL to origin, then wipe the state store, still held.
+    /// Remove what a stopped wipe left aside, then reset the WAL to origin
+    /// and wipe the state store, still held.
     fn wipe(
         self,
         config: &RootConfig,
     ) -> miette::Result<WalStoreBackend<dolos_cardano::CardanoDelta>> {
+        // Before the WAL moves, so that a failure here leaves the stores as
+        // they were.
+        super::reset::ready_aside(&self.state_path, self.lock.is_some())?;
+
         let wal = open_store("wal", crate::common::open_wal_store(config))?;
 
         wal.reset_to(&ChainPoint::Origin)
             .into_diagnostic()
             .context("resetting the WAL to origin")?;
-
-        // A held store moves aside, removing what is there first; one gone
-        // already leaves that to this.
-        if self.lock.is_none() {
-            if let Some(left) = left_aside(&self.state_path) {
-                super::reset::remove_held(&left, Vec::new())
-                    .with_context(|| format!("removing {}", left.display()))?;
-            }
-        }
 
         super::reset::remove_held(&self.state_path, self.lock.into_iter().collect())
             .with_context(|| format!("wiping the state store at {}", self.state_path.display()))?;
@@ -1011,6 +1041,138 @@ mod tests {
         drop(in_place.wipe(&config).unwrap());
 
         assert!(!left.exists());
+    }
+
+    /// Whether the volume holding `dir` takes names in any letter case.
+    fn case_insensitive(dir: &std::path::Path) -> bool {
+        std::fs::create_dir_all(dir.join("probe")).unwrap();
+        let insensitive = dir.join("PROBE").exists();
+        std::fs::remove_dir(dir.join("probe")).unwrap();
+        insensitive
+    }
+
+    /// On a case-insensitive volume, a store, or the root, spelled in
+    /// another case than the state or its aside refuses the wipe, as it
+    /// does spelled alike.
+    #[test]
+    fn a_store_spelled_in_another_case_refuses_the_wipe() {
+        type Set = fn(&mut RootConfig, &std::path::Path);
+
+        let cases: [(Set, &str); 4] = [
+            (
+                |config, _| config.storage.archive.path = Some(PathBuf::from(".STATE.reset")),
+                "archive",
+            ),
+            (
+                |config, dir| {
+                    config.storage.path = dir.join("srv").join(".STATE.reset");
+                    config.storage.state.path = Some(dir.join("srv").join("state"));
+                },
+                "storage root",
+            ),
+            (
+                |config, _| config.storage.archive.path = Some(PathBuf::from("STATE")),
+                "archive",
+            ),
+            (
+                |config, dir| config.storage.state.path = Some(dir.join("DATA")),
+                "storage root",
+            ),
+        ];
+
+        for (set, what) in cases {
+            let dir = tempfile::tempdir().unwrap();
+
+            if !case_insensitive(dir.path()) {
+                return;
+            }
+
+            let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+            config.storage.path = dir.path().join("data");
+            set(&mut config, dir.path());
+
+            let state_path = config.storage.state_path().unwrap();
+            std::fs::create_dir_all(&state_path).unwrap();
+            for path in [
+                config.storage.path.clone(),
+                config.storage.archive_path().unwrap(),
+            ] {
+                std::fs::create_dir_all(path).unwrap();
+            }
+
+            let error = check_wipe_scope(&config, &state_path).unwrap_err();
+            assert!(error.to_string().contains(what), "{what}: {error}");
+        }
+    }
+
+    /// A store reached through a link into the state refuses the wipe,
+    /// which would take what it points at.
+    #[cfg(unix)]
+    #[test]
+    fn a_store_linked_into_the_state_refuses_the_wipe() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = dir.path().join("data");
+        config.storage.archive.path = Some(PathBuf::from("alias/archive"));
+
+        let state_path = config.storage.state_path().unwrap();
+        std::fs::create_dir_all(state_path.join("archive")).unwrap();
+        std::os::unix::fs::symlink(&state_path, config.storage.path.join("alias")).unwrap();
+
+        let error = check_wipe_scope(&config, &state_path).unwrap_err();
+        assert!(error.to_string().contains("archive"), "{error}");
+    }
+
+    /// A wipe that cannot clear the state's aside, or move the state there,
+    /// stops before the WAL is touched, leaving the stores as they were.
+    #[cfg(unix)]
+    #[test]
+    fn a_wipe_that_cannot_move_the_state_aside_leaves_the_wal() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        for sealed_aside in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+            config.storage.path = dir.path().join("data");
+            config.storage.state.path = Some(PathBuf::from("sealed/state"));
+
+            let state = config.storage.state_path().unwrap();
+            drop(dolos_fjall::StateStore::open(&state, Default::default()).unwrap());
+
+            let sealed = if sealed_aside {
+                let folder = config.storage.path.join("sealed/.state.reset/keyspaces");
+                std::fs::create_dir_all(&folder).unwrap();
+                std::fs::write(folder.join("000001.sst"), b"a table").unwrap();
+                folder
+            } else {
+                config.storage.path.join("sealed")
+            };
+
+            let set = |mode| {
+                std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(mode)).unwrap()
+            };
+            set(0o555);
+
+            // Whoever ignores permissions, as root does, can move it anyway.
+            if std::fs::write(sealed.join("probe"), b"").is_ok() {
+                set(0o755);
+                return;
+            }
+
+            let in_place = InPlace::prepare(&config, &args(false)).unwrap();
+            let result = in_place.wipe(&config).map(drop);
+            set(0o755);
+
+            assert!(result.is_err(), "sealed aside {sealed_aside}");
+            assert!(
+                !config.wal_path().unwrap().exists(),
+                "sealed aside {sealed_aside}"
+            );
+            assert!(
+                dolos_fjall::database_exists(&state),
+                "sealed aside {sealed_aside}"
+            );
+        }
     }
 
     /// A state written with `..` through a missing folder to a link refuses
