@@ -255,7 +255,7 @@ fn restore(domain: &ToyDomain, utxos: dolos_core::UtxoMap) {
     writer.commit().unwrap();
 }
 
-/// `dolos doctor reclaim-avvm`'s repair, against the shape it exists for: a
+/// The library repair, against the shape it exists for: a
 /// store that crossed the boundary under a pre-fix binary, so the pots are
 /// already right and the rows are still there. It deletes exactly the
 /// unredeemed refs, leaves the pots alone, and the second run has nothing
