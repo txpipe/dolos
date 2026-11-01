@@ -158,6 +158,7 @@ The project follows a modular workspace architecture with clear separation of co
   - `ToyDomain`: Minimal in-memory `Domain` implementation for testing
   - Test data generation (fake UTxOs, blocks, deltas)
   - Test address utilities
+  - `peer::PeerFixture`: a node-to-node peer serving a synthetic chain over chain-sync and block-fetch, whose tip can keep advancing and which can stop mid-run, for syncing a node under test without a relay
 - **Role**: Development and testing support
 
 #### `xtask` (Development Automation)

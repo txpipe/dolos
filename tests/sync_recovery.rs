@@ -1019,6 +1019,147 @@ fn a_dump_is_bounded_unless_told_otherwise() {
     assert_eq!(table_rows(&stdout(&output)), (entries, 2));
 }
 
+/// The long options a command's `--help` lists, in order.
+fn listed_options(help: &str) -> Vec<&str> {
+    help.lines()
+        .skip_while(|line| !line.starts_with("Options:"))
+        .skip(1)
+        .filter(|line| line.trim_start().starts_with('-'))
+        .filter_map(|line| line.split_whitespace().find(|word| word.starts_with("--")))
+        .collect()
+}
+
+#[test]
+fn catchup_takes_only_follow_and_stop_epoch_and_daemon_no_stop_flag() {
+    let node = Node::new();
+
+    let output = node.run(&["sync", "catchup", "--help"]);
+    assert_eq!(code(&output), Some(0));
+    assert_eq!(
+        listed_options(&stdout(&output)),
+        ["--follow", "--stop-epoch", "--config", "--help"],
+        "{}",
+        stdout(&output)
+    );
+
+    let output = node.run(&["daemon", "--help"]);
+    assert_eq!(code(&output), Some(0));
+    assert_eq!(
+        listed_options(&stdout(&output)),
+        ["--config", "--help"],
+        "{}",
+        stdout(&output)
+    );
+
+    for removed in [
+        &["daemon", "--stop-epoch", "1"][..],
+        &["daemon", "--until-tip"],
+        &["daemon", "--max-blocks", "1"],
+        &["sync", "catchup", "--until-tip"],
+    ] {
+        let output = node.run(removed);
+        assert_eq!(code(&output), Some(2), "{removed:?}");
+    }
+}
+
+/// A node whose upstream is an emulator.
+fn emulator_node() -> Node {
+    let node = Node::new();
+    node.write_chain(&node.custom_chain(2, Vec::new()));
+
+    let config_path = node.config_path();
+    let mut document: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    document["upstream"] =
+        toml::from_str("type = \"emulator\"\nblock_production_interval = 1").unwrap();
+    std::fs::write(&config_path, toml::to_string(&document).unwrap()).unwrap();
+
+    node
+}
+
+/// An emulator produces the chain itself: there is no upstream tip to catch
+/// up to, so only `--follow` or a stop epoch syncs from one.
+#[test]
+fn catchup_refuses_an_emulator_upstream_without_follow() {
+    let node = emulator_node();
+
+    let output = node.run(&["sync", "catchup"]);
+    assert_eq!(code(&output), Some(2), "{}", stderr_words(&output));
+    assert!(
+        stderr_words(&output).contains("an emulator upstream has no tip to catch up to"),
+        "{}",
+        stderr_words(&output)
+    );
+    assert!(
+        !node.root.path().join("data").exists(),
+        "the refusal opened the stores"
+    );
+}
+
+/// Shorten the emulator node's epochs to `slots`, with a security parameter
+/// and an active slot coefficient whose stability windows fit in one.
+fn shorten_epochs(node: &Node, slots: u64) {
+    let edit = |file: &str, change: &dyn Fn(&mut serde_json::Value)| {
+        let path = node.root.path().join(file);
+        let mut genesis = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        change(&mut genesis);
+        std::fs::write(&path, serde_json::to_string(&genesis).unwrap()).unwrap();
+    };
+
+    edit("shelley.json", &|genesis| {
+        genesis["epochLength"] = slots.into();
+        genesis["securityParam"] = 1.into();
+        genesis["activeSlotsCoeff"] = 0.5.into();
+    });
+
+    edit("byron.json", &|genesis| {
+        genesis["protocolConsts"]["k"] = 1.into();
+    });
+}
+
+/// With a stop epoch, `sync catchup` syncs from an emulator until the ledger
+/// reaches it, and exits 0: the emulator is not refused, and its run has no
+/// catch-up target to wait for.
+#[test]
+#[cfg_attr(
+    feature = "debug",
+    ignore = "the debug feature's console subscriber panics a sync built without tokio_unstable"
+)]
+fn catchup_syncs_from_an_emulator_to_a_stop_epoch() {
+    let node = emulator_node();
+    shorten_epochs(&node, 10);
+
+    let log = node.root.path().join("catchup.log");
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_dolos"))
+        .arg("--config")
+        .arg(node.config_path())
+        .args(["sync", "catchup", "--stop-epoch", "1"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&log).unwrap())
+        .spawn()
+        .unwrap();
+
+    // One block a second, ten slots an epoch.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("{}", std::fs::read_to_string(&log).unwrap());
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+
+    let log = std::fs::read_to_string(&log).unwrap();
+    assert!(status.success(), "{status}: {log}");
+    assert!(!log.contains("target:"), "{log}");
+}
+
 /// The commands under `dolos sync --help`.
 fn listed_commands(help: &str) -> Vec<&str> {
     help.lines()
