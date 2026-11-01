@@ -21,7 +21,6 @@ use dolos::core::Genesis;
 use dolos::engine::{DomainBuildError, DomainBuilder};
 use dolos::prelude::*;
 use dolos::storage;
-use dolos::sync::SyncLimit;
 
 pub type Stores = storage::Stores<dolos_cardano::CardanoDelta>;
 
@@ -34,10 +33,6 @@ pub fn open_wal_store(
     config: &RootConfig,
 ) -> Result<storage::WalStoreBackend<dolos_cardano::CardanoDelta>, Error> {
     storage::open_wal_store(config)
-}
-
-pub fn open_archive_store(config: &RootConfig) -> Result<storage::ArchiveStoreBackend, Error> {
-    storage::open_archive_store(config)
 }
 
 pub fn open_state_store(config: &RootConfig) -> Result<storage::StateStoreBackend, Error> {
@@ -122,33 +117,6 @@ pub fn open_genesis(config: &RootConfig) -> miette::Result<Genesis> {
         .genesis()
         .into_diagnostic()
         .context("loading genesis")
-}
-
-/// When `daemon` stops.
-#[derive(Debug, Clone, Default, clap::Args)]
-pub struct StopArgs {
-    /// Stop once the ledger reaches this epoch, on its first block: the only
-    /// state a Stelae snapshot of that epoch is cut from
-    #[arg(long, value_name = "N")]
-    pub stop_epoch: Option<u64>,
-
-    /// Stop pulling once the upstream tip is reached
-    #[arg(long, conflicts_with = "max_blocks")]
-    pub until_tip: bool,
-
-    /// Stop pulling after this many blocks
-    #[arg(long, value_name = "N")]
-    pub max_blocks: Option<u64>,
-}
-
-impl StopArgs {
-    pub fn sync_limit(&self) -> SyncLimit {
-        match (self.until_tip, self.max_blocks) {
-            (true, _) => SyncLimit::UntilTip,
-            (false, Some(blocks)) => SyncLimit::MaxBlocks(blocks),
-            (false, None) => SyncLimit::NoLimit,
-        }
-    }
 }
 
 pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
@@ -368,27 +336,88 @@ pub fn hook_exit_token() -> CancellationToken {
     cancel
 }
 
-pub async fn run_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationToken) {
-    loop {
+/// Run the pipeline until it ends or `exit` is cancelled, then tear it down.
+/// Returns the stages that ended on their own when one did, which is a
+/// failure: `exit` is then cancelled, so the rest of the process winds down.
+pub async fn run_pipeline(
+    pipeline: gasket::daemon::Daemon,
+    exit: CancellationToken,
+) -> Option<Vec<String>> {
+    let ended = loop {
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(5)) => {
-                if pipeline.should_stop() {
-                    debug!("pipeline should stop");
-
-                    // trigger cancel so that stages stop early
+                if pipeline.has_ended() {
+                    warn!("the sync pipeline ended");
                     exit.cancel();
-                    break;
+                    break Some(ended_stages(&pipeline));
+                }
+
+                if pipeline.is_terminated() {
+                    debug!("termination requested");
+                    exit.cancel();
+                    break None;
                 }
             }
             _ = exit.cancelled() => {
                 debug!("exit requested");
-                break;
+                break None;
             }
         }
-    }
+    };
 
     debug!("shutting down pipeline");
     pipeline.teardown();
+
+    ended
+}
+
+/// The names of the pipeline's stages that have ended.
+pub fn ended_stages(pipeline: &gasket::daemon::Daemon) -> Vec<String> {
+    use gasket::runtime::{StagePhase, TetherState};
+
+    pipeline
+        .tethers()
+        .filter(|tether| {
+            !matches!(tether.check_state(), TetherState::Alive(phase) if phase != StagePhase::Ended)
+        })
+        .map(|tether| tether.name().to_string())
+        .collect()
+}
+
+/// The error for a sync whose pipeline ended on its own, said after `what`:
+/// why a stage gave up on the upstream peer, or else which stages stopped.
+pub fn sync_failure(
+    what: &str,
+    failure: Option<&dolos::sync::UpstreamFailure>,
+    ended: &[String],
+) -> miette::Report {
+    match failure {
+        Some(failure) if failure.refused => miette::miette!(
+            help = "a peer refuses the handshake of a node on another network, or of one \
+                    with no protocol version in common: check that `upstream.peer_address` \
+                    serves the configured chain",
+            "{what}: {failure}"
+        ),
+        Some(failure) => miette::miette!(
+            help = "`[sync.retry]` sets how many failed attempts in a row are retried, \
+                    and the backoff between them",
+            "{what}: {failure}"
+        ),
+        None => miette::miette!(
+            help = "the log above says why",
+            "{what}: {}",
+            stopped(ended)
+        ),
+    }
+}
+
+/// `the pull stage stopped`, `the pull and apply stages stopped`.
+fn stopped(stages: &[String]) -> String {
+    match stages {
+        [] => "the pipeline stopped".into(),
+        [stage] => format!("the {stage} stage stopped"),
+        [init @ .., last] => format!("the {} and {last} stages stopped", init.join(", ")),
+    }
 }
 
 /// Drains the serving drivers, cancelling the rest once any one of them fails.
@@ -457,6 +486,37 @@ mod tests {
             ..Default::default()
         };
         assert!(log_filter(&config).is_err());
+    }
+
+    #[test]
+    fn a_sync_failure_points_at_what_to_check() {
+        use dolos::sync::UpstreamFailure;
+
+        let failure = |refused| UpstreamFailure {
+            message: "the pull stage gave up on the upstream peer".into(),
+            refused,
+        };
+
+        let help = |failure: Option<&UpstreamFailure>| {
+            let report = sync_failure("the sync stopped", failure, &["pull".into()]);
+            let help = report.help().map(|help| help.to_string());
+            (report.to_string(), help.unwrap_or_default())
+        };
+
+        let (message, refused) = help(Some(&failure(true)));
+        assert_eq!(
+            message,
+            "the sync stopped: the pull stage gave up on the upstream peer"
+        );
+        assert!(refused.contains("another network"), "{refused}");
+        assert!(!refused.contains("[sync.retry]"), "{refused}");
+
+        let (_, retried) = help(Some(&failure(false)));
+        assert!(retried.starts_with("`[sync.retry]`"), "{retried}");
+
+        let (message, stopped) = help(None);
+        assert_eq!(message, "the sync stopped: the pull stage stopped");
+        assert_eq!(stopped, "the log above says why");
     }
 
     #[tokio::test]

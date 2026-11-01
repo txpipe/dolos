@@ -25,6 +25,7 @@ pub mod blocks;
 pub mod cip151;
 pub mod faults;
 pub mod measured;
+pub mod peer;
 pub mod performance;
 pub mod synthetic;
 

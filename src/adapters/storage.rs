@@ -344,7 +344,7 @@ pub fn resolve_parent_dirs(path: &Path) -> std::io::Result<PathBuf> {
 
 /// `path` made absolute with `..` resolved lexically. Only a relative path
 /// reads the working directory, so absolute ones survive a deleted one.
-fn normalize(path: &Path) -> std::io::Result<PathBuf> {
+pub fn normalize(path: &Path) -> std::io::Result<PathBuf> {
     let mut normalized = PathBuf::new();
 
     for component in std::path::absolute(path)?.components() {
@@ -964,18 +964,7 @@ where
 
     let state = existing_state(config, access)?;
 
-    let archive = if !config.keeps_archive() {
-        ArchiveStoreBackend::noop()
-    } else {
-        let path = config.storage.archive_path().unwrap_or_default();
-
-        if matches!(config.storage.archive.kind, StoreType::Fjall { .. }) {
-            fjall_existing(&path.join("index"))?;
-            existing(&config.storage.blocks_path().unwrap_or_else(|| path.clone()))?;
-        }
-
-        open_archive_at(config, &path, access)?
-    };
+    let archive = existing_archive(config, access)?;
 
     Ok(Stores {
         wal,
@@ -985,10 +974,20 @@ where
     })
 }
 
-/// The state store alone of a dataset that is already there, opened as
-/// [`open_existing_stores`] opens it. A command that touches only the state
-/// leaves the WAL, the archive and the mempool closed, so a writable open
-/// cannot migrate or wipe them.
+/// The archive alone, opened as [`open_existing_stores`] opens it: never
+/// created, a no-op one when `history.mode` is `none`.
+pub fn open_existing_archive(
+    config: &RootConfig,
+    access: Access,
+) -> Result<ArchiveStoreBackend, OpenError> {
+    existing(&config.storage.path)?;
+    existing_archive(config, access)
+}
+
+/// The state alone, opened as [`open_existing_stores`] opens it: never
+/// created. A command that touches only the state leaves the WAL, the
+/// archive and the mempool closed, so a writable open cannot migrate or wipe
+/// them.
 pub fn open_existing_state(
     config: &RootConfig,
     access: Access,
@@ -1005,6 +1004,21 @@ fn existing_state(config: &RootConfig, access: Access) -> Result<StateStoreBacke
     }
 
     Ok(open_state_at(config, &path, access)?)
+}
+
+fn existing_archive(config: &RootConfig, access: Access) -> Result<ArchiveStoreBackend, OpenError> {
+    if !config.keeps_archive() {
+        return Ok(ArchiveStoreBackend::noop());
+    }
+
+    let path = config.storage.archive_path().unwrap_or_default();
+
+    if matches!(config.storage.archive.kind, StoreType::Fjall { .. }) {
+        fjall_existing(&path.join("index"))?;
+        existing(&config.storage.blocks_path().unwrap_or_else(|| path.clone()))?;
+    }
+
+    Ok(open_archive_at(config, &path, access)?)
 }
 
 /// [`redb_opened`], with an observing open refused for want of a repair,
@@ -1718,7 +1732,7 @@ pub enum ArchiveStoreBackend {
     /// appends and undos are discarded.
     ///
     /// This exists for replays over an archive that already holds the chain
-    /// (`dolos doctor rebuild-state --rewrite-logs`): block appends are not
+    /// (`dolos data rebuild --rewrite-logs`): block appends are not
     /// idempotent — replaying them would double every shared segment file,
     /// whichever backend owns the index — while boundary log keys are
     /// slot-derived and identical under replay, so re-written log rows
@@ -1736,7 +1750,7 @@ pub enum ArchiveStoreBackend {
     /// as in [`Self::NoOp`].
     ///
     /// This exists for replays into a fresh state over an archive that holds
-    /// the chain (`dolos doctor rebuild-state` without `--rewrite-logs`): the
+    /// the chain (`dolos data rebuild` without `--rewrite-logs`): the
     /// roll tells a script's first sighting from a repeat by the entity index
     /// below its batch, which only the source archive holds, while the seal
     /// must not read the logs the source sealed.
@@ -2823,7 +2837,7 @@ mod tests {
         for remedy in [
             "dolos bootstrap stelae --force",
             "dolos bootstrap immutabledb --source <db> --force",
-            "dolos data cleanup --force",
+            "dolos data reset --yes",
         ] {
             assert!(message.contains(remedy), "{message}");
         }

@@ -11,7 +11,8 @@ use pallas::network::miniprotocols::chainsync::{HeaderContent, NextResponse, Tip
 use pallas::network::miniprotocols::Point;
 use tracing::{debug, info, warn};
 
-use super::SyncLimit;
+use super::retry::{Attempts, Failure};
+use super::{SyncLimit, SyncProgress};
 use crate::adapters::WalAdapter;
 use crate::prelude::*;
 
@@ -41,63 +42,46 @@ pub enum WorkUnit {
     Await,
 }
 
-pub enum PullQuota {
-    WaitingTip,
-    Unlimited,
-    BlockQuota(u64),
-    Reached,
-}
-
-impl PullQuota {
-    fn should_quit(&self) -> bool {
-        matches!(self, Self::Reached)
-    }
-
-    fn on_tip(&mut self) {
-        if let Self::WaitingTip = self {
-            *self = Self::Reached;
-        }
-    }
-
-    fn consume_blocks(&mut self, count: u64) {
-        if let Self::BlockQuota(x) = self {
-            let new = x.saturating_sub(count);
-
-            if new == 0 {
-                *self = Self::Reached;
-            } else {
-                *self = Self::BlockQuota(new);
-            }
-        }
-    }
-}
-
-impl From<SyncLimit> for PullQuota {
-    fn from(limit: SyncLimit) -> Self {
-        match limit {
-            SyncLimit::UntilTip => Self::WaitingTip,
-            SyncLimit::NoLimit => Self::Unlimited,
-            SyncLimit::MaxBlocks(blocks) => Self::BlockQuota(blocks),
-        }
-    }
-}
-
 pub struct Worker {
     peer_session: PeerClient,
     chain: ChainFragment,
+    /// The tip the peer reported last.
+    tip: ChainPoint,
+    /// Whether this session delivered something: a block, or the tip.
+    /// Headers alone are not enough: a peer whose chain grows sends new ones
+    /// to every session, and may never serve their blocks.
+    delivered: bool,
+    /// Why this session failed, once it has.
+    lost: Option<Failure>,
 }
 
 impl Worker {
+    /// Note why the session failed, for the stage to reconnect or give up.
+    fn lose(&mut self, what: &str, error: &(dyn std::error::Error + 'static)) -> WorkerError {
+        self.lost = Some(Failure::new(what, error));
+        WorkerError::Restart
+    }
+
+    /// The session delivered something: the failed attempts start again,
+    /// the submit stage's too.
+    fn deliver(&mut self, stage: &Stage) {
+        self.delivered = true;
+        stage.attempts.reset();
+        stage.progress.note_delivery();
+    }
+
     /// Receive the next chainsync response, using the appropriate method
     /// depending on whether we have agency (catching up) or not (at the tip).
     async fn recv_next_header(&mut self) -> Result<NextResponse<HeaderContent>, WorkerError> {
         let client = self.peer_session.chainsync();
 
-        if client.has_agency() {
-            client.request_next().await.or_restart()
+        let next = if client.has_agency() {
+            client.request_next().await
         } else {
-            client.recv_while_must_reply().await.or_restart()
-        }
+            client.recv_while_must_reply().await
+        };
+
+        next.map_err(|error| self.lose("chain-sync failed", &error))
     }
 
     /// Gather up to `max_headers` headers from the upstream peer.
@@ -124,20 +108,21 @@ impl Worker {
                     let point = ChainPoint::Specific(header.slot(), header.hash());
                     let prev_hash = header.previous_hash();
 
-                    self.chain
-                        .roll_forward(point.clone(), prev_hash)
-                        .map_err(|err| {
-                            warn!(%err, "consensus error, reconnecting");
-                            WorkerError::Restart
-                        })?;
+                    if let Err(error) = self.chain.roll_forward(point.clone(), prev_hash) {
+                        return Err(
+                            self.lose("the upstream sent a header that does not chain", &error)
+                        );
+                    }
 
                     debug!(%point, "header received from upstream peer");
                     gathered += 1;
 
-                    stage.track_tip(&tip);
+                    self.track_tip(&tip, stage);
                 }
                 NextResponse::RollBackward(point, tip) => {
                     debug!(?point, "rollback sent by upstream peer");
+
+                    self.track_tip(&tip, stage);
 
                     let chain_point = ChainPoint::from(point);
 
@@ -147,8 +132,6 @@ impl Worker {
                         }
                         RollbackResult::Handled => (),
                     }
-
-                    stage.track_tip(&tip);
                 }
                 NextResponse::Await => break,
             }
@@ -173,58 +156,67 @@ impl Worker {
             Point::try_from(cp.clone()).expect("pending points are always Specific")
         };
 
-        let blocks = match points {
-            [single] => {
-                let block = self
-                    .peer_session
-                    .blockfetch()
-                    .fetch_single(to_pallas(single))
-                    .await
-                    .or_restart()?;
-
-                vec![block]
-            }
-            [first, .., last] => self
+        let fetched = match points {
+            [single] => self
                 .peer_session
                 .blockfetch()
-                .fetch_range((to_pallas(first), to_pallas(last)))
+                .fetch_single(to_pallas(single))
                 .await
-                .or_restart()?,
+                .map(|block| vec![block]),
+            [first, .., last] => {
+                self.peer_session
+                    .blockfetch()
+                    .fetch_range((to_pallas(first), to_pallas(last)))
+                    .await
+            }
             [] => return Ok(()),
         };
 
+        let blocks = fetched.map_err(|error| self.lose("block-fetch failed", &error))?;
+
         debug!(len = blocks.len(), "block batch pulled from peer");
 
-        stage.quota.consume_blocks(blocks.len() as u64);
         stage.flush_blocks(blocks).await?;
+        self.deliver(stage);
 
         Ok(())
     }
-}
 
-#[async_trait::async_trait(?Send)]
-impl gasket::framework::Worker<Stage> for Worker {
-    async fn bootstrap(stage: &Stage) -> Result<Self, WorkerError> {
-        debug!("finding intersection candidates");
+    async fn pull(&mut self, unit: &WorkUnit, stage: &mut Stage) -> Result<(), WorkerError> {
+        let max_headers = match unit {
+            WorkUnit::Pull => stage.block_fetch_batch_size,
+            WorkUnit::Await => 1,
+        };
 
-        let mut candidates = stage
-            .wal
-            .intersect_candidates(5)
-            .or_panic()?
-            .into_iter()
-            .map(TryFrom::try_from)
-            .filter_map(|x| x.ok())
-            .collect_vec();
-
-        if candidates.is_empty() {
-            candidates.push(Point::Origin);
+        match self.pull_headers(max_headers, stage).await? {
+            PullResult::Blocks(points) => self.fetch_and_flush(&points, stage).await?,
+            PullResult::Rollback(point) => stage.flush_rollback(point).await?,
+            PullResult::Empty => (),
         }
 
+        if !self.peer_session.chainsync().has_agency() {
+            self.deliver(stage);
+
+            if stage.progress.fix_target(self.tip.clone()) {
+                info!(tip = %self.tip, "reached the upstream tip, the catch-up target");
+            }
+        }
+
+        Ok(())
+    }
+
+    fn track_tip(&mut self, tip: &Tip, stage: &Stage) {
+        self.tip = ChainPoint::from(tip.0.clone());
+        stage.chain_tip.set(tip.0.slot_or_default() as i64);
+    }
+
+    /// Connect to the peer and find the intersection: one attempt.
+    async fn open(stage: &Stage, candidates: Vec<Point>) -> Result<Self, Failure> {
         debug!("connecting to peer");
 
         let mut peer_session = PeerClient::connect(&stage.peer_address, stage.network_magic)
             .await
-            .or_retry()?;
+            .map_err(|error| Failure::connecting(&error))?;
 
         info!(
             address = stage.peer_address,
@@ -234,30 +226,59 @@ impl gasket::framework::Worker<Stage> for Worker {
 
         debug!("finding intersect");
 
-        let (point, _) = peer_session
-            .chainsync()
-            .find_intersect(candidates)
-            .await
-            .or_restart()?;
+        let found = peer_session.chainsync().find_intersect(candidates).await;
 
-        let intersection = point
-            .ok_or(Error::message("couldn't find intersect"))
-            .or_panic()?;
+        let (point, tip) = match found {
+            Ok(found) => found,
+            Err(error) => {
+                peer_session.abort().await;
+                return Err(Failure::new("finding the intersection", &error));
+            }
+        };
+
+        let tip = ChainPoint::from(tip.0);
+
+        let Some(intersection) = point else {
+            peer_session.abort().await;
+
+            return Err(Failure::message(format!(
+                "finding the intersection: the peer, at {tip}, holds none of the WAL's recent points"
+            )));
+        };
 
         info!(?intersection, "found intersection");
 
-        let worker = Self {
+        Ok(Self {
             peer_session,
             chain: ChainFragment::start(ChainPoint::from(intersection)),
-        };
+            tip,
+            delivered: false,
+            lost: None,
+        })
+    }
+}
 
-        Ok(worker)
+#[async_trait::async_trait(?Send)]
+impl gasket::framework::Worker<Stage> for Worker {
+    /// Retried here rather than by gasket, so that a failed connection or
+    /// intersection waits the backoff of its place in the count.
+    async fn bootstrap(stage: &Stage) -> Result<Self, WorkerError> {
+        loop {
+            let candidates = stage.intersect_candidates()?;
+
+            match Self::open(stage, candidates).await {
+                Ok(worker) => return Ok(worker),
+                Err(failure) => stage.attempts.failed(failure).await?,
+            }
+        }
     }
 
     async fn schedule(&mut self, stage: &mut Stage) -> Result<WorkSchedule<WorkUnit>, WorkerError> {
-        if stage.quota.should_quit() {
-            warn!("quota reached, stopping sync");
-            return Ok(WorkSchedule::Done);
+        if stage.limit == SyncLimit::CatchUp && stage.progress.target().is_some() {
+            // Nothing past the target is pulled. The apply stage ends the
+            // pipeline once it commits the target; until then this stage
+            // waits, so that its end is never taken for the pipeline's.
+            std::future::pending::<()>().await;
         }
 
         let client = self.peer_session.chainsync();
@@ -272,22 +293,26 @@ impl gasket::framework::Worker<Stage> for Worker {
     }
 
     async fn execute(&mut self, unit: &WorkUnit, stage: &mut Stage) -> Result<(), WorkerError> {
-        let max_headers = match unit {
-            WorkUnit::Pull => stage.block_fetch_batch_size,
-            WorkUnit::Await => 1,
+        let result = self.pull(unit, stage).await;
+
+        let Err(WorkerError::Restart) = result else {
+            return result;
         };
 
-        match self.pull_headers(max_headers, stage).await? {
-            PullResult::Blocks(points) => self.fetch_and_flush(&points, stage).await?,
-            PullResult::Rollback(point) => stage.flush_rollback(point).await?,
-            PullResult::Empty => (),
+        let failure = self
+            .lost
+            .take()
+            .unwrap_or_else(|| Failure::message("the session failed".into()));
+
+        // A session that delivered something reconnects at once; one that
+        // delivered nothing is a failed attempt.
+        if self.delivered {
+            warn!(cause = %failure, "the upstream session ended, reconnecting");
+        } else {
+            stage.attempts.failed(failure).await?;
         }
 
-        if !self.peer_session.chainsync().has_agency() {
-            stage.quota.on_tip();
-        }
-
-        Ok(())
+        Err(WorkerError::Restart)
     }
 }
 
@@ -298,7 +323,12 @@ pub struct Stage {
     network_magic: u64,
     block_fetch_batch_size: usize,
     wal: WalAdapter,
-    quota: PullQuota,
+    limit: SyncLimit,
+    progress: Arc<SyncProgress>,
+
+    /// Connections, intersections and sessions that failed in a row before
+    /// their session delivered anything.
+    attempts: Attempts,
 
     pub downstream: DownstreamPort,
 
@@ -315,18 +345,45 @@ impl Stage {
         peer_address: String,
         network_magic: u64,
         limit: SyncLimit,
+        progress: Arc<SyncProgress>,
         wal: WalAdapter,
     ) -> Self {
         Self {
+            attempts: Attempts::new(
+                "pull",
+                peer_address.clone(),
+                config.retry.clone(),
+                progress.clone(),
+            ),
             peer_address,
             network_magic,
-            quota: limit.into(),
+            limit,
+            progress,
             block_fetch_batch_size: config.pull_batch_size,
             wal,
             downstream: Default::default(),
             block_count: Default::default(),
             chain_tip: Default::default(),
         }
+    }
+
+    /// The points the WAL offers for an intersection, Origin when it holds
+    /// none.
+    fn intersect_candidates(&self) -> Result<Vec<Point>, WorkerError> {
+        let mut candidates = self
+            .wal
+            .intersect_candidates(5)
+            .or_panic()?
+            .into_iter()
+            .map(TryFrom::try_from)
+            .filter_map(|x| x.ok())
+            .collect_vec();
+
+        if candidates.is_empty() {
+            candidates.push(Point::Origin);
+        }
+
+        Ok(candidates)
     }
 
     async fn flush_blocks(&mut self, blocks: Vec<BlockBody>) -> Result<(), WorkerError> {
@@ -349,9 +406,5 @@ impl Stage {
             .or_panic()?;
 
         Ok(())
-    }
-
-    fn track_tip(&self, tip: &Tip) {
-        self.chain_tip.set(tip.0.slot_or_default() as i64);
     }
 }

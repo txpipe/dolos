@@ -52,7 +52,7 @@ The node checks the file's `compatibility` declaration before anything else, and
 | `upstream.peer_address`, or `upstream.block_production_interval` | `upstream.type = "peer"` (the default) with `peer_address`, defaulted per known network; or `type = "emulator"` with `block_production_interval`, on a custom network only |
 | `[storage.wal]` (`backend`, `path`, `cache`) | `sync.wal_path`; the WAL is on disk exactly when the state is `fjall` |
 | `sync.max_rollback` | removed: the rollback window is the protocol's |
-| root `[retries]` (`backoff_unit_sec`, `max_backoff_sec`, …) | `[sync.retry]` (`backoff_unit_seconds`, `max_backoff_seconds`, …) |
+| root `[retries]` (`backoff_unit_sec`, `max_backoff_sec`, …) | `[sync.retry]` (`backoff_unit_seconds`, `max_backoff_seconds`, …); toward the upstream peer, `max_retries` counts failed attempts in a row, sessions that deliver nothing included, and running out of them stops `dolos daemon` too, with exit 1 |
 | `sync.max_history`; archive `backend = "no_op"` | `history.mode` (`none`, `rolling`, `full`) and, for `rolling`, `window = { unit = "slot", value = … }` |
 | state `max_history` | removed: managed by the node |
 | store `backend` (`fjall`, `redb`, `in_memory`) | store `type = "fjall"` or `"ephemeral"` |
@@ -61,7 +61,7 @@ The node checks the file's `compatibility` declaration before anything else, and
 | `storage.cache.memory_budget_bytes`, `disk_budget_bytes` | `storage.cache.memory_mb`, `disk_mb`, in MiB |
 | `[mithril]`, `snapshot.download_url`, `[stelae]` | [command inputs](#bootstrap-inputs) of the bootstrap and snapshot commands |
 | `snapshot.state_epochs` | `--state-epochs` or `--state-epochs-file` on `dolos snapshot digest` and `verify --reproduce`; the Stelae publisher's own `stateEpochs` |
-| `sync.sync_limit`, `chain.stop_epoch` | `--until-tip`, `--max-blocks`, `--stop-epoch` on `dolos daemon` and `dolos sync` |
+| `sync.sync_limit`, `chain.stop_epoch` | `sync_limit = "UntilTip"`: `dolos sync catchup`, which stops at the upstream tip unless `--follow`; `sync_limit = { MaxBlocks = N }`: removed, with no successor; `stop_epoch`: `--stop-epoch` on `dolos sync catchup`, `dolos bootstrap mithril` and `dolos bootstrap immutabledb` |
 | the query limit, fixed at 32 | `serve.max_concurrent_queries`, from 1 to 64 |
 | `serve.grpc.tls_client_ca_root` | removed, and refused on load: the endpoint serves plaintext gRPC, so terminate TLS, mutual TLS included, at a reverse proxy |
 | `serve.minibf.url`, `serve.trp.extra_fees` | `serve.minibf.public_url`, `serve.trp.extra_fees_lovelace` |

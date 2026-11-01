@@ -718,7 +718,7 @@ where
 /// A subject with no first mint is left out with a warning. A rollback
 /// between the list read and the supply read removes a staged first mint,
 /// once; a sealed list that predates the archive's asset index names one on
-/// every read, and its node needs `dolos doctor rebuild-state --rewrite-logs`.
+/// every read, and its node needs `dolos data rebuild --rewrite-logs`.
 pub(crate) async fn asset_quantities<D>(
     domain: &Facade<D>,
     subjects: Vec<Vec<u8>>,
@@ -753,7 +753,7 @@ where
                 asset = hex::encode(&subject),
                 "an asset list names an asset with no first mint: a rollback removed it since \
                  the list was read, or, if this repeats for the asset, a sealed first-mint list \
-                 predates the archive's asset index and `dolos doctor rebuild-state \
+                 predates the archive's asset index and `dolos data rebuild \
                  --rewrite-logs` indexes it"
             );
 

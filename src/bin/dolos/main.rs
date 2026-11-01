@@ -13,7 +13,6 @@ mod cache;
 mod common;
 mod config;
 mod daemon;
-mod doctor;
 mod feedback;
 mod output;
 mod registry;
@@ -46,9 +45,6 @@ enum Command {
     /// Commands to interact with data
     #[cfg(feature = "utils")]
     Data(data::Args),
-
-    /// Commands to fix problems
-    Doctor(doctor::Args),
 
     /// Commands over the configuration file
     Config(config::Args),
@@ -106,7 +102,6 @@ fn run() -> Result<()> {
         Command::Daemon(args) => daemon::run(load()?, &args),
         Command::Sync(args) => sync::run(&load()?, &args, &feedback),
         Command::Serve(args) => serve::run(load()?, &args),
-        Command::Doctor(args) => doctor::run(&load()?, &args, &feedback),
         Command::Cache(args) => cache::run(&load()?, &args),
         Command::Config(args) => config::run(config_file, &args),
         Command::Service(args) => service::run(explicit_config, &args),

@@ -91,7 +91,7 @@ fn backend(system: bool) -> miette::Result<Box<dyn ServiceBackend>> {
     if system {
         return Err(Usage::new(
             "launchd agents are per user: `--system` is not supported on macOS",
-            "leave out `--system` to install a LaunchAgent",
+            Some("leave out `--system` to install a LaunchAgent".into()),
         )
         .into());
     }
@@ -110,8 +110,9 @@ fn backend(_system: bool) -> miette::Result<Box<dyn ServiceBackend>> {
 }
 
 fn derived(config: &RootConfig) -> miette::Result<Name> {
-    Name::derive(config)
-        .map_err(|error| Usage::new(error.to_string(), "pass the instance's NAME").into())
+    Name::derive(config).map_err(|error| {
+        Usage::new(error.to_string(), Some("pass the instance's NAME".into())).into()
+    })
 }
 
 /// The error, with the `sudo` command for one that needs root; `config` is
@@ -198,7 +199,7 @@ fn config_file<'a>(
     if explicit.is_none() && scope == service::Scope::System {
         return Err(Usage::new(
             format!("`--system` reads no default {DEFAULT_CONFIG_FILE}: name the configuration with `--config`"),
-            help,
+            Some(help.into()),
         )
         .into());
     }

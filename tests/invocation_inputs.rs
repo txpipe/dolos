@@ -395,7 +395,7 @@ fn removed_commands_are_unknown_subcommands() {
 
     let help = node::assert_ok(&node.run(&["--help"]));
 
-    for removed in ["snapshot", "minibf", "minikupo", "eval"] {
+    for removed in ["snapshot", "minibf", "minikupo", "eval", "doctor"] {
         assert!(
             !help
                 .lines()

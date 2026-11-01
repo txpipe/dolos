@@ -302,6 +302,8 @@ How a pipeline stage retries a step that failed.
 
 Retry `n` waits `backoff_unit_seconds × backoff_factor^n` seconds, at most `max_backoff_seconds`. Once `max_retries` is reached the stage stops, unless `dismissible` is on, which skips the failed step and carries on.
 
+The stages that talk to the upstream peer count failed attempts in a row instead: the pull stage (chain-sync and block-fetch) and, under `sync catchup --follow` and in `dolos daemon`, the submit stage (tx-submission). A failed attempt is a connection that fails, an intersection the pull stage cannot find, or a session that ends before it delivers anything: a block or the upstream tip for the pull stage, headers alone not counting, and the peer's first request for the submit stage. Attempt `n` in a row waits `backoff_unit_seconds × backoff_factor^n` seconds, at most `max_backoff_seconds`, whatever failed. `max_retries` failed attempts in a row are retried, and one more stops the sync, which exits 1, in `dolos daemon` too; `dismissible` does not apply. A session that delivered something reconnects at once, and the count starts again. The submit stage's count also starts again whenever the pull stage delivers between two of its failed attempts. A cardano-node asks for transactions only about a minute into a session, so on a link that drops sessions sooner every tx-submission session fails, while the peer still serves the sync.
+
 ```toml
 [sync]
 pull_batch_size = 200
@@ -630,12 +632,10 @@ The registry inputs apply to `dolos bootstrap stelae`, `dolos snapshot inspect` 
 
 ### Stopping
 
-`dolos daemon` and `dolos sync` run until stopped, unless told otherwise:
+`dolos daemon` runs until stopped, or until its sync gives up on the upstream peer under [`sync.retry`](#syncretry), when it exits 1. `dolos sync catchup` stops once the stores commit the upstream tip it reached, or with `--follow` runs until stopped or until it gives up the same way, unless told otherwise:
 
 | argument | effect |
 | -------- | ------ |
-| `--until-tip` | stop pulling once the upstream tip is reached |
-| `--max-blocks N` | stop pulling after `N` blocks |
 | `--stop-epoch N` | stop once the ledger reaches epoch `N`, on its first block |
 
 <Aside type="note">

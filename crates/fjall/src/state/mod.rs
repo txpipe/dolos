@@ -112,7 +112,10 @@ impl StateStore {
 
     fn open_at(path: &Path, preset: Preset, view: Option<Arc<View>>) -> Result<Self, Error> {
         let tuning = preset.state();
-        let db = tuning.database.builder(path).open()?;
+        let db = crate::open_database(tuning.database.builder(path), path, || {
+            view.as_ref()
+                .map_or(path.to_path_buf(), |view| view.source_of(path))
+        })?;
 
         let store = Self {
             cursor: db.keyspace(keyspace_names::CURSOR, || tuning.cursor.options())?,
@@ -194,7 +197,8 @@ impl StateStore {
         Ok(false)
     }
 
-    /// Per-keyspace disk footprint: `(name, bytes, path)`.
+    /// Per-keyspace disk footprint: `(name, bytes, path)`, the path in the
+    /// store's own folder.
     pub fn disk_usage(&self) -> Vec<(&'static str, u64, std::path::PathBuf)> {
         [
             (keyspace_names::CURSOR, &self.cursor),
@@ -202,8 +206,16 @@ impl StateStore {
             (keyspace_names::ENTITIES, &self.entities),
             (keyspace_names::TAGS, &self.tags),
         ]
-        .map(|(name, ks)| (name, ks.disk_space(), ks.path().to_path_buf()))
+        .map(|(name, ks)| (name, ks.disk_space(), self.source_of(ks.path())))
         .to_vec()
+    }
+
+    /// Where `path` is in the store itself, when it is in a view's mirror.
+    fn source_of(&self, path: &Path) -> std::path::PathBuf {
+        match &self.view {
+            Some(view) => view.source_of(path),
+            None => path.to_path_buf(),
+        }
     }
 
     /// Gracefully shutdown the state store.
@@ -512,6 +524,33 @@ mod tests {
         found
     }
 
+    /// A store a stopped removal marked refuses every open, its views'
+    /// included, naming the store and the command to run again.
+    #[test]
+    fn a_store_marked_as_being_removed_names_the_rerun() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state");
+        written(&path, 1);
+        std::fs::write(path.join("version"), crate::REMOVING_VERSION).unwrap();
+
+        for opened in [
+            StateStore::open(&path, Preset::Standard).err(),
+            StateStore::open_view(&path, Preset::Standard).err(),
+        ] {
+            let error = opened.expect("a marked store does not open");
+
+            assert!(
+                matches!(&error, Error::BeingRemoved(at) if *at == path),
+                "{error:?}"
+            );
+            assert!(error.to_string().contains("run that command again"));
+        }
+
+        std::fs::write(path.join("version"), b"not a version").unwrap();
+        let error = StateStore::open(&path, Preset::Standard).err().unwrap();
+        assert!(matches!(error, Error::Fjall(_)), "{error:?}");
+    }
+
     #[test]
     fn a_read_only_store_refuses_writers() {
         let dir = tempfile::tempdir().unwrap();
@@ -590,5 +629,25 @@ mod tests {
 
         let _store = StateStore::open(&path, Preset::Standard).unwrap();
         assert_eq!(left(dir.path()), ["state"]);
+    }
+
+    /// A view reports its footprint under the store's own folder, not the
+    /// mirror it is dropped with.
+    #[test]
+    fn a_view_reports_the_paths_of_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state");
+        written(&path, 1);
+
+        let store = std::path::absolute(&path).unwrap();
+        let view = StateStore::open_view(&path, Preset::Standard).unwrap();
+
+        for (name, _, keyspace) in view.disk_usage() {
+            assert!(
+                keyspace.starts_with(&store),
+                "{name}: {}",
+                keyspace.display()
+            );
+        }
     }
 }

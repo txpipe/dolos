@@ -70,7 +70,7 @@ The project follows a modular workspace architecture with clear separation of co
   - `relay`: Upstream relay connection handling
   - `mempool`: Transaction mempool implementation
   - `facade`: High-level domain operations (extends `dolos-core` facade)
-- **CLI Commands**: daemon, sync, serve, bootstrap (mithril/stelae/immutabledb), data, doctor
+- **CLI Commands**: daemon, sync, serve, bootstrap (mithril/stelae/immutabledb), data
 - **Features**: Configurable service compilation (grpc, minibf, trp, mithril, utils)
 
 #### `dolos-core` (Foundation)
@@ -158,6 +158,7 @@ The project follows a modular workspace architecture with clear separation of co
   - `ToyDomain`: Minimal in-memory `Domain` implementation for testing
   - Test data generation (fake UTxOs, blocks, deltas)
   - Test address utilities
+  - `peer::PeerFixture`: a node-to-node peer serving a synthetic chain over chain-sync and block-fetch, whose tip can keep advancing and which can stop mid-run, for syncing a node under test without a relay
 - **Role**: Development and testing support
 
 #### `xtask` (Development Automation)

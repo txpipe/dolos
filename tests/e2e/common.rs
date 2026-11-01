@@ -2,7 +2,7 @@
 
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
@@ -50,6 +50,12 @@ pub const SCENARIOS: &[Scenario] = &[
         port_prefix: 6600,
         expect_ports: true,
     },
+    // Serves nothing: its one port is the local peer's it syncs from.
+    Scenario {
+        name: "preview-local-peer",
+        port_prefix: 6610,
+        expect_ports: false,
+    },
 ];
 
 /// Where a scenario's checked-in fixture lives.
@@ -65,7 +71,7 @@ fn fixture_path(scenario: &Scenario) -> PathBuf {
 
 /// Ports handed out to workspaces, one block of ten each.
 ///
-/// Deliberately above every `Scenario::port_prefix` (6540..6609), which buys
+/// Deliberately above every `Scenario::port_prefix` (6540..6619), which buys
 /// two things: a workspace can never collide with a daemon a previous run left
 /// holding a fixture's ports, and the rewrite in `rewrite_ports` can never
 /// rewrite a port it has itself just written.
@@ -224,14 +230,15 @@ pub fn assert_file_released(workspace: &ScenarioWorkspace, relative_path: &str) 
     assert!(std::fs::metadata(path).is_err());
 }
 
-pub fn shutdown_gracefully(handle: &mut Child) {
+/// SIGTERM the process and wait for its exit.
+pub fn shutdown_gracefully(handle: &mut Child) -> ExitStatus {
     nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(handle.id() as i32),
         nix::sys::signal::Signal::SIGTERM,
     )
     .expect("failed to kill process");
 
-    handle.wait().expect("failed to wait for process");
+    handle.wait().expect("failed to wait for process")
 }
 
 /// A custom scenario runs on preview's genesis under preview's magic, its

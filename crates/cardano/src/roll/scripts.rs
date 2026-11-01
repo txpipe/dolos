@@ -124,8 +124,8 @@ impl ScriptRegistryContext {
     /// batch, or a staged `first-scripts` row of an unsealed epoch names it.
     /// The seal writes the index entry before it deletes the staged row, so a
     /// sealed script is always in one of the two. The slot bound keeps a
-    /// re-roll over an archive that already indexes the batch (`doctor
-    /// rebuild-state`) from reading the batch's own entries.
+    /// re-roll over an archive that already indexes the batch (`data
+    /// rebuild`) from reading the batch's own entries.
     pub fn load<S: StateStore, A: ArchiveStore>(
         state: &S,
         archive: &A,
@@ -828,8 +828,8 @@ pub(crate) mod tests {
     }
 
     /// A batch never reads its own index entries: re-rolling it over an
-    /// archive that already indexes every sealed script, as `doctor
-    /// rebuild-state` does, stages the rows the first roll staged.
+    /// archive that already indexes every sealed script, as `data
+    /// rebuild` does, stages the rows the first roll staged.
     #[test]
     fn a_re_roll_over_a_full_archive_stages_the_same_rows() {
         let batches = vec![
