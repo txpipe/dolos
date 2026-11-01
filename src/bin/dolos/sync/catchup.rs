@@ -53,10 +53,13 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     let limit = args.sync_limit();
 
-    if limit == SyncLimit::CatchUp && matches!(config.upstream, Some(UpstreamConfig::Emulator(_))) {
+    if limit == SyncLimit::CatchUp
+        && args.stop_epoch.is_none()
+        && matches!(config.upstream, Some(UpstreamConfig::Emulator(_)))
+    {
         return Err(Usage::new(
             "an emulator upstream has no tip to catch up to",
-            "pass `--follow` to sync from it",
+            "pass `--follow` or `--stop-epoch` to sync from it",
         )
         .into());
     }
@@ -82,14 +85,21 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     }
 
     if interrupted {
-        Err(miette::miette!("interrupted {}", args.unmet()))
-    } else {
-        Err(miette::miette!(
-            help = "the log above names the cause: an upstream unreachable within `[sync.retry]`, \
-                    or a stage that failed",
+        return Err(miette::miette!("interrupted {}", args.unmet()));
+    }
+
+    match progress.upstream_failure() {
+        Some(failure) => Err(miette::miette!(
+            help = "`[sync.retry]` sets how many failed attempts in a row are retried, \
+                    and the backoff between them",
+            "the sync ended {}: {failure}",
+            args.unmet()
+        )),
+        None => Err(miette::miette!(
+            help = "the log above names the stage that failed",
             "the sync ended {}",
             args.unmet()
-        ))
+        )),
     }
 }
 

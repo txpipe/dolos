@@ -223,6 +223,9 @@ fn catchup_fails_once_its_upstream_stops(workspace: &ScenarioWorkspace) {
         log.contains("the sync ended before the stores committed the catch-up target"),
         "{log}"
     );
+
+    // The pull stage gave up on the peer: only it records that.
+    assert!(log.contains("gave up on the upstream peer"), "{log}");
 }
 
 /// `sync catchup --follow` runs on past the target it commits, until Ctrl-C

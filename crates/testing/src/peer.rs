@@ -1,6 +1,6 @@
 //! A node-to-node peer over a synthetic chain, for a node under test to sync
 //! from: chain-sync and block-fetch over TCP, a tip that can keep advancing,
-//! and a stop that closes every connection.
+//! a stop that closes every connection, and faults that close one session.
 //!
 //! Block `n` sits at slot `n`, chained from block `n - 1`; block 1 has no
 //! parent. The chain never forks.
@@ -32,6 +32,18 @@ pub struct PeerOptions {
     pub produce_every: Option<Duration>,
     /// Stop, closing every connection, once this many headers were sent.
     pub stop_after_headers: Option<usize>,
+    /// Close the session instead of answering these intersection requests,
+    /// numbered from 1 across sessions.
+    pub close_at_intersects: Vec<usize>,
+    /// Close the first session that intersects once it sent this many
+    /// headers.
+    pub close_first_session_after_headers: Option<usize>,
+    /// Close every session on its first request for the next update.
+    pub close_at_first_request: bool,
+    /// Close the session on any block-fetch request.
+    pub refuse_block_fetch: bool,
+    /// Serve this block's body as bytes that decode as no block.
+    pub corrupt_body: Option<u64>,
 }
 
 struct Block {
@@ -139,15 +151,19 @@ impl Chain {
         })
     }
 
-    /// The bodies from `from` through `to`, when both are on the chain.
-    fn range(&self, from: &Point, to: &Point) -> Vec<Vec<u8>> {
+    /// The bodies from `from` through `to`, when both are on the chain, with
+    /// junk for block `corrupt`.
+    fn range(&self, from: &Point, to: &Point, corrupt: Option<u64>) -> Vec<Vec<u8>> {
         let blocks = self.blocks.lock().unwrap();
         let index = |point: &Point| blocks.iter().position(|b| &b.wire_point() == point);
 
         match (index(from), index(to)) {
             (Some(from), Some(to)) if from <= to => blocks[from..=to]
                 .iter()
-                .map(|block| block.body.to_vec())
+                .map(|block| match corrupt {
+                    Some(number) if block.point.slot() == number => vec![0xff; 8],
+                    _ => block.body.to_vec(),
+                })
                 .collect(),
             _ => Vec::new(),
         }
@@ -167,9 +183,11 @@ impl Chain {
 
 struct Shared {
     chain: Chain,
+    options: PeerOptions,
     next_requests: AtomicUsize,
     headers_sent: AtomicUsize,
-    stop_after_headers: Option<usize>,
+    intersects: AtomicUsize,
+    sessions: AtomicUsize,
     stop: watch::Sender<bool>,
 }
 
@@ -177,7 +195,11 @@ impl Shared {
     fn header_sent(&self) {
         let sent = self.headers_sent.fetch_add(1, Ordering::SeqCst) + 1;
 
-        if self.stop_after_headers.is_some_and(|limit| sent >= limit) {
+        if self
+            .options
+            .stop_after_headers
+            .is_some_and(|limit| sent >= limit)
+        {
             self.stop.send_replace(true);
         }
     }
@@ -201,9 +223,11 @@ impl PeerFixture {
 
         let shared = Arc::new(Shared {
             chain: Chain::new(options.initial_blocks),
+            options: options.clone(),
             next_requests: AtomicUsize::new(0),
             headers_sent: AtomicUsize::new(0),
-            stop_after_headers: options.stop_after_headers,
+            intersects: AtomicUsize::new(0),
+            sessions: AtomicUsize::new(0),
             stop: watch::Sender::new(false),
         });
 
@@ -247,6 +271,12 @@ impl PeerFixture {
     /// sent after an await to a request made before it.
     pub fn headers_sent(&self) -> usize {
         self.shared.headers_sent.load(Ordering::SeqCst)
+    }
+
+    /// The intersection requests received so far, across connections,
+    /// including those answered by closing the session.
+    pub fn intersects(&self) -> usize {
+        self.shared.intersects.load(Ordering::SeqCst)
     }
 
     /// Whether the fixture has stopped, by [`Self::stop`] or after
@@ -329,10 +359,11 @@ async fn session(peer: PeerServer, shared: Arc<Shared>) {
 
     let keepalive = KeepAliveLoop::server(keepalive).spawn();
 
-    let _ = tokio::join!(
-        serve_chainsync(chainsync, &shared),
-        serve_blockfetch(blockfetch, &shared)
-    );
+    // Either side ending closes the connection.
+    tokio::select! {
+        _ = serve_chainsync(chainsync, &shared) => (),
+        _ = serve_blockfetch(blockfetch, &shared) => (),
+    }
 
     keepalive.abort();
     plexer.abort().await;
@@ -343,24 +374,44 @@ async fn serve_chainsync(
     shared: &Shared,
 ) -> Result<(), chainsync::ServerError> {
     let chain = &shared.chain;
+    let options = &shared.options;
 
     // A client that asks for the next update without intersecting starts at
     // Origin, announced by a rollback as after any intersection.
     let mut next = 0;
     let mut rollback = Some(Point::Origin);
+    let mut session = None;
+    let mut requests = 0;
+    let mut headers = 0;
 
     while let Some(request) = server.recv_while_idle().await? {
         match request {
-            ClientRequest::Intersect(points) => match chain.intersect(&points) {
-                Some((point, after)) => {
-                    next = after;
-                    rollback = Some(point.clone());
-                    server.send_intersect_found(point, chain.tip()).await?;
+            ClientRequest::Intersect(points) => {
+                let number = shared.intersects.fetch_add(1, Ordering::SeqCst) + 1;
+
+                if options.close_at_intersects.contains(&number) {
+                    return Ok(());
                 }
-                None => server.send_intersect_not_found(chain.tip()).await?,
-            },
+
+                match chain.intersect(&points) {
+                    Some((point, after)) => {
+                        next = after;
+                        rollback = Some(point.clone());
+                        session.get_or_insert_with(|| {
+                            shared.sessions.fetch_add(1, Ordering::SeqCst) + 1
+                        });
+                        server.send_intersect_found(point, chain.tip()).await?;
+                    }
+                    None => server.send_intersect_not_found(chain.tip()).await?,
+                }
+            }
             ClientRequest::RequestNext => {
                 shared.next_requests.fetch_add(1, Ordering::SeqCst);
+                requests += 1;
+
+                if options.close_at_first_request && requests == 1 {
+                    return Ok(());
+                }
 
                 if let Some(point) = rollback.take() {
                     server.send_roll_backward(point, chain.tip()).await?;
@@ -380,7 +431,13 @@ async fn serve_chainsync(
                     .await?;
 
                 next += 1;
+                headers += 1;
                 shared.header_sent();
+
+                if session == Some(1) && options.close_first_session_after_headers == Some(headers)
+                {
+                    return Ok(());
+                }
             }
         }
     }
@@ -393,7 +450,11 @@ async fn serve_blockfetch(
     shared: &Shared,
 ) -> Result<(), blockfetch::ServerError> {
     while let Some(blockfetch::BlockRequest((from, to))) = server.recv_while_idle().await? {
-        let bodies = shared.chain.range(&from, &to);
+        if shared.options.refuse_block_fetch {
+            return Ok(());
+        }
+
+        let bodies = shared.chain.range(&from, &to, shared.options.corrupt_body);
         server.send_block_range(bodies).await?;
     }
 

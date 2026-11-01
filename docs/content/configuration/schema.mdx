@@ -302,6 +302,8 @@ How a pipeline stage retries a step that failed.
 
 Retry `n` waits `backoff_unit_seconds × backoff_factor^n` seconds, at most `max_backoff_seconds`. Once `max_retries` is reached the stage stops, unless `dismissible` is on, which skips the failed step and carries on.
 
+Toward the upstream peer, the failed step is an attempt: a connection, an intersection, or a session that ends before it delivers a block, the tip, or a header past every one an earlier session received. `max_retries` failed attempts in a row are retried, and one more stops the sync; `dismissible` does not apply. A session that delivered something reconnects at once, and the count starts again.
+
 ```toml
 [sync]
 pull_batch_size = 200

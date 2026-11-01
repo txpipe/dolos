@@ -3,7 +3,7 @@ use dolos_core::config::{
     EmulatorConfig, PeerConfig, RetryConfig, RootConfig, SyncConfig, UpstreamConfig,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::watch;
 
@@ -29,6 +29,7 @@ pub enum SyncLimit {
     Follow,
     /// End once the WAL and the state have committed the tip the peer
     /// reported when chain-sync first reached it, pulling nothing past it.
+    /// An emulator upstream has no such tip, so only a stop epoch ends it.
     CatchUp,
 }
 
@@ -39,6 +40,7 @@ pub struct SyncProgress {
     target: watch::Sender<Option<ChainPoint>>,
     caught_up: AtomicBool,
     stop_epoch_reached: AtomicBool,
+    upstream_failure: OnceLock<String>,
 }
 
 impl Default for SyncProgress {
@@ -47,6 +49,7 @@ impl Default for SyncProgress {
             target: watch::Sender::new(None),
             caught_up: AtomicBool::new(false),
             stop_epoch_reached: AtomicBool::new(false),
+            upstream_failure: OnceLock::new(),
         }
     }
 }
@@ -74,6 +77,11 @@ impl SyncProgress {
         self.stop_epoch_reached() || (limit == SyncLimit::CatchUp && self.caught_up())
     }
 
+    /// Why the pull stage gave up on the upstream peer, if it did.
+    pub fn upstream_failure(&self) -> Option<&str> {
+        self.upstream_failure.get().map(String::as_str)
+    }
+
     /// Fix the target at `tip`; only the first call counts, so a tip that
     /// moves later leaves it where it is.
     fn fix_target(&self, tip: ChainPoint) -> bool {
@@ -98,22 +106,40 @@ impl SyncProgress {
     fn mark_stop_epoch_reached(&self) {
         self.stop_epoch_reached.store(true, Ordering::SeqCst);
     }
+
+    fn record_upstream_failure(&self, cause: String) {
+        let _ = self.upstream_failure.set(cause);
+    }
 }
 
-/// Whether the WAL tip and the state cursor both stand on `target`. A
-/// rollback below the target moves them off it, and the wait goes on from
-/// there. Origin is reached while neither store holds a block.
+/// Whether the state cursor stands on `target`. Origin is reached while the
+/// state holds no block.
+fn state_on(target: &ChainPoint, state: Option<&ChainPoint>) -> bool {
+    match target {
+        ChainPoint::Origin => matches!(state, None | Some(ChainPoint::Origin)),
+        target => state == Some(target),
+    }
+}
+
+/// Whether the stores have committed `target` and nothing past it: the state
+/// cursor stands on it, and the WAL holds it with no entry at a later slot.
+/// The WAL's last entry need not be the target: a Byron epoch boundary block
+/// shares its slot with the block after it, and can sort after it. A rollback
+/// below the target moves the stores off it, and the wait goes on from there.
 fn committed(
     target: &ChainPoint,
-    wal_tip: Option<&ChainPoint>,
     state: Option<&ChainPoint>,
+    wal_tip: Option<&ChainPoint>,
+    wal_holds_target: bool,
 ) -> bool {
-    let at = |point: Option<&ChainPoint>| match target {
-        ChainPoint::Origin => matches!(point, None | Some(ChainPoint::Origin)),
-        target => point == Some(target),
-    };
+    if !state_on(target, state) {
+        return false;
+    }
 
-    at(wal_tip) && at(state)
+    match target {
+        ChainPoint::Origin => matches!(wal_tip, None | Some(ChainPoint::Origin)),
+        target => wal_holds_target && wal_tip.is_some_and(|tip| tip.slot() == target.slot()),
+    }
 }
 
 /// A sync's stages, and the progress they share.
@@ -162,9 +188,6 @@ pub fn pipeline(
         .map_err(|error| Error::ConfigError(error.to_string()))?;
 
     match &config.upstream {
-        Some(UpstreamConfig::Emulator(_)) if limit == SyncLimit::CatchUp => Err(
-            Error::ConfigError("an emulator upstream has no tip to catch up to".into()),
-        ),
         Some(UpstreamConfig::Emulator(cfg)) => devnet(cfg, domain, &config.sync.retry),
         _ => sync(
             &config.sync,
@@ -201,8 +224,6 @@ pub fn sync(
         HOUSEKEEPING_INTERVAL,
     );
 
-    let submit = submit::Stage::new(peer_address, network_magic, domain.mempool().clone());
-
     let (to_apply, from_pull) = gasket::messaging::tokio::mpsc_channel(50);
     pull.downstream.connect(to_apply);
     apply.upstream.connect(from_pull);
@@ -212,18 +233,24 @@ pub fn sync(
 
     let policy = define_gasket_policy(&config.retry);
 
-    let pull = gasket::runtime::spawn_stage(pull, policy.clone());
-    let apply = gasket::runtime::spawn_stage(apply, policy.clone());
-    let submit = gasket::runtime::spawn_stage(submit, policy.clone());
+    let mut tethers = vec![
+        gasket::runtime::spawn_stage(pull, policy.clone()),
+        gasket::runtime::spawn_stage(apply, policy.clone()),
+    ];
 
-    Ok(Pipeline {
-        tethers: vec![pull, apply, submit],
-        progress,
-    })
+    // A catch-up submits no transactions: the submit stage keeps its own
+    // peer session, whose end would end the catch-up while the apply stage
+    // still drains toward the target.
+    if limit == SyncLimit::Follow {
+        let submit = submit::Stage::new(peer_address, network_magic, domain.mempool().clone());
+        tethers.push(gasket::runtime::spawn_stage(submit, policy.clone()));
+    }
+
+    Ok(Pipeline { tethers, progress })
 }
 
 /// The emulator produces the chain itself, so there is no upstream tip to
-/// catch up to: the pipeline follows it.
+/// catch up to: the pipeline follows it, and only a stop epoch ends it.
 pub fn devnet(
     emulator_cfg: &EmulatorConfig,
     domain: DomainAdapter,

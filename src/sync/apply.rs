@@ -97,16 +97,19 @@ impl Stage {
             return Ok(());
         };
 
-        let wal_tip = self
-            .domain
-            .wal()
-            .find_tip()
-            .or_panic()?
-            .map(|(point, _)| point);
-
         let state = self.domain.state().read_cursor().or_panic()?;
 
-        if super::committed(&target, wal_tip.as_ref(), state.as_ref()) {
+        // The WAL is read only once the state stands on the target, so a
+        // follow short of it reads one cursor per block.
+        if !super::state_on(&target, state.as_ref()) {
+            return Ok(());
+        }
+
+        let wal = self.domain.wal();
+        let wal_tip = wal.find_tip().or_panic()?.map(|(point, _)| point);
+        let wal_holds_target = wal.contains_point(&target).or_panic()?;
+
+        if super::committed(&target, state.as_ref(), wal_tip.as_ref(), wal_holds_target) {
             info!(point = %target, "catch-up target committed");
             self.progress.mark_caught_up();
         }

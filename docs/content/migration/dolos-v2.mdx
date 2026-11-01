@@ -61,7 +61,7 @@ The node checks the file's `compatibility` declaration before anything else, and
 | `storage.cache.memory_budget_bytes`, `disk_budget_bytes` | `storage.cache.memory_mb`, `disk_mb`, in MiB |
 | `[mithril]`, `snapshot.download_url`, `[stelae]` | [command inputs](#bootstrap-inputs) of the bootstrap and snapshot commands |
 | `snapshot.state_epochs` | `--state-epochs` or `--state-epochs-file` on `dolos snapshot digest` and `verify --reproduce`; the Stelae publisher's own `stateEpochs` |
-| `sync.sync_limit`, `chain.stop_epoch` | `dolos sync catchup`, which stops at the upstream tip unless `--follow`; `--stop-epoch` on `dolos sync catchup`, `dolos bootstrap mithril` and `dolos bootstrap immutabledb` |
+| `sync.sync_limit`, `chain.stop_epoch` | `sync_limit = "UntilTip"`: `dolos sync catchup`, which stops at the upstream tip unless `--follow`; `sync_limit = { MaxBlocks = N }`: removed, with no successor; `stop_epoch`: `--stop-epoch` on `dolos sync catchup`, `dolos bootstrap mithril` and `dolos bootstrap immutabledb` |
 | the query limit, fixed at 32 | `serve.max_concurrent_queries`, from 1 to 64 |
 | `serve.grpc.tls_client_ca_root` | removed, and refused on load: the endpoint serves plaintext gRPC, so terminate TLS, mutual TLS included, at a reverse proxy |
 | `serve.minibf.url`, `serve.trp.extra_fees` | `serve.minibf.public_url`, `serve.trp.extra_fees_lovelace` |

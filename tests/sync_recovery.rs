@@ -1062,10 +1062,8 @@ fn catchup_takes_only_follow_and_stop_epoch_and_daemon_no_stop_flag() {
     }
 }
 
-/// An emulator produces the chain itself: there is no upstream tip to catch
-/// up to, so only `--follow` syncs from one.
-#[test]
-fn catchup_refuses_an_emulator_upstream_without_follow() {
+/// A node whose upstream is an emulator.
+fn emulator_node() -> Node {
     let node = Node::new();
     node.write_chain(&node.custom_chain(2, Vec::new()));
 
@@ -1075,6 +1073,15 @@ fn catchup_refuses_an_emulator_upstream_without_follow() {
     document["upstream"] =
         toml::from_str("type = \"emulator\"\nblock_production_interval = 1").unwrap();
     std::fs::write(&config_path, toml::to_string(&document).unwrap()).unwrap();
+
+    node
+}
+
+/// An emulator produces the chain itself: there is no upstream tip to catch
+/// up to, so only `--follow` or a stop epoch syncs from one.
+#[test]
+fn catchup_refuses_an_emulator_upstream_without_follow() {
+    let node = emulator_node();
 
     let output = node.run(&["sync", "catchup"]);
     assert_eq!(code(&output), Some(2), "{}", stderr_words(&output));
@@ -1087,6 +1094,44 @@ fn catchup_refuses_an_emulator_upstream_without_follow() {
         !node.root.path().join("data").exists(),
         "the refusal opened the stores"
     );
+}
+
+/// With a stop epoch, `sync catchup` syncs from an emulator until the ledger
+/// reaches it: the emulator is not refused.
+#[test]
+#[cfg_attr(
+    feature = "debug",
+    ignore = "the debug feature's console subscriber panics a sync built without tokio_unstable"
+)]
+fn catchup_syncs_from_an_emulator_toward_a_stop_epoch() {
+    let node = emulator_node();
+    let log = node.root.path().join("catchup.log");
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_dolos"))
+        .arg("--config")
+        .arg(node.config_path())
+        .args(["sync", "catchup", "--stop-epoch", "1"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&log).unwrap())
+        .spawn()
+        .unwrap();
+
+    // Running a while after it opened the stores, it is syncing: neither
+    // the command nor the pipeline refused the emulator.
+    let data = node.root.path().join("data");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !data.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    std::thread::sleep(std::time::Duration::from_secs(3));
+
+    let exited = child.try_wait().unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let log = std::fs::read_to_string(&log).unwrap();
+    assert!(data.exists(), "the sync never opened the stores: {log}");
+    assert_eq!(exited, None, "{log}");
 }
 
 /// The commands under `dolos sync --help`.

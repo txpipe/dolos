@@ -142,7 +142,7 @@ impl gasket::framework::Worker<Stage> for Worker {
 
         debug!("sending txsubmit init message");
 
-        peer_session.txsubmission().send_init().await.or_restart()?;
+        peer_session.txsubmission().send_init().await.or_retry()?;
 
         let worker = Self {
             peer_session,

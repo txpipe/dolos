@@ -26,7 +26,7 @@ To start _Dolos_ in `sync` mode, use the following command:
 dolos sync catchup
 ```
 
-`sync catchup` pulls blocks until it reaches the tip the upstream peer reports, and exits 0 once the WAL and the state have committed that point; a tip that moves on meanwhile is not waited for. It prints that target to stderr when it fixes it, and the committed point when it exits. A disconnect is retried as `[sync.retry]` allows; running out of retries, an interruption or any other error exits 1. With `--follow` it keeps following the chain past the target instead, and never exits on its own.
+`sync catchup` pulls blocks until it reaches the tip the upstream peer reports, and exits 0 once the WAL and the state have committed that point; a tip that moves on meanwhile is not waited for. It prints that target to stderr when it fixes it, and the committed point when it exits. A failed connection, or a session that fails before it delivers anything new, is retried as `[sync.retry]` allows; a session that delivered blocks reconnects at once. Running out of retries, an interruption or any other error exits 1. A catch-up submits no mempool transactions to the peer. With `--follow` it keeps following the chain past the target instead, submitting transactions, and never exits on its own. An emulator upstream has no tip to catch up to, so it needs `--follow` or `--stop-epoch`.
 
 ## `serve` mode
 
