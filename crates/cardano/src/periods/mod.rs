@@ -925,7 +925,7 @@ mod tests {
         use dolos_core::{ArchiveStore as _, ArchiveWriter as _, Domain as _};
         use dolos_testing::toy_domain::ToyDomain;
 
-        use crate::{FirstMintChunk, PolicyKey, PolicyMintChunk};
+        use crate::{FirstMintChunk, PolicyFirstMintChunk, PolicyKey};
 
         let domain = ToyDomain::new(None, None);
         let chain = toy_chain(&domain);
@@ -944,7 +944,7 @@ mod tests {
             .write_log_typed(
                 slot,
                 &policy_key,
-                &PolicyMintChunk::new(1, vec![b"OLD".to_vec()]),
+                &PolicyFirstMintChunk::new(1, vec![b"OLD".to_vec()]),
             )
             .unwrap();
         writer.commit().unwrap();
@@ -971,7 +971,7 @@ mod tests {
 
         let names = domain
             .archive()
-            .read_log_typed::<PolicyMintChunk>(slot, &policy_key)
+            .read_log_typed::<PolicyFirstMintChunk>(slot, &policy_key)
             .unwrap()
             .map(|chunk| chunk.into_items());
         assert_eq!(names, Some(vec![b"OLD".to_vec()]));
