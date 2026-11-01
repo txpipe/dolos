@@ -350,8 +350,8 @@ pub(super) fn reached(path: &Path, follow_last: bool) -> std::io::Result<PathBuf
 
 /// Whether `path` is `wiped` or sits under it, both [`reached`]: folders are
 /// compared by what they are on disk where both exist and, where neither
-/// does, by name in any letter case beside the same folder, as a
-/// case-insensitive volume would take them for one.
+/// does, by name in any Unicode form and letter case beside the same folder,
+/// as a volume ignoring either would take them for one.
 pub(super) fn within(path: &Path, wiped: &Path) -> bool {
     path.ancestors().any(|ancestor| same_place(ancestor, wiped))
 }
@@ -361,13 +361,19 @@ fn same_place(a: &Path, b: &Path) -> bool {
         (Some(a), Some(b)) => a == b,
         (None, None) => match (a.parent(), a.file_name(), b.parent(), b.file_name()) {
             (Some(a_in), Some(a_name), Some(b_in), Some(b_name)) => {
-                a_name.to_string_lossy().to_lowercase() == b_name.to_string_lossy().to_lowercase()
-                    && same_place(a_in, b_in)
+                folded(a_name) == folded(b_name) && same_place(a_in, b_in)
             }
             _ => a == b,
         },
         _ => false,
     }
+}
+
+/// `name` in one Unicode form and letter case.
+fn folded(name: &std::ffi::OsStr) -> String {
+    use unicode_normalization::UnicodeNormalization as _;
+
+    name.to_string_lossy().to_lowercase().nfc().collect()
 }
 
 /// What the file at `path` is on disk, a link itself rather than what it
@@ -460,8 +466,9 @@ fn clean(path: PathBuf) -> PathBuf {
 /// removed, after the checks that keep removing them complete and bounded:
 /// every store sits strictly inside the root, as written and as the
 /// filesystem resolves it, reached through no symbolic link, holds none
-/// (a view's mirror may, since removing it follows none), and no process
-/// holds a fjall store, so nothing outside the root is reached and nothing
+/// (a view's mirror may, since removing it follows none), none sits in
+/// another through a folder spelled otherwise, and no process holds a fjall
+/// store, so nothing outside the root is reached and nothing
 /// the configuration places elsewhere is left behind. The fjall stores stay
 /// locked against views and writers until they are removed.
 fn managed_paths(config: &RootConfig) -> miette::Result<Removal> {
@@ -544,6 +551,24 @@ fn managed_paths(config: &RootConfig) -> miette::Result<Removal> {
             "the stores under {} are, hold or are reached through symbolic links, and a reset \
              would not reach what they point at:\n{listed}\nRemove the stores and the linked \
              directories by hand, then run `dolos bootstrap`",
+            root.display(),
+        );
+    }
+
+    let respelled = nested_in_another_spelling(config).into_diagnostic()?;
+
+    if !respelled.is_empty() {
+        let listed = respelled
+            .iter()
+            .map(|(inner, outer)| format!("  {} in {}", inner.display(), outer.display()))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        miette::bail!(
+            "the configuration keeps stores under {} in another store's folder spelled in \
+             another letter case or Unicode form, so a reset could not tell which store holds \
+             which:\n{listed}\nSpell each the way the folder holding it is spelled, or remove \
+             the stores by hand, then run `dolos bootstrap`",
             root.display(),
         );
     }
@@ -653,6 +678,33 @@ fn configured_paths(config: &RootConfig) -> std::io::Result<Vec<(PathBuf, PathBu
     }
 
     Ok(paths)
+}
+
+/// The configured stores that exist and sit in another only as the volume
+/// reaches them, through a folder spelled in another letter case or Unicode
+/// form, each with the store it sits in. A reset tells which store holds
+/// which, and so which locks and asides go with each, by how the paths are
+/// written; links on the way are refused before this is asked.
+fn nested_in_another_spelling(config: &RootConfig) -> std::io::Result<Vec<(PathBuf, PathBuf)>> {
+    let paths: Vec<(PathBuf, PathBuf)> = configured_paths(config)?
+        .into_iter()
+        .filter(|(_, at)| std::fs::symlink_metadata(at).is_ok())
+        .collect();
+
+    let mut found = Vec::new();
+
+    for (inner, inner_at) in &paths {
+        for (outer, outer_at) in &paths {
+            if !inner_at.starts_with(outer_at)
+                && !same_place(inner_at, outer_at)
+                && within(inner_at, outer_at)
+            {
+                found.push((inner.clone(), outer.clone()));
+            }
+        }
+    }
+
+    Ok(found)
 }
 
 /// The stores' paths as the configuration writes them, the WAL and the
@@ -2518,5 +2570,206 @@ pub(super) mod tests {
 
         assert!(result.is_err());
         assert!(store.join("version").is_file());
+    }
+
+    /// On a volume taking names in any letter case, a store sitting in
+    /// another only through a folder spelled in another case refuses the
+    /// reset, and what an operator keeps where that store would move aside
+    /// stays.
+    #[test]
+    fn refuses_a_store_nested_in_another_spelled_in_another_case() {
+        let dir = tempfile::tempdir().unwrap();
+
+        if !case_insensitive(dir.path()) {
+            return;
+        }
+
+        let root = dir.path().join("data");
+        let mut kept = old_store_under(&root);
+
+        let mut config = config_over(&root);
+        config.storage.archive.path = Some(PathBuf::from("x/archive"));
+        config.storage.cache.path = Some(PathBuf::from("X"));
+
+        for file in [
+            root.join("x")
+                .join("archive")
+                .join("index")
+                .join("000001.sst"),
+            root.join(".X.reset").join("precious").join("file"),
+        ] {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, b"kept").unwrap();
+            kept.push(file);
+        }
+
+        assert_refused(&config, &kept, "another letter case");
+    }
+
+    /// The lock of a fjall store goes with the store holding it, where the
+    /// folder holding it is spelled in another case on a volume taking both.
+    #[test]
+    fn a_lock_goes_with_the_store_holding_it_in_another_case() {
+        let dir = tempfile::tempdir().unwrap();
+
+        if !case_insensitive(dir.path()) {
+            return;
+        }
+
+        let root = dir.path().join("data");
+        let state = root.join("x").join("state");
+        drop(dolos_fjall::StateStore::open(&state, Default::default()).unwrap());
+        let lock = dolos_fjall::view::lock_out(&state).unwrap().unwrap();
+
+        let removal = Removal {
+            root: root.clone(),
+            paths: vec![root.join("X")],
+            locks: vec![(state, lock)],
+        };
+
+        let mut handed = Vec::new();
+
+        removal
+            .remove_all(
+                |path, held| {
+                    handed.push((path.to_path_buf(), held.len()));
+                    Ok(())
+                },
+                |_| {},
+            )
+            .unwrap();
+
+        assert_eq!(handed, [(root.join("X"), 1)]);
+    }
+
+    /// Run `run` on another thread, failing if it takes longer than a link
+    /// loop should.
+    fn within_seconds<T: Send + 'static>(run: impl FnOnce() -> T + Send + 'static) -> T {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || sender.send(run()).unwrap());
+
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("following the links ends")
+    }
+
+    /// A path through a loop of links is an error, both where it is reached
+    /// and when a reset finds a store on it, rather than followed forever or
+    /// taken as written.
+    #[cfg(unix)]
+    #[test]
+    fn a_loop_of_links_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("data");
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(root.join("b"), root.join("a")).unwrap();
+        std::os::unix::fs::symlink("a", root.join("b")).unwrap();
+
+        let store = root.join("a").join("state");
+
+        let (reached, removed) = within_seconds(move || {
+            let reached = reached(&store, true).map_err(|error| error.to_string());
+
+            let removal = Removal {
+                root,
+                paths: vec![store],
+                locks: Vec::new(),
+            };
+            let removed = removal
+                .remove_all(|_, _| Ok(()), |_| {})
+                .map_err(|error| error.to_string());
+
+            (reached, removed)
+        });
+
+        let error = reached.unwrap_err();
+        assert!(error.contains("symbolic links"), "{error}");
+        assert!(removed.is_err());
+    }
+
+    /// A link whose target is relative is followed from the folder holding
+    /// it, as the OS follows it.
+    #[cfg(unix)]
+    #[test]
+    fn a_relative_link_is_followed_from_where_it_sits() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap().join("data");
+        std::fs::create_dir_all(root.join("state")).unwrap();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::os::unix::fs::symlink("state", root.join("alias")).unwrap();
+        std::os::unix::fs::symlink("../state", root.join("sub").join("up")).unwrap();
+
+        assert_eq!(
+            reached(&root.join("alias").join("archive"), true).unwrap(),
+            root.join("state").join("archive")
+        );
+        assert_eq!(
+            reached(&root.join("sub").join("up"), true).unwrap(),
+            root.join("state")
+        );
+        assert_eq!(
+            reached(&root.join("alias"), false).unwrap(),
+            root.join("alias")
+        );
+    }
+
+    /// On a volume taking names in any letter case, two stores spelled in
+    /// different cases for one folder are listed once.
+    #[test]
+    fn a_store_written_twice_in_another_case_is_listed_once() {
+        let dir = tempfile::tempdir().unwrap();
+
+        if !case_insensitive(dir.path()) {
+            return;
+        }
+
+        let root = dir.path().join("data");
+        old_store_under(&root);
+        std::fs::create_dir_all(root.join("mempool")).unwrap();
+
+        let mut config = config_over(&root);
+        config.storage.cache.path = Some(PathBuf::from("MEMPOOL"));
+
+        let listed = managed_paths(&config).unwrap().paths;
+        let mempool = listed
+            .iter()
+            .filter(|path| same_place(path, &root.join("mempool")))
+            .count();
+
+        assert_eq!(mempool, 1, "{listed:?}");
+    }
+
+    /// Missing folders are one place only by the same name, in any Unicode
+    /// form and letter case, in one place.
+    #[test]
+    fn missing_folders_are_one_place_by_name_beside_one_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        assert!(within(
+            &root.join("a").join("Foo"),
+            &root.join("a").join("foo")
+        ));
+        assert!(!within(
+            &root.join("a").join("foo"),
+            &root.join("b").join("foo")
+        ));
+        assert!(within(
+            &root.join("\u{e9}tat").join("wal"),
+            &root.join("E\u{301}TAT")
+        ));
+        assert!(!within(&root.join("etat"), &root.join("\u{e9}tat")));
+    }
+
+    /// A folder is one place whatever path reaches it: its canonical form
+    /// and the one written, the temporary folder's link on macOS or the
+    /// verbatim prefix on Windows among them.
+    #[test]
+    fn a_folder_is_one_place_under_its_canonical_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+
+        assert!(same_place(&canonical, dir.path()));
+        assert!(within(&canonical.join("missing"), dir.path()));
     }
 }
