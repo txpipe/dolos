@@ -156,6 +156,11 @@ pub fn as_utxo(record: &StateRecord) -> Result<(TxoRef, UtxoValue), Error> {
     ))
 }
 
+/// The eras a `utxos` value may carry: Pallas's encoding of
+/// `MultiEraOutput::era()`, Byron 1 to Conway 7. A store reads the number back
+/// as a Pallas era and has no answer for any other.
+const UTXO_ERAS: std::ops::RangeInclusive<Era> = 1..=7;
+
 /// The `utxos` value: `[era: uint, body: bytes, slot: uint, tx_index: uint]`,
 /// the creation position last. A UTxO no block produced has no position and
 /// is `[era: uint, body: bytes]`.
@@ -196,7 +201,14 @@ pub fn decode_utxo_value(bytes: &[u8]) -> Result<UtxoValue, Error> {
 
     let era = uint(STATE, "era", &mut decoder)?;
     let era = Era::try_from(era)
-        .map_err(|_| Error::malformed(STATE, format!("era {era} does not fit a u16")))?;
+        .ok()
+        .filter(|era| UTXO_ERAS.contains(era))
+        .ok_or_else(|| {
+            Error::malformed(
+                STATE,
+                format!("era {era} is outside 1 (Byron) to 7 (Conway)"),
+            )
+        })?;
     let body = blob(STATE, "body", &mut decoder)?.to_vec();
 
     let position = if fields == 4 {
@@ -490,7 +502,7 @@ mod tests {
             Some(UtxoPosition::new(u64::MAX, UtxoPosition::MAX_TX_INDEX)),
         ];
 
-        for era in [0u16, 23, 24, 255, 256, u16::MAX] {
+        for era in UTXO_ERAS {
             for position in positions {
                 let value = UtxoValue::new(EraCbor(era, vec![0xff; 3]), position);
                 let composed = encode_utxo_value(&value).unwrap();
@@ -547,14 +559,12 @@ mod tests {
         }
     }
 
-    /// The era is a `u16` in the stores and a CBOR uint on the wire, so the
-    /// widths disagree and the decoder narrows. `encode_utxo_value` cannot
-    /// reach the refusal — a `UtxoValue` already holds a `u16` — so the wire
-    /// bytes are built directly, which is the only way an out-of-range era
-    /// arrives at all.
+    /// The era is one of Pallas's seven, and a CBOR uint on the wire, so the
+    /// decoder refuses every other number, including the ones past a `u16`.
+    /// The wire bytes are built directly, which is how an unknown era arrives.
     #[test]
     fn an_out_of_range_era_is_refused() {
-        for era in [u64::from(u16::MAX) + 1, u64::MAX] {
+        for era in [0, 8, u64::from(u16::MAX), u64::from(u16::MAX) + 1, u64::MAX] {
             let wire = frame::encode(|e| {
                 e.array(2)?.u64(era)?.bytes(&[])?;
                 Ok(())
