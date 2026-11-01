@@ -255,7 +255,7 @@ fn copy_wal_writes_the_slot_range() {
     assert_eq!(entries(&output), expected);
 }
 
-/// An output an older release wrote is wiped by the WAL's version check,
+/// An output at an older WAL version is wiped by the version check,
 /// which says so on stderr.
 #[test]
 fn copy_wal_onto_an_older_wal_warns_of_the_wipe() {
@@ -288,7 +288,7 @@ fn copy_wal_onto_an_older_wal_warns_of_the_wipe() {
     assert_eq!(slots, vec![12, 13, 14, 15]);
 }
 
-/// `copy-wal` onto a WAL an older release wrote, with `logging` as the
+/// `copy-wal` onto a WAL at an older version, with `logging` as the
 /// config's `[logging]` section; its stderr.
 fn copy_onto_an_older_wal(logging: &str) -> String {
     let node = Node::new(10..=20);
@@ -329,6 +329,12 @@ fn logs_follow_the_configured_level_and_filter() {
         filtered.contains("wiping WAL data"),
         "the filter was not applied\n{filtered}"
     );
+
+    let alongside = copy_onto_an_older_wal("level = \"warn\"\nfilter = \"pallas=info\"");
+    assert!(
+        alongside.contains("wiping WAL data"),
+        "the filter replaced the level\n{alongside}"
+    );
 }
 
 #[test]
@@ -345,7 +351,7 @@ fn a_malformed_logging_filter_is_refused() {
     assert!(error.contains("logging.filter"), "{error}");
 }
 
-/// An output a newer release wrote is refused, neither wiped nor restamped.
+/// An output at a newer WAL version is refused, neither wiped nor restamped.
 #[test]
 fn copy_wal_refuses_a_newer_wal() {
     let node = Node::new(10..=20);
