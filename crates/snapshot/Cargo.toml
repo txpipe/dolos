@@ -16,8 +16,8 @@ edition.workspace = true
 # parties; this profile publishes into registries as a matter of course, so
 # it turns the transport on unconditionally rather than forwarding a feature
 # nothing in dolos ever left off.
-stelae = { git = "https://github.com/txpipe/stelae", tag = "v0.4.0", features = ["oci"] }
-stelae-driver = { git = "https://github.com/txpipe/stelae", tag = "v0.4.0", features = ["oci"] }
+stelae = { git = "https://github.com/txpipe/stelae", tag = "v0.5.0", features = ["oci"] }
+stelae-driver = { git = "https://github.com/txpipe/stelae", tag = "v0.5.0", features = ["oci"] }
 dolos-core = { path = "../core" }
 dolos-cardano = { path = "../cardano" }
 
@@ -52,4 +52,4 @@ dolos-testing = { path = "../testing" }
 # libzstd alone and decodes the blocks it appends afterwards.
 dolos-fjall = { path = "../fjall" }
 pallas = { workspace = true }
-zstd = "0.13"
+zstd = "0.14"
