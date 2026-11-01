@@ -6,7 +6,9 @@ use gasket::framework::*;
 use itertools::Itertools as _;
 use pallas::crypto::hash::Hash;
 use pallas::network::facades::PeerClient;
-use pallas::network::miniprotocols::txsubmission::{EraTxBody, EraTxId, Request, TxIdAndSize};
+use pallas::network::miniprotocols::txsubmission::{
+    self, EraTxBody, EraTxId, Request, TxIdAndSize,
+};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
@@ -40,7 +42,8 @@ fn to_n2n_body(mempool_tx: MempoolTx) -> EraTxBody {
 }
 
 pub struct Worker {
-    peer_session: PeerClient,
+    /// The session, until the worker's teardown aborts it.
+    peer_session: Option<PeerClient>,
     unfulfilled_request: Option<usize>,
     /// Tracks the hashes of tx IDs we've propagated to the peer, in order.
     /// Used to map the protocol's positional ack count to specific tx hashes.
@@ -72,11 +75,18 @@ impl Worker {
         }
 
         Ok(Self {
-            peer_session,
+            peer_session: Some(peer_session),
             unfulfilled_request: Default::default(),
             propagated_hashes: VecDeque::new(),
             requested: false,
         })
+    }
+
+    fn txsubmission(&mut self) -> &mut txsubmission::Client {
+        self.peer_session
+            .as_mut()
+            .expect("the session is open until teardown")
+            .txsubmission()
     }
 
     async fn propagate_txs(
@@ -92,11 +102,10 @@ impl Worker {
 
         let payload = txs.iter().map(to_n2n_reply).collect_vec();
 
-        self.peer_session
-            .txsubmission()
+        self.txsubmission()
             .reply_tx_ids(payload)
             .await
-            .inspect_err(|err| warn!(error=%err, "error replying with tx ids"))
+            .inspect_err(|error| ended("replying with tx ids", error))
             .or_restart()?;
 
         Ok(())
@@ -157,7 +166,7 @@ impl Worker {
     ) -> Result<WorkSchedule<Request<EraTxId>>, WorkerError> {
         debug!("waiting for request from upstream peer");
 
-        let next = self.peer_session.txsubmission().next_request().await;
+        let next = self.txsubmission().next_request().await;
 
         match next {
             Ok(request) => {
@@ -169,7 +178,7 @@ impl Worker {
                 Ok(WorkSchedule::Unit(request))
             }
             Err(error) if self.requested => {
-                warn!(%error, "the tx-submission session ended, reconnecting");
+                ended("waiting for the peer's next request", &error);
                 Err(WorkerError::Restart)
             }
             Err(error) => {
@@ -250,18 +259,32 @@ impl gasket::framework::Worker<Stage> for Worker {
 
                 let to_send = found.into_iter().map(to_n2n_body).collect_vec();
 
-                let result = self.peer_session.txsubmission().reply_txs(to_send).await;
-
-                if let Err(err) = &result {
-                    warn!(err=%err, "error sending txs upstream")
-                }
-
-                result.or_restart()?;
+                self.txsubmission()
+                    .reply_txs(to_send)
+                    .await
+                    .inspect_err(|error| ended("sending txs", error))
+                    .or_restart()?;
             }
         };
 
         Ok(())
     }
+
+    /// Abort the session: pallas's multiplexer outlives a dropped client,
+    /// holding the socket, until a write to it fails, and after a peer's FIN
+    /// none may.
+    async fn teardown(&mut self) -> Result<(), WorkerError> {
+        if let Some(session) = self.peer_session.take() {
+            session.abort().await;
+        }
+
+        Ok(())
+    }
+}
+
+/// A session that ended once the peer had asked: it reconnects at once.
+fn ended(what: &str, error: &txsubmission::Error) {
+    warn!(cause = %Failure::new(what, error), "the tx-submission session ended, reconnecting");
 }
 
 #[derive(Stage)]

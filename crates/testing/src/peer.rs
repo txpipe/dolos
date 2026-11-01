@@ -23,6 +23,8 @@ use pallas::network::miniprotocols::{
     txsubmission, Point,
 };
 use pallas::network::multiplexer::Bearer;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::TcpStream;
 use tokio::sync::watch;
 
 use crate::blocks::make_conway_block_with_prev;
@@ -58,6 +60,9 @@ pub struct PeerOptions {
     pub request_tx_ids_at: Vec<usize>,
     /// Serve this block's body as bytes that decode as no block.
     pub corrupt_body: Option<u64>,
+    /// Close each session with a FIN, as a node does, rather than a reset,
+    /// and count the connections the node then closes too.
+    pub close_with_fin: bool,
 }
 
 struct Block {
@@ -204,6 +209,7 @@ struct Shared {
     intersected_at: Mutex<Vec<Instant>>,
     sessions: AtomicUsize,
     tx_submissions: AtomicUsize,
+    closed_by_node: AtomicUsize,
     stop: watch::Sender<bool>,
 }
 
@@ -254,6 +260,7 @@ impl PeerFixture {
             intersected_at: Mutex::new(Vec::new()),
             sessions: AtomicUsize::new(0),
             tx_submissions: AtomicUsize::new(0),
+            closed_by_node: AtomicUsize::new(0),
             stop: watch::Sender::new(false),
         });
 
@@ -315,6 +322,12 @@ impl PeerFixture {
         self.shared.tx_submissions.load(Ordering::SeqCst)
     }
 
+    /// The connections closed with [`PeerOptions::close_with_fin`] that the
+    /// node has closed on its side since.
+    pub fn closed_by_node(&self) -> usize {
+        self.shared.closed_by_node.load(Ordering::SeqCst)
+    }
+
     /// Whether the fixture has stopped, by [`Self::stop`] or after
     /// [`PeerOptions::stop_after_headers`].
     pub fn is_stopped(&self) -> bool {
@@ -362,9 +375,20 @@ async fn serve(
 
     let accept = async {
         loop {
-            if let Ok((bearer, _)) = Bearer::accept_tcp(&listener).await {
-                tokio::spawn(handshake(bearer, magic, shared.clone()));
-            }
+            let Ok((bearer, _)) = Bearer::accept_tcp(&listener).await else {
+                continue;
+            };
+
+            let connection = if shared.options.close_with_fin {
+                match with_second_handle(bearer) {
+                    Ok((bearer, socket)) => (bearer, Some(socket)),
+                    Err(_) => continue,
+                }
+            } else {
+                (bearer, None)
+            };
+
+            tokio::spawn(handshake(connection, magic, shared.clone()));
         }
     };
 
@@ -379,7 +403,7 @@ async fn serve(
 /// `PeerServer::accept` aborts a refused connection right after queueing the
 /// refusal, which the node then rarely reads; this holds it until the node
 /// closes it, or for at most ten seconds.
-async fn handshake(bearer: Bearer, magic: u64, shared: Arc<Shared>) {
+async fn handshake((bearer, socket): (Bearer, Option<TcpStream>), magic: u64, shared: Arc<Shared>) {
     let mut peer = PeerServer::new(bearer);
 
     match peer
@@ -387,7 +411,13 @@ async fn handshake(bearer: Bearer, magic: u64, shared: Arc<Shared>) {
         .handshake(VersionTable::v7_and_above(magic))
         .await
     {
-        Ok(Some(_)) => session(peer, shared).await,
+        Ok(Some(_)) => {
+            session(peer, &shared).await;
+
+            if let Some(socket) = socket {
+                close_with_fin(socket, &shared).await;
+            }
+        }
         Ok(None) => {
             let closed = peer.chainsync().recv_while_idle();
             let _ = tokio::time::timeout(Duration::from_secs(10), closed).await;
@@ -397,7 +427,7 @@ async fn handshake(bearer: Bearer, magic: u64, shared: Arc<Shared>) {
     }
 }
 
-async fn session(peer: PeerServer, shared: Arc<Shared>) {
+async fn session(peer: PeerServer, shared: &Shared) {
     // Every agent stays alive for the session: the multiplexer fails the
     // connection on a message for a protocol whose agent was dropped, and the
     // node's submit stage speaks tx-submission.
@@ -416,13 +446,40 @@ async fn session(peer: PeerServer, shared: Arc<Shared>) {
 
     // Any protocol ending closes the connection.
     tokio::select! {
-        _ = serve_chainsync(chainsync, &shared) => (),
-        _ = serve_blockfetch(blockfetch, &shared) => (),
-        _ = serve_txsubmission(txsubmission, &shared) => (),
+        _ = serve_chainsync(chainsync, shared) => (),
+        _ = serve_blockfetch(blockfetch, shared) => (),
+        _ = serve_txsubmission(txsubmission, shared) => (),
     }
 
     keepalive.abort();
     plexer.abort().await;
+}
+
+/// The connection, and a second handle on its socket that keeps it open once
+/// the session's multiplexer is gone. The bearer resets the socket when
+/// closed; the second handle closes it with a FIN instead.
+fn with_second_handle(bearer: Bearer) -> std::io::Result<(Bearer, TcpStream)> {
+    let Bearer::Tcp(stream) = bearer else {
+        unreachable!("the fixture accepts TCP connections");
+    };
+
+    let stream = stream.into_std()?;
+    let second = stream.try_clone()?;
+
+    Ok((
+        Bearer::Tcp(TcpStream::from_std(stream)?),
+        TcpStream::from_std(second)?,
+    ))
+}
+
+/// Send a FIN, then wait until the node closes its side too.
+async fn close_with_fin(mut socket: TcpStream, shared: &Shared) {
+    let _ = socket.shutdown().await;
+
+    let mut buffer = [0; 1024];
+    while let Ok(1..) = socket.read(&mut buffer).await {}
+
+    shared.closed_by_node.fetch_add(1, Ordering::SeqCst);
 }
 
 async fn serve_chainsync(

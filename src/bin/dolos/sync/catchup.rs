@@ -91,7 +91,7 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         End::Interrupted => Err(miette::miette!("interrupted {unmet}")),
         End::Stopped(stages) => Err(crate::common::sync_failure(
             &format!("the sync ended {unmet}"),
-            &progress,
+            progress.upstream_failure(),
             &stages,
         )),
     }

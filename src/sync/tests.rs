@@ -895,14 +895,41 @@ fn a_submit_stage_whose_peer_is_unreachable_gives_up_on_it() {
 }
 
 #[test]
+fn a_tx_submission_session_the_peer_closed_closes_its_connection() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, domain) = domain_over(temp.path(), backing_off(20, 1, 1));
+
+    let peer = peer(PeerOptions {
+        close_tx_submission: Some(Duration::ZERO),
+        close_with_fin: true,
+        ..Default::default()
+    });
+
+    let (_progress, stages) = submit_alone(&config, peer.address().to_string(), &domain);
+
+    // A stage that gives up closes its connections with it, so only the
+    // count before that shows they close as their sessions end.
+    wait_until(
+        "the node closed the first three sessions",
+        Duration::from_secs(30),
+        || peer.closed_by_node() >= 3 || stages.any_ended(),
+    );
+
+    let ended = stages.any_ended();
+    stages.teardown();
+
+    assert!(!ended, "the submit stage gave up first");
+}
+
+#[test]
 fn a_follow_at_the_tip_whose_peer_drops_idle_sessions_keeps_reconnecting() {
     let temp = tempfile::tempdir().unwrap();
     let (config, domain) = domain_over(temp.path(), no_backoff(0));
 
     // Reaching the tip is a delivery: every session does, before the peer
-    // drops it, so none counts.
+    // drops it, so none counts. An empty chain leaves no block to fetch
+    // inside the drop's window.
     let peer = peer(PeerOptions {
-        initial_blocks: 20,
         close_after_await: Some(Duration::from_millis(50)),
         ..Default::default()
     });
@@ -1095,6 +1122,46 @@ fn a_session_cause_says_what_the_multiplexer_saw() {
     assert_eq!(
         cause(ClientError::IntersectionNotFound),
         "chain-sync failed: no intersection point found"
+    );
+
+    let fetched = retry::Failure::new(
+        "block-fetch failed",
+        &pallas::network::miniprotocols::blockfetch::ClientError::Plexer(Plexer::AgentDequeue),
+    );
+    assert!(
+        fetched.to_string().ends_with(": the connection closed"),
+        "{fetched}"
+    );
+
+    let submitted = retry::Failure::new(
+        "waiting for the peer's first request",
+        &pallas::network::miniprotocols::txsubmission::Error::Plexer(Plexer::AgentDequeue),
+    );
+    assert!(
+        submitted.to_string().ends_with(": the connection closed"),
+        "{submitted}"
+    );
+}
+
+#[tokio::test]
+async fn only_a_delivery_since_the_last_failure_starts_the_count_again() {
+    let progress = Arc::new(SyncProgress::default());
+    let attempts = retry::Attempts::new("pull", "peer".into(), no_backoff(1), progress.clone());
+    let failure = || retry::Failure::message("the session failed".into());
+
+    progress.note_delivery();
+    assert!(attempts.failed(failure()).await.is_ok());
+
+    progress.note_delivery();
+    assert!(attempts.failed(failure()).await.is_ok());
+    assert!(attempts.failed(failure()).await.is_err());
+
+    let failure = progress
+        .upstream_failure()
+        .expect("the upstream was given up");
+    assert!(
+        failure.message.contains("after 2 failed attempts in a row"),
+        "{failure}"
     );
 }
 

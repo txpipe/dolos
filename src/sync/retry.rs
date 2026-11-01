@@ -21,8 +21,8 @@ use super::{SyncProgress, UpstreamFailure};
 #[derive(Debug, Clone)]
 pub(super) struct Failure {
     cause: String,
-    /// Whether the peer refused the handshake, as a peer of another network
-    /// does.
+    /// Whether the peer refused the handshake: it serves another network, or
+    /// shares no protocol version with dolos.
     refused: bool,
 }
 

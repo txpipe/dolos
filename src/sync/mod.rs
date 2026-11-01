@@ -52,8 +52,8 @@ pub struct SyncProgress {
 pub struct UpstreamFailure {
     /// The stage, the peer, the attempts and the last one's cause.
     pub message: String,
-    /// Whether the peer refused the last attempt's handshake, as a peer of
-    /// another network does.
+    /// Whether the peer refused the last attempt's handshake: it serves
+    /// another network, or shares no protocol version with dolos.
     pub refused: bool,
 }
 

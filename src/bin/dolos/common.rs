@@ -384,13 +384,14 @@ pub fn ended_stages(pipeline: &gasket::daemon::Daemon) -> Vec<String> {
 /// why a stage gave up on the upstream peer, or else which stages stopped.
 pub fn sync_failure(
     what: &str,
-    progress: &dolos::sync::SyncProgress,
+    failure: Option<&dolos::sync::UpstreamFailure>,
     ended: &[String],
 ) -> miette::Report {
-    match progress.upstream_failure() {
+    match failure {
         Some(failure) if failure.refused => miette::miette!(
-            help = "a peer refuses the handshake of a node on another network: check that \
-                    `upstream.peer_address` serves the configured chain",
+            help = "a peer refuses the handshake of a node on another network, or of one \
+                    with no protocol version in common: check that `upstream.peer_address` \
+                    serves the configured chain",
             "{what}: {failure}"
         ),
         Some(failure) => miette::miette!(
@@ -481,6 +482,37 @@ mod tests {
             ..Default::default()
         };
         assert!(log_filter(&config).is_err());
+    }
+
+    #[test]
+    fn a_sync_failure_points_at_what_to_check() {
+        use dolos::sync::UpstreamFailure;
+
+        let failure = |refused| UpstreamFailure {
+            message: "the pull stage gave up on the upstream peer".into(),
+            refused,
+        };
+
+        let help = |failure: Option<&UpstreamFailure>| {
+            let report = sync_failure("the sync stopped", failure, &["pull".into()]);
+            let help = report.help().map(|help| help.to_string());
+            (report.to_string(), help.unwrap_or_default())
+        };
+
+        let (message, refused) = help(Some(&failure(true)));
+        assert_eq!(
+            message,
+            "the sync stopped: the pull stage gave up on the upstream peer"
+        );
+        assert!(refused.contains("another network"), "{refused}");
+        assert!(!refused.contains("[sync.retry]"), "{refused}");
+
+        let (_, retried) = help(Some(&failure(false)));
+        assert!(retried.starts_with("`[sync.retry]`"), "{retried}");
+
+        let (message, stopped) = help(None);
+        assert_eq!(message, "the sync stopped: the pull stage stopped");
+        assert_eq!(stopped, "the log above says why");
     }
 
     #[tokio::test]

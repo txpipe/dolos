@@ -55,7 +55,7 @@ pub async fn run(config: RootConfig, _args: &Args) -> miette::Result<()> {
     if let Some(ended) = ended {
         return Err(crate::common::sync_failure(
             "the sync stopped",
-            &progress,
+            progress.upstream_failure(),
             &ended,
         ));
     }
