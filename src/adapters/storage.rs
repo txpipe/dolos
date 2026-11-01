@@ -2817,21 +2817,24 @@ mod tests {
         assert!(refusal(open_archive_store(&config)).is_some());
     }
 
+    /// `v2-alpha.1` stores predate the freeze-hardening record layouts.
     #[test]
     fn an_unsupported_identity_is_refused() {
-        let temp = tempfile::tempdir().unwrap();
-        let config = config_over(&temp.path().join("data"));
-        written_state(&config, Some("v1"));
-        written_archive(&config, Some("v1"));
+        for identity in ["v1", "v2-alpha.1"] {
+            let temp = tempfile::tempdir().unwrap();
+            let config = config_over(&temp.path().join("data"));
+            written_state(&config, Some(identity));
+            written_archive(&config, Some(identity));
 
-        let message = open_state_store(&config).err().unwrap().to_string();
-        assert!(message.contains("`v1`"), "{message}");
+            let message = open_state_store(&config).err().unwrap().to_string();
+            assert!(message.contains(&format!("`{identity}`")), "{message}");
 
-        for refused in [
-            refusal(open_state_store(&config)),
-            refusal(open_archive_store(&config)),
-        ] {
-            assert_eq!(refused.unwrap().found.as_deref(), Some("v1"));
+            for refused in [
+                refusal(open_state_store(&config)),
+                refusal(open_archive_store(&config)),
+            ] {
+                assert_eq!(refused.unwrap().found.as_deref(), Some(identity));
+            }
         }
     }
 
@@ -2848,7 +2851,7 @@ mod tests {
             |config| config.sync.wal_path = Some("journal".into()),
         ];
 
-        for recorded in [None, Some("v1"), current().as_deref()] {
+        for recorded in [None, Some("v1"), Some("v2-alpha.1"), current().as_deref()] {
             let expected = match recorded {
                 Some(identity) if reads_store_identity(identity) => None,
                 _ => Some(recorded.map(str::to_string)),

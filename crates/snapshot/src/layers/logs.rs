@@ -21,10 +21,8 @@
 //! Deriving them at restore time means replaying the ledger, which is the thing
 //! a snapshot exists to avoid — so they travel, and the value is the stored
 //! minicbor of the entity, byte for byte. This codec never decodes an entity: a
-//! log value is an opaque byte string here, which is also why an entity holding
-//! a float (`PoolEpochLog::relative_size`) does not collide with the layer's
-//! no-floats encoding rule. The rule governs the record's own CBOR, and the
-//! value is a byte string within it.
+//! log value is an opaque byte string here. The layer's encoding rules govern
+//! the record's own CBOR, and the value is a byte string within it.
 //!
 //! Determinism therefore rests on the entity encoders being deterministic — an
 //! ADR-004 limitation, and an audit that belongs to the export slice, not here.
