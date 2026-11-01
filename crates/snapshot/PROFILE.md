@@ -72,7 +72,7 @@ Every tag dimension carries `xxh3_64` of its logical key in `key_hash`, so `para
 
 State namespaces: the entity namespaces from `dolos_cardano::model::build_schema()` (key = the stored bytes of the namespace's typed key, value = the stored value verbatim, under the [value encoding](#value-encoding)) plus `utxos` (key = `tx_hash(32) ‖ output_index(4, BE)`, value = CBOR `[era: uint, body: bytes, slot: uint, tx_index: uint]`, the last two the UTxO's creation position: the slot of the block holding the producing transaction and that transaction's index in it; a UTxO no block produced — genesis, AVVM, configured — has no position and is `[era: uint, body: bytes]`). The chain point lives in the inscription's `position`, not in a layer. Live-UTxO tags (`utxo::*`) are not shipped; they are rebuilt at restore into the state store via `utxo_index_delta_from_utxo_delta`, keyed `[dim_hash:8][lookup_key][slot:8 BE][tx_index + 1:2 BE][txo_ref:36]` from the position each record carries (ten zero bytes without one), so a restored node lists UTxOs in creation order with no archive read.
 
-A `utxos` value's `era` is Pallas's encoding of the output's era (`MultiEraOutput::era()`), and nothing else. A restore refuses a value whose era is outside the table.
+A `utxos` value's `era` is a number from the table below. For an output a block produced it is Pallas's encoding of the output's era (`MultiEraOutput::era()`); for a UTxO no block produced it is set as stated after the table. A restore refuses a value whose era is outside the table.
 
 | `era` | Era |
 |---|---|
@@ -84,7 +84,7 @@ A `utxos` value's `era` is Pallas's encoding of the output's era (`MultiEraOutpu
 | 6 | Babbage |
 | 7 | Conway |
 
-A UTxO no block produced carries the era of how it was built: 1 for a Byron genesis or AVVM output, 7 for a Shelley-genesis output, and for a configured UTxO the era its configuration names, 7 when it names none.
+A UTxO no block produced carries the era of how it was built: 1 for a Byron genesis or AVVM output, 7 for a Shelley-genesis output, and for a configured UTxO the era its configuration names, 7 when it names none. A configured era must be one of 1 to 7: the publisher writes it as configured without checking it, and a restore refuses any other, so a node configured with an era outside the table publishes steles that do not restore.
 
 Key kinds: every key below is built from these, and a credential has a different encoding in each kind that carries one. The encodings are fixed as tabled; none is converted into another.
 
@@ -161,7 +161,7 @@ Namespace names follow one grammar. A name says what a row is, and the suffix sa
 
 `log-pool-epochs` carries one `PoolEpochLog` per pool and epoch `e`, keyed at `epoch_start(e)`, as `[blocks_minted, total_stake, delegators_count, live_pledge, total_rewards, fixed_cost, margin_cost]`. `total_stake` is the pool's active stake in `e`. Its share of the `active_stake` in `e`'s `log-epochs` row is the pool's relative size, which a reader derives: the row stores no ratio.
 
-`state-datums` carries `DatumState` values as CBOR `[refcount: uint, bytes: bytes]`, keyed by the datum hash, with `bytes` the datum's CBOR as the witness set carried it. The count follows one rule, applied per transaction: each produced output whose datum option is a hash `h`, in a transaction whose witness set carries the datum for `h`, adds one, and creates the row at 1 with that witness's bytes when there is none; each consumed output whose datum option is a hash takes one away, deleting the row at 0, and does nothing when there is no row. Inline datums are not counted, and neither is an output naming a hash whose datum its transaction does not carry. The count is what this rule yields over the chain, which is not always the number of live outputs naming the datum.
+`state-datums` carries `DatumState` values as CBOR `[refcount: uint, bytes: bytes]`, keyed by the datum hash, with `bytes` the datum's CBOR as the witness set carried it. The count follows one rule, applied per transaction, the transaction's consumed outputs before its produced outputs: first each consumed output whose datum option is a hash takes one away, deleting the row at 0, and does nothing when there is no row; then each produced output whose datum option is a hash `h`, in a transaction whose witness set carries the datum for `h`, adds one, and creates the row at 1 with that witness's bytes when there is none. Inline datums are not counted, and neither is an output naming a hash whose datum its transaction does not carry. The count is what this rule yields over the chain, which is not always the number of live outputs naming the datum.
 
 `state-metadata-labels` carries `MetadataLabelState` values as CBOR `[tx_count: uint]`, with `tx_count` at field 0. Its key is the metadata label as an exact 8-byte big-endian u64.
 
@@ -219,9 +219,11 @@ Chain positions take several shapes, each fixed as tabled. A tuple is a CBOR arr
 | Shape | Encoding | Where |
 |---|---|---|
 | bare slot | `slot: uint` | `accounts.registered_at`, `accounts.deregistered_at`, `pruned-accounts.deregistered_at` |
-| `(slot, TxOrder)` | `[slot, tx_index]` | `accounts.vote_delegated_at`; `dreps.registered_at`, `dreps.unregistered_at`; `gov`'s DRep snapshot `unregistered_at`; a vote's position (`VotePosition`) in `proposals` |
+| `(slot, TxOrder)` | `[slot, tx_index]` | `accounts.vote_delegated_at`; `dreps.registered_at`, `dreps.unregistered_at`; `gov`'s DRep snapshot `unregistered_at` |
+| `VoteEntry` | `[newest: [slot, vote], standing: [slot, vote] / null, newest_order: uint, standing_order: uint]`, `vote` Pallas's `Vote` as a uint (0 No, 1 Yes, 2 Abstain), each order the `TxOrder` of its vote's transaction, `standing_order` 0 without a standing vote | `proposals.cc_votes`, `proposals.drep_votes` and `proposals.spo_votes` values |
 | `CertPosition` | `[slot, tx_index, cert_index]`, the certificate's index among its transaction's | `drep-sightings.first_seen` |
 | `MintPosition` | `slot(8, BE) ‖ tx_index(4, BE)` in the key | `asset-mints` keys |
+| first-mint position | `slot`, `tx_index: u32` at fields 3 and 4 | `first-mints` values |
 | `FirstScriptSet` | `[slot, tx_index: u32, order: u32]` | `first-scripts` values |
 | account-address chain order | `slot`, `tx_index: u32`, `output_index: u32` at fields 3 to 5 | `account-addresses` values |
 | `UtxoPosition` | `slot, tx_index` as the last two fields of the value, `tx_index` a `u16` | `utxos` values |
@@ -245,7 +247,7 @@ The contract is enforced by `crates/snapshot/tests/field_registry.rs` and its `t
 
 The contract has edges it does not close. Each is waived here, by its finding number in the freeze-hardening review, and each is what a reader must allow for.
 
-- **Hard-fork enums (7).** A hard fork that adds a variant to `PParamValue`, `ProposalAction`, `GovPurpose` or a Pallas enum reachable from a record bumps the media type of every kind that carries it. A fork that adds a protocol parameter bumps `state-epochs`, `log-epochs`, `state-proposals`, `log-proposals` and `state-gov`. Variants are only appended, so a newer reader still reads older bytes.
+- **Hard-fork enums (7).** A hard fork that adds a variant to `PParamValue`, `ProposalAction`, `GovPurpose` or a Pallas enum reachable from a record bumps the media type of every kind that carries it. A fork that adds a protocol parameter bumps `state-epochs`, `log-epochs`, `state-proposals` and `log-proposals`; `state-gov` carries no parameter value and keeps its media type. Variants are only appended, so a newer reader still reads older bytes.
 - **Pallas codecs (8).** A Pallas codec change that moves a record's bytes is a profile event. The variant tables and the per-struct canaries in `field_registry.rs` catch it as a build failure.
 - **Enum order shared with the WAL (9).** `ProposalAction`'s variant order is also the WAL's bincode format. Reordering it costs a WAL version bump as well as the media-type bump.
 - **Credential and key shapes (10).** The key kinds stay as tabled under "Key kinds", four credential encodings included.
