@@ -1,9 +1,15 @@
-use dolos_core::{ChainError, ChainPoint, Domain, Genesis, StateStore as _, StateWriter as _};
+use std::collections::HashMap;
+
+use dolos_core::{
+    ChainError, ChainPoint, Domain, Genesis, StateStore as _, StateWriter as _, UtxoSetDelta,
+};
+use pallas::{crypto::hash::Hash, ledger::primitives::conway::DatumOption};
 
 use crate::{
-    gov_from_conway_genesis, indexes::utxo_index_delta_from_utxo_delta, pots::Pots,
-    utils::nonce_stability_window, EndStats, EpochState, EpochValue, EraBoundary, EraKey, EraState,
-    GovState, Lovelace, Nonces, PParamsSet, RollingStats,
+    gov_from_conway_genesis, indexes::utxo_index_delta_from_utxo_delta, owned::OwnedMultiEraOutput,
+    pots::Pots, utils::nonce_stability_window, DatumKey, DatumState, EndStats, EpochState,
+    EpochValue, EraBoundary, EraKey, EraState, GovState, Lovelace, Nonces, PParamsSet,
+    RollingStats,
 };
 
 mod staking;
@@ -157,6 +163,24 @@ pub fn bootstrap_gov<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<(
     Ok(())
 }
 
+/// The configured UTxOs referencing each datum hash, counted as a block
+/// producing them would be, so that their spends' decrements pair up. No
+/// witness set carries their datums, so the rows start with empty bytes.
+/// Genesis UTxOs carry no datums.
+fn custom_datum_refs(delta: &UtxoSetDelta) -> Result<HashMap<Hash<32>, u64>, ChainError> {
+    let mut refs = HashMap::new();
+
+    for value in delta.produced_utxo.values() {
+        let output = OwnedMultiEraOutput::decode(value.clone())?;
+
+        if let Some(DatumOption::Hash(hash)) = output.with_dependent(|_, output| output.datum()) {
+            *refs.entry(hash).or_default() += 1;
+        }
+    }
+
+    Ok(refs)
+}
+
 pub fn bootstrap_utxos<D: Domain>(
     state: &D::State,
     genesis: &Genesis,
@@ -173,6 +197,14 @@ pub fn bootstrap_utxos<D: Domain>(
     let custom_delta = crate::utxoset::build_custom_utxos_delta(config)?;
     state_writer.apply_utxoset(&custom_delta)?;
     state_writer.apply_utxo_tags(&utxo_index_delta_from_utxo_delta(&custom_delta))?;
+
+    for (hash, refcount) in custom_datum_refs(&custom_delta)? {
+        let state = DatumState {
+            refcount,
+            bytes: vec![],
+        };
+        state_writer.write_entity_typed(&DatumKey(hash), &state)?;
+    }
 
     state_writer.commit()?;
 
