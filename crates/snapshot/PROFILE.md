@@ -84,7 +84,7 @@ A `utxos` value's `era` is a number from the table below. For an output a block 
 | 6 | Babbage |
 | 7 | Conway |
 
-A UTxO no block produced carries the era of how it was built: 1 for a Byron genesis or AVVM output, 7 for a Shelley-genesis output, and for a configured UTxO the era its configuration names, 7 when it names none. A configured era must be one of 1 to 7: the publisher writes it as configured without checking it, and a restore refuses any other, so a node configured with an era outside the table publishes steles that do not restore.
+A UTxO no block produced carries the era of how it was built: 1 for a Byron genesis or AVVM output, 7 for a Shelley-genesis output, and for a configured UTxO the era its configuration names, 7 when it names none. A configured era must be one of 1 to 7, and a restore refuses any other. Nothing checks it before then: a node configured with era 0 runs, and the publisher writes the era as configured, so its steles do not restore; a node configured with 8 or above panics at genesis ("era out of range") and never publishes.
 
 Key kinds: every key below is built from these, and a credential has a different encoding in each kind that carries one. The encodings are fixed as tabled; none is converted into another.
 
