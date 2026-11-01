@@ -167,7 +167,7 @@ pub enum CardanoEntity {
     DRepEpochLog(Box<DRepEpochLog>),
     FirstMintSet(Box<FirstMintSet>),
     FirstMintChunk(Box<FirstMintChunk>),
-    PolicyMintChunk(Box<PolicyMintChunk>),
+    PolicyFirstMintChunk(Box<PolicyFirstMintChunk>),
     AccountAddressSet(Box<AccountAddressSet>),
     AccountAddressChunk(Box<AccountAddressChunk>),
     AddressStats(Box<AddressStats>),
@@ -218,7 +218,7 @@ variant_boilerplate!(AccountEpochLog);
 variant_boilerplate!(DRepEpochLog);
 variant_boilerplate!(FirstMintSet);
 variant_boilerplate!(FirstMintChunk);
-variant_boilerplate!(PolicyMintChunk);
+variant_boilerplate!(PolicyFirstMintChunk);
 variant_boilerplate!(AccountAddressSet);
 variant_boilerplate!(AccountAddressChunk);
 variant_boilerplate!(AddressStats);
@@ -252,7 +252,9 @@ impl dolos_core::Entity for CardanoEntity {
             DRepEpochLog::NS => DRepEpochLog::decode_entity(ns, value).map(Into::into),
             FirstMintSet::NS => FirstMintSet::decode_entity(ns, value).map(Into::into),
             FirstMintChunk::NS => FirstMintChunk::decode_entity(ns, value).map(Into::into),
-            PolicyMintChunk::NS => PolicyMintChunk::decode_entity(ns, value).map(Into::into),
+            PolicyFirstMintChunk::NS => {
+                PolicyFirstMintChunk::decode_entity(ns, value).map(Into::into)
+            }
             AccountAddressSet::NS => AccountAddressSet::decode_entity(ns, value).map(Into::into),
             AccountAddressChunk::NS => {
                 AccountAddressChunk::decode_entity(ns, value).map(Into::into)
@@ -292,7 +294,7 @@ impl dolos_core::Entity for CardanoEntity {
             Self::DRepEpochLog(x) => DRepEpochLog::encode_entity(x),
             Self::FirstMintSet(x) => FirstMintSet::encode_entity(x),
             Self::FirstMintChunk(x) => FirstMintChunk::encode_entity(x),
-            Self::PolicyMintChunk(x) => PolicyMintChunk::encode_entity(x),
+            Self::PolicyFirstMintChunk(x) => PolicyFirstMintChunk::encode_entity(x),
             Self::AccountAddressSet(x) => AccountAddressSet::encode_entity(x),
             Self::AccountAddressChunk(x) => AccountAddressChunk::encode_entity(x),
             Self::AddressStats(x) => AddressStats::encode_entity(x),
@@ -356,7 +358,7 @@ pub fn build_log_schema() -> StateSchema {
     register_log::<AccountEpochLog>(&mut schema);
     register_log::<DRepEpochLog>(&mut schema);
     register_log::<FirstMintChunk>(&mut schema);
-    register_log::<PolicyMintChunk>(&mut schema);
+    register_log::<PolicyFirstMintChunk>(&mut schema);
     register_log::<FirstScriptChunk>(&mut schema);
     register_log::<AccountAddressChunk>(&mut schema);
     register_log::<AddressStats>(&mut schema);
@@ -384,7 +386,7 @@ mod schema_tests {
             DRepEpochLog::NS,
             AccountAddressChunk::NS,
             PaymentAddressChunk::NS,
-            PolicyMintChunk::NS,
+            PolicyFirstMintChunk::NS,
             FirstMintChunk::NS,
             AssetMintChunk::NS,
         ] {
