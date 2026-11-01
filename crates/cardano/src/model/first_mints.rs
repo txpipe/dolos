@@ -9,7 +9,7 @@ use super::AssetKey;
 use crate::periods::{ChunkRow, GroupKey, GroupRow, StageIfAbsent};
 
 /// The first mint of an asset, held in state until its epoch seals into a
-/// [`FirstMintChunk`], a [`PolicyMintChunk`] and the asset's entity index
+/// [`FirstMintChunk`], a [`PolicyFirstMintChunk`] and the asset's entity index
 /// entry.
 ///
 /// Keyed `policy ‖ epoch ‖ asset key`, so one prefix scan returns every
@@ -116,7 +116,7 @@ impl ChunkRow for FirstMintChunk {
 /// Sealed at `epoch_start(e) ‖ policy ‖ chunk (4 B)`, with the policy's total
 /// for the epoch on every chunk.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Default)]
-pub struct PolicyMintChunk {
+pub struct PolicyFirstMintChunk {
     #[n(0)]
     pub count: u64,
 
@@ -125,12 +125,12 @@ pub struct PolicyMintChunk {
 }
 
 entity_boilerplate!(
-    PolicyMintChunk,
-    "policy-mint-chunks",
+    PolicyFirstMintChunk,
+    "policy-first-mint-chunks",
     log = (PolicyKey, u32)
 );
 
-impl ChunkRow for PolicyMintChunk {
+impl ChunkRow for PolicyFirstMintChunk {
     type Item = Vec<u8>;
 
     fn new(count: u64, items: Vec<Vec<u8>>) -> Self {

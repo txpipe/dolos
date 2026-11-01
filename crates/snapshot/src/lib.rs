@@ -106,7 +106,7 @@ use dolos_cardano::model::{
     AddressStats, AssetMintChunk, AssetMintSet, DRepEpochLog, DRepSightingState, DRepState,
     DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
     FirstScriptSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressChunk,
-    PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk,
+    PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyFirstMintChunk,
     PoolEpochLog, PoolState, ProposalState, PrunedAccountState,
 };
 use dolos_core::{ChainPoint, EntityKind, Namespace};
@@ -181,7 +181,7 @@ pub const LOG_KINDS: [(&str, Namespace); 15] = [
     ("log-first-mint-chunks", FirstMintChunk::NS),
     ("log-first-script-chunks", FirstScriptChunk::NS),
     ("log-payment-address-chunks", PaymentAddressChunk::NS),
-    ("log-policy-mint-chunks", PolicyMintChunk::NS),
+    ("log-policy-first-mint-chunks", PolicyFirstMintChunk::NS),
     ("log-pool-epochs", PoolEpochLog::NS),
     ("log-pools", PoolState::NS),
     ("log-proposals", ProposalState::NS),

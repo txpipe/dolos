@@ -61,7 +61,7 @@ use dolos_cardano::model::{
     AddressStats, AssetMintChunk, AssetMintSet, DRepEpochLog, DRepSightingState, DRepState,
     DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
     FirstScriptSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressChunk,
-    PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk,
+    PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyFirstMintChunk,
     PoolEpochLog, PoolState, ProposalState, PrunedAccountState,
 };
 use dolos_core::{Entity, Namespace};
@@ -260,12 +260,12 @@ pub fn registry() -> Vec<Entry> {
             }]
         ),
         entity_entry!(
-            enc_policy_mint_chunks,
-            PolicyMintChunk,
-            canaries::policy_mint_chunk,
+            enc_policy_first_mint_chunks,
+            PolicyFirstMintChunk,
+            canaries::policy_first_mint_chunk,
             &[Pinned {
                 rev: 1,
-                hex: include_str!("goldens/policy-mint-chunks.rev1.hex"),
+                hex: include_str!("goldens/policy-first-mint-chunks.rev1.hex"),
             }]
         ),
         entity_entry!(
