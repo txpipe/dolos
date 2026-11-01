@@ -342,7 +342,8 @@ impl InPlace {
                  wipe can neither move aside nor remove; {}",
                 state_path.display(),
                 if args.rewrite_logs {
-                    "set `storage.state.path` to a folder under it"
+                    "move the store's contents into a folder under it and set \
+                     `storage.state.path` to that folder"
                 } else {
                     "rebuild into --target"
                 },
@@ -882,7 +883,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_linked_state_refuses_an_in_place_rebuild() {
-        for written in ["state", "state/"] {
+        for (written, rewrite_logs) in [
+            ("state", false),
+            ("state/", false),
+            ("state", true),
+            ("state/", true),
+        ] {
             let dir = tempfile::tempdir().unwrap();
             let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
             config.storage.path = dir.path().join("data");
@@ -895,11 +901,12 @@ mod tests {
 
             let before = std::fs::read_dir(&elsewhere).unwrap().count();
 
-            let error = InPlace::prepare(&config, &args(false)).err().unwrap();
-            assert!(
-                error.to_string().contains("symbolic link"),
-                "{written}: {error}"
-            );
+            let error = InPlace::prepare(&config, &args(rewrite_logs))
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(error.contains("symbolic link"), "{written}: {error}");
+            assert_eq!(error.contains("--target"), !rewrite_logs, "{error}");
             assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), before);
             assert!(dolos_fjall::view::lock_out(&elsewhere).unwrap().is_some());
         }
@@ -1298,6 +1305,7 @@ mod tests {
             ("ffi", ".\u{fb03}.reset"),
             ("state", ".sta\u{200c}te.reset"),
             ("state", ".\u{feff}state.reset"),
+            ("state", ".\u{202a}state.reset"),
             ("\u{1f82}", ".\u{1f80}\u{300}.reset"),
         ];
 
@@ -1333,10 +1341,30 @@ mod tests {
             let state_path = config.storage.state_path().unwrap();
             std::fs::create_dir_all(&state_path).unwrap();
 
-            let error = check_wipe_scope(&config, &state_path, rewrite_logs).unwrap_err();
-            let error = error.to_string();
+            let error = InPlace::prepare(&config, &args(rewrite_logs))
+                .err()
+                .unwrap()
+                .to_string();
             assert!(error.contains("aside"), "{error}");
             assert_eq!(error.contains("--target"), !rewrite_logs, "{error}");
+        }
+    }
+
+    /// An ephemeral state refuses an in-place rebuild, offering `--target`
+    /// and `--ephemeral` only to a run that can take them.
+    #[test]
+    fn an_ephemeral_state_refuses_an_in_place_rebuild() {
+        for rewrite_logs in [false, true] {
+            let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+            config.storage.state.kind = StoreType::Ephemeral;
+
+            let error = InPlace::prepare(&config, &args(rewrite_logs))
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(error.contains("ephemeral"), "{error}");
+            assert_eq!(error.contains("--target"), !rewrite_logs, "{error}");
+            assert_eq!(error.contains("--ephemeral"), !rewrite_logs, "{error}");
         }
     }
 
@@ -1483,11 +1511,22 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_state_at_a_mount_point_refuses_the_rebuild() {
-        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
-        config.storage.path = PathBuf::from("/");
-        config.storage.state.path = Some(PathBuf::from("dev"));
+        for rewrite_logs in [false, true] {
+            let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+            config.storage.path = PathBuf::from("/");
+            config.storage.state.path = Some(PathBuf::from("dev"));
 
-        let error = InPlace::prepare(&config, &args(false)).err().unwrap();
-        assert!(error.to_string().contains("mount point"), "{error}");
+            let error = InPlace::prepare(&config, &args(rewrite_logs))
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(error.contains("mount point"), "{error}");
+            assert_eq!(error.contains("--target"), !rewrite_logs, "{error}");
+            assert_eq!(
+                error.contains("move the store's contents"),
+                rewrite_logs,
+                "{error}"
+            );
+        }
     }
 }

@@ -355,8 +355,9 @@ pub(super) fn walk(path: &Path, follow_last: bool) -> std::io::Result<(PathBuf, 
 
 /// Whether `path` is `wiped` or sits under it, both [`reached`]: folders are
 /// compared by what they are on disk where both exist and, where neither
-/// does, by name in any Unicode form and letter case beside the same folder,
-/// as a volume ignoring either would take them for one.
+/// does, by name in any Unicode form and letter case, or with a
+/// default-ignorable character, beside the same folder, as a volume ignoring
+/// any of those would take them for one.
 pub(super) fn within(path: &Path, wiped: &Path) -> bool {
     path.ancestors().any(|ancestor| same_place(ancestor, wiped))
 }
@@ -2781,7 +2782,8 @@ pub(super) mod tests {
     }
 
     /// Missing folders are one place only by the same name, in any Unicode
-    /// form and letter case, in one place.
+    /// form and letter case or with a default-ignorable character, in one
+    /// place.
     #[test]
     fn missing_folders_are_one_place_by_name_beside_one_folder() {
         let dir = tempfile::tempdir().unwrap();
@@ -2812,6 +2814,11 @@ pub(super) mod tests {
             ("\u{212a}elvin", "kelvin"),
             ("sta\u{200c}te", "state"),
             ("\u{feff}state", "state"),
+            ("sta\u{200f}te", "state"),
+            ("\u{202a}state", "state"),
+            ("\u{202e}state", "state"),
+            ("state\u{206a}", "state"),
+            ("state\u{206f}", "state"),
             ("\u{1f82}", "\u{1f80}\u{300}"),
         ] {
             assert!(within(&root.join(a), &root.join(b)), "{a} {b}");
