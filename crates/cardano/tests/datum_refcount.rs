@@ -1,0 +1,275 @@
+//! Witness-datum refcounts through the real pipeline and its WAL: a datum
+//! stays readable while any live UTxO references its hash, whichever of those
+//! UTxOs carried the datum in its witness set, and rollback restores every
+//! row the block before held.
+
+use std::sync::Arc;
+
+use dolos_cardano::{indexes::AsyncCardanoQueryExt as _, DatumKey, DatumState};
+use dolos_core::{
+    config::CustomUtxo, sync::SyncExt as _, AsyncQueryFacade, ChainPoint, Domain as _, RawBlock,
+    StateStore as _, TxoRef,
+};
+use dolos_testing::{
+    blocks::{empty_witness_set, make_conway_block_with_witnessed_txs_at},
+    toy_domain::ToyDomain,
+};
+use pallas::{
+    codec::{
+        minicbor,
+        utils::{Int, KeepRaw, NonEmptySet, Set},
+    },
+    crypto::hash::Hash,
+    ledger::{
+        addresses::{Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart},
+        primitives::{
+            conway::{
+                DatumOption, PlutusData, PostAlonzoTransactionOutput, TransactionBody,
+                TransactionInput, TransactionOutput, Value, WitnessSet,
+            },
+            BigInt,
+        },
+        traverse::{ComputeHash as _, Era},
+    },
+};
+
+const ADA: u64 = 1_000_000;
+
+const SEED: [u8; 32] = [0xee; 32];
+
+fn seed(index: u32) -> TxoRef {
+    TxoRef(SEED.into(), index)
+}
+
+fn address(payment: u8) -> Vec<u8> {
+    ShelleyAddress::new(
+        Network::Testnet,
+        ShelleyPaymentPart::Key([payment; 28].into()),
+        ShelleyDelegationPart::Null,
+    )
+    .to_vec()
+}
+
+fn datum() -> PlutusData {
+    PlutusData::BigInt(BigInt::Int(Int::from(42)))
+}
+
+fn datum_hash() -> Hash<32> {
+    datum().compute_hash()
+}
+
+fn datum_bytes() -> Vec<u8> {
+    minicbor::to_vec(datum()).unwrap()
+}
+
+fn output(datum_hash: Option<Hash<32>>) -> TransactionOutput<'static> {
+    TransactionOutput::PostAlonzo(KeepRaw::from(PostAlonzoTransactionOutput {
+        address: address(0x01).into(),
+        value: Value::Coin(2 * ADA),
+        datum_option: datum_hash.map(|hash| KeepRaw::from(DatumOption::Hash(hash))),
+        script_ref: None,
+    }))
+}
+
+fn body(input: &TxoRef, datum_hash: Option<Hash<32>>) -> TransactionBody<'static> {
+    TransactionBody {
+        inputs: Set::from(vec![TransactionInput {
+            transaction_id: input.0,
+            index: input.1 as u64,
+        }]),
+        outputs: vec![output(datum_hash)],
+        fee: 100_000,
+        ttl: None,
+        certificates: None,
+        withdrawals: None,
+        auxiliary_data_hash: None,
+        validity_interval_start: None,
+        mint: None,
+        script_data_hash: None,
+        collateral: None,
+        required_signers: None,
+        network_id: None,
+        collateral_return: None,
+        total_collateral: None,
+        reference_inputs: None,
+        voting_procedures: None,
+        proposal_procedures: None,
+        treasury_value: None,
+        donation: None,
+    }
+}
+
+fn witnessing_datum() -> WitnessSet<'static> {
+    WitnessSet {
+        plutus_data: Some(KeepRaw::from(
+            NonEmptySet::try_from(vec![KeepRaw::from(datum())]).unwrap(),
+        )),
+        ..empty_witness_set()
+    }
+}
+
+/// A tx from `input` to one output locked by the datum's hash, carrying the
+/// datum in its witness set when `witnessed`.
+fn lock(input: &TxoRef, witnessed: bool) -> (TransactionBody<'static>, WitnessSet<'static>) {
+    let witness_set = if witnessed {
+        witnessing_datum()
+    } else {
+        empty_witness_set()
+    };
+
+    (body(input, Some(datum_hash())), witness_set)
+}
+
+/// A tx spending `input` to an output with no datum.
+fn spend(input: &TxoRef) -> (TransactionBody<'static>, WitnessSet<'static>) {
+    (body(input, None), empty_witness_set())
+}
+
+fn produced(tx: &TransactionBody) -> TxoRef {
+    TxoRef(tx.compute_hash(), 0)
+}
+
+fn domain() -> ToyDomain {
+    let mut config = dolos_cardano::CardanoLogicConfig::default();
+
+    for index in 0..2 {
+        let cbor = minicbor::to_vec(TransactionOutput::PostAlonzo(KeepRaw::from(
+            PostAlonzoTransactionOutput {
+                address: address(0x0f).into(),
+                value: Value::Coin(10 * ADA),
+                datum_option: None,
+                script_ref: None,
+            },
+        )))
+        .unwrap();
+
+        config.custom_utxos.push(CustomUtxo {
+            ref_: seed(index),
+            era: Some(Era::Conway.into()),
+            cbor,
+        });
+    }
+
+    ToyDomain::new_with_genesis_and_config(
+        Arc::new(dolos_cardano::include::preview::load()),
+        config,
+        None,
+        None,
+    )
+}
+
+/// One block per tx, in order.
+fn blocks(
+    txs: Vec<(TransactionBody<'static>, WitnessSet<'static>)>,
+) -> Vec<(ChainPoint, RawBlock)> {
+    let mut prev = None;
+
+    txs.into_iter()
+        .enumerate()
+        .map(|(i, (body, witness_set))| {
+            let (point, raw) = make_conway_block_with_witnessed_txs_at(
+                10 + 10 * i as u64,
+                i as u64,
+                prev,
+                vec![(body, witness_set, true)],
+                None,
+            );
+            prev = point.hash();
+            (point, raw)
+        })
+        .collect()
+}
+
+fn row(domain: &ToyDomain) -> Option<DatumState> {
+    domain
+        .state()
+        .read_entity_typed::<DatumState>(&DatumKey(datum_hash()))
+        .unwrap()
+}
+
+/// What a datum lookup answers.
+async fn lookup(domain: &ToyDomain) -> Option<Vec<u8>> {
+    AsyncQueryFacade::new(domain.clone())
+        .get_datum(&datum_hash())
+        .await
+        .unwrap()
+}
+
+fn known(refcount: u64) -> Option<DatumState> {
+    Some(DatumState {
+        refcount,
+        bytes: datum_bytes(),
+    })
+}
+
+/// Rolls `chain` forward, checking the row and the lookup after each block
+/// against `expected`, then rolls it back, checking each block's state is
+/// restored exactly.
+async fn roll(
+    chain: Vec<(TransactionBody<'static>, WitnessSet<'static>)>,
+    expected: &[Option<DatumState>],
+) {
+    let domain = domain();
+    let blocks = blocks(chain);
+    assert_eq!(blocks.len(), expected.len());
+
+    for (i, ((_, raw), expected)) in blocks.iter().zip(expected).enumerate() {
+        domain.roll_forward(raw.clone()).unwrap();
+
+        let readable = expected.as_ref().filter(|state| !state.bytes.is_empty());
+        assert_eq!(
+            lookup(&domain).await,
+            readable.map(|state| state.bytes.clone()),
+            "lookup after block {i}"
+        );
+        assert_eq!(&row(&domain), expected, "row after block {i}");
+    }
+
+    for i in (0..blocks.len() - 1).rev() {
+        domain.rollback(&blocks[i].0).unwrap();
+        assert_eq!(
+            row(&domain),
+            expected[i],
+            "row after rolling back to block {i}"
+        );
+    }
+}
+
+/// Output A carries the datum's hash and the datum; output B, in a later tx,
+/// only the hash. Spending A leaves the datum readable while B is live, and
+/// spending B then removes it.
+#[tokio::test]
+async fn spending_the_witnessed_output_keeps_the_datum_for_another() {
+    let a = lock(&seed(0), true);
+    let b = lock(&seed(1), false);
+    let spend_a = spend(&produced(&a.0));
+    let spend_b = spend(&produced(&b.0));
+
+    roll(
+        vec![a, b, spend_a, spend_b],
+        &[known(1), known(2), known(1), None],
+    )
+    .await;
+}
+
+/// The same with B first: before any tx witnesses the datum its hash is
+/// counted but the datum is not readable; the witness of A fills it in, and
+/// spending B leaves it readable while A is live.
+#[tokio::test]
+async fn spending_an_unwitnessed_output_keeps_the_datum_for_another() {
+    let b = lock(&seed(1), false);
+    let a = lock(&seed(0), true);
+    let spend_b = spend(&produced(&b.0));
+    let spend_a = spend(&produced(&a.0));
+
+    let unknown = Some(DatumState {
+        refcount: 1,
+        bytes: vec![],
+    });
+
+    roll(
+        vec![b, a, spend_b, spend_a],
+        &[unknown, known(2), known(1), None],
+    )
+    .await;
+}

@@ -140,6 +140,40 @@ pub fn make_conway_block_with_txs_at(
     )>,
     auxiliary_data: Option<alonzo::AuxiliaryData>,
 ) -> (ChainPoint, RawBlock) {
+    let txs = txs
+        .into_iter()
+        .map(|(body, valid)| (body, empty_witness_set(), valid))
+        .collect();
+
+    make_conway_block_with_witnessed_txs_at(slot, block_number, prev_hash, txs, auxiliary_data)
+}
+
+/// A witness set with nothing in it.
+pub fn empty_witness_set() -> WitnessSet<'static> {
+    WitnessSet {
+        vkeywitness: None,
+        native_script: None,
+        bootstrap_witness: None,
+        plutus_v1_script: None,
+        plutus_data: None,
+        redeemer: None,
+        plutus_v2_script: None,
+        plutus_v3_script: None,
+    }
+}
+
+/// [`make_conway_block_with_txs_at`] with each tx's witness set given.
+pub fn make_conway_block_with_witnessed_txs_at(
+    slot: BlockSlot,
+    block_number: u64,
+    prev_hash: Option<Hash<32>>,
+    txs: Vec<(
+        pallas::ledger::primitives::conway::TransactionBody<'static>,
+        WitnessSet<'static>,
+        bool,
+    )>,
+    auxiliary_data: Option<alonzo::AuxiliaryData>,
+) -> (ChainPoint, RawBlock) {
     let header_body = HeaderBody {
         block_number,
         slot,
@@ -163,31 +197,22 @@ pub fn make_conway_block_with_txs_at(
         body_signature: Bytes::from(vec![0x18]),
     };
 
-    let witness_set = || WitnessSet {
-        vkeywitness: None,
-        native_script: None,
-        bootstrap_witness: None,
-        plutus_v1_script: None,
-        plutus_data: None,
-        redeemer: None,
-        plutus_v2_script: None,
-        plutus_v3_script: None,
-    };
-
     let invalid: Vec<u32> = txs
         .iter()
         .enumerate()
-        .filter(|(_, (_, valid))| !valid)
+        .filter(|(_, (_, _, valid))| !valid)
         .map(|(index, _)| index as u32)
         .collect();
 
+    let (transaction_bodies, transaction_witness_sets) = txs
+        .into_iter()
+        .map(|(body, witness_set, _)| (KeepRaw::from(body), KeepRaw::from(witness_set)))
+        .unzip();
+
     let block = Block {
         header: KeepRaw::from(header),
-        transaction_witness_sets: txs.iter().map(|_| KeepRaw::from(witness_set())).collect(),
-        transaction_bodies: txs
-            .into_iter()
-            .map(|(body, _)| KeepRaw::from(body))
-            .collect(),
+        transaction_witness_sets,
+        transaction_bodies,
         auxiliary_data_set: match auxiliary_data {
             Some(aux) => {
                 let mut map = BTreeMap::new();
