@@ -823,3 +823,117 @@ pub(crate) fn output_has_subject(subject: &[u8], output: &MultiEraOutput) -> boo
     }
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use pallas::{
+        codec::utils::{KeyValuePairs, MaybeIndefArray},
+        ledger::primitives::Constr,
+    };
+
+    use super::*;
+    use crate::mapping::sorted_json;
+
+    const POLICY: &str = "f0ff48bbb7bbe9d59a40f1ce90e9e9d0ff5002ec48f232b49ca0fb9a";
+
+    /// Property names in their on-chain order, which is not sorted.
+    const KEYS: [&str; 8] = [
+        "name",
+        "description",
+        "website",
+        "image",
+        "mediaType",
+        "author",
+        "collection",
+        "artist",
+    ];
+
+    /// Serializes the asset that `metadata` describes as the route does.
+    fn asset_bytes(metadata: OnchainMetadata) -> Vec<u8> {
+        let asset = Asset {
+            asset: String::new(),
+            policy_id: POLICY.to_string(),
+            asset_name: None,
+            fingerprint: String::new(),
+            quantity: "1".to_string(),
+            initial_mint_tx_hash: String::new(),
+            mint_or_burn_count: 1,
+            onchain_metadata: Some(metadata.metadata),
+            onchain_metadata_standard: Some(metadata.version),
+            onchain_metadata_extra: Some(metadata.extra),
+            metadata: None,
+        };
+
+        serde_json::to_vec(&sorted_json(asset).unwrap().0).unwrap()
+    }
+
+    fn assert_identical_and_sorted(mut next: impl FnMut() -> Vec<u8>) {
+        let expected = next();
+
+        // each pass builds a new `HashMap`, so each has its own seed
+        for _ in 0..64 {
+            assert_eq!(next(), expected);
+        }
+
+        let body: serde_json::Value = serde_json::from_slice(&expected).unwrap();
+        let keys: Vec<_> = body["onchain_metadata"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        let body = std::str::from_utf8(&expected).unwrap();
+        let positions: Vec<_> = keys
+            .iter()
+            .map(|key| body.find(&format!("\"{key}\":")).unwrap())
+            .collect();
+
+        assert_eq!(keys.len(), KEYS.len());
+        // the parsed keys come sorted: the body must list them in that order
+        assert!(positions.windows(2).all(|w| w[0] < w[1]), "{body}");
+    }
+
+    #[test]
+    fn cip25_metadata_serializes_to_the_same_sorted_bytes() {
+        let text = |x: &str| Metadatum::Text(x.to_string());
+        let unit = format!("{POLICY}{}", hex::encode("james"));
+
+        let properties = KEYS.map(|key| (text(key), text(&format!("{key} value"))));
+        let asset = KeyValuePairs::Def(vec![(
+            text("james"),
+            Metadatum::Map(properties.to_vec().into()),
+        )]);
+        let policy = KeyValuePairs::Def(vec![(text(POLICY), Metadatum::Map(asset))]);
+        let metadatum = Metadatum::Map(policy);
+
+        assert_identical_and_sorted(|| {
+            let metadata = OnchainMetadata::from_metadatum(&unit, metadatum.clone())
+                .unwrap()
+                .unwrap();
+            asset_bytes(metadata)
+        });
+    }
+
+    #[test]
+    fn cip68_metadata_serializes_to_the_same_sorted_bytes() {
+        let text = |x: &str| PlutusData::BoundedBytes(x.as_bytes().to_vec().into());
+
+        let properties = KEYS.map(|key| (text(key), text(&format!("{key} value"))));
+        let datum = PlutusData::Constr(Constr {
+            tag: 121,
+            any_constructor: None,
+            fields: MaybeIndefArray::Def(vec![
+                PlutusData::Map(KeyValuePairs::Def(properties.into())),
+                PlutusData::BigInt(BigInt::Int(1.into())),
+            ]),
+        });
+
+        assert_identical_and_sorted(|| {
+            let metadata =
+                OnchainMetadata::from_plutus_data(datum.clone(), Cip68TokenStandard::Nft)
+                    .unwrap()
+                    .unwrap();
+            asset_bytes(metadata)
+        });
+    }
+}

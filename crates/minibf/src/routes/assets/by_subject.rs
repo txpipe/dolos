@@ -2,23 +2,27 @@ use axum::{
     extract::{Path, State},
     Json,
 };
-use blockfrost_openapi::models::asset::Asset;
 use dolos_cardano::periods::assets::WalkBudget;
 use dolos_core::Domain;
 
-use crate::{error::Error, mapping::assets::load_asset_builder, Facade};
+use crate::{
+    error::Error,
+    mapping::{assets::load_asset_builder, sorted_json},
+    Facade,
+};
 
 pub async fn by_subject<D>(
     Path(unit): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Asset>, Error>
+) -> Result<Json<serde_json::Value>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
     let budget = WalkBudget::new(domain.config.max_scan_items());
     let model = load_asset_builder(&domain, unit, &budget).await?;
 
-    Ok(Json(model.into_model(&domain).await?))
+    // `onchain_metadata` is a `HashMap`: its key order changes per instance
+    Ok(sorted_json(model.into_model(&domain).await?)?)
 }
 
 #[cfg(test)]
@@ -93,7 +97,11 @@ mod tests {
             fields: MaybeIndefArray::Def(vec![
                 PlutusData::Map(KeyValuePairs::Def(vec![
                     (text("name"), text("Pair")),
+                    (text("description"), text("A pair")),
+                    (text("website"), text("https://pair")),
                     (text("image"), text("ipfs://pair")),
+                    (text("mediaType"), text("image/png")),
+                    (text("author"), text("Dolos")),
                 ])),
                 PlutusData::BigInt(BigInt::Int(1.into())),
                 PlutusData::Constr(Constr {
@@ -211,6 +219,42 @@ mod tests {
         assert_eq!(asset["onchain_metadata_standard"], "CIP68v1");
         assert_eq!(asset["onchain_metadata"]["name"], "Pair");
         assert_eq!(asset["onchain_metadata"]["image"], "ipfs://pair");
+    }
+
+    /// The datum lists its properties unsorted, and the metadata lands in a
+    /// `HashMap`: every request gets the same bytes, with sorted keys. The
+    /// standard does not define `author` or `website`, so they stay CBOR hex.
+    #[tokio::test]
+    async fn assets_by_subject_onchain_metadata_has_stable_bytes() {
+        use dolos_core::{import::ImportExt as _, Domain as _, StateStore as _};
+
+        let policy = [0x5a; 28];
+
+        let app = TestApp::new_with_cfg_and_setup(Default::default(), |domain, _| {
+            let tip = domain.state().read_cursor().unwrap().unwrap().slot();
+            domain
+                .import_blocks(vec![cip68_pair_block(tip + 1, policy)])
+                .unwrap();
+        });
+
+        let path = format!("/assets/{}000de14050414952", hex::encode(policy));
+        let (status, expected) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        for _ in 0..16 {
+            let (status, actual) = app.get_bytes(&path).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(actual, expected, "response changed for {path}");
+        }
+
+        let body = std::str::from_utf8(&expected).unwrap();
+        let metadata = &body[body.find("\"onchain_metadata\":").unwrap()..];
+        let expected_metadata = concat!(
+            r#""onchain_metadata":{"author":"45446f6c6f73","description":"A pair","#,
+            r#""image":"ipfs://pair","mediaType":"image/png","name":"Pair","#,
+            r#""website":"4c68747470733a2f2f70616972"}"#,
+        );
+        assert!(metadata.starts_with(expected_metadata), "{body}");
     }
 
     #[tokio::test]
