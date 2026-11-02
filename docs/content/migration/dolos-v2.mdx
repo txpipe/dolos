@@ -7,7 +7,7 @@ sidebar:
 
 import { Aside } from '@astrojs/starlight/components';
 
-What changes for a node moving to Dolos v2, and what to do about each change: the shape of `dolos.toml`, and the stores the node opens.
+What changes for a node moving to Dolos v2, and what to do about each change: the shape of `dolos.toml`, the stores the node opens, and the [command line](#command-line).
 
 ## Configuration
 
@@ -59,8 +59,8 @@ The node checks the file's `compatibility` declaration before anything else, and
 | store `cache`, `max_journal_size`, `flush_on_commit`, `l0_threshold`, `worker_threads`, `memtable_size_mb` | `preset = "standard"`, which sets all of them; the old fields are refused by name |
 | `[storage.mempool]`; `submit.prune_height` | root `[mempool]` (`persistent`, `path`, `retain_confirmed_blocks`); `prune_height` removed |
 | `storage.cache.memory_budget_bytes`, `disk_budget_bytes` | `storage.cache.memory_mb`, `disk_mb`, in MiB |
-| `[mithril]`, `snapshot.download_url`, `[stelae]` | [command inputs](#bootstrap-inputs) of the bootstrap and snapshot commands |
-| `snapshot.state_epochs` | `--state-epochs` or `--state-epochs-file` on `dolos snapshot digest` and `verify --reproduce`; the Stelae publisher's own `stateEpochs` |
+| `[mithril]`, `[stelae]` | [command inputs](#bootstrap-inputs) of the bootstrap commands |
+| `snapshot.state_epochs` | `--state-epochs` or `--state-epochs-file` on `stelae-publisher digest` and `verify --reproduce`; the Stelae publisher's own `stateEpochs` |
 | `sync.sync_limit`, `chain.stop_epoch` | `sync_limit = "UntilTip"`: `dolos sync catchup`, which stops at the upstream tip unless `--follow`; `sync_limit = { MaxBlocks = N }`: removed, with no successor; `stop_epoch`: `--stop-epoch` on `dolos sync catchup`, `dolos bootstrap mithril` and `dolos bootstrap immutabledb` |
 | the query limit, fixed at 32 | `serve.max_concurrent_queries`, from 1 to 64 |
 | `serve.grpc.tls_client_ca_root` | removed, and refused on load: the endpoint serves plaintext gRPC, so terminate TLS, mutual TLS included, at a reverse proxy |
@@ -143,7 +143,7 @@ The `[mithril]`, `[snapshot]` and `[stelae]` tables described where bootstraps r
 | `mithril.aggregator` | `dolos bootstrap mithril --aggregator`, or `DOLOS_MITHRIL_AGGREGATOR` |
 | `mithril.genesis_key` | `dolos bootstrap mithril --genesis-vkey`, or `DOLOS_MITHRIL_GENESIS_VKEY` |
 | `mithril.ancillary_key` | removed: the ledger state is rebuilt from the blocks |
-| `snapshot.download_url` | `dolos bootstrap snapshot --download-url` |
+| `snapshot.download_url` | removed with `dolos bootstrap snapshot`, with no successor (see [command line](#command-line)) |
 | `stelae.registry.user` | `--registry-user`, or `DOLOS_STELAE_USER` |
 | `stelae.registry.password`, `token` | `DOLOS_STELAE_PASSWORD`, `DOLOS_STELAE_TOKEN`, or `--registry-credentials-file` |
 
@@ -185,7 +185,7 @@ The v1 and v2.0.0-alpha.0 example configurations remain in the repository's hist
 Dolos v2 opens only the state and archive stores it wrote itself. Each store records, when it is created, the compatibility identifier of the contract the binary that created it writes (`v2-alpha.2`), and every command checks it before it reads or writes anything. Stores written by Dolos v1, or by a v2 alpha that predates store identities, record none, so v2 refuses them:
 
 ```
-the state store at /var/lib/dolos/data/state holds data but records no compatibility identity; this dolos opens stores that record `v2-alpha.2`. Restore it from a stele (`dolos bootstrap stelae --force`), replay a Cardano node database over it (`dolos bootstrap immutabledb --source <db> --force`), or clear it and sync from genesis (`dolos data cleanup --force`, then `dolos daemon`); see https://docs.txpipe.io/dolos/migration/dolos-v2
+the state store at /var/lib/dolos/data/state holds data but records no compatibility identity; this dolos opens stores that record `v2-alpha.2`. Restore it from a stele (`dolos bootstrap stelae --force`), replay a Cardano node database over it (`dolos bootstrap immutabledb --source <db> --force`), or clear it and sync from genesis (`dolos data reset --yes`, then `dolos daemon`); see https://docs.txpipe.io/dolos/migration/dolos-v2
 ```
 
 A store recording an identifier the release does not read is refused the same way, and the error names that identifier. That includes stores written by an earlier v2 alpha that recorded `v2-alpha.1`: this release changed the record layouts they hold, so it refuses them, and they are rebuilt like any other refused store. Change a `v2-alpha.1` configuration's declaration to `compatibility = "v2-alpha.2"` as well; the old value is refused as unsupported. The check reads only the stores: no configuration edit gets a refused store past it.
@@ -193,14 +193,63 @@ A store recording an identifier the release does not read is refused the same wa
 To move a node to v2, replace its stores with ones v2 writes:
 
 - **Restore from a stele** (minutes): `dolos bootstrap stelae --force`. The restore writes through v2's own stores, so they record its identity whatever release published the stele. The stele has to declare the entity index kinds this release reads (`parameters.entities`): one published before them is refused before anything is written, because a node restored from it would have no record of which scripts, assets and stake credentials it had already seen. Re-sync instead until a stele that declares them is published.
-- **Re-sync** (hours to days): `dolos bootstrap mithril --force`, or `dolos bootstrap relay --force` and then `dolos daemon` to sync from the relay.
+- **Replay** (hours): `dolos bootstrap mithril --force`, or `dolos bootstrap immutabledb --source <db> --force` over a local Cardano node database.
+- **Re-sync** (hours to days): `dolos data reset --yes`, then `dolos daemon` to sync from genesis.
 
 `--force` on its own is what clears the refused stores. Without it, `dolos bootstrap` refuses with the same error, `--skip-if-data` and `--continue` included, rather than leave the node a store it refuses. `--force` clears only the storage root, though, and never a state store that fails to open for another reason, as a half-unpacked one does, or whose cursor fails to read. So `--force` is refused too, naming what to remove by hand before bootstrapping, while such a state is there, or while the state, the archive or its block segments sit outside the root (an absolute or `..` `storage.state.path`, `storage.archive.path` or `storage.archive.blocks_path`; the archive and its segments only while `history.mode` is not `none`) and hold data: a store with data, an archive that fails to open, or block segments. `--force` neither checks nor clears a WAL, mempool or cache outside the root. A directory holding no data, such as a fresh mount point or an empty store this release opens, doesn't stop it. Stop the node first: a running node holds its stores, so they fail to open, and `--force` stops at the store's own error.
 
 The check covers the fjall stores. A v1 store kept in redb (a `redb` state backend, or the archive, which v1 keeps in redb by default) is not one v2 can open at all, so it has no identity to check: remove it by hand before bootstrapping v2. The exception is v1's default layout, a fjall state beside a redb archive, with the state in the storage root. Its state is refused, so `--force` clears the root, the archive in it included, once you have removed what it names outside the root. With the state outside the root, remove the redb archive by hand as well: once the state is gone, nothing is left refused, and `--force` clears nothing.
 
-<Aside type="caution">
-A Dolos snapshot (`dolos bootstrap snapshot`) unpacks the stores of the node that exported it as they were. One exported before stores recorded an identity is refused once unpacked; bootstrap from a stele or re-sync instead.
-</Aside>
-
 The WAL keeps its own format version: one written by an older release is wiped, and one from a newer release is refused. The mempool and the cache are outside the check. See the [data layer](../architecture/data-layer#store-identity) for where each store keeps its identity.
+
+## Command line
+
+Dolos v2 reorganizes the commands by what they do: preparing a node (`init`, `config`), filling its stores (`bootstrap`), running it (`daemon`, `serve`), synchronizing and recovering it (`sync`), observing and maintaining its data (`data`, `cache`) and installing it (`service`). The [CLI reference](../reference/cli) lists every command and flag. No old name is kept as an alias: an old command fails as unknown, with exit code 2.
+
+Along the way, every command that prints a report or records takes `--format text|json`, puts its result on stdout and its progress and logs on stderr, and exits `0` on success, `1` on an error, `2` on a usage error and `3` when a check finds a problem. Commands that destroy data never prompt: they take `--yes`, and without it they print what they would destroy and exit 2. Commands that only observe never write to the stores, and a store held by a running node is reported as in use rather than opened. See the reference's [conventions](../reference/cli#conventions).
+
+### Where each command went
+
+| v2.0.0-alpha | v2 |
+| ------------ | -- |
+| `dolos init`, which configured and bootstrapped | `dolos init` writes the configuration only; then `dolos bootstrap` |
+| `dolos doctor reset-genesis` | `dolos config write-genesis [--network NAME] [--dir PATH] [--force]` |
+| `dolos daemon`, `dolos serve` | unchanged; `daemon` takes no stop flags |
+| `dolos sync`, which followed the chain until stopped | `dolos sync catchup --follow` |
+| `dolos sync --until-tip` (or `daemon --until-tip`) | `dolos sync catchup`: bounded is now the default; it exits once the tip it first reached is committed |
+| `--max-blocks N` on `sync` and `daemon` | removed, with no successor |
+| `--stop-epoch N` on `sync` and `daemon` | `dolos sync catchup [--follow] --stop-epoch N` |
+| `dolos data summary` | `dolos sync status`, which also verifies the WAL and exits 3 when unhealthy |
+| `dolos doctor wal-integrity` | part of every `dolos sync status` |
+| `dolos doctor catchup-stores` | `dolos sync recover` |
+| `dolos doctor reset-wal` | `dolos sync recover --discard-wal`, only when the WAL cannot cover the gap |
+| `dolos doctor rollback` | `dolos sync rollback --slot S --hash H --yes` |
+| `dolos data dump-wal` | `dolos sync dump` |
+| `dolos doctor check` | split by what it checks: `dolos config check`, `dolos sync status` and `dolos data check` |
+| `dolos data dump-entity` | `dolos data inspect` |
+| `dolos data dump-state`, `dump-logs`, `dump-blocks` | `dolos data dump state`, `logs`, `blocks`; bounded to 100 records by default, `--limit 0` for all |
+| `dolos data stats`, `check`, `housekeeping` | unchanged names; `data check` exits 3 when it finds a problem |
+| `dolos data cleanup --force` | `dolos data reset --yes` |
+| `dolos doctor rebuild-state` | `dolos data rebuild`; the in-place rebuild takes `--yes` where it took `--force` |
+| `dolos data prune-wal`, `prune-chain` | removed: the [`history`](../configuration/schema) policy prunes as the node runs, and `dolos data housekeeping` applies it by hand |
+| `dolos data find-seq`, `copy-wal`, `clear-state`; `dolos doctor update-entity` | moved out of the binary to `cargo xtask debug find-seq`, `copy-wal`, `clear-state` and `update-entity` in the Dolos repository; `update-entity` now writes unless `--dry-run` |
+| `dolos data compute-spdd`, `compute-nonce`; `dolos doctor reclaim-avvm`; `dolos eval` | deleted, with no successor |
+| `dolos data import-archive` | removed; see [below](#archive-only-import) |
+| `dolos data export`, `dolos bootstrap snapshot` (`--variant`, `--point`, `--file`, `--download-url`) | removed with the Dolos snapshot format; restore a stele with `dolos bootstrap stelae` |
+| `dolos bootstrap relay` | removed: a node with empty stores syncs from genesis under `dolos daemon` or `dolos sync catchup` |
+| `dolos bootstrap mithril`, `dolos bootstrap stelae` | unchanged sources; `mithril` loses `--start-from`, replaced by `--continue` |
+| (none) | `dolos bootstrap immutabledb --source PATH`, replaying a local Cardano node database |
+| `dolos bootstrap --skip-if-not-empty`, `--resume` | `--skip-if-data` and `--continue`; the old spellings are gone, and `--continue` now follows the source (`dolos bootstrap mithril --continue`), not the `bootstrap` group |
+| `dolos snapshot publish`, `backfill` | `stelae-publisher publish`, `backfill`, in [`txpipe/stelae`](https://github.com/txpipe/stelae) |
+| `dolos snapshot digest`, `verify [--reproduce]`, `inspect` | `stelae-publisher digest`, `verify [--reproduce]`, `inspect` |
+| `dolos minibf …`, `dolos minikupo …` | removed: query the running node's MiniBF or MiniKupo HTTP endpoint instead |
+| `dolos cache …`, `dolos config check` | unchanged |
+| (none) | `dolos service install`, `uninstall`: the node as a systemd or launchd service |
+
+### Bootstrap and existing data
+
+Every bootstrap source now refuses when a managed store already holds data. `--force` replaces it, after resolving and checking the source's inputs; `--skip-if-data` exits 0 without acting; `--continue`, on `mithril` and `immutabledb` only, resumes an interrupted replay from its committed position. The three exclude one another. A stele restore has no `--continue`: run an interrupted one again with `--force`. The `bootstrap` group no longer needs the `mithril` feature; only `bootstrap mithril` does.
+
+### Archive-only import
+
+`dolos data import-archive` appended an ImmutableDB's blocks to the archive alone, leaving the state and the WAL as they were. That capability is gone. `dolos bootstrap immutabledb` replays a database into every store, rebuilding the state from the blocks; it is not a way to write blocks into the archive of a node whose state is kept.

@@ -62,7 +62,7 @@ Dolos connects directly to the Cardano network using Ouroboros Node-to-Node (N2N
 - **Mempool-aware transaction submit** — Tracks pending, inflight, and finalized UTxO states, enabling transaction chaining workflows
 - **Local devnet mode** — Ephemeral single-node network via for offline development
 - **Fast Mithril bootstrap** — Sync mainnet from Mithril snapshot in under 20 hours
-- **Dolos snapshots** — Export and load node state in minutes for rapid deployment
+- **Stelae snapshots** — Restore verifiable node state in minutes with `dolos bootstrap stelae` for rapid deployment
 - **Multi-platform binaries** — Native packages for macOS (Apple Silicon), Linux (ARM64/x64), Windows x64, plus Docker images
 
 ### Operations & Observability

@@ -1,0 +1,8 @@
+runs housekeeping tasks, applying the configured history policy
+
+Usage: dolos data housekeeping [OPTIONS]
+
+Options:
+      --max-rounds <MAX_ROUNDS>  maximum amount of housekeeping rounds to execute
+  -c, --config <CONFIG>          
+  -h, --help                     Print help

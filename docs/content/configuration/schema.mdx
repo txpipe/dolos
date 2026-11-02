@@ -157,7 +157,7 @@ A relative path resolves against one of three bases, named for every path field 
 An absolute path is used as written, which is how a store, or the archive's block segments, goes on another volume.
 
 <Aside type="caution">
-`dolos bootstrap --force` clears only `storage.path`. A store kept outside it is left as it was, so a forced bootstrap would resume from that store's old contents. Delete such a store yourself before you run one. Beside a store this release refuses (see [store identity](../architecture/data-layer#store-identity)), `dolos bootstrap --force` is refused instead, naming what to remove, while a store outside `storage.path` holds data or is itself refused: the state, and unless `history.mode` is `none` the archive and its block segments. A forced bootstrap does not check an outside WAL, mempool or cache, and leaves it as it was. `dolos data cleanup` refuses outright while the WAL, state, archive, block segments or mempool are kept outside `storage.path`; it does not check the cache.
+`dolos bootstrap --force` clears only `storage.path`. A store kept outside it is left as it was, so a forced bootstrap would resume from that store's old contents. Delete such a store yourself before you run one. Beside a store this release refuses (see [store identity](../architecture/data-layer#store-identity)), `dolos bootstrap --force` is refused instead, naming what to remove, while a store outside `storage.path` holds data or is itself refused: the state, and unless `history.mode` is `none` the archive and its block segments. A forced bootstrap does not check an outside WAL, mempool or cache, and leaves it as it was. `dolos data reset` refuses outright while the WAL, state, archive, block segments, mempool or cache are kept outside `storage.path`.
 </Aside>
 
 ## `compatibility`
@@ -320,7 +320,7 @@ Where and how the node keeps its data.
 | ----- | ---- | ------- |
 | `path` | path, relative to the working directory | `data` |
 
-The root directory for the stores. It also holds `scratch/`, where `dolos bootstrap stelae` and `dolos snapshot verify` stage layers moved over an OCI registry; a mainnet transfer stages gigabytes, so it defaults to the volume already sized for the data.
+The root directory for the stores. It also holds `scratch/`, where `dolos bootstrap stelae` stages layers moved over an OCI registry; a mainnet transfer stages gigabytes, so it defaults to the volume already sized for the data.
 
 ### `storage.state` and `storage.archive`
 
@@ -336,7 +336,7 @@ The ledger state and the block archive. Each store table is optional and takes a
 - `fjall` keeps the store on disk in a Fjall database, opened with the named `preset`.
 - `ephemeral` keeps it in memory, and it is lost on restart. It holds everything the store holds in RAM, so it suits devnets, tooling and short tests rather than a node that follows a public network for long. An ephemeral store takes no other field.
 
-`blocks_path` puts the archive's block segment files in their own directory, such as one on another volume; `data export` and `bootstrap snapshot` move them with the archive.
+`blocks_path` puts the archive's block segment files in their own directory, such as one on another volume.
 
 The state and archive tables refuse Fjall's tuning fields (`cache`, `max_journal_size`, `flush_on_commit`, `l0_threshold`, `worker_threads`, `memtable_size_mb`) by name: the preset sets all of them.
 
@@ -616,19 +616,17 @@ Some settings belong to one invocation rather than to the node, and are argument
 
 ### Bootstrap sources
 
-Where a bootstrap reads from is an input of its command, defaulted per known network. A file that still carries a `[mithril]`, `[snapshot]` or `[stelae]` table is refused, naming where each went:
+Where a bootstrap reads from is an input of its command, defaulted per known network. A file that still carries a `[mithril]`, `[snapshot]` or `[stelae]` table is refused, naming where each went (`[snapshot]`'s state epochs go to `stelae-publisher digest --state-epochs-file`; its download URL has no successor, see the [migration guide](../migration/dolos-v2#command-line)):
 
 | input | argument | environment |
 | ----- | -------- | ----------- |
 | Mithril aggregator | `dolos bootstrap mithril --aggregator` | `DOLOS_MITHRIL_AGGREGATOR` |
 | Mithril genesis key | `dolos bootstrap mithril --genesis-vkey` | `DOLOS_MITHRIL_GENESIS_VKEY` |
-| snapshot download | `dolos bootstrap snapshot --download-url` | |
 | stele source | `dolos bootstrap stelae --source` | |
 | registry user | `--registry-user` | `DOLOS_STELAE_USER` |
 | registry secret | `--registry-credentials-file` | `DOLOS_STELAE_PASSWORD`, `DOLOS_STELAE_TOKEN` |
-| state epochs | `dolos snapshot digest`, `verify --reproduce`: `--state-epochs`, `--state-epochs-file` | |
 
-The registry inputs apply to `dolos bootstrap stelae`, `dolos snapshot inspect` and `dolos snapshot verify`. A known network's official stele repository is read as its published read-only user with no input at all. Any other registry is read anonymously unless the invocation names a user or a token. A secret is never a command-line argument: it comes from the environment, or from a TOML credentials file naming `password` or `token`. A custom network has no defaults, so it needs the Mithril and stele inputs explicitly.
+The registry inputs apply to `dolos bootstrap stelae`; the publisher's `--state-epochs` and its registry inputs belong to the `stelae-publisher` executable in [`txpipe/stelae`](https://github.com/txpipe/stelae). A known network's official stele repository is read as its published read-only user with no input at all. Any other registry is read anonymously unless the invocation names a user or a token. A secret is never a command-line argument: it comes from the environment, or from a TOML credentials file naming `password` or `token`. A custom network has no defaults, so it needs the Mithril and stele inputs explicitly.
 
 ### Stopping
 

@@ -1,0 +1,12 @@
+writes a known network's genesis files, without opening any store
+
+Usage: dolos config write-genesis [OPTIONS]
+
+Options:
+      --network <NAME>   A known network; without it, the configuration's network, and no
+                         configuration is read when it is given
+      --dir <PATH>       The directory the files are written to, created if missing [default:
+                         ./genesis]
+      --force            Overwrite files that already exist
+  -c, --config <CONFIG>  
+  -h, --help             Print help

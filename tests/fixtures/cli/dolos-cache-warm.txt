@@ -1,0 +1,11 @@
+builds a namespace's entries ahead of the reads that would miss them
+
+Usage: dolos cache warm [OPTIONS] --namespace <NAMESPACE> <--keys <KEYS>|--previous|--scan>
+
+Options:
+      --namespace <NAMESPACE>  the namespace to warm
+      --keys <KEYS>            a file of keys, one per line, in the namespace's text form
+      --previous               the keys the namespace held when it was last wiped
+      --scan                   the keys the namespace's use finds worth warming
+  -c, --config <CONFIG>        
+  -h, --help                   Print help
