@@ -250,7 +250,7 @@ The contract is enforced by `crates/snapshot/tests/field_registry.rs` and its `t
 The contract has edges it does not close. Each is waived here, by its finding number in the freeze-hardening review, and each is what a reader must allow for.
 
 - **Hard-fork enums (7).** A hard fork that adds a variant to `PParamValue`, `ProposalAction`, `GovPurpose` or a Pallas enum reachable from a record bumps the media type of every kind that carries it. A fork that adds a protocol parameter bumps `state-epochs`, `log-epochs`, `state-proposals` and `log-proposals`; `state-gov` carries no parameter value and keeps its media type. Variants are only appended, so a newer reader still reads older bytes.
-- **Pallas codecs (8).** A Pallas codec change that moves a record's bytes is a profile event. The variant tables and the per-struct canaries in `field_registry.rs` catch it as a build failure.
+- **Pallas codecs (8).** A Pallas codec change that moves a record's bytes is a profile event. The variant tables and the namespace canaries in `field_registry.rs` catch, as a build failure, a change to the bytes they cover; no other Pallas encoding is tested.
 - **Enum order shared with the WAL (9).** `ProposalAction`'s variant order is also the WAL's bincode format. Reordering it costs a WAL version bump as well as the media-type bump.
 - **Credential and key shapes (10).** The key kinds stay as tabled under "Key kinds", four credential encodings included.
 - **Chain positions (11).** The position shapes stay as tabled under "Value encoding", with `TxOrder` below 2^32.
