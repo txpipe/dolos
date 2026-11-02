@@ -11,7 +11,7 @@ use axum::{
 };
 use blockfrost_openapi::models::{DrepsInner, DrepsInnerMetadata};
 use dolos_cardano::{
-    model::{CertPosition, DRepKey, DRepSightingState, DRepState},
+    model::{CertPosition, DRepKey, DRepObservationState, DRepState},
     ChainSummary, PParamsSet,
 };
 use dolos_core::{BlockSlot, Domain};
@@ -154,21 +154,21 @@ fn parse_bool_filter(value: Option<&str>) -> Result<Option<bool>, Error> {
     }
 }
 
-/// One listed DRep: its sighting, and its ledger row where the ledger has
+/// One listed DRep: its observation, and its ledger row where the ledger has
 /// one, in state or as its final row in the log. A DRep only a vote
 /// delegation named has none.
 struct DrepRow {
     key: DRepKey,
-    sighting: DRepSightingState,
+    observation: DRepObservationState,
     state: Option<DRepState>,
 }
 
 impl DrepRow {
     /// The listing's default order, db-sync's `drep_hash` order: first
-    /// sighting, down to the certificate, the key breaking ties no chain
+    /// observation, down to the certificate, the key breaking ties no chain
     /// produces.
     fn appearance(&self) -> (CertPosition, &DRepKey) {
-        (self.sighting.first_seen, &self.key)
+        (self.observation.first_seen, &self.key)
     }
 
     fn amount(&self, distribution: &BTreeMap<DRep, u64>) -> u64 {
@@ -187,15 +187,15 @@ struct DrepsPage {
 }
 
 /// Every DRep a certificate has named, in key order.
-async fn load_drep_sightings<D>(
+async fn load_drep_observations<D>(
     domain: &Facade<D>,
     chunk: usize,
-) -> Result<Vec<(DRepKey, DRepSightingState)>, StatusCode>
+) -> Result<Vec<(DRepKey, DRepObservationState)>, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    EntityScan::<DRepSightingState>::all(chunk)
-        .filter_map(domain, |key, sighting| Some((key, sighting)))
+    EntityScan::<DRepObservationState>::all(chunk)
+        .filter_map(domain, |key, observation| Some((key, observation)))
         .await
 }
 
@@ -205,7 +205,7 @@ where
 /// row wins over a final row.
 async fn join_drep_states<D>(
     domain: &Facade<D>,
-    sightings: Vec<(DRepKey, DRepSightingState)>,
+    observations: Vec<(DRepKey, DRepObservationState)>,
     chunk: usize,
 ) -> Result<Vec<DrepRow>, StatusCode>
 where
@@ -221,14 +221,14 @@ where
         .blocking(|facade| drep_final_rows(&facade.inner))
         .await?;
 
-    let rows = sightings
+    let rows = observations
         .into_iter()
-        .map(|(key, sighting)| {
+        .map(|(key, observation)| {
             let state = states.remove(&key).or_else(|| finals.remove(&key));
 
             DrepRow {
                 key,
-                sighting,
+                observation,
                 state,
             }
         })
@@ -244,7 +244,7 @@ where
 async fn read_drep_states<D>(
     domain: &Facade<D>,
     chain: &ChainSummary,
-    sightings: Vec<(DRepKey, DRepSightingState)>,
+    observations: Vec<(DRepKey, DRepObservationState)>,
 ) -> Result<Vec<DrepRow>, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
@@ -255,14 +255,14 @@ where
         .blocking(move |facade| {
             let reads = DRepReads::new(&chain);
 
-            let mut rows = sightings
+            let mut rows = observations
                 .into_iter()
-                .map(|(key, sighting)| {
+                .map(|(key, observation)| {
                     let state = point_read_drep_row(&facade.inner, &reads, &key)?;
 
                     Ok(DrepRow {
                         key,
-                        sighting,
+                        observation,
                         state,
                     })
                 })
@@ -303,17 +303,17 @@ where
     let (chain, tip, pparams) = chain_context(domain)?;
     let distribution = drep_distribution(domain)?;
 
-    let mut sightings = load_drep_sightings(domain, ENTITY_CHUNK).await?;
+    let mut observations = load_drep_observations(domain, ENTITY_CHUNK).await?;
 
     if retired.is_none() && expired.is_none() && !order_by_amount {
-        sightings
+        observations
             .sort_by(|(a_key, a), (b_key, b)| (a.first_seen, a_key).cmp(&(b.first_seen, b_key)));
 
         if matches!(pagination.order, Order::Desc) {
-            sightings.reverse();
+            observations.reverse();
         }
 
-        let page = sightings
+        let page = observations
             .into_iter()
             .skip(pagination.from())
             .take(pagination.count)
@@ -330,7 +330,7 @@ where
         });
     }
 
-    let mut rows = join_drep_states(domain, sightings, ENTITY_CHUNK).await?;
+    let mut rows = join_drep_states(domain, observations, ENTITY_CHUNK).await?;
 
     // a DRep with no ledger row is listed, neither retired nor expired
     rows.retain(|row| {
@@ -410,7 +410,7 @@ where
     // it; the ledger's own anchor is cleared by an update that carries none
     let anchors: Vec<_> = rows
         .iter()
-        .flat_map(|row| row.sighting.anchor.clone())
+        .flat_map(|row| row.observation.anchor.clone())
         .collect();
 
     // a page shows what it has rather than wait on a backlog of loads
@@ -429,7 +429,7 @@ where
     let page = rows
         .into_iter()
         .map(|row| {
-            let has_anchor = row.sighting.anchor.is_some();
+            let has_anchor = row.observation.anchor.is_some();
             let amount = row.amount(&distribution);
             let mut model =
                 drep_list_item(row.key.into(), row.state, amount, &pparams, &chain, tip)?;
@@ -677,8 +677,8 @@ mod tests {
         assert!(models.is_empty());
     }
 
-    /// Writes a DRep's sighting, as the roll would have.
-    fn write_sighting(
+    /// Writes a DRep's observation, as the roll would have.
+    fn write_observation(
         writer: &impl dolos_core::StateWriter,
         identifier: &DRep,
         first_seen: CertPosition,
@@ -687,12 +687,12 @@ mod tests {
         writer
             .write_entity_typed(
                 &DRepKey::from(identifier),
-                &DRepSightingState { first_seen, anchor },
+                &DRepObservationState { first_seen, anchor },
             )
-            .expect("failed to write drep sighting");
+            .expect("failed to write drep observation");
     }
 
-    /// Three DReps whose voting powers and first sightings disagree, so
+    /// Three DReps whose voting powers and first observations disagree, so
     /// ordering by amount cannot be mistaken for the default ordering and
     /// each direction names a different row first.
     fn amount_app() -> TestApp {
@@ -721,7 +721,7 @@ mod tests {
                 .write_entity_typed(&DRepKey::from(&identifier), &state)
                 .expect("failed to write drep");
 
-            write_sighting(&writer, &identifier, (seen, 0, 0), None);
+            write_observation(&writer, &identifier, (seen, 0, 0), None);
 
             distribution.insert(identifier, power);
         }
@@ -1040,7 +1040,7 @@ mod tests {
                     .write_entity_typed(&DRepKey::from(&identifier), &state)
                     .expect("failed to write drep");
 
-                write_sighting(&writer, &identifier, (0, 0, 0), None);
+                write_observation(&writer, &identifier, (0, 0, 0), None);
 
                 writer.commit().expect("failed to commit drep");
             })
@@ -1103,7 +1103,7 @@ mod tests {
         assert_status(&app, "/governance/dreps", StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
-    /// Writes `copies` copies of the synthetic DRep and its sighting under
+    /// Writes `copies` copies of the synthetic DRep and its observation under
     /// new keys, so that a scan of either reads several chunks.
     fn replicate_dreps(domain: &ToyDomain, copies: u8) {
         use dolos_core::StateWriter as _;
@@ -1116,11 +1116,11 @@ mod tests {
             .expect("drep read")
             .expect("drep state");
 
-        let sighting = domain
+        let observation = domain
             .state()
-            .read_entity_typed::<DRepSightingState>(&key)
-            .expect("sighting read")
-            .expect("drep sighting");
+            .read_entity_typed::<DRepObservationState>(&key)
+            .expect("observation read")
+            .expect("drep observation");
 
         let writer = domain.state().start_writer().expect("state writer");
 
@@ -1129,15 +1129,15 @@ mod tests {
             let mut state = state.clone();
             state.identifier = drep.clone();
 
-            let mut sighting = sighting.clone();
-            sighting.first_seen.2 += usize::from(copy);
+            let mut observation = observation.clone();
+            observation.first_seen.2 += usize::from(copy);
 
             writer
                 .write_entity_typed(&DRepKey(drep.clone()), &state)
                 .expect("drep write");
             writer
-                .write_entity_typed(&DRepKey(drep), &sighting)
-                .expect("sighting write");
+                .write_entity_typed(&DRepKey(drep), &observation)
+                .expect("observation write");
         }
 
         writer.commit().expect("state commit");
@@ -1153,17 +1153,17 @@ mod tests {
         let rows = |chunk| {
             let facade = facade.clone();
             async move {
-                let sightings = load_drep_sightings(&facade, chunk)
+                let observations = load_drep_observations(&facade, chunk)
                     .await
-                    .expect("drep sightings");
+                    .expect("drep observations");
 
-                join_drep_states(&facade, sightings, chunk)
+                join_drep_states(&facade, observations, chunk)
                     .await
                     .expect("drep rows")
                     .into_iter()
                     .map(|row| {
                         let registered = row.state.map(|state| state.registered_at);
-                        (row.sighting.first_seen, row.key, registered)
+                        (row.observation.first_seen, row.key, registered)
                     })
                     .collect::<Vec<_>>()
             }

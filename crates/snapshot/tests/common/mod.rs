@@ -23,14 +23,14 @@
 use dolos_cardano::{
     indexes::archive_dimensions,
     model::{
-        AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountKey, AccountState,
-        AccountStats, AddressKey, AddressStats, AssetKey, AssetMintChunk, AssetMintSet,
-        DRepEpochLog, DRepKey, DRepSightingState, DRepState, DatumKey, DatumState, EpochState,
-        EraKey, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk, FirstScriptSet,
-        FixedNamespace as _, GovState, MetadataLabelState, PaymentAddressChunk, PaymentAddressKey,
-        PaymentAddressSet, PaymentKey, PaymentStats, PendingMirState, PendingRewardState,
-        PolicyFirstMintChunk, PolicyKey, PoolEpochLog, PoolKey, PoolState, ProposalKey,
-        ProposalState, PrunedAccountState, ScriptKey,
+        AccountAddressEpochs, AccountAddressSet, AccountEpochLog, AccountHistoryState, AccountKey,
+        AccountState, AccountStats, AddressKey, AddressStats, AssetKey, AssetMintChunk,
+        AssetMintSet, DRepEpochLog, DRepKey, DRepObservationState, DRepState, DatumKey, DatumState,
+        EpochState, EraKey, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
+        FirstScriptSet, FixedNamespace as _, GovState, MetadataLabelState, PaymentAddressEpochs,
+        PaymentAddressKey, PaymentAddressSet, PaymentKey, PaymentStats, PendingMirState,
+        PendingRewardState, PolicyFirstMintChunk, PolicyKey, PoolEpochLog, PoolKey, PoolState,
+        ProposalKey, ProposalState, ScriptKey,
     },
     pallas::ledger::primitives::{conway::DRep, StakeCredential},
     periods::{GroupKey, Ungrouped},
@@ -95,11 +95,11 @@ pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
         | AccountEpochLog::NS
         | PendingMirState::NS
         | PendingRewardState::NS
-        | PrunedAccountState::NS
-        | AccountAddressChunk::NS => keys::encode(&credential),
+        | AccountHistoryState::NS => keys::encode(&credential),
+        AccountAddressEpochs::NS => keys::encode(&(credential, u32::from(byte))),
         AccountStats::NS => keys::encode(&(u64::from(byte), credential)),
         AddressStats::NS => keys::encode(&(u64::from(byte), address)),
-        PaymentAddressChunk::NS => keys::encode(&payment),
+        PaymentAddressEpochs::NS => keys::encode(&(payment, u32::from(byte))),
         PaymentAddressSet::NS => keys::encode(&GroupKey {
             group: payment,
             epoch: u64::from(byte),
@@ -117,7 +117,7 @@ pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
             member: (u64::from(byte), u32::from(byte)),
         }),
         DatumState::NS => keys::encode(&DatumKey([byte; 32].into())),
-        DRepEpochLog::NS | DRepSightingState::NS | DRepState::NS => {
+        DRepEpochLog::NS | DRepObservationState::NS | DRepState::NS => {
             keys::encode(&DRepKey(DRep::Key([byte; 28].into())))
         }
         EpochState::NS | GovState::NS => keys::encode(&()),

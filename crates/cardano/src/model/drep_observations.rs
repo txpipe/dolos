@@ -12,8 +12,9 @@ use super::DRepKey;
 /// transaction's certificates. Sorting by it is the chain's certificate order.
 pub type CertPosition = (BlockSlot, TxOrder, usize);
 
-/// What the API knows of a DRep beyond the ledger: when a certificate first
-/// named it, and the latest anchor a registration or update carried.
+/// What certificates have shown about a DRep: the first certificate
+/// position that named it, and the latest anchor a registration or update
+/// carried.
 ///
 /// db-sync writes a `drep_hash` row for every DRep a certificate of a valid
 /// tx names, vote delegations and the special DReps included, and Blockfrost
@@ -23,15 +24,18 @@ pub type CertPosition = (BlockSlot, TxOrder, usize);
 /// a row here and none in `dreps`, which keeps that namespace to the DReps
 /// the ledger knows. Rows are never pruned.
 #[derive(Debug, Encode, Decode, Clone, PartialEq, Eq)]
-pub struct DRepSightingState {
+pub struct DRepObservationState {
+    /// The position of the first certificate that named the DRep.
     #[n(0)]
     pub first_seen: CertPosition,
 
+    /// The anchor of the latest registration or update that carried one;
+    /// absent when none has.
     #[n(1)]
     pub anchor: Option<Anchor>,
 }
 
-entity_boilerplate!(DRepSightingState, "drep-sightings", state = DRepKey);
+entity_boilerplate!(DRepObservationState, "drep-observations", state = DRepKey);
 
 #[cfg(test)]
 pub(crate) mod testing {
@@ -50,11 +54,11 @@ pub(crate) mod testing {
     }
 
     prop_compose! {
-        pub fn any_drep_sighting_state()(
+        pub fn any_drep_observation_state()(
             first_seen in any_cert_position(),
             anchor in prop::option::of(root::any_anchor()),
-        ) -> DRepSightingState {
-            DRepSightingState { first_seen, anchor }
+        ) -> DRepObservationState {
+            DRepObservationState { first_seen, anchor }
         }
     }
 }
@@ -65,7 +69,7 @@ pub(crate) mod testing {
 /// carries an anchor, a registration or an update, replaces the anchor, and
 /// any other keeps it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DRepSighting {
+pub struct DRepObservation {
     pub(crate) drep: DRep,
     pub(crate) at: CertPosition,
     pub(crate) anchor: Option<Anchor>,
@@ -74,7 +78,7 @@ pub struct DRepSighting {
     pub(crate) prev: Option<(CertPosition, Option<Anchor>)>,
 }
 
-impl DRepSighting {
+impl DRepObservation {
     pub fn new(drep: DRep, at: CertPosition, anchor: Option<Anchor>) -> Self {
         Self {
             drep,
@@ -85,19 +89,19 @@ impl DRepSighting {
     }
 }
 
-impl dolos_core::EntityDelta for DRepSighting {
-    type Entity = DRepSightingState;
+impl dolos_core::EntityDelta for DRepObservation {
+    type Entity = DRepObservationState;
 
     fn key(&self) -> NsKey {
-        NsKey::of::<DRepSightingState>(&DRepKey::from(&self.drep))
+        NsKey::of::<DRepObservationState>(&DRepKey::from(&self.drep))
     }
 
-    fn apply(&mut self, entity: &mut Option<DRepSightingState>) {
+    fn apply(&mut self, entity: &mut Option<DRepObservationState>) {
         self.prev = entity
             .as_ref()
             .map(|state| (state.first_seen, state.anchor.clone()));
 
-        let state = entity.get_or_insert_with(|| DRepSightingState {
+        let state = entity.get_or_insert_with(|| DRepObservationState {
             first_seen: self.at,
             anchor: None,
         });
@@ -107,11 +111,11 @@ impl dolos_core::EntityDelta for DRepSighting {
         }
     }
 
-    fn undo(&self, entity: &mut Option<DRepSightingState>) {
+    fn undo(&self, entity: &mut Option<DRepObservationState>) {
         *entity = self
             .prev
             .clone()
-            .map(|(first_seen, anchor)| DRepSightingState { first_seen, anchor });
+            .map(|(first_seen, anchor)| DRepObservationState { first_seen, anchor });
     }
 }
 
@@ -124,28 +128,28 @@ mod tests {
     use crate::model::testing::{self as root, assert_delta_roundtrip};
 
     prop_compose! {
-        fn any_drep_sighting()(
+        fn any_drep_observation()(
             drep in root::any_drep(),
             at in any_cert_position(),
             anchor in prop::option::of(root::any_anchor()),
-        ) -> DRepSighting {
-            DRepSighting::new(drep, at, anchor)
+        ) -> DRepObservation {
+            DRepObservation::new(drep, at, anchor)
         }
     }
 
     proptest! {
         #[test]
-        fn drep_sighting_roundtrip(
-            entity in prop::option::of(any_drep_sighting_state()),
-            delta in any_drep_sighting(),
+        fn drep_observation_roundtrip(
+            entity in prop::option::of(any_drep_observation_state()),
+            delta in any_drep_observation(),
         ) {
             assert_delta_roundtrip(entity, delta);
         }
 
         #[test]
-        fn drep_sighting_serde_roundtrip(
-            entity in prop::option::of(any_drep_sighting_state()),
-            delta in any_drep_sighting(),
+        fn drep_observation_serde_roundtrip(
+            entity in prop::option::of(any_drep_observation_state()),
+            delta in any_drep_observation(),
         ) {
             root::assert_delta_serde_roundtrip(entity, delta);
         }
@@ -159,37 +163,37 @@ mod tests {
     }
 
     #[test]
-    fn first_sighting_holds_and_anchor_follows_the_latest_carrier() {
+    fn first_observation_holds_and_anchor_follows_the_latest_carrier() {
         let drep = DRep::Key([1u8; 28].into());
         let mut entity = None;
 
         // a vote delegation names the DRep first
-        DRepSighting::new(drep.clone(), (100, 3, 1), None).apply(&mut entity);
+        DRepObservation::new(drep.clone(), (100, 3, 1), None).apply(&mut entity);
         assert_eq!(
             entity,
-            Some(DRepSightingState {
+            Some(DRepObservationState {
                 first_seen: (100, 3, 1),
                 anchor: None,
             })
         );
 
         // its registration carries an anchor
-        DRepSighting::new(drep.clone(), (200, 0, 0), Some(anchor(1))).apply(&mut entity);
+        DRepObservation::new(drep.clone(), (200, 0, 0), Some(anchor(1))).apply(&mut entity);
 
         // an update without one, then a retirement, keep it
-        DRepSighting::new(drep.clone(), (300, 0, 0), None).apply(&mut entity);
-        DRepSighting::new(drep.clone(), (400, 0, 0), None).apply(&mut entity);
+        DRepObservation::new(drep.clone(), (300, 0, 0), None).apply(&mut entity);
+        DRepObservation::new(drep.clone(), (400, 0, 0), None).apply(&mut entity);
 
         assert_eq!(
             entity,
-            Some(DRepSightingState {
+            Some(DRepObservationState {
                 first_seen: (100, 3, 1),
                 anchor: Some(anchor(1)),
             })
         );
 
         // an update with a new one replaces it
-        DRepSighting::new(drep, (500, 0, 0), Some(anchor(2))).apply(&mut entity);
+        DRepObservation::new(drep, (500, 0, 0), Some(anchor(2))).apply(&mut entity);
         assert_eq!(entity.unwrap().anchor, Some(anchor(2)));
     }
 }

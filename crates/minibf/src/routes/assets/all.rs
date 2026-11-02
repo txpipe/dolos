@@ -353,7 +353,7 @@ mod tests {
                 .expect("an epoch sealed")
                 .unwrap();
 
-            let mut subjects: Vec<Vec<u8>> = head.subjects.into_iter().map(Vec::from).collect();
+            let mut subjects = head.into_items();
             subjects.push(unindexed.clone());
 
             let writer = inner.archive().start_writer().unwrap();

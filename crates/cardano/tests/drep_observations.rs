@@ -1,9 +1,9 @@
-//! DRep sightings through the real pipeline: a rollback restores the rows of
+//! DRep observations through the real pipeline: a rollback restores the rows of
 //! the blocks it undoes.
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use dolos_cardano::{model::DRepSightingState, DRepKey};
+use dolos_cardano::{model::DRepObservationState, DRepKey};
 use dolos_core::{sync::SyncExt as _, ChainPoint, Domain as _, StateStore as _};
 use dolos_testing::{
     synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
@@ -49,10 +49,10 @@ fn update(drep: u8, anchor: Option<Anchor>) -> Certificate {
     Certificate::UpdateDRepCert(StakeCredential::AddrKeyhash([drep; 28].into()), anchor)
 }
 
-fn sightings(domain: &ToyDomain) -> BTreeMap<DRepKey, DRepSightingState> {
+fn observations(domain: &ToyDomain) -> BTreeMap<DRepKey, DRepObservationState> {
     domain
         .state()
-        .iter_entities_typed::<DRepSightingState>(None)
+        .iter_entities_typed::<DRepObservationState>(None)
         .unwrap()
         .map(|row| row.unwrap())
         .collect()
@@ -61,7 +61,7 @@ fn sightings(domain: &ToyDomain) -> BTreeMap<DRepKey, DRepSightingState> {
 /// Each block first sights a DRep and moves the anchor of one sighted
 /// earlier; undoing a block takes both back.
 #[test]
-fn rollback_restores_the_sightings_of_its_block() {
+fn rollback_restores_the_observations_of_its_block() {
     let cfg = SyntheticBlockConfig {
         block_count: 3,
         extra_certs_by_block: vec![
@@ -84,13 +84,13 @@ fn rollback_restores_the_sightings_of_its_block() {
 
         let decoded = MultiEraBlock::decode(block).unwrap();
         points.push(ChainPoint::Specific(decoded.slot(), decoded.hash()));
-        after.push(sightings(&domain));
+        after.push(observations(&domain));
     }
 
     let key = |byte: u8| DRepKey::from(DRep::Key([byte; 28].into()));
 
     // each block adds a DRep, and a later certificate never moves the first
-    // sighting
+    // observation
     assert!(!after[0].contains_key(&key(0xc3)));
     assert!(after[1].contains_key(&key(0xc3)));
     assert!(!after[1].contains_key(&key(0xd4)));
@@ -107,8 +107,8 @@ fn rollback_restores_the_sightings_of_its_block() {
     assert_eq!(after[2][&key(0xa1)].anchor, Some(anchor(3)));
 
     domain.rollback(&points[1]).unwrap();
-    assert_eq!(sightings(&domain), after[1]);
+    assert_eq!(observations(&domain), after[1]);
 
     domain.rollback(&points[0]).unwrap();
-    assert_eq!(sightings(&domain), after[0]);
+    assert_eq!(observations(&domain), after[0]);
 }

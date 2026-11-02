@@ -67,7 +67,14 @@ pub struct FirstScriptChunk {
     pub count: u64,
 
     #[n(1)]
-    pub hashes: Vec<Hash<28>>,
+    pub hashes: Vec<FirstScriptItem>,
+}
+
+/// One script hash of a [`FirstScriptChunk`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
+pub struct FirstScriptItem {
+    #[n(0)]
+    pub hash: Hash<28>,
 }
 
 entity_boilerplate!(FirstScriptChunk, "first-script-chunks", log = u32);
@@ -76,11 +83,17 @@ impl ChunkRow for FirstScriptChunk {
     type Item = Hash<28>;
 
     fn new(count: u64, hashes: Vec<Hash<28>>) -> Self {
-        Self { count, hashes }
+        Self {
+            count,
+            hashes: hashes
+                .into_iter()
+                .map(|hash| FirstScriptItem { hash })
+                .collect(),
+        }
     }
 
     fn into_items(self) -> Vec<Hash<28>> {
-        self.hashes
+        self.hashes.into_iter().map(|item| item.hash).collect()
     }
 }
 

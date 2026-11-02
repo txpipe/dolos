@@ -1,7 +1,7 @@
 use axum::http::StatusCode;
 use dolos_cardano::{
     indexes::{AsyncCardanoQueryExt, SlotOrder},
-    model::{AccountState, ProposalState, PrunedAccountState},
+    model::{AccountHistoryState, AccountState, ProposalState},
     pallas_extras,
     periods::account_addresses,
     AccountKey, ChainSummary,
@@ -171,10 +171,10 @@ where
 fn read_rows<D: Domain>(
     domain: &Facade<D>,
     account: &AccountKey,
-) -> Result<(Option<AccountState>, Option<PrunedAccountState>), StatusCode> {
+) -> Result<(Option<AccountState>, Option<AccountHistoryState>), StatusCode> {
     agreeing(
         || domain.read_cardano_entity::<AccountState>(account),
-        || domain.read_cardano_entity::<PrunedAccountState>(account),
+        || domain.read_cardano_entity::<AccountHistoryState>(account),
     )
 }
 
@@ -813,7 +813,7 @@ mod tests {
         app: &TestApp,
         credential: &StakeCredential,
         live: Option<&AccountState>,
-        pruned: Option<&PrunedAccountState>,
+        pruned: Option<&AccountHistoryState>,
     ) {
         put(
             app.facade().state(),
@@ -827,7 +827,7 @@ mod tests {
         state: &S,
         key: &AccountKey,
         live: Option<&AccountState>,
-        pruned: Option<&PrunedAccountState>,
+        pruned: Option<&AccountHistoryState>,
     ) {
         let writer = state.start_writer().unwrap();
         writer.save_entity_typed(key, live).unwrap();
@@ -851,10 +851,10 @@ mod tests {
         writer.commit().unwrap();
     }
 
-    fn read_remainders(app: &TestApp) -> Vec<(AccountKey, PrunedAccountState)> {
+    fn read_remainders(app: &TestApp) -> Vec<(AccountKey, AccountHistoryState)> {
         app.facade()
             .state()
-            .iter_entities_typed::<PrunedAccountState>(None)
+            .iter_entities_typed::<AccountHistoryState>(None)
             .unwrap()
             .map(|x| x.unwrap())
             .collect()
@@ -938,7 +938,7 @@ mod tests {
             pruned,
             vec![(
                 key.clone(),
-                PrunedAccountState {
+                AccountHistoryState {
                     lifetime_rewards: 450_000,
                     deregistered_at: Some(slot + 2),
                 }
@@ -978,7 +978,7 @@ mod tests {
             read_remainders(&app),
             vec![(
                 key,
-                PrunedAccountState {
+                AccountHistoryState {
                     lifetime_rewards: 570_000,
                     deregistered_at: Some(second + 4),
                 }
@@ -1233,7 +1233,7 @@ mod tests {
 
         between_reads(
             &app,
-            PrunedAccountState::NS,
+            AccountHistoryState::NS,
             vec![Box::new(move |state| prune_in(state, &key, &row))],
         );
 

@@ -57,12 +57,12 @@ pub mod enums;
 pub mod ground_rules;
 
 use dolos_cardano::model::{
-    AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
-    AddressStats, AssetMintChunk, AssetMintSet, DRepEpochLog, DRepSightingState, DRepState,
-    DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
-    FirstScriptSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressChunk,
+    AccountAddressEpochs, AccountAddressSet, AccountEpochLog, AccountHistoryState, AccountState,
+    AccountStats, AddressStats, AssetMintChunk, AssetMintSet, DRepEpochLog, DRepObservationState,
+    DRepState, DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
+    FirstScriptSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressEpochs,
     PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyFirstMintChunk,
-    PoolEpochLog, PoolState, ProposalState, PrunedAccountState,
+    PoolEpochLog, PoolState, ProposalState,
 };
 use dolos_core::{Entity, Namespace};
 use dolos_snapshot::{layers::state, UTXOS};
@@ -179,12 +179,12 @@ pub fn registry() -> Vec<Entry> {
             }]
         ),
         entity_entry!(
-            enc_drep_sightings,
-            DRepSightingState,
-            canaries::drep_sighting_state,
+            enc_drep_observations,
+            DRepObservationState,
+            canaries::drep_observation_state,
             &[Pinned {
                 rev: 1,
-                hex: include_str!("goldens/drep-sightings.rev1.hex"),
+                hex: include_str!("goldens/drep-observations.rev1.hex"),
             }]
         ),
         entity_entry!(
@@ -287,12 +287,12 @@ pub fn registry() -> Vec<Entry> {
             }]
         ),
         entity_entry!(
-            enc_pruned_accounts,
-            PrunedAccountState,
-            canaries::pruned_account_state,
+            enc_account_history,
+            AccountHistoryState,
+            canaries::account_history_state,
             &[Pinned {
                 rev: 1,
-                hex: include_str!("goldens/pruned-accounts.rev1.hex"),
+                hex: include_str!("goldens/account-history.rev1.hex"),
             }]
         ),
         entity_entry!(
@@ -323,12 +323,12 @@ pub fn registry() -> Vec<Entry> {
             }]
         ),
         entity_entry!(
-            enc_payment_address_chunks,
-            PaymentAddressChunk,
-            canaries::payment_address_chunk,
+            enc_payment_address_epochs,
+            PaymentAddressEpochs,
+            canaries::payment_address_epochs,
             &[Pinned {
                 rev: 1,
-                hex: include_str!("goldens/payment-address-chunks.rev1.hex"),
+                hex: include_str!("goldens/payment-address-epochs.rev1.hex"),
             }]
         ),
         entity_entry!(
@@ -377,12 +377,12 @@ pub fn registry() -> Vec<Entry> {
             }]
         ),
         entity_entry!(
-            enc_account_address_chunks,
-            AccountAddressChunk,
-            canaries::account_address_chunk,
+            enc_account_address_epochs,
+            AccountAddressEpochs,
+            canaries::account_address_epochs,
             &[Pinned {
                 rev: 1,
-                hex: include_str!("goldens/account-address-chunks.rev1.hex"),
+                hex: include_str!("goldens/account-address-epochs.rev1.hex"),
             }]
         ),
         entity_entry!(

@@ -4,7 +4,7 @@
 //! A shard deletes each account that is dead once rotated
 //! ([`AccountState::is_dead`]) and did not deregister in the closing epoch,
 //! instead of writing it back ([`prunes`]). The history the API serves of it
-//! ([`AccountState::remainder`]) adds to the credential's `pruned-accounts`
+//! ([`AccountState::remainder`]) adds to the credential's `account-history`
 //! row in the same commit.
 //!
 //! ESTART is never undone, but a rollback across the boundary undoes the
@@ -31,7 +31,7 @@ use dolos_core::{
 use pallas::ledger::primitives::Epoch;
 use tracing::debug;
 
-use crate::{sub, AccountKey, AccountState, CardanoEntity, EpochState, PrunedAccountState};
+use crate::{sub, AccountHistoryState, AccountKey, AccountState, CardanoEntity, EpochState};
 
 /// Whether the shard deletes `account`, rotated: it is dead, and it did not
 /// deregister in the closing epoch, which starts at `closing_start`.
@@ -47,7 +47,7 @@ pub fn prunes(account: &AccountState, closing_start: BlockSlot) -> bool {
 }
 
 /// Delete the dead, rotated `account` from state, and add its history to the
-/// credential's `pruned-accounts` row. Returns whether it wrote that row.
+/// credential's `account-history` row. Returns whether it wrote that row.
 ///
 /// The row is read from `state`, which the shard's own commit has not
 /// written yet. That is exact: a credential appears once in a shard, and a
@@ -64,7 +64,7 @@ pub fn prune_account<S: StateStore>(
         return Ok(false);
     };
 
-    let row = match state.read_entity_typed::<PrunedAccountState>(key)? {
+    let row = match state.read_entity_typed::<AccountHistoryState>(key)? {
         Some(mut row) => {
             row.absorb(&remainder);
             row
@@ -279,8 +279,8 @@ mod tests {
                 entities.insert(deleted, None);
 
                 let credential = row(0xe0 + byte, 7, PRUNED, Kind::Restored).credential;
-                let other = NsKey::of::<PrunedAccountState>(&AccountKey::from(&credential));
-                let remainder = PrunedAccountState {
+                let other = NsKey::of::<AccountHistoryState>(&AccountKey::from(&credential));
+                let remainder = AccountHistoryState {
                     lifetime_rewards: PRUNED.0,
                     deregistered_at: Some(300),
                 };

@@ -1,5 +1,5 @@
 use pallas::{
-    codec::minicbor::{self, data::Int, decode, encode, Decode, Decoder, Encode, Encoder},
+    codec::minicbor::{self, Decode, Encode},
     crypto::hash::Hash,
     ledger::primitives::Epoch,
 };
@@ -16,52 +16,21 @@ pub type MintPosition = (u64, u32);
 ///
 /// Keyed `AssetKey ‖ epoch ‖ (slot, tx index)`, so one prefix scan returns
 /// every unsealed epoch of an asset, in chain order, and nothing else. The
-/// value is `[tx hash, 2 × amount + names_asset]`; the key holds the rest.
-/// The same pair is an entry of [`AssetMintChunk`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// value is `[tx hash, quantity, names_asset]`; the key holds the rest. The
+/// same record is an entry of [`AssetMintChunk`].
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
 pub struct AssetMintSet {
+    #[n(0)]
     pub tx_hash: Hash<32>,
 
     /// The signed quantity: negative for a burn, never zero.
+    #[n(1)]
     pub amount: i64,
 
     /// The mint sets the asset's `metadata_tx`: its tx's CIP-25 metadata
     /// names the asset. Never set on a burn.
+    #[n(2)]
     pub names_asset: bool,
-}
-
-impl<C> Encode<C> for AssetMintSet {
-    fn encode<W: encode::Write>(
-        &self,
-        e: &mut Encoder<W>,
-        _: &mut C,
-    ) -> Result<(), encode::Error<W::Error>> {
-        // 2 × i64 + 1 spans exactly the CBOR integer range
-        let packed = 2 * i128::from(self.amount) + i128::from(self.names_asset);
-        let packed = Int::try_from(packed).expect("within the CBOR integer range");
-
-        e.array(2)?.encode(self.tx_hash)?.int(packed)?;
-        Ok(())
-    }
-}
-
-impl<'b, C> Decode<'b, C> for AssetMintSet {
-    fn decode(d: &mut Decoder<'b>, _: &mut C) -> Result<Self, decode::Error> {
-        if d.array()? != Some(2) {
-            return Err(decode::Error::message("expected a two-item mint"));
-        }
-
-        let tx_hash = d.decode()?;
-        let packed = i128::from(d.int()?);
-        let amount = i64::try_from(packed.div_euclid(2))
-            .map_err(|_| decode::Error::message("mint amount out of range"))?;
-
-        Ok(Self {
-            tx_hash,
-            amount,
-            names_asset: packed.rem_euclid(2) == 1,
-        })
-    }
 }
 
 entity_boilerplate!(
@@ -211,32 +180,38 @@ mod layout_tests {
         minicbor::to_vec(&row).unwrap()[35..].to_vec()
     }
 
-    /// The flag rides in the amount's low bit, so the common amounts keep
-    /// their one-byte head and the extremes still fit a CBOR integer.
+    /// The quantity and the flag are separate fields: the flag never
+    /// shifts the quantity's integer.
     #[test]
-    fn the_flag_packs_into_the_amount() {
-        assert_eq!(raw(1, false), [0x02]);
-        assert_eq!(raw(1, true), [0x03]);
-        assert_eq!(raw(11, true), [0x17]);
-        assert_eq!(raw(-1, false), [0x21]);
-        assert_eq!(raw(-12, false), [0x37]);
-        assert_eq!(raw(i64::MAX, true), [&[0x1b][..], &[0xff; 8]].concat());
-        assert_eq!(raw(i64::MIN, false), [&[0x3b][..], &[0xff; 8]].concat());
+    fn quantity_and_flag_are_separate_fields() {
+        assert_eq!(raw(1, false), [0x01, 0xf4]);
+        assert_eq!(raw(1, true), [0x01, 0xf5]);
+        assert_eq!(raw(-1, false), [0x20, 0xf4]);
+        assert_eq!(raw(-12, false), [0x2b, 0xf4]);
+        assert_eq!(
+            raw(i64::MAX, true),
+            [&[0x1b, 0x7f][..], &[0xff; 7], &[0xf5]].concat()
+        );
+        assert_eq!(
+            raw(i64::MIN, false),
+            [&[0x3b, 0x7f][..], &[0xff; 7], &[0xf4]].concat()
+        );
     }
 
+    /// The packed two-item form `[tx hash, 2 × amount + names_asset]` is not
+    /// read: no store on it is kept.
     #[test]
-    fn a_mint_without_two_items_is_refused() {
-        let mut good = minicbor::to_vec(AssetMintSet {
-            tx_hash: [0xab; 32].into(),
-            amount: 1,
-            names_asset: false,
-        })
-        .unwrap();
-        assert!(minicbor::decode::<AssetMintSet>(&good).is_ok());
+    fn the_packed_form_is_refused() {
+        let mut packed = minicbor::Encoder::new(Vec::new());
+        packed
+            .array(2)
+            .unwrap()
+            .encode(Hash::<32>::from([0xab; 32]))
+            .unwrap()
+            .int(3.into())
+            .unwrap();
 
-        good[0] = 0x83;
-        good.push(0x00);
-        assert!(minicbor::decode::<AssetMintSet>(&good).is_err());
+        assert!(minicbor::decode::<AssetMintSet>(packed.writer()).is_err());
     }
 }
 
