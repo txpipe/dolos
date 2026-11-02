@@ -98,6 +98,9 @@ impl<M: KeyCodec> dolos_core::KeyPrefix<GroupKey<crate::AccountKey, M>> for crat
 impl<M: KeyCodec> dolos_core::KeyPrefix<GroupKey<crate::PaymentKey, M>> for crate::PaymentKey {}
 impl<M: KeyCodec> dolos_core::KeyPrefix<GroupKey<crate::AssetKey, M>> for crate::AssetKey {}
 
+/// Ungrouped keys lead with their epoch.
+impl<M: KeyCodec> dolos_core::KeyPrefix<GroupKey<Ungrouped, M>> for Epoch {}
+
 /// A `Set` row: one member of a group in an epoch, held in state under a
 /// [`GroupKey`] until the epoch seals into a `Chunk`.
 pub trait SetRow:
