@@ -503,7 +503,7 @@ mod tests {
 
         let sealed = domain
             .archive()
-            .iter_logs_typed::<dolos_cardano::AccountAddressChunk>(None)
+            .iter_logs_typed::<dolos_cardano::AccountAddressEpochs>(None)
             .unwrap()
             .count();
         let staged = domain

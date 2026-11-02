@@ -23,7 +23,7 @@ use pallas::{
 use serde::{Deserialize, Serialize};
 
 use super::AccountKey;
-use crate::periods::{GroupKey, GroupRow, StageIfAbsent, StageSum, SumRow};
+use crate::periods::{ChunkRow, GroupKey, GroupRow, StageIfAbsent, StageSum, SumRow};
 
 hash_key!(
     /// A payment credential, by its hash alone: what `/addresses/{address}/total`
@@ -365,28 +365,68 @@ impl SumRow for AddressStats {
 
 pub type StageAddressStats = StageSum<AddressStats>;
 
-/// A payment credential's addresses that moved value in one epoch, as
-/// tails, and the txs that moved any of them: the seal of a
-/// [`PaymentAddressSet`] and its [`PaymentStats`] together.
+/// One page of a payment credential's addresses that moved value in one
+/// epoch, as tails, and on page 0 the txs that moved any of them: the seal of
+/// a [`PaymentAddressSet`] and its [`PaymentStats`] together.
 ///
-/// Sealed at `epoch_start(e) ‖ PaymentKey`, the tails in byte order.
+/// Sealed at `epoch_start(e) ‖ PaymentKey ‖ page (4 B)`, the tails in byte
+/// order. Page `i` holds entries `i × CHUNK_LEN` onward, and every page
+/// carries the epoch's count, so a reader learns from page 0 how many pages
+/// follow. A credential with a tx count and no tails has page 0 alone, with a
+/// count of 0.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Encode, Decode)]
-pub struct PaymentAddressChunk {
+pub struct PaymentAddressEpochs {
+    /// The tails the credential moved value through in the epoch, over every
+    /// page.
     #[n(0)]
-    pub tails: Vec<ByteVec>,
+    pub count: u64,
 
     #[n(1)]
-    pub tx_count: u64,
+    pub tails: Vec<PaymentAddressItem>,
+
+    /// The txs that moved value through any of the tails; on page 0 only,
+    /// absent on every later page.
+    #[n(2)]
+    pub tx_count: Option<u64>,
+}
+
+/// One address tail of a [`PaymentAddressEpochs`] page.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+pub struct PaymentAddressItem {
+    #[n(0)]
+    pub tail: ByteVec,
 }
 
 entity_boilerplate!(
-    PaymentAddressChunk,
-    "payment-address-chunks",
-    log = PaymentKey
+    PaymentAddressEpochs,
+    "payment-address-epochs",
+    log = (PaymentKey, u32)
 );
 
+impl ChunkRow for PaymentAddressEpochs {
+    type Item = Vec<u8>;
+
+    fn new(count: u64, items: Vec<Vec<u8>>) -> Self {
+        Self {
+            count,
+            tails: items
+                .into_iter()
+                .map(|tail| PaymentAddressItem { tail: tail.into() })
+                .collect(),
+            tx_count: None,
+        }
+    }
+
+    fn into_items(self) -> Vec<Vec<u8>> {
+        self.tails
+            .into_iter()
+            .map(|item| item.tail.into())
+            .collect()
+    }
+}
+
 /// One address of a payment credential that moved value in an epoch, held in
-/// state until the epoch seals into a [`PaymentAddressChunk`].
+/// state until the epoch seals into a [`PaymentAddressEpochs`].
 ///
 /// Keyed `payment ‖ epoch ‖ tail`, so one prefix scan returns every unsealed
 /// epoch of a credential.
@@ -424,7 +464,7 @@ pub type StagePaymentAddress = StageIfAbsent<PaymentAddressSet>;
 /// The txs that moved value through a payment credential's addresses in an
 /// epoch that has not sealed, keyed `payment ‖ epoch`.
 ///
-/// In state only: its count seals into the [`PaymentAddressChunk`] beside the
+/// In state only: its count seals into the [`PaymentAddressEpochs`] beside the
 /// addresses.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
 pub struct PaymentStats {
