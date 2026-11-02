@@ -43,7 +43,7 @@ use pallas::{
     },
 };
 
-use super::{is_sealable, oldest_staged, seal_epochs, ChunkRow as _, GroupKey};
+use super::{is_sealable, oldest_staged, seal_epochs, staged_floor, ChunkRow as _, GroupKey};
 use crate::{
     model::stats::{join_payment, split_payment},
     pallas_extras, AccountKey, AccountStats, AddressKey, AddressStats, ChainSummary,
@@ -413,7 +413,8 @@ fn fold_address_rows<D: Domain>(
     keys: &[(Epoch, AddressKey)],
     fold: &mut Fold,
 ) -> Result<(), ChainError> {
-    let staged_from = oldest_staged::<_, AddressStats, _>(domain.state())?;
+    let floor = staged_floor(domain, chain)?;
+    let staged_from = oldest_staged::<_, AddressStats, _>(domain.state(), floor)?;
 
     for batch in keys.chunks(READ_BATCH) {
         let staged_keys: Vec<(usize, EntityKey)> = batch
@@ -575,7 +576,8 @@ fn account_epochs<D: Domain>(
     account: &AccountKey,
 ) -> Result<BTreeMap<Epoch, u64>, ChainError> {
     let state = domain.state();
-    let staged_from = oldest_staged::<_, AccountStats, _>(state)?;
+    let floor = staged_floor(domain, chain)?;
+    let staged_from = oldest_staged::<_, AccountStats, _>(state, floor)?;
 
     let staged_keys: Vec<(Epoch, AccountKey)> = epochs
         .clone()
@@ -629,7 +631,8 @@ fn fold_account<D: Domain>(
     let (state, archive) = (domain.state(), domain.archive());
 
     let active = account_epochs(domain, chain, epochs, account)?;
-    let staged_from = oldest_staged::<_, AddressStats, _>(state)?;
+    let floor = staged_floor(domain, chain)?;
+    let staged_from = oldest_staged::<_, AddressStats, _>(state, floor)?;
 
     let mut fold = Fold::default();
 
@@ -888,10 +891,11 @@ pub fn totals_watermark<D: Domain>(
         .find(|epoch| is_sealable(chain, mutable_slots, *epoch, tip));
 
     let state = domain.state();
+    let floor = staged_floor(domain, chain)?;
 
     let staged = [
-        oldest_staged::<_, AddressStats, _>(state)?,
-        oldest_staged::<_, AccountStats, _>(state)?,
+        oldest_staged::<_, AddressStats, _>(state, floor)?,
+        oldest_staged::<_, AccountStats, _>(state, floor)?,
     ]
     .into_iter()
     .flatten()
@@ -1592,6 +1596,118 @@ mod tests {
 
             crash_after += 1;
         }
+    }
+
+    /// The ledger standing in epoch `number`.
+    fn set_ledger(domain: &ToyDomain, number: Epoch) {
+        let mut epoch = crate::load_epoch::<ToyDomain>(domain.state()).unwrap();
+        epoch.number = number;
+
+        let writer = domain.state().start_writer().unwrap();
+        writer.write_entity_typed(&(), &epoch).unwrap();
+        writer.commit().unwrap();
+    }
+
+    /// The watermark a scan from each namespace's start finds: the ledger in
+    /// the genesis epoch puts the floor at 0.
+    fn full_scan_watermark(domain: &ToyDomain, tip: Epoch) -> Option<Epoch> {
+        let ledger = crate::load_epoch::<ToyDomain>(domain.state())
+            .unwrap()
+            .number;
+
+        set_ledger(domain, 0);
+        let full = watermark(domain, tip);
+        set_ledger(domain, ledger);
+
+        full
+    }
+
+    /// The lookup reads from its floor on: rows below it are never seen, even
+    /// staged ones.
+    #[test]
+    fn the_oldest_staged_epoch_is_read_from_its_floor() {
+        let domain = seeded();
+        let state = domain.state();
+
+        assert_eq!(
+            oldest_staged::<_, AddressStats, _>(state, 0).unwrap(),
+            Some(5)
+        );
+        assert_eq!(
+            oldest_staged::<_, AccountStats, _>(state, 6).unwrap(),
+            Some(6)
+        );
+        assert_eq!(
+            oldest_staged::<_, AddressStats, _>(state, 7).unwrap(),
+            Some(7)
+        );
+        assert_eq!(oldest_staged::<_, AccountStats, _>(state, 8).unwrap(), None);
+    }
+
+    /// With the ledger in the epoch whose boundary sealed 5 and 6, the floor
+    /// is 7, past their deleted rows, and the watermark and every total are
+    /// those of a scan from the namespace start.
+    #[tokio::test]
+    async fn sealed_epochs_ahead_of_the_staged_ones_keep_the_watermark() {
+        let domain = seeded();
+        seal_as(&domain, &domain).unwrap();
+        register(&domain, 0);
+
+        let full = full_scan_watermark(&domain, BOUNDARY);
+        let before = totals(&domain);
+        assert_eq!(full, Some(6));
+
+        set_ledger(&domain, BOUNDARY);
+        assert_eq!(staged_floor(&domain, &chain(&domain)).unwrap(), 7);
+        assert_eq!(watermark(&domain, BOUNDARY), full);
+        assert_eq!(totals(&domain), before);
+
+        for of in every_key() {
+            let expected = uncached(&domain, &of, BOUNDARY);
+            assert_eq!(cached(&domain, &of, BOUNDARY).await, expected, "{of:?}");
+            assert_eq!(entry(&domain, &of).unwrap().watermark, 6, "{of:?}");
+        }
+    }
+
+    /// A seal that dies after any commit leaves the ledger in the epoch before
+    /// its boundary, and the floor with it: the watermark and every total are
+    /// those of a scan from the namespace start.
+    #[test]
+    fn an_unfinished_seal_keeps_the_watermark() {
+        let before = {
+            let domain = seeded();
+            seal_at(&domain, &domain, 7).unwrap();
+            totals(&domain)
+        };
+
+        let mut crash_after = 0;
+
+        loop {
+            let domain = seeded();
+            seal_at(&domain, &domain, 7).unwrap();
+            set_ledger(&domain, 7);
+
+            let crashing =
+                FaultyToyDomain::new(domain.clone(), TestFault::CrashAfterCommits(crash_after));
+            let done = seal_as(&crashing, &domain).is_ok();
+
+            let at = format!("after commit {crash_after}");
+            assert_eq!(staged_floor(&domain, &chain(&domain)).unwrap(), 6, "{at}");
+            assert_eq!(
+                watermark(&domain, BOUNDARY),
+                full_scan_watermark(&domain, BOUNDARY),
+                "{at}"
+            );
+            assert_eq!(totals(&domain), before, "{at}");
+
+            if done {
+                break;
+            }
+
+            crash_after += 1;
+        }
+
+        assert!(crash_after >= 3, "only {crash_after} commits");
     }
 
     /// Every credential the seeded rows answer for, of each family.
