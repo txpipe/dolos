@@ -1,0 +1,38 @@
+dumps the entities of a state namespace
+
+Usage: dolos data dump state [OPTIONS] --namespace <NAMESPACE>
+
+Options:
+      --namespace <NAMESPACE>
+          namespace to dump
+
+      --limit <N>
+          Print at most this many records; 0 prints every one
+          
+          [default: 100]
+
+      --offset <N>
+          Skip this many records first
+          
+          [default: 0]
+
+      --format <FORMAT>
+          How to print the result: text for people, JSON for scripts
+          
+          [default: text]
+          [possible values: text, json]
+
+      --layout <LAYOUT>
+          How text output lays out its rows
+          
+          [default: table]
+
+          Possible values:
+          - table:  a table
+          - dbsync: comma-separated rows under cardano-db-sync's column names
+
+  -c, --config <CONFIG>
+          
+
+  -h, --help
+          Print help (see a summary with '-h')

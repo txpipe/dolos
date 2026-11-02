@@ -1,0 +1,41 @@
+Restore a Stelae snapshot
+
+Usage: dolos bootstrap stelae [OPTIONS]
+
+Options:
+      --force
+          Replace any data already in storage
+      --source <SOURCE>
+          Where to restore from, as a URL: `file://DIR` naming a stele directory, or
+          `oci://HOST/PATH` naming a repository in a registry. Defaults to the configured network's
+          official repository, and is required for a custom network
+      --point <POINT>
+          which stele in the repository to restore: `latest`, or `epoch-N` for the stele published
+          at the end of epoch N. Registry sources only [default: latest]
+      --skip-if-data
+          Exit 0 without bootstrapping when storage already holds a node, as an interrupted replay
+          that has committed leaves one for `--continue` to resume; data without one, as a bootstrap
+          interrupted before it commits a cursor leaves, and a store this release refuses are errors
+          instead
+      --insecure
+          talk to the repository over plaintext HTTP rather than HTTPS; for a registry on a loopback
+          address or a mirror inside a cluster, and for nothing reachable from outside one
+      --verbose
+          Enable verbose logging output
+      --scratch-dir <DIR>
+          directory to stage pulled layers in; defaults to `<storage.path>/scratch`. registry
+          sources only — a `file://` restore stages nothing
+      --skip-space-check
+          skip the restore disk-space preflight and continue even when the stele's declared sizes
+          exceed the available space
+      --registry-user <USER>
+          the user to read the registry as; defaults to the published read-only user when the
+          repository is the configured network's official one. The password comes from
+          DOLOS_STELAE_PASSWORD or --registry-credentials-file [env: DOLOS_STELAE_USER=]
+      --registry-credentials-file <PATH>
+          a TOML file naming the registry secret as `password` or `token`; it takes the place of
+          DOLOS_STELAE_PASSWORD / DOLOS_STELAE_TOKEN
+  -c, --config <CONFIG>
+          
+  -h, --help
+          Print help

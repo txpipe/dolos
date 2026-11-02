@@ -43,21 +43,23 @@ dolos bootstrap mithril
 The process will take from several minutes to a few hours depending on the network. You'll see a sequence of progress bars describing each of the steps of the process.
 
 <Aside type="note">
-The process supports resuming from previous runs (use the global `--continue` flag to allow bootstrap to proceed when Dolos storage already has data). The download step resumes automatically: if immutable files already exist in the download directory, only the missing ones are fetched.
+An interrupted replay keeps what it committed: run the command again with `--continue` to resume from there. The download resumes on its own: if immutable files already exist in the download directory, only the missing ones are fetched.
 </Aside>
 
-In addition to the [global bootstrap flags](../bootstrap), the `mithril` subcommand accepts the following flags:
+In addition to the [bootstrap flags](../bootstrap), the `mithril` subcommand accepts the following flags:
 
 | arg | description | default |
 | --- | ----------- | ------- |
 | `--download-dir <DIR>` | Directory to store the downloaded snapshot | `./snapshot` |
 | `--skip-validation` | Skip the Mithril certificate validation | `false` |
 | `--skip-download` | Assume the snapshot is already available in the download dir | `false` |
-| `--retain-snapshot` | Retain downloaded snapshot instead of deleting it | `false` |
-| `--chunk-size <N>` | Number of blocks to process per chunk (more is faster but uses more memory) | `500` |
-| `--start-from <POINT>` | Resume import from a specific chain point | none |
+| `--retain-snapshot` | Retain the downloaded snapshot instead of deleting it; a replay that stops at `--stop-epoch` keeps it either way, for `--continue --skip-download` | `false` |
 | `--download-start <N>` | Start downloading from this immutable file number (inclusive) | none |
 | `--download-end <N>` | Download up to this immutable file number (inclusive) | none |
-| `--stop-epoch <N>` | Stop the import once the ledger reaches this epoch | none |
+| `--continue` | Resume an interrupted replay from its committed position | `false` |
+| `--stop-epoch <N>` | Stop once the ledger reaches this epoch | none |
+| `--chunk-size <N>` | Number of blocks to process per chunk (more is faster but uses more memory) | `500` |
 
 When `--download-start` and `--download-end` are not specified, the full range of immutable files is downloaded and verified. If immutable files already exist in the download directory, the download resumes from the highest file present (which is re-fetched in case a previous run left it incomplete); certificate verification still covers the full set of immutable files. When an explicit range is given, verification is scoped to that range.
+
+The replay itself is the one [`bootstrap immutabledb`](./local) runs over a local database.

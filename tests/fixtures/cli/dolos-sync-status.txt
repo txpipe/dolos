@@ -1,0 +1,9 @@
+Where the WAL, the state and the archive stand, and whether the WAL's blocks chain; reads only
+
+Usage: dolos sync status [OPTIONS]
+
+Options:
+      --format <FORMAT>  How to print the result: text for people, JSON for scripts [default: text]
+                         [possible values: text, json]
+  -c, --config <CONFIG>  
+  -h, --help             Print help
