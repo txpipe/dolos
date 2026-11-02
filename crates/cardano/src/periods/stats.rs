@@ -6,7 +6,8 @@
 //! - `address-stats` holds one row per (epoch, address), keyed stake-first.
 //! - `payment-addresses` (a `Set`) and `payment-stats` hold, in state, a
 //!   payment credential's addresses as tails and its tx count; they seal
-//!   together into one `payment-address-epochs` row per (epoch, credential).
+//!   together into the `payment-address-epochs` pages of each (epoch,
+//!   credential), the tx count on page 0.
 //! - `account-stats` holds one row per (epoch, account) whose addresses moved
 //!   value, with the account's tx count.
 //!
@@ -219,8 +220,8 @@ struct PaymentEpoch {
 }
 
 /// Payment rows seal in chunks of whole credentials. A credential's tails and
-/// tx count of an epoch are staged in two namespaces and seal into one row,
-/// so a chunk deletes both only after the archive holds the row.
+/// tx count of an epoch are staged in two namespaces and seal into its pages,
+/// so a chunk deletes both only after the archive holds every page.
 fn seal_payments<D: Domain>(
     state: &D::State,
     archive: &D::Archive,
@@ -2054,5 +2055,85 @@ mod tests {
 
         let totals = payment_totals(&domain, &chain, 0..=BOUNDARY, &payment).unwrap();
         assert_eq!(totals.tx_count, 7);
+    }
+
+    /// Payment 0x50 in epochs 5 and 6: 300 base addresses each, two pages
+    /// each, every address receiving one lovelace in one tx, and tx counts of
+    /// 7 and 11.
+    fn two_paged_payment_epochs() -> ToyDomain {
+        let domain = ToyDomain::new(None, None);
+        let writer = domain.state().start_writer().unwrap();
+
+        for (epoch, tx_count) in [(5u8, 7), (6, 11)] {
+            for i in 0..300u32 {
+                let mut stake = [0x22; 28];
+                stake[0] = epoch;
+                stake[1..5].copy_from_slice(&i.to_be_bytes());
+                let address = base(0x50, StakeCredential::AddrKeyhash(Hash::new(stake)));
+
+                let stats = AddressStats {
+                    units: [(Bytes::from(vec![]), sums(1, 0))].into_iter().collect(),
+                    tx_count: 1,
+                };
+
+                writer
+                    .write_entity_typed(&(Epoch::from(epoch), AddressKey::of(&address)), &stats)
+                    .unwrap();
+
+                let (payment, tail) = split_payment(&address).unwrap();
+                let row = PaymentAddressSet {
+                    payment,
+                    epoch: epoch.into(),
+                    tail,
+                };
+
+                writer
+                    .write_entity_typed(&super::super::GroupRow::key(&row), &row)
+                    .unwrap();
+            }
+
+            writer
+                .write_entity_typed(
+                    &GroupKey {
+                        group: PaymentKey([0x50; 28].into()),
+                        epoch: epoch.into(),
+                        member: (),
+                    },
+                    &PaymentStats { tx_count },
+                )
+                .unwrap();
+        }
+
+        writer.commit().unwrap();
+
+        domain
+    }
+
+    /// Each sealed epoch's later pages are its own: the totals over two
+    /// multi-page epochs answer as the staged rows did; and a later page
+    /// encodes without the tx count, `[n, [items]]`.
+    #[test]
+    fn later_payment_pages_are_read_from_their_own_epoch() {
+        let payment = PaymentKey([0x50; 28].into());
+        let totals = |domain: &ToyDomain| {
+            payment_totals(domain, &chain(domain), 0..=BOUNDARY, &payment).unwrap()
+        };
+
+        let clean = two_paged_payment_epochs();
+        let before = totals(&clean);
+        assert_eq!(before.tx_count, 18);
+        assert_eq!(before.units[&Bytes::from(vec![])].received.0, 600);
+
+        seal_as(&clean, &clean).unwrap();
+        assert_eq!(totals(&clean), before);
+
+        let (_, pages, _) = logs(&clean);
+        assert_eq!(pages.len(), 4);
+
+        for (_, (_, page), row) in &pages {
+            let raw = pallas::codec::minicbor::to_vec(row).unwrap();
+            let header = if *page == 0 { 0x83 } else { 0x82 };
+            assert_eq!(raw[0], header, "page {page}");
+        }
     }
 }

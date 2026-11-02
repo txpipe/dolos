@@ -707,4 +707,103 @@ mod tests {
             assert_eq!(after[windows.len() + i], reversed[skip..skip + count]);
         }
     }
+
+    /// 300 addresses under `a` in each of epochs 5 and 6, two pages each.
+    /// Epoch 6's entry 270, on its page 1, repeats epoch 5's entry 260, on
+    /// its page 1. Returns the listing in first-appearance order.
+    fn two_paged_epochs() -> (ToyDomain, Vec<Vec<u8>>) {
+        let domain = ToyDomain::new(None, None);
+        let chain = chain(&domain);
+        let writer = domain.state().start_writer().unwrap();
+        let mut listing = Vec::new();
+
+        for epoch in [5u8, 6] {
+            for i in 0..300u32 {
+                let address = match (epoch, i) {
+                    (6, 270) => [[0x01, 5].as_slice(), &260u32.to_be_bytes()].concat(),
+                    _ => [[0x01, epoch].as_slice(), &i.to_be_bytes()].concat(),
+                };
+
+                let row = AccountAddressSet {
+                    account: a(),
+                    address: address.clone(),
+                    epoch: epoch.into(),
+                    slot: chain.epoch_start(epoch.into()) + 1,
+                    tx_index: i,
+                    output_index: 0,
+                };
+
+                writer.write_entity_typed(&row.key(), &row).unwrap();
+
+                if !listing.contains(&address) {
+                    listing.push(address);
+                }
+            }
+        }
+
+        writer.commit().unwrap();
+
+        (domain, listing)
+    }
+
+    /// Each sealed epoch's later pages are its own: a listing over two
+    /// multi-page epochs answers as the staged rows did, keeps the repeat's
+    /// first appearance, and answers so between any two commits of the seal
+    /// and after a crash re-run.
+    #[test]
+    fn later_pages_are_read_from_their_own_epoch() {
+        let full = |domain: &ToyDomain, order| {
+            page(
+                domain,
+                &chain(domain),
+                0..=BOUNDARY,
+                &AccountKey(a()),
+                order,
+                0,
+                1_000,
+            )
+            .unwrap()
+        };
+
+        let (clean, listing) = two_paged_epochs();
+        assert_eq!(listing.len(), 599);
+
+        let reversed: Vec<Vec<u8>> = listing.iter().rev().cloned().collect();
+        assert_eq!(full(&clean, SlotOrder::Asc), listing);
+
+        seal_as(&clean, &clean).unwrap();
+        assert_eq!(logs(&clean).len(), 4);
+        assert!(staged(&clean).is_empty());
+        assert_eq!(full(&clean, SlotOrder::Asc), listing);
+        assert_eq!(full(&clean, SlotOrder::Desc), reversed);
+
+        let mut crash_after = 0;
+
+        loop {
+            let (domain, _) = two_paged_epochs();
+            let crashing =
+                FaultyToyDomain::new(domain.clone(), TestFault::CrashAfterCommits(crash_after));
+            let done = seal_as(&crashing, &domain).is_ok();
+
+            assert_eq!(
+                full(&domain, SlotOrder::Asc),
+                listing,
+                "commit {crash_after}"
+            );
+
+            if done {
+                break;
+            }
+
+            seal_as(&domain, &domain).expect("re-run");
+            assert_eq!(logs(&domain), logs(&clean), "commit {crash_after}");
+            assert_eq!(
+                full(&domain, SlotOrder::Desc),
+                reversed,
+                "commit {crash_after}"
+            );
+
+            crash_after += 1;
+        }
+    }
 }
