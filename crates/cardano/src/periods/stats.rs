@@ -6,7 +6,8 @@
 //! - `address-stats` holds one row per (epoch, address), keyed stake-first.
 //! - `payment-addresses` (a `Set`) and `payment-stats` hold, in state, a
 //!   payment credential's addresses as tails and its tx count; they seal
-//!   together into one `payment-address-chunks` row per (epoch, credential).
+//!   together into the `payment-address-epochs` pages of each (epoch,
+//!   credential), the tx count on page 0.
 //! - `account-stats` holds one row per (epoch, account) whose addresses moved
 //!   value, with the account's tx count.
 //!
@@ -42,11 +43,11 @@ use pallas::{
     },
 };
 
-use super::{is_sealable, oldest_staged, seal_epochs, GroupKey};
+use super::{is_sealable, oldest_staged, seal_epochs, ChunkRow as _, GroupKey};
 use crate::{
     model::stats::{join_payment, split_payment},
     pallas_extras, AccountKey, AccountStats, AddressKey, AddressStats, ChainSummary,
-    FixedNamespace as _, PaymentAddressChunk, PaymentAddressSet, PaymentKey, PaymentStats, Sum,
+    FixedNamespace as _, PaymentAddressEpochs, PaymentAddressSet, PaymentKey, PaymentStats, Sum,
     UnitSums,
 };
 
@@ -219,8 +220,8 @@ struct PaymentEpoch {
 }
 
 /// Payment rows seal in chunks of whole credentials. A credential's tails and
-/// tx count of an epoch are staged in two namespaces and seal into one row,
-/// so a chunk deletes both only after the archive holds the row.
+/// tx count of an epoch are staged in two namespaces and seal into its pages,
+/// so a chunk deletes both only after the archive holds every page.
 fn seal_payments<D: Domain>(
     state: &D::State,
     archive: &D::Archive,
@@ -277,14 +278,21 @@ fn seal_payments<D: Domain>(
             let mut tails = row.tails.clone();
             tails.sort();
 
-            writer.write_log_typed(
-                chain.epoch_start(*epoch),
-                &PaymentKey(*payment),
-                &PaymentAddressChunk {
-                    tails: tails.into_iter().map(Into::into).collect(),
-                    tx_count: row.tx_count,
-                },
-            )?;
+            let mut pages = super::chunk::<PaymentAddressEpochs>(tails);
+
+            if pages.is_empty() {
+                pages.push(PaymentAddressEpochs::new(0, Vec::new()));
+            }
+
+            pages[0].tx_count = Some(row.tx_count);
+
+            for (page, row) in (0u32..).zip(pages) {
+                writer.write_log_typed(
+                    chain.epoch_start(*epoch),
+                    &(PaymentKey(*payment), page),
+                    &row,
+                )?;
+            }
         }
 
         writer.commit()?;
@@ -504,11 +512,11 @@ fn fold_payment<D: Domain>(
         staged.entry(key.epoch).or_default().tx_count = row.tx_count;
     }
 
-    let sealed = super::read_sealed::<_, PaymentAddressChunk>(
+    let sealed = super::read_sealed::<_, PaymentAddressEpochs>(
         domain.archive(),
         chain,
         epochs.clone(),
-        |_| *payment,
+        |_| (*payment, 0),
     )?;
 
     let mut tx_count = 0u64;
@@ -517,12 +525,22 @@ fn fold_payment<D: Domain>(
     for epoch in epochs {
         let row = match sealed.get(&epoch) {
             Some(raw) => {
-                let row = PaymentAddressChunk::decode_entity(PaymentAddressChunk::NS, raw)?;
+                let first = PaymentAddressEpochs::decode_entity(PaymentAddressEpochs::NS, raw)?;
+                let pages = super::chunks_of(first.count);
+                let tx_count = first.tx_count.unwrap_or_default();
+                let mut tails = first.into_items();
 
-                PaymentEpoch {
-                    tails: row.tails.into_iter().map(Vec::from).collect(),
-                    tx_count: row.tx_count,
+                for row in super::load_chunks::<_, PaymentAddressEpochs>(
+                    domain.archive(),
+                    chain,
+                    epoch,
+                    1..pages,
+                    |page| (*payment, page),
+                )? {
+                    tails.extend(row.into_items());
                 }
+
+                PaymentEpoch { tails, tx_count }
             }
             None => match staged.remove(&epoch) {
                 Some(row) => row,
@@ -1183,7 +1201,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::{model::stats::split_payment, periods::is_sealable};
+    use crate::{
+        model::stats::split_payment,
+        periods::{is_sealable, CHUNK_LEN},
+    };
 
     /// The epoch the sealing boundary opens: 5 and 6 are immutable at it, 7 is
     /// not.
@@ -1331,7 +1352,7 @@ mod tests {
 
     type Logs = (
         Vec<(BlockSlot, AddressKey, AddressStats)>,
-        Vec<(BlockSlot, PaymentKey, PaymentAddressChunk)>,
+        Vec<(BlockSlot, (PaymentKey, u32), PaymentAddressEpochs)>,
         Vec<(BlockSlot, AccountKey, AccountStats)>,
     );
 
@@ -1345,7 +1366,7 @@ mod tests {
                 .map(Result::unwrap)
                 .collect(),
             archive
-                .iter_logs_typed::<PaymentAddressChunk>(None)
+                .iter_logs_typed::<PaymentAddressEpochs>(None)
                 .unwrap()
                 .map(Result::unwrap)
                 .collect(),
@@ -1918,5 +1939,201 @@ mod tests {
         .collect();
 
         assert_eq!(found, expected);
+    }
+
+    /// Payment 0x50 in epoch 5: `n` base addresses, each receiving one
+    /// lovelace in one tx, and a tx count of 7.
+    fn seeded_payment(n: u32) -> ToyDomain {
+        let domain = ToyDomain::new(None, None);
+        let writer = domain.state().start_writer().unwrap();
+
+        for i in 0..n {
+            let mut stake = [0x22; 28];
+            stake[..4].copy_from_slice(&i.to_be_bytes());
+            let address = base(0x50, StakeCredential::AddrKeyhash(Hash::new(stake)));
+
+            let stats = AddressStats {
+                units: [(Bytes::from(vec![]), sums(1, 0))].into_iter().collect(),
+                tx_count: 1,
+            };
+
+            writer
+                .write_entity_typed(&(5, AddressKey::of(&address)), &stats)
+                .unwrap();
+
+            let (payment, tail) = split_payment(&address).unwrap();
+            let row = PaymentAddressSet {
+                payment,
+                epoch: 5,
+                tail,
+            };
+
+            writer
+                .write_entity_typed(&super::super::GroupRow::key(&row), &row)
+                .unwrap();
+        }
+
+        writer
+            .write_entity_typed(
+                &GroupKey {
+                    group: PaymentKey([0x50; 28].into()),
+                    epoch: 5,
+                    member: (),
+                },
+                &PaymentStats { tx_count: 7 },
+            )
+            .unwrap();
+
+        writer.commit().unwrap();
+
+        domain
+    }
+
+    #[test]
+    fn a_payment_epoch_seals_into_pages_with_its_tx_count_on_page_0() {
+        let payment = PaymentKey([0x50; 28].into());
+
+        for n in [0u32, 1, 255, 256, 257, 65_536] {
+            let domain = seeded_payment(n);
+            let chain = chain(&domain);
+            let before = payment_totals(&domain, &chain, 0..=BOUNDARY, &payment).unwrap();
+
+            seal_as(&domain, &domain).unwrap();
+
+            let (_, pages, _) = logs(&domain);
+            assert_eq!(pages.len(), (n as usize).div_ceil(CHUNK_LEN).max(1), "{n}");
+
+            for (i, (_, (key, page), row)) in pages.iter().enumerate() {
+                assert_eq!(key, &payment);
+                assert_eq!(*page as usize, i, "{n} tails");
+                assert_eq!(row.count, u64::from(n), "{n} tails, page {i}");
+                assert_eq!(
+                    row.tails.len(),
+                    CHUNK_LEN.min(n as usize - i * CHUNK_LEN),
+                    "{n} tails, page {i}"
+                );
+                assert_eq!(row.tx_count, (i == 0).then_some(7), "{n} tails, page {i}");
+            }
+
+            let tails: Vec<Vec<u8>> = pages
+                .into_iter()
+                .flat_map(|(_, _, row)| row.into_items())
+                .collect();
+            assert!(tails.is_sorted(), "{n} tails");
+
+            let after = payment_totals(&domain, &chain, 0..=BOUNDARY, &payment).unwrap();
+            assert_eq!(after, before, "{n} tails");
+            assert_eq!(after.tx_count, 7, "{n} tails");
+            assert_eq!(
+                after.units.get(&Bytes::from(vec![])).map(|x| x.received.0),
+                (n > 0).then_some(u128::from(n)),
+                "{n} tails"
+            );
+        }
+    }
+
+    #[test]
+    fn the_payment_tx_count_is_read_from_page_0_alone() {
+        let payment = PaymentKey([0x50; 28].into());
+        let domain = seeded_payment(300);
+        let chain = chain(&domain);
+
+        seal_as(&domain, &domain).unwrap();
+
+        // a tx count on a later page is not the epoch's
+        let slot = chain.epoch_start(5);
+        let mut page = domain
+            .archive()
+            .read_log_typed::<PaymentAddressEpochs>(slot, &(payment, 1))
+            .unwrap()
+            .unwrap();
+        page.tx_count = Some(1_000);
+
+        let writer = domain.archive().start_writer().unwrap();
+        writer.write_log_typed(slot, &(payment, 1), &page).unwrap();
+        writer.commit().unwrap();
+
+        let totals = payment_totals(&domain, &chain, 0..=BOUNDARY, &payment).unwrap();
+        assert_eq!(totals.tx_count, 7);
+    }
+
+    /// Payment 0x50 in epochs 5 and 6: 300 base addresses each, two pages
+    /// each, every address receiving one lovelace in one tx, and tx counts of
+    /// 7 and 11.
+    fn two_paged_payment_epochs() -> ToyDomain {
+        let domain = ToyDomain::new(None, None);
+        let writer = domain.state().start_writer().unwrap();
+
+        for (epoch, tx_count) in [(5u8, 7), (6, 11)] {
+            for i in 0..300u32 {
+                let mut stake = [0x22; 28];
+                stake[0] = epoch;
+                stake[1..5].copy_from_slice(&i.to_be_bytes());
+                let address = base(0x50, StakeCredential::AddrKeyhash(Hash::new(stake)));
+
+                let stats = AddressStats {
+                    units: [(Bytes::from(vec![]), sums(1, 0))].into_iter().collect(),
+                    tx_count: 1,
+                };
+
+                writer
+                    .write_entity_typed(&(Epoch::from(epoch), AddressKey::of(&address)), &stats)
+                    .unwrap();
+
+                let (payment, tail) = split_payment(&address).unwrap();
+                let row = PaymentAddressSet {
+                    payment,
+                    epoch: epoch.into(),
+                    tail,
+                };
+
+                writer
+                    .write_entity_typed(&super::super::GroupRow::key(&row), &row)
+                    .unwrap();
+            }
+
+            writer
+                .write_entity_typed(
+                    &GroupKey {
+                        group: PaymentKey([0x50; 28].into()),
+                        epoch: epoch.into(),
+                        member: (),
+                    },
+                    &PaymentStats { tx_count },
+                )
+                .unwrap();
+        }
+
+        writer.commit().unwrap();
+
+        domain
+    }
+
+    /// Each sealed epoch's later pages are its own: the totals over two
+    /// multi-page epochs answer as the staged rows did; and a later page
+    /// encodes without the tx count, `[n, [items]]`.
+    #[test]
+    fn later_payment_pages_are_read_from_their_own_epoch() {
+        let payment = PaymentKey([0x50; 28].into());
+        let totals = |domain: &ToyDomain| {
+            payment_totals(domain, &chain(domain), 0..=BOUNDARY, &payment).unwrap()
+        };
+
+        let clean = two_paged_payment_epochs();
+        let before = totals(&clean);
+        assert_eq!(before.tx_count, 18);
+        assert_eq!(before.units[&Bytes::from(vec![])].received.0, 600);
+
+        seal_as(&clean, &clean).unwrap();
+        assert_eq!(totals(&clean), before);
+
+        let (_, pages, _) = logs(&clean);
+        assert_eq!(pages.len(), 4);
+
+        for (_, (_, page), row) in &pages {
+            let raw = pallas::codec::minicbor::to_vec(row).unwrap();
+            let header = if *page == 0 { 0x83 } else { 0x82 };
+            assert_eq!(raw[0], header, "page {page}");
+        }
     }
 }

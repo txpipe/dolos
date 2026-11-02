@@ -472,16 +472,16 @@ impl AccountState {
             })
     }
 
-    /// What the row leaves in `pruned-accounts` when ESTART deletes it, or
+    /// What the row leaves in `account-history` when ESTART deletes it, or
     /// `None` when it carries no history: no lifetime rewards and no
     /// deregistration.
-    pub fn remainder(&self) -> Option<PrunedAccountState> {
-        let remainder = PrunedAccountState {
+    pub fn remainder(&self) -> Option<AccountHistoryState> {
+        let remainder = AccountHistoryState {
             lifetime_rewards: self.stake.live().map(|x| x.rewards_sum).unwrap_or_default(),
             deregistered_at: self.deregistered_at,
         };
 
-        (remainder != PrunedAccountState::default()).then_some(remainder)
+        (remainder != AccountHistoryState::default()).then_some(remainder)
     }
 }
 
@@ -500,29 +500,32 @@ fn every_snapshot<T: Clone + std::fmt::Debug>(
     .all(holds)
 }
 
-/// What the dead rows ESTART pruned for a credential leave for the API, kept
-/// under the credential's [`AccountKey`] in its own namespace. Nothing during
-/// sync reads it.
+/// The retained history of a credential's retired lives: lifetime rewards
+/// summed over every pruned life, and the newest deregistration.
 ///
-/// One row per credential, summed over every pruned life. A dead row holds
-/// no reward balance, so its lifetime withdrawals equal its lifetime
-/// rewards, and one sum serves both. The newest deregistration sets
-/// `active_epoch` when the credential has no row, or a row with neither
-/// date.
+/// Keyed by the credential's [`AccountKey`]. ESTART adds a life to it in the
+/// commit that prunes the life's dead row; nothing during sync reads it. A
+/// dead row holds no reward balance, so its lifetime withdrawals equal its
+/// lifetime rewards, and one sum serves both. A credential with no retired
+/// life that carried history has no row.
 #[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
-pub struct PrunedAccountState {
+pub struct AccountHistoryState {
+    /// Rewards earned over every retired life; 0 when none earned any.
     #[n(0)]
     pub lifetime_rewards: u64,
 
+    /// The slot of the newest deregistration among the retired lives;
+    /// absent when none deregistered. It sets `active_epoch` when the
+    /// credential has no live row, or a row with neither date.
     #[n(1)]
     pub deregistered_at: Option<u64>,
 }
 
-entity_boilerplate!(PrunedAccountState, "pruned-accounts", state = AccountKey);
+entity_boilerplate!(AccountHistoryState, "account-history", state = AccountKey);
 
-impl PrunedAccountState {
+impl AccountHistoryState {
     /// Add a later pruned life of the same credential.
-    pub fn absorb(&mut self, later: &PrunedAccountState) {
+    pub fn absorb(&mut self, later: &AccountHistoryState) {
         self.lifetime_rewards = add!(self.lifetime_rewards, later.lifetime_rewards);
         self.deregistered_at = self.deregistered_at.max(later.deregistered_at);
     }

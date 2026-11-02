@@ -60,7 +60,7 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     if limit == SyncLimit::CatchUp && args.stop_epoch.is_none() && emulator {
         return Err(Usage::new(
             "an emulator upstream has no tip to catch up to",
-            "pass `--follow` or `--stop-epoch` to sync from it",
+            Some("pass `--follow` or `--stop-epoch` to sync from it".into()),
         )
         .into());
     }

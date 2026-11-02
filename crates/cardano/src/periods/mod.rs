@@ -562,6 +562,11 @@ pub fn chunk<R: ChunkRow>(items: Vec<R::Item>) -> Vec<R> {
     rows
 }
 
+/// The number of chunks a list of `count` entries seals into.
+pub fn chunks_of(count: u64) -> u32 {
+    count.div_ceil(CHUNK_LEN as u64) as u32
+}
+
 /// The entry count of a raw chunk row, read off its header.
 pub fn chunk_count(raw: &[u8]) -> Result<u64, ChainError> {
     let mut decoder = minicbor::Decoder::new(raw);

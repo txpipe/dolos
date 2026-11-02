@@ -102,12 +102,12 @@ pub use stelae::{dir, inscription, transport, SteleReader};
 
 use dolos_cardano::indexes::entities;
 use dolos_cardano::model::{
-    AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
-    AddressStats, AssetMintChunk, AssetMintSet, DRepEpochLog, DRepSightingState, DRepState,
-    DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
-    FirstScriptSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressChunk,
+    AccountAddressEpochs, AccountAddressSet, AccountEpochLog, AccountHistoryState, AccountState,
+    AccountStats, AddressStats, AssetMintChunk, AssetMintSet, DRepEpochLog, DRepObservationState,
+    DRepState, DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
+    FirstScriptSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressEpochs,
     PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyFirstMintChunk,
-    PoolEpochLog, PoolState, ProposalState, PrunedAccountState,
+    PoolEpochLog, PoolState, ProposalState,
 };
 use dolos_core::{ChainPoint, EntityKind, Namespace};
 use serde_json::json;
@@ -170,7 +170,7 @@ pub const LOG_NAMESPACES: [Namespace; LOG_KINDS.len()] = {
 /// the log namespaces are spelled, held to the entity types by
 /// `log_kinds_derive_from_their_namespaces` in `tests/coverage.rs`.
 pub const LOG_KINDS: [(&str, Namespace); 15] = [
-    ("log-account-address-chunks", AccountAddressChunk::NS),
+    ("log-account-address-epochs", AccountAddressEpochs::NS),
     ("log-account-epochs", AccountEpochLog::NS),
     ("log-account-stats", AccountStats::NS),
     ("log-address-stats", AddressStats::NS),
@@ -180,7 +180,7 @@ pub const LOG_KINDS: [(&str, Namespace); 15] = [
     ("log-epochs", EpochState::NS),
     ("log-first-mint-chunks", FirstMintChunk::NS),
     ("log-first-script-chunks", FirstScriptChunk::NS),
-    ("log-payment-address-chunks", PaymentAddressChunk::NS),
+    ("log-payment-address-epochs", PaymentAddressEpochs::NS),
     ("log-policy-first-mint-chunks", PolicyFirstMintChunk::NS),
     ("log-pool-epochs", PoolEpochLog::NS),
     ("log-pools", PoolState::NS),
@@ -269,12 +269,13 @@ pub fn entity_kind_for(kind: &str) -> Option<EntityKind> {
 /// blob never reads its key, so its shard byte is 0.
 pub const STATE_KINDS: [(&str, Namespace, u8, usize); 22] = [
     ("state-account-addresses", AccountAddressSet::NS, 1, 0),
+    ("state-account-history", AccountHistoryState::NS, 1, 0),
     ("state-account-stats", AccountStats::NS, 1, 0),
     ("state-accounts", AccountState::NS, 16, 4),
     ("state-address-stats", AddressStats::NS, 1, 0),
     ("state-asset-mints", AssetMintSet::NS, 1, 0),
     ("state-datums", DatumState::NS, 16, 0),
-    ("state-drep-sightings", DRepSightingState::NS, 1, 0),
+    ("state-drep-observations", DRepObservationState::NS, 1, 0),
     ("state-dreps", DRepState::NS, 1, 0),
     ("state-epochs", EpochState::NS, 1, 0),
     ("state-eras", EraState::NS, 1, 0),
@@ -288,7 +289,6 @@ pub const STATE_KINDS: [(&str, Namespace, u8, usize); 22] = [
     ("state-pending-rewards", PendingRewardState::NS, 1, 0),
     ("state-pools", PoolState::NS, 1, 0),
     ("state-proposals", ProposalState::NS, 1, 0),
-    ("state-pruned-accounts", PrunedAccountState::NS, 1, 0),
     ("state-utxos", namespaces::UTXOS, 16, 0),
 ];
 

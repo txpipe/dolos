@@ -332,10 +332,10 @@ impl OrderCheck {
 #[cfg(test)]
 mod tests {
     use dolos_cardano::model::{
-        AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountKey, AccountState,
-        AccountStats, AddressStats, AssetMintChunk, AssetMintSet, DRepState, DatumKey, DatumState,
-        EpochState, EraState, FirstMintSet, FixedNamespace, GovState, MetadataLabelState,
-        PaymentAddressSet, PaymentStats, PoolState, ProposalState, PrunedAccountState,
+        AccountAddressEpochs, AccountAddressSet, AccountEpochLog, AccountHistoryState, AccountKey,
+        AccountState, AccountStats, AddressStats, AssetMintChunk, AssetMintSet, DRepState,
+        DatumKey, DatumState, EpochState, EraState, FirstMintSet, FixedNamespace, GovState,
+        MetadataLabelState, PaymentAddressSet, PaymentStats, PoolState, ProposalState,
     };
 
     use dolos_cardano::pallas::ledger::primitives::StakeCredential;
@@ -395,7 +395,7 @@ mod tests {
         }
 
         keyed(AccountState::NS, &credential).unwrap();
-        keyed(PrunedAccountState::NS, &credential).unwrap();
+        keyed(AccountHistoryState::NS, &credential).unwrap();
         keyed(DRepState::NS, &[[0x22].as_slice(), &[7; 28]].concat()).unwrap();
 
         // an address: an account and a base address's header and payment
@@ -433,16 +433,19 @@ mod tests {
             (MetadataLabelState::NS, vec![1; 32]),
             (DRepState::NS, vec![0x22; 32]),
             (AccountState::NS, vec![1; 32]),
-            (PrunedAccountState::NS, vec![1; 32]),
+            (AccountHistoryState::NS, vec![1; 32]),
             (AccountEpochLog::NS, vec![1; 32]),
             (AccountAddressSet::NS, staged(&[])),
             (AccountAddressSet::NS, staged(&[1; 57])),
             (AccountAddressSet::NS, credential.clone()),
-            (AccountAddressChunk::NS, vec![1; 32]),
+            (AccountAddressEpochs::NS, vec![1; 32]),
             (AssetMintSet::NS, vec![1; 48]),
             (AssetMintChunk::NS, vec![1; 36]),
             // an archive-only log holds no state, even under its log key
-            (AccountAddressChunk::NS, credential.clone()),
+            (
+                AccountAddressEpochs::NS,
+                [credential.as_slice(), &[0; 4]].concat(),
+            ),
             (AddressStats::NS, [epoch.as_slice(), &credential].concat()),
             (AddressStats::NS, [epoch.as_slice(), &staked, &[1]].concat()),
             (

@@ -123,8 +123,8 @@ impl OrderCheck {
 #[cfg(test)]
 mod tests {
     use dolos_cardano::model::{
-        AccountAddressChunk, AccountStats, AddressStats, AssetMintChunk, DRepEpochLog, DRepState,
-        EpochState, FirstMintChunk, FirstScriptChunk, FixedNamespace as _, PaymentAddressChunk,
+        AccountAddressEpochs, AccountStats, AddressStats, AssetMintChunk, DRepEpochLog, DRepState,
+        EpochState, FirstMintChunk, FirstScriptChunk, FixedNamespace as _, PaymentAddressEpochs,
         PolicyFirstMintChunk, PolicyKey, PoolEpochLog, PoolKey, PoolState, ProposalState,
     };
 
@@ -179,10 +179,14 @@ mod tests {
         let policy = LogKey::of(7, &(PolicyKey([1; 28].into()), 3u32));
         assert_eq!(policy.entity().len(), 32);
 
-        // account address chunks take an account: a credential header and its hash
+        // account stats take an account: a credential header and its hash;
+        // account address pages take an account and a page
         let account = [slot.as_slice(), &[0x82, 0x01, 0x58, 0x1c], &[1; 28]].concat();
-        decode(AccountAddressChunk::NS, wire(&account).as_bytes()).unwrap();
         decode(AccountStats::NS, wire(&account).as_bytes()).unwrap();
+        let page = [account.as_slice(), &3u32.to_be_bytes()].concat();
+        decode(AccountAddressEpochs::NS, wire(&page).as_bytes()).unwrap();
+        let err = decode(AccountAddressEpochs::NS, wire(&account).as_bytes()).unwrap_err();
+        assert!(matches!(err, Error::MalformedRecord { .. }), "{err:?}");
 
         // address stats take an account and a base address's header and
         // payment hash, or a tag and the address whole
@@ -190,11 +194,18 @@ mod tests {
         decode(AddressStats::NS, wire(&staked).as_bytes()).unwrap();
         let unstaked = [slot.as_slice(), &[0x00], &[1; 29]].concat();
         decode(AddressStats::NS, wire(&unstaked).as_bytes()).unwrap();
+        // payment address pages take a payment hash and a page
         decode(
-            PaymentAddressChunk::NS,
-            wire(&[slot.as_slice(), &[1; 28]].concat()).as_bytes(),
+            PaymentAddressEpochs::NS,
+            wire(&[slot.as_slice(), &[1; 28], &3u32.to_be_bytes()].concat()).as_bytes(),
         )
         .unwrap();
+        let err = decode(
+            PaymentAddressEpochs::NS,
+            wire(&[slot.as_slice(), &[1; 28]].concat()).as_bytes(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::MalformedRecord { .. }), "{err:?}");
 
         // drep epochs and a DRep's final row take a drep: a credential
         // header and its hash, or the one-byte tag of Abstain or NoConfidence
@@ -220,12 +231,12 @@ mod tests {
             (FirstMintChunk::NS, 32),
             (FirstScriptChunk::NS, 32),
             (AssetMintChunk::NS, 32),
-            (AccountAddressChunk::NS, 32),
+            (AccountAddressEpochs::NS, 32),
             (AccountStats::NS, 32),
             (AddressStats::NS, 1),
             (AddressStats::NS, 32),
             (AddressStats::NS, 33),
-            (PaymentAddressChunk::NS, 32),
+            (PaymentAddressEpochs::NS, 31),
             (PoolEpochLog::NS, 32),
             (PoolEpochLog::NS, 0),
             (PoolState::NS, 32),

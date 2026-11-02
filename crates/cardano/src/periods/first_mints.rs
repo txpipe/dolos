@@ -89,11 +89,6 @@ fn sealed_from<A: ArchiveStore>(
     Ok(true)
 }
 
-/// The number of chunks a list of `count` entries seals into.
-fn chunks_of(count: u64) -> u32 {
-    count.div_ceil(CHUNK_LEN as u64) as u32
-}
-
 /// Writes `epoch`'s lists again from `mints`, its staged rows in mint order,
 /// over `stale`, an all-subjects list an earlier run sealed from other rows:
 /// the all-subjects list and each policy list that either names, in one
@@ -116,7 +111,7 @@ fn rewrite<A: ArchiveStore>(
         writer.write_log_typed(slot, &(i as u32), chunk)?;
     }
 
-    for i in chunks.len() as u32..chunks_of(stale.len() as u64) {
+    for i in chunks.len() as u32..super::chunks_of(stale.len() as u64) {
         writer.delete_log_typed::<FirstMintChunk>(slot, &i)?;
     }
 
@@ -132,7 +127,7 @@ fn rewrite<A: ArchiveStore>(
     for (policy, names) in names {
         let sealed = archive
             .read_log_typed::<PolicyFirstMintChunk>(slot, &policy_key(&policy, 0))?
-            .map_or(0, |head| chunks_of(head.count));
+            .map_or(0, |head| super::chunks_of(head.count));
 
         let chunks = super::chunk::<PolicyFirstMintChunk>(names);
 
