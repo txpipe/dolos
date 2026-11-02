@@ -239,7 +239,7 @@ Along the way, every command that prints a report or records takes `--format tex
 | `dolos bootstrap relay` | removed: a node with empty stores syncs from genesis under `dolos daemon` or `dolos sync catchup` |
 | `dolos bootstrap mithril`, `dolos bootstrap stelae` | unchanged sources; `mithril` loses `--start-from`, replaced by `--continue` |
 | (none) | `dolos bootstrap immutabledb --source PATH`, replaying a local Cardano node database |
-| `dolos bootstrap --skip-if-not-empty`, `--resume` | `--skip-if-data` and `--continue`; the old spellings are gone |
+| `dolos bootstrap --skip-if-not-empty`, `--resume` | `--skip-if-data` and `--continue`; the old spellings are gone, and `--continue` now follows the source (`dolos bootstrap mithril --continue`), not the `bootstrap` group |
 | `dolos snapshot publish`, `backfill` | `stelae-publisher publish`, `backfill`, in [`txpipe/stelae`](https://github.com/txpipe/stelae) |
 | `dolos snapshot digest`, `verify [--reproduce]`, `inspect` | `stelae-publisher digest`, `verify [--reproduce]`, `inspect` |
 | `dolos minibf …`, `dolos minikupo …` | removed: query the running node's MiniBF or MiniKupo HTTP endpoint instead |

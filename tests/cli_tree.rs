@@ -155,7 +155,7 @@ fn every_command_lists_the_tree() {
 #[test]
 #[cfg(all(feature = "mithril", feature = "utils"))]
 fn every_help_matches_its_fixture() {
-    let bless = std::env::var_os("DOLOS_BLESS_CLI").is_some();
+    let bless = std::env::var_os("DOLOS_BLESS_CLI").is_some_and(|v| v == "1");
     let dir = fixtures();
 
     if bless {
@@ -196,6 +196,7 @@ fn every_help_matches_its_fixture() {
     let present: BTreeSet<_> = std::fs::read_dir(&dir)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.ends_with(".txt"))
         .collect();
 
     assert_eq!(present, named, "fixtures for commands outside the tree");
