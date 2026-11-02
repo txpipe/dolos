@@ -242,7 +242,8 @@ pub fn probe(path: impl AsRef<Path>) -> Result<WalProbe, RedbWalError> {
 /// 7: `ScriptFirstSeen` retires.
 /// 8: `MintStatsUpdate` and `MetadataTxUpdate` retire.
 /// 9: the `Other` proposal action retires, and `proposed_in` is required.
-pub const CURRENT_WAL_VERSION: u32 = 9;
+/// 10: `DatumRefIncrement` records whether it filled a row's datum bytes.
+pub const CURRENT_WAL_VERSION: u32 = 10;
 
 pub struct LogIter<'a, T>(Range<'a, DbChainPoint, DbLogValue>, PhantomData<T>);
 
