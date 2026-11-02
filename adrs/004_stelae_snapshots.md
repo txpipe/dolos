@@ -15,8 +15,8 @@ Accepted
 > [`crates/snapshot/PROFILE.md`](../crates/snapshot/PROFILE.md). Older
 > references to this ADR's implementation sections resolve there — PROFILE.md
 > preserves the section names. The protocol version this tree implements is
-> the tag `crates/snapshot/Cargo.toml` pins, whatever `main`'s spec says
-> since.
+> the tag or commit `rev` `crates/snapshot/Cargo.toml` pins, whatever
+> `main`'s spec says since.
 
 ## Context
 
