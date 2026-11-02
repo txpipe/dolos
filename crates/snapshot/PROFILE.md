@@ -24,6 +24,10 @@ transport — and this one for every byte inside it.
 - Profile name `io.txpipe.dolos.cardano`, version 1; the media-type vendor
   token is `dolos` (IANA `vnd.` custom).
 - Payload media types: `application/vnd.dolos.stelae.{blocks|indexes|log-{ns}|entity-{kind}|state-{ns}|digests}.v1+zstd`.
+- Envelope: the manifest `artifactType` is the Stelae snapshot envelope,
+  `application/vnd.stelae.snapshot.v1`, set by the protocol rather than this
+  profile. A restore refuses the pre-v2 `application/vnd.stelae.stele.v1`
+  before it touches a store.
 - One repository per network — e.g. `ghcr.io/txpipe/dolos-snapshots/mainnet`.
 - Tags: immutable `epoch-E` per sequence plus a moving `latest`, where E is
   the newly started epoch — equal to `sequence` and to `position.epoch`; the

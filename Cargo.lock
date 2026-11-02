@@ -5640,7 +5640,7 @@ checksum = "5c0e04424e733e69714ca1bbb9204c1a57f09f5493439520f9f68c132ad25eec"
 [[package]]
 name = "stelae"
 version = "0.5.0"
-source = "git+https://github.com/txpipe/stelae?tag=v0.5.0#24833a352d8255eaa2f8a2266c454e64bcab3322"
+source = "git+https://github.com/txpipe/stelae?rev=55d5270eb3fc45f921dc56aec5a67f49d415596d#55d5270eb3fc45f921dc56aec5a67f49d415596d"
 dependencies = [
  "bytes",
  "futures-util",
@@ -5662,7 +5662,7 @@ dependencies = [
 [[package]]
 name = "stelae-driver"
 version = "0.5.0"
-source = "git+https://github.com/txpipe/stelae?tag=v0.5.0#24833a352d8255eaa2f8a2266c454e64bcab3322"
+source = "git+https://github.com/txpipe/stelae?rev=55d5270eb3fc45f921dc56aec5a67f49d415596d#55d5270eb3fc45f921dc56aec5a67f49d415596d"
 dependencies = [
  "fs4",
  "minicbor 0.26.4",

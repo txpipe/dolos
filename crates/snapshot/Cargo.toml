@@ -8,16 +8,17 @@ edition.workspace = true
 # stelae crates and on `dolos-*`, never the other way around — structural now
 # that the protocol lives in its own repository. This is the workspace's one
 # pin point: the CLI and root lib reach protocol and driver types through
-# this crate's re-exports, and a stelae release lands here as one tag bump
-# for both crates (they version in lockstep; never pin a branch). See
+# this crate's re-exports, and both crates move here together to one
+# immutable stelae reference: a release tag or, between releases, a commit
+# `rev` (they version in lockstep; never pin a branch). See
 # adrs/004_stelae_snapshots.md, "Code layout".
 [dependencies]
 # The protocol crates keep their own default-off `oci` feature for third
 # parties; this profile publishes into registries as a matter of course, so
 # it turns the transport on unconditionally rather than forwarding a feature
 # nothing in dolos ever left off.
-stelae = { git = "https://github.com/txpipe/stelae", tag = "v0.5.0", features = ["oci"] }
-stelae-driver = { git = "https://github.com/txpipe/stelae", tag = "v0.5.0", features = ["oci"] }
+stelae = { git = "https://github.com/txpipe/stelae", rev = "55d5270eb3fc45f921dc56aec5a67f49d415596d", features = ["oci"] }
+stelae-driver = { git = "https://github.com/txpipe/stelae", rev = "55d5270eb3fc45f921dc56aec5a67f49d415596d", features = ["oci"] }
 dolos-core = { path = "../core" }
 dolos-cardano = { path = "../cardano" }
 

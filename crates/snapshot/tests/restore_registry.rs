@@ -33,6 +33,11 @@
 //!    for this fifth. The test named for it states the same thing directly,
 //!    from both sides. Where a node's credentials *come from* is the `dolos`
 //!    binary's decision and is tested there.
+//! 6. **The envelope is a Stelae snapshot's.** A publish writes the manifest
+//!    `artifactType` `application/vnd.stelae.snapshot.v1`, read off the wire
+//!    and held against a literal rather than the protocol's constant; the
+//!    retired `application/vnd.stelae.stele.v1` is refused before a store is
+//!    touched.
 //!
 //! ## Why the interruption is a layer boundary
 //!
@@ -59,7 +64,7 @@ use dolos_snapshot::{
 };
 use dolos_testing::toy_domain::{MemoryStores, ToyDomain, ToyStores};
 use node::{harness, plan_at_boundary, Blank};
-use registry_fixture::Fixture;
+use registry_fixture::{Distribution, Fixture};
 use stelae::{
     frame::Limits,
     inscription::LayerDescriptor,
@@ -574,6 +579,158 @@ fn a_point_that_names_no_stele_is_refused() {
         None,
         "a restore that never started left a progress file"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The envelope
+// ---------------------------------------------------------------------------
+
+/// The manifest `artifactType` a Dolos publish writes, spelled out here rather
+/// than taken from `stelae::ARTIFACT_TYPE`: a writer and reader moved back
+/// together would still agree with each other, and not with this.
+const SNAPSHOT_ENVELOPE: &str = "application/vnd.stelae.snapshot.v1";
+
+/// The envelope Stelae wrote before v2. No reader accepts it.
+const RETIRED_ENVELOPE: &str = "application/vnd.stelae.stele.v1";
+
+/// A Dolos publish carries the snapshot envelope, and the snapshot it names
+/// restores through the path a node bootstraps with.
+#[test]
+#[ignore]
+fn a_publish_writes_the_snapshot_envelope_and_restores() {
+    let fixture = Fixture::spawn();
+    let distribution = Distribution::new(&fixture);
+    let node = Node::build();
+
+    let repository_name = "dolos/envelope";
+    let repository = fixture.repository(repository_name);
+    node.publish(&repository, &node.first);
+
+    for tag in ["latest", "epoch-1"] {
+        let manifest = distribution.manifest(repository_name, tag);
+
+        assert_eq!(
+            manifest["artifactType"], SNAPSHOT_ENVELOPE,
+            "the manifest under {tag}"
+        );
+    }
+
+    let blank = Blank::<MemoryStores>::open();
+    let storage = tempfile::tempdir().unwrap();
+    let source = fixture.snapshot_repository(repository_name);
+
+    let summary = restore::execute(
+        RestoreInput::Repository {
+            repository: &source,
+            point: Point::Latest,
+        },
+        restoring(storage.path(), node.magic, false),
+        target(&blank),
+        None,
+    )
+    .unwrap()
+    .summary;
+
+    assert_eq!(summary.layers_fetched, PER_PUBLISH);
+
+    assert_eq!(
+        blank.state().read_cursor().unwrap(),
+        node.earlier.state().read_cursor().unwrap(),
+        "the cursor the node published from"
+    );
+
+    assert_eq!(
+        blocks_of(&blank.archive),
+        blocks_of(node.earlier.archive()),
+        "the blocks the node published"
+    );
+}
+
+/// A manifest that differs from a valid one only in carrying the retired
+/// envelope is refused, and nothing reaches the stores.
+///
+/// Planted under `latest` over a real publish, so the inscription and every
+/// layer it names are the ones a restore would otherwise apply. The sequence
+/// tag still names the untouched manifest, and restoring from it is the
+/// control: the envelope is the whole reason for the refusal.
+#[test]
+#[ignore]
+fn a_retired_envelope_is_refused_before_the_stores_are_touched() {
+    let fixture = Fixture::spawn();
+    let distribution = Distribution::new(&fixture);
+    let node = Node::build();
+
+    let repository_name = "dolos/retired-envelope";
+    let repository = fixture.repository(repository_name);
+    node.publish(&repository, &node.first);
+
+    let mut manifest = distribution.manifest(repository_name, "latest");
+    assert_eq!(manifest["artifactType"], SNAPSHOT_ENVELOPE);
+
+    manifest["artifactType"] = serde_json::json!(RETIRED_ENVELOPE);
+    distribution.put_manifest(repository_name, "latest", &manifest);
+
+    let source = fixture.snapshot_repository(repository_name);
+    let restore_at = |point: Point, storage: &std::path::Path, blank: &Blank<MemoryStores>| {
+        restore::execute(
+            RestoreInput::Repository {
+                repository: &source,
+                point,
+            },
+            restoring(storage, node.magic, false),
+            target(blank),
+            None,
+        )
+    };
+
+    let blank = Blank::<MemoryStores>::open();
+    let storage = tempfile::tempdir().unwrap();
+
+    let err = match restore_at(Point::Latest, storage.path(), &blank) {
+        Ok(_) => panic!("a manifest with the retired envelope restored"),
+        Err(err) => err,
+    };
+
+    assert!(matches!(err, Error::Stelae(_)), "{err:?}");
+    assert!(err.to_string().contains(RETIRED_ENVELOPE), "{err}");
+
+    assert!(
+        blank.state().read_cursor().unwrap().is_none(),
+        "a refused envelope still wrote a cursor"
+    );
+
+    assert!(
+        blocks_of(&blank.archive).is_empty(),
+        "a refused envelope still appended blocks"
+    );
+
+    assert!(
+        utxos_of(blank.state()).is_empty(),
+        "a refused envelope still wrote utxos"
+    );
+
+    assert_eq!(
+        RestoreProgress::load(&progress_path_in(storage.path())).unwrap(),
+        None,
+        "a refused envelope left a progress file"
+    );
+
+    // The same snapshot under its sequence tag, envelope intact.
+    let control = Blank::<MemoryStores>::open();
+    let control_storage = tempfile::tempdir().unwrap();
+
+    let summary = restore_at(Point::Epoch(1), control_storage.path(), &control)
+        .unwrap()
+        .summary;
+
+    assert_eq!(summary.layers_fetched, PER_PUBLISH);
+
+    assert_eq!(
+        control.state().read_cursor().unwrap(),
+        node.earlier.state().read_cursor().unwrap(),
+    );
+
+    eprintln!("retired envelope: {err}");
 }
 
 /// The credentials handed to `registry::open` are what a restore authenticates
