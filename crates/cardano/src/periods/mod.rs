@@ -451,15 +451,37 @@ where
     }
 }
 
-/// The oldest epoch an epoch-first period type holds rows of in state: the
-/// namespace's first key names it.
-pub fn oldest_staged<S, E, K>(state: &S) -> Result<Option<Epoch>, ChainError>
+/// The oldest epoch that may still hold staged rows: the oldest one the
+/// boundary that opened the ledger's epoch could not seal.
+///
+/// A boundary seals before it advances the ledger's epoch, and no later write
+/// stages a row in an epoch it sealed, so no row is staged below this one. A
+/// boundary that has not finished its seal leaves the ledger's epoch behind,
+/// and this one lower with it.
+pub fn staged_floor<D: Domain>(domain: &D, chain: &ChainSummary) -> Result<Epoch, ChainError> {
+    let Some(ledger) = crate::read_singleton::<D, crate::EpochState>(domain.state())? else {
+        return Ok(0);
+    };
+
+    let mutable_slots = crate::utils::mutable_slots(&domain.genesis());
+
+    Ok(*unsealed_epochs(chain, mutable_slots, ledger.number).start())
+}
+
+/// The oldest epoch at or after `from` an epoch-first period type holds rows
+/// of in state: the first key from `from` on names it.
+///
+/// With `from` the [`staged_floor`], this is the oldest staged epoch. The scan
+/// starts there, past the rows the seals deleted below it, which a storage
+/// engine keeps as tombstones until it compacts them.
+pub fn oldest_staged<S, E, K>(state: &S, from: Epoch) -> Result<Option<Epoch>, ChainError>
 where
     S: StateStore,
     E: StateEntity<Key = (Epoch, K)>,
     K: KeyCodec,
 {
-    let mut rows = state.iter_entities_typed::<E>(None)?;
+    let range = RangeOf::<(Epoch, K)>::all().starting_at_prefix(&from);
+    let mut rows = state.iter_entities_typed::<E>(Some(range))?;
 
     Ok(rows.next().transpose()?.map(|((epoch, _), _)| epoch))
 }
