@@ -13,14 +13,11 @@ mod cache;
 mod common;
 mod config;
 mod daemon;
-mod doctor;
-mod eval;
 mod feedback;
 mod output;
 mod registry;
 mod serve;
 mod service;
-mod snapshot;
 mod sync;
 
 #[cfg(feature = "utils")]
@@ -28,12 +25,6 @@ mod init;
 
 #[cfg(feature = "utils")]
 mod data;
-
-#[cfg(feature = "minibf")]
-mod minibf;
-
-#[cfg(feature = "minikupo")]
-mod minikupo;
 
 #[derive(Debug, Subcommand)]
 enum Command {
@@ -55,17 +46,8 @@ enum Command {
     #[cfg(feature = "utils")]
     Data(data::Args),
 
-    /// Evaluate txs using current ledger
-    Eval(eval::Args),
-
-    /// Commands to fix problems
-    Doctor(doctor::Args),
-
     /// Commands over the configuration file
     Config(config::Args),
-
-    /// Inspect and reproduce Stelae snapshots for this node
-    Snapshot(snapshot::Args),
 
     /// Fill, clear, inspect and check the cache, with the node stopped
     Cache(cache::Args),
@@ -76,14 +58,6 @@ enum Command {
     /// Fill the node's stores from a Stelae snapshot, Mithril or a local
     /// ImmutableDB
     Bootstrap(bootstrap::Args),
-
-    /// runs a minibf query in-process
-    #[cfg(feature = "minibf")]
-    Minibf(minibf::Args),
-
-    /// runs a minikupo query in-process
-    #[cfg(feature = "minikupo")]
-    Minikupo(minikupo::Args),
 }
 
 #[derive(Debug, Parser)]
@@ -128,9 +102,6 @@ fn run() -> Result<()> {
         Command::Daemon(args) => daemon::run(load()?, &args),
         Command::Sync(args) => sync::run(&load()?, &args, &feedback),
         Command::Serve(args) => serve::run(load()?, &args),
-        Command::Eval(args) => eval::run(&load()?, &args),
-        Command::Doctor(args) => doctor::run(&load()?, &args),
-        Command::Snapshot(args) => snapshot::run(&load()?, &args),
         Command::Cache(args) => cache::run(&load()?, &args),
         Command::Config(args) => config::run(config_file, &args),
         Command::Service(args) => service::run(explicit_config, &args),
@@ -145,11 +116,5 @@ fn run() -> Result<()> {
         Command::Data(args) => data::run(&load()?, &args, &feedback),
 
         Command::Bootstrap(args) => bootstrap::run(&load()?, &args, &feedback),
-
-        #[cfg(feature = "minibf")]
-        Command::Minibf(x) => minibf::run(&load()?, &x),
-
-        #[cfg(feature = "minikupo")]
-        Command::Minikupo(x) => minikupo::run(&load()?, &x),
     }
 }

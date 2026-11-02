@@ -19,6 +19,7 @@ dolos = { path = "..", default-features = false }
 dolos-core = { path = "../crates/core" }
 dolos-cardano = { path = "../crates/cardano", features = ["include-genesis"] }
 hex = { workspace = true }
+itertools = { workspace = true }
 postgres = "0.19"
 postgres-native-tls = "0.5"
 bech32 = { workspace = true }
@@ -36,9 +37,12 @@ libc = "0.2"
 sha2 = "0.10"
 tokio = { workspace = true }
 tonic = "0.12.3"
+tracing-log = "0.2"
+tracing-subscriber = "0.3.17"
 zstd = "0.14"
 
 [dev-dependencies]
+dolos-redb3 = { path = "../crates/redb3" }
 tempfile = "3"
 
 [build-dependencies]

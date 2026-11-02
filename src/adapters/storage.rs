@@ -985,7 +985,9 @@ pub fn open_existing_archive(
 }
 
 /// The state alone, opened as [`open_existing_stores`] opens it: never
-/// created.
+/// created. A command that touches only the state leaves the WAL, the
+/// archive and the mempool closed, so a writable open cannot migrate or wipe
+/// them.
 pub fn open_existing_state(
     config: &RootConfig,
     access: Access,
