@@ -132,7 +132,10 @@ this record deliberately duplicates neither:
   manifest and its agreement rules, the transport and what it requires of a
   host, restore planning — is [`SPEC.md` in
   `txpipe/stelae`](https://github.com/txpipe/stelae/blob/main/SPEC.md), the
-  repository the `stelae` and `stelae-driver` crates extracted to.
+  repository the `stelae` and `stelae-driver` crates extracted to. Its
+  manifests carry the snapshot envelope,
+  `application/vnd.stelae.snapshot.v1`; v2 dropped the earlier
+  `application/vnd.stelae.stele.v1` without an alias.
 - **The Dolos profile** — layer kinds and record shapes, scopes, state
   history, `position`/`parameters`, the compatibility contract, the cut
   point, and the publish/restore pipelines — is
