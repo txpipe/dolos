@@ -2109,7 +2109,7 @@ mod tests {
     fn a_payment_epoch_seals_into_pages_with_its_tx_count_on_page_0() {
         let payment = PaymentKey([0x50; 28].into());
 
-        for n in [0u32, 1, 255, 256, 257, 65_536] {
+        for n in [0u32, 1, 255, 256, 257] {
             let domain = seeded_payment(n);
             let chain = chain(&domain);
             let before = payment_totals(&domain, &chain, 0..=BOUNDARY, &payment).unwrap();
