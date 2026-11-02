@@ -949,6 +949,43 @@ fn the_last_write_to_a_log_key_wins<B: Backend>() {
     assert_eq!(walked, vec![(key, b"final".to_vec())]);
 }
 
+/// A deleted row is gone from point reads and walks, its neighbours stay,
+/// and deleting a row that is not there does nothing.
+fn a_deleted_log_row_is_gone<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let (kept, deleted, absent) = (log_key(10, 0x01), log_key(10, 0x02), log_key(20, 0x03));
+
+    let writer = store.start_writer().unwrap();
+    writer.write_log(NS_A, &kept, &b"kept".to_vec()).unwrap();
+    writer.write_log(NS_A, &deleted, &b"gone".to_vec()).unwrap();
+    writer
+        .write_log(NS_B, &deleted, &b"other".to_vec())
+        .unwrap();
+    writer.commit().unwrap();
+
+    let writer = store.start_writer().unwrap();
+    writer.delete_log(NS_A, &deleted).unwrap();
+    writer.delete_log(NS_A, &absent).unwrap();
+    writer.commit().unwrap();
+
+    assert_eq!(
+        store.read_logs(NS_A, &[&kept, &deleted, &absent]).unwrap(),
+        vec![Some(b"kept".to_vec()), None, None]
+    );
+
+    let walked: Vec<LogKey> = walk_logs(&store, NS_A, KeyRange::all());
+    assert_eq!(walked, vec![kept]);
+
+    assert_eq!(
+        store.read_logs(NS_B, &[&deleted]).unwrap(),
+        vec![Some(b"other".to_vec())]
+    );
+
+    let writer = store.start_writer().unwrap();
+    assert!(writer.delete_log("no-such-namespace", &deleted).is_err());
+}
+
 fn an_unknown_namespace_is_refused<B: Backend>() {
     let (store, _guard) = B::open();
 
@@ -1828,6 +1865,7 @@ macro_rules! full_suite {
                 log_namespaces_are_isolated,
                 log_range_is_start_inclusive_end_exclusive,
                 the_last_write_to_a_log_key_wins,
+                a_deleted_log_row_is_gone,
                 an_unknown_namespace_is_refused,
                 prune_keeps_logs_at_the_cutoff_slot,
                 truncate_front_drops_logs_at_the_cut_slot,

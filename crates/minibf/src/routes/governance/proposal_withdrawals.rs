@@ -5,7 +5,7 @@ use axum::{
 };
 use blockfrost_openapi::models::proposal_withdrawals_inner::ProposalWithdrawalsInner;
 use dolos_cardano::model::{ProposalAction, ProposalKey, ProposalState};
-use dolos_core::{Domain, StateStore as _};
+use dolos_core::Domain;
 use pallas::{
     crypto::hash::Hash,
     ledger::{
@@ -20,6 +20,8 @@ use crate::{
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
+
+use super::read_proposal_row;
 
 /// One page of a proposal's treasury withdrawals, ordered the way the action
 /// itself lists them.
@@ -73,14 +75,11 @@ fn read_withdrawals<D: Domain>(
 ) -> Result<Vec<ProposalWithdrawalsInner>, Error> {
     let key = ProposalKey::new(tx, idx);
 
-    let state = domain
-        .state()
-        .read_entity_typed::<ProposalState>(&key)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let Some(state) = state else {
+    let Some(row) = read_proposal_row(&domain.inner, &key)? else {
         return Ok(vec![]);
     };
+
+    let state = row.into_state();
 
     let network = domain.get_network_id()?;
 

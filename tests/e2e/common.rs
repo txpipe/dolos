@@ -2,7 +2,7 @@
 
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
@@ -50,6 +50,12 @@ pub const SCENARIOS: &[Scenario] = &[
         port_prefix: 6600,
         expect_ports: true,
     },
+    // Serves nothing: its one port is the local peer's it syncs from.
+    Scenario {
+        name: "preview-local-peer",
+        port_prefix: 6610,
+        expect_ports: false,
+    },
 ];
 
 /// Where a scenario's checked-in fixture lives.
@@ -65,7 +71,7 @@ fn fixture_path(scenario: &Scenario) -> PathBuf {
 
 /// Ports handed out to workspaces, one block of ten each.
 ///
-/// Deliberately above every `Scenario::port_prefix` (6540..6609), which buys
+/// Deliberately above every `Scenario::port_prefix` (6540..6619), which buys
 /// two things: a workspace can never collide with a daemon a previous run left
 /// holding a fixture's ports, and the rewrite in `rewrite_ports` can never
 /// rewrite a port it has itself just written.
@@ -224,69 +230,73 @@ pub fn assert_file_released(workspace: &ScenarioWorkspace, relative_path: &str) 
     assert!(std::fs::metadata(path).is_err());
 }
 
-pub fn shutdown_gracefully(handle: &mut Child) {
+/// SIGTERM the process and wait for its exit.
+pub fn shutdown_gracefully(handle: &mut Child) -> ExitStatus {
     nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(handle.id() as i32),
         nix::sys::signal::Signal::SIGTERM,
     )
     .expect("failed to kill process");
 
-    handle.wait().expect("failed to wait for process");
+    handle.wait().expect("failed to wait for process")
 }
 
-pub fn reset_and_bootstrap(workspace: &ScenarioWorkspace) {
-    let mut cmd = prepare_scenario_process(workspace);
+/// A custom scenario runs on preview's genesis under preview's magic, its
+/// files beside its `dolos.toml`; a known network's genesis is built in.
+pub fn write_custom_genesis(workspace: &ScenarioWorkspace) {
+    let config = std::fs::read_to_string(workspace.path().join("dolos.toml"))
+        .expect("failed to read the scenario config");
 
-    let reset = cmd
-        .args(["doctor", "reset-genesis"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .expect("failed to reset genesis");
-
-    assert!(
-        reset.status.success(),
-        "doctor reset-genesis failed for scenario {}: {}",
-        workspace.name(),
-        String::from_utf8_lossy(&reset.stderr)
-    );
+    if !config.contains("network = \"custom\"") {
+        return;
+    }
 
     let mut cmd = prepare_scenario_process(workspace);
 
-    let bootstrap = cmd
-        .args(["bootstrap", "relay", "--force"])
+    let write = cmd
+        .args([
+            "config",
+            "write-genesis",
+            "--network",
+            "preview",
+            "--dir",
+            ".",
+            "--force",
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
-        .expect("failed to bootstrap data");
+        .expect("failed to write genesis");
 
     assert!(
-        bootstrap.status.success(),
-        "bootstrap relay failed for scenario {}: {}",
+        write.status.success(),
+        "config write-genesis failed for scenario {}: {}",
         workspace.name(),
-        String::from_utf8_lossy(&bootstrap.stderr)
+        String::from_utf8_lossy(&write.stderr)
     );
 }
 
+/// The cursors `sync status` reports, over stores a node left healthy.
 pub fn fetch_summary(workspace: &ScenarioWorkspace) -> dolos::cli::DataSummary {
     let mut cmd = prepare_scenario_process(workspace);
 
     let data = cmd
-        .args(["data", "summary"])
+        .args(["sync", "status", "--format", "json"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .expect("failed to get data summary");
+        .expect("failed to get sync status");
 
     assert!(
         data.status.success(),
-        "data summary failed for scenario {}: {}",
+        "sync status failed for scenario {}: {}{}",
         workspace.name(),
+        String::from_utf8_lossy(&data.stdout),
         String::from_utf8_lossy(&data.stderr)
     );
 
     serde_json::from_slice::<dolos::cli::DataSummary>(&data.stdout)
-        .expect("failed to parse data summary")
+        .expect("failed to parse sync status")
 }
 
 pub struct ProcessGuard(Option<Child>);

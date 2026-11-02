@@ -41,6 +41,10 @@ impl ArchiveWriter for NoOpArchiveWriter {
         Ok(())
     }
 
+    fn delete_log(&self, _ns: Namespace, _key: &LogKey) -> Result<(), ArchiveError> {
+        Ok(())
+    }
+
     fn undo(&self, _point: &ChainPoint) -> Result<(), ArchiveError> {
         Ok(())
     }

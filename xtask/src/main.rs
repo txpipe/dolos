@@ -1,8 +1,8 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use xshell::{cmd, Shell};
-use xtask::perf;
 use xtask::perf::measure::PeakAlloc;
+use xtask::{debug, perf};
 
 mod bootstrap;
 mod config;
@@ -46,6 +46,10 @@ enum Commands {
     /// Test instance management commands (create, delete)
     #[command(subcommand)]
     TestInstance(test_instance::TestInstanceCmd),
+
+    /// Maintainer tooling over a stopped node's stores
+    #[command(subcommand)]
+    Debug(debug::Cmd),
 }
 
 fn main() -> Result<()> {
@@ -65,6 +69,7 @@ fn main() -> Result<()> {
         Commands::BootstrapMithrilLocal(args) => bootstrap::run(&sh, &args)?,
         Commands::GroundTruth(cmd) => ground_truth::run(cmd)?,
         Commands::TestInstance(cmd) => test_instance::run(&sh, cmd)?,
+        Commands::Debug(cmd) => debug::run(cmd)?,
     }
 
     Ok(())

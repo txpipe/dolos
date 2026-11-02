@@ -1,0 +1,15 @@
+stops and unregisters one instance, keeping its configuration and data
+
+Usage: dolos service uninstall [OPTIONS] [NAME]
+
+Arguments:
+  [NAME]  The instance's name, which needs no configuration; without it, derived from the
+          configuration as `install` derives it
+
+Options:
+      --system           A system unit, removed as root (Linux only); without NAME, derived from the
+                         file `--config` names
+      --format <FORMAT>  How to print the result: text for people, JSON for scripts [default: text]
+                         [possible values: text, json]
+  -c, --config <CONFIG>  
+  -h, --help             Print help

@@ -8,10 +8,10 @@ use axum::{
 use blockfrost_openapi::models::committee_votes_inner::{self, CommitteeVotesInner};
 use dolos_cardano::{
     indexes::CardanoArchiveIndexExt as _,
-    model::{ProposalAction, ProposalKey, ProposalState},
+    model::{ProposalAction, ProposalKey},
     pallas_extras,
 };
-use dolos_core::{ArchiveError, ArchiveStore as _, BlockSlot, Domain, StateStore as _};
+use dolos_core::{ArchiveError, ArchiveStore as _, BlockSlot, Domain};
 use itertools::Itertools;
 use pallas::{
     crypto::hash::Hash,
@@ -35,7 +35,7 @@ use crate::{
     Facade,
 };
 
-use super::collect_block_rows;
+use super::{collect_block_rows, read_proposal_row};
 
 /// One vote of a committee member, as the archived block records it.
 struct CommitteeCast {
@@ -54,20 +54,17 @@ struct CommitteeCast {
     slot: BlockSlot,
 }
 
-fn committee_governance_type(
-    action: &ProposalAction,
-) -> Option<committee_votes_inner::GovernanceType> {
+fn committee_governance_type(action: &ProposalAction) -> committee_votes_inner::GovernanceType {
     use committee_votes_inner::GovernanceType;
 
     match action {
-        ProposalAction::ParamChange(_) => Some(GovernanceType::ParameterChange),
-        ProposalAction::HardFork(_) => Some(GovernanceType::HardForkInitiation),
-        ProposalAction::TreasuryWithdrawal(_) => Some(GovernanceType::TreasuryWithdrawals),
-        ProposalAction::NoConfidence => Some(GovernanceType::NoConfidence),
-        ProposalAction::UpdateCommittee { .. } => Some(GovernanceType::NewCommittee),
-        ProposalAction::NewConstitution { .. } => Some(GovernanceType::NewConstitution),
-        ProposalAction::Info => Some(GovernanceType::InfoAction),
-        ProposalAction::Other => None,
+        ProposalAction::ParamChange(_) => GovernanceType::ParameterChange,
+        ProposalAction::HardFork(_) => GovernanceType::HardForkInitiation,
+        ProposalAction::TreasuryWithdrawal(_) => GovernanceType::TreasuryWithdrawals,
+        ProposalAction::NoConfidence => GovernanceType::NoConfidence,
+        ProposalAction::UpdateCommittee { .. } => GovernanceType::NewCommittee,
+        ProposalAction::NewConstitution { .. } => GovernanceType::NewConstitution,
+        ProposalAction::Info => GovernanceType::InfoAction,
     }
 }
 
@@ -90,9 +87,10 @@ fn committee_voter(cred: &StakeCredential) -> Voter {
 /// up. A request reads each `ProposalState` row once, however many votes it
 /// lists on the same action.
 ///
-/// A proposal row is never deleted, so a vote on an action always finds its
-/// row. The legacy `Other` variant has no Blockfrost type, so a vote on such a
-/// row has no type (`None`).
+/// A proposal row lives in state until the boundary after its resolution, and
+/// in the final-row log from then on, so a vote on an action always finds its
+/// row. A vote has no type (`None`) only when neither store holds the row,
+/// which means the stores disagree.
 struct ProposalTypes<'a, D: Domain> {
     domain: &'a D,
     types: HashMap<(Hash<32>, u32), Option<committee_votes_inner::GovernanceType>>,
@@ -117,23 +115,19 @@ impl<'a, D: Domain> ProposalTypes<'a, D> {
 
         let key = ProposalKey::new(tx, idx);
 
-        let state = self
-            .domain
-            .state()
-            .read_entity_typed::<ProposalState>(&key)
-            .map_err(log_and_500("failed to read proposal state"))?;
+        let row = read_proposal_row(self.domain, &key)?;
 
-        let governance_type = match state {
-            Some(state) => committee_governance_type(&state.action),
+        let governance_type = match row {
+            Some(row) => Some(committee_governance_type(&row.state().action)),
             None => {
                 // The ledger rejects a vote on an unknown action, so a block
                 // that holds the vote also holds, or follows, the proposal.
-                // If the row is missing, the state and the archive do not
-                // agree.
+                // If neither the state nor the log holds the row, the stores
+                // do not agree.
                 tracing::warn!(
                     proposal_tx = %tx,
                     proposal_idx = idx,
-                    "the state has no proposal row for a committee vote, so the vote leaves the listing"
+                    "no proposal row for a committee vote, so the vote leaves the listing"
                 );
                 None
             }
@@ -492,7 +486,7 @@ mod tests {
     };
     use bech32::{Bech32, Hrp};
     use dolos_cardano::model::gov::{CommitteeAuthorization, GovState};
-    use dolos_core::{ChainPoint, StateWriter as _};
+    use dolos_core::{ChainPoint, StateStore as _, StateWriter as _};
     use dolos_testing::{
         synthetic::{SyntheticBlockConfig, SyntheticVote},
         toy_domain::ToyDomain,

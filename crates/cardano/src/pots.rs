@@ -79,13 +79,13 @@ pub struct EpochIncentives {
     #[n(0)]
     pub total: u64,
 
-    #[n(2)]
+    #[n(1)]
     pub treasury_tax: u64,
 
-    #[n(3)]
+    #[n(2)]
     pub available_rewards: u64,
 
-    #[n(4)]
+    #[n(3)]
     pub used_fees: u64,
 }
 

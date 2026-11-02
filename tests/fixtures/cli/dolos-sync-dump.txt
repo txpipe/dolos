@@ -1,0 +1,11 @@
+Print the WAL's entries
+
+Usage: dolos sync dump [OPTIONS]
+
+Options:
+      --start <SLOT>     Start at the WAL entry at, or nearest to, this slot
+      --limit <N>        How many entries to print; 0 prints them all [default: 100]
+      --format <FORMAT>  How to print the result: text for people, JSON for scripts [default: text]
+                         [possible values: text, json]
+  -c, --config <CONFIG>  
+  -h, --help             Print help

@@ -24,6 +24,19 @@ pub enum Error {
     #[error("storage error: {0}")]
     StorageError(String),
 
+    /// A store another process, or another handle in this one, holds open;
+    /// `storage::OpenError` renders it.
+    #[error("{} is locked by another process", .path.display())]
+    InUse { path: std::path::PathBuf },
+
+    /// A store a reading command could not mirror beside it;
+    /// `storage::OpenError` renders it.
+    #[error("cannot mirror {} for a read-only open: {reason}", .path.display())]
+    Unviewable {
+        path: std::path::PathBuf,
+        reason: String,
+    },
+
     #[error("wal error: {0}")]
     WalError(#[from] WalError),
 

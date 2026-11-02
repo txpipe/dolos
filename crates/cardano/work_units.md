@@ -58,9 +58,10 @@ The sections below walk the cycle starting at `Estart` (the first phase of every
 ### `finalize()` — Estart global pass
 
 - Builds a fresh `WorkContext` via `WorkContext::load_finalize` (using the AVVM total computed in `initialize`).
-- Iterates pools / dreps / proposals; emits transition deltas via the `nonces` and `reset` visitors.
+- Iterates pools / dreps / proposals; emits transition deltas via the `nonces` and `reset` visitors, and gathers the rows that leave state via the `final_rows` visitor: a pool whose every snapshot is retired once rotated (`PoolState::leaves_state`, the boundary opening its retiring epoch + 3), a DRep unregistered and refunded before the closing epoch and before every proposal the next boundary can still ratify was submitted (`DRepState::leaves_state_at`), and a proposal resolved at a boundary before the one just crossed (`ProposalState::leaves_state_at`).
 - Emits the closing `EpochTransition` delta (rotates `number` / `initial_pots` / `rolling` / `pparams`, seeds `EpochState.end = Some(EndStats::default())`, resets *both* `ewrap_progress = None` and `estart_progress = None`).
 - Direct writes: `EraState` writes during era transitions (Shelley→Allegra etc.).
+- Direct writes and deletes (`crate::final_rows`): each moved row's final row (a pool's or a DRep's last state row as it stands; a proposal's without its vote maps) goes to the log of its own namespace under `epoch_start` of the closing epoch, and its state row is deleted, along with the transition delta the `reset` visitor queued for it. The archive commits before the state, so a crash in between re-runs finalize over the same rows.
 - **Sets the cursor** to `ChainPoint::Slot(boundary_slot)` — the only phase across all work units that moves the cursor. A crash before `finalize()` restarts from the boundary block.
 - Deltas emitted in finalize:
   - `NonceTransition` — `estart/nonces.rs:92`. Targets `epochs`.
@@ -69,7 +70,7 @@ The sections below walk the cycle starting at `Estart` (the first phase of every
 
 The rotation is not idempotent (rotating twice double-rolls), so a resumed boundary skips the shards `estart_progress` records as committed. A shard is all or nothing: its rows and its `EStartProgress` commit together, so a crash inside a shard leaves its rows untouched for the resumed run to read again.
 
-- Namespaces touched: `accounts` (shard range, per shard), `pools`, `epochs`, `eras` (in finalize).
+- Namespaces touched: `accounts` (shard range, per shard), `pools`, `epochs`, `eras`, `pools`, `dreps` and `proposals` (deletes, and their logs) (in finalize).
 
 ## 2. `RollWorkUnit` — applies a batch of blocks
 
@@ -87,9 +88,10 @@ The rotation is not idempotent (rotating twice double-rolls), so a resumed bound
     - `WithdrawalInc:191`
     - `EnqueueMir:163,167`
   - **Pools** (`roll/pools.rs`):
-    - `MintedBlocksInc:35`
-    - `PoolRegistration:46`
-    - `PoolDeRegistration:68,77`
+    - `MintedBlocksInc:175`
+    - `PoolRegistration:237`
+    - `PoolDeRegistration:256,265`
+    - `PoolCalidusUpdate:245,276` (the first seeds the nonce floor of a moved pool registering again, read ahead of the crawl by `CalidusFloors::load`)
   - **DReps** (`roll/dreps.rs`):
     - `DRepRegistration:74`
     - `DRepUnRegistration:83`
@@ -132,7 +134,7 @@ The rotation is not idempotent (rotating twice double-rolls), so a resumed bound
 ### `finalize()` — Rupd global pass
 
 - Direct write: `EpochState.incentives = Some(work.incentives)` and `EpochState.rupd_progress = None`. Single one-shot write so concurrent shard commits can't race.
-- Direct writes: per-pool `PoolEpochLog` archive entries from the shard-accumulator (`total_rewards`, `delegators_count` rolled up across shards; `blocks_minted`, `total_stake`, `relative_size`, `fixed_cost`, `margin_cost` from globals).
+- Direct writes: per-pool `PoolEpochLog` archive entries from the shard-accumulator (`total_rewards`, `delegators_count` rolled up across shards; `blocks_minted`, `total_stake`, `fixed_cost`, `margin_cost` from globals).
 - No deltas emitted in finalize.
 
 `PendingRewardState` writes are overwrite-by-key, so true mid-shard resume is safe (rerunning a shard rewrites the same credentials with identical data).
@@ -167,7 +169,7 @@ The rotation is not idempotent (rotating twice double-rolls), so a resumed bound
 - Builds a fresh `BoundaryWork` via `BoundaryWork::load_finalize`.
 - Classifies retiring pools / expiring dreps / enacting+dropping proposals; processes pending MIRs; runs enactment + refund + wrapup-global visitors.
 - Assembles the final `EndStats` (prepare-time fields combined with the accumulator fields populated by the preceding shard runs) and emits a single `EpochWrapUp` to close the boundary.
-- Direct writes: writes the completed `EpochState` to the archive under the epoch-start temporal key.
+- Direct writes: writes the completed `EpochState` to the archive under the epoch-start temporal key, with its sync cursors (`ewrap_progress`, `estart_progress`, `rupd_progress`, `estart_tally`, `ewrap_finalized`) cleared.
 - Direct writes: one `DRepEpochLog` archive entry per entry of the completed DRep distribution (Abstain and NoConfidence included), under the same epoch-start temporal key; none when the distribution is incomplete.
 - Direct deletes: `PendingMirState` entries for processed MIRs.
 - Deltas emitted in finalize (10 distinct variants, 11 sites):

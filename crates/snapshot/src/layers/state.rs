@@ -1,8 +1,8 @@
 //! The `state-{ns}` layers: the ledger tip, one namespace per kind.
 //!
 //! `[key: bytes, value: bytes]`, ordered by `key`, with the shard given by the
-//! first nibble of `key[0]` for a sixteen-way namespace and fixed at 0 for a
-//! single-blob one.
+//! first nibble of the namespace's shard byte for a sixteen-way namespace and
+//! fixed at 0 for a single-blob one.
 //!
 //! The namespace is not in the record: it is the layer's *kind*, one per state
 //! namespace (`crate::STATE_KINDS`), so a shape change to one namespace's
@@ -46,14 +46,20 @@
 //!
 //! ## Sharding
 //!
-//! The chain-scale namespaces (`utxos`, `accounts`, `assets`, `datums`)
-//! split sixteen ways by the first nibble of the first key byte. Keys are
-//! hash-derived (transaction hashes, credentials, script hashes), so the split
-//! is uniform without a hash of its own; shards can be fetched in parallel and
+//! The chain-scale namespaces (`utxos`, `accounts`, `datums`)
+//! split sixteen ways by the first nibble of their shard byte: the first key
+//! byte that comes from a hash. A `utxos` key opens with its transaction hash
+//! and a `datums` key is the datum hash, so both shard on byte 0. An `accounts`
+//! key opens with the four-byte CBOR header of its stake credential
+//! (`0x82 ‖ variant ‖ 0x58 0x1c`), which carries no entropy, so it shards on
+//! byte 4, the first byte of the credential hash, the same byte the ledger's
+//! own account work units split on. Sharding on a hash byte keeps the split
+//! uniform without a hash of its own; shards can be fetched in parallel and
 //! stay far from registry size limits as state grows. Every other namespace is
 //! a single blob — shard 0 — because sixteen slivers of a kilobyte-scale
-//! population would be all overhead. The counts are fixed by the profile
-//! specification (`crate::STATE_KINDS`), never by data or configuration.
+//! population would be all overhead. The counts and shard bytes are fixed by
+//! the profile specification (`crate::STATE_KINDS`), never by data or
+//! configuration.
 
 use dolos_core::{
     EntityKey, EntityValue, Era, EraCbor, Namespace, TxoRef, UtxoPosition, UtxoValue,
@@ -72,18 +78,19 @@ pub use crate::namespaces::UTXO_KEY_LEN;
 /// caller wraps it in.
 const STATE: &str = "state";
 
-/// The shard a state key belongs to under a kind published in `shards` shards:
-/// the first nibble of its first byte for a sixteen-way namespace, 0 for a
-/// single blob.
+/// The shard a state key belongs to under a kind published in `shards` shards
+/// that splits on key byte `byte`: the first nibble of that byte for a
+/// sixteen-way namespace, 0 for a single blob.
 ///
-/// An empty key only exists in a single-blob namespace (the singletons), so
-/// the fallback for one is unreachable rather than a policy.
-pub fn shard_of(key: &[u8], shards: u8) -> u8 {
+/// A sharded namespace's keys are fixed-width and longer than its shard byte,
+/// and the codec refuses any other, so the fallback for a short key is
+/// unreachable rather than a policy.
+pub fn shard_of(key: &[u8], shards: u8, byte: usize) -> u8 {
     if shards <= 1 {
         return 0;
     }
 
-    key.first().copied().unwrap_or(0) >> 4
+    key.get(byte).copied().unwrap_or(0) >> 4
 }
 
 /// One state entry, as the layer carries it.
@@ -149,6 +156,11 @@ pub fn as_utxo(record: &StateRecord) -> Result<(TxoRef, UtxoValue), Error> {
     ))
 }
 
+/// The eras a `utxos` value may carry: Pallas's encoding of
+/// `MultiEraOutput::era()`, Byron 1 to Conway 7. A store reads the number back
+/// as a Pallas era and has no answer for any other.
+const UTXO_ERAS: std::ops::RangeInclusive<Era> = 1..=7;
+
 /// The `utxos` value: `[era: uint, body: bytes, slot: uint, tx_index: uint]`,
 /// the creation position last. A UTxO no block produced has no position and
 /// is `[era: uint, body: bytes]`.
@@ -189,7 +201,14 @@ pub fn decode_utxo_value(bytes: &[u8]) -> Result<UtxoValue, Error> {
 
     let era = uint(STATE, "era", &mut decoder)?;
     let era = Era::try_from(era)
-        .map_err(|_| Error::malformed(STATE, format!("era {era} does not fit a u16")))?;
+        .ok()
+        .filter(|era| UTXO_ERAS.contains(era))
+        .ok_or_else(|| {
+            Error::malformed(
+                STATE,
+                format!("era {era} is outside 1 (Byron) to 7 (Conway)"),
+            )
+        })?;
     let body = blob(STATE, "body", &mut decoder)?.to_vec();
 
     let position = if fields == 4 {
@@ -255,35 +274,37 @@ pub fn decode(ns: Namespace, bytes: &[u8]) -> Result<StateRecord, Error> {
 /// store's own iterator already yields.
 #[derive(Debug, Default, Clone)]
 pub struct OrderCheck {
-    /// `(shard, shards)`: which shard every record must belong to, under the
-    /// kind's shard count.
-    shard: Option<(u8, u8)>,
+    /// `(shard, shards, byte)`: which shard every record must belong to, under
+    /// the kind's shard count and shard byte.
+    shard: Option<(u8, u8, usize)>,
     last: Option<Vec<u8>>,
 }
 
 impl OrderCheck {
-    /// A check that also insists every record belongs to `shard` of `shards`.
+    /// A check that also insists every record belongs to `shard` of `shards`,
+    /// split on key byte `byte`.
     ///
     /// Worth having beside the ordering rule: a record in the wrong shard layer
     /// still restores — the write path dispatches on the kind, not on the
     /// shard — so nothing downstream would ever notice, and a client fetching
     /// shards selectively would silently miss it.
-    pub fn for_shard(shard: u8, shards: u8) -> Self {
+    pub fn for_shard(shard: u8, shards: u8, byte: usize) -> Self {
         Self {
-            shard: Some((shard, shards)),
+            shard: Some((shard, shards, byte)),
             last: None,
         }
     }
 
     pub fn check(&mut self, record: &StateRecord) -> Result<(), Error> {
-        if let Some((shard, shards)) = self.shard {
-            if shard_of(&record.key, shards) != shard {
+        if let Some((shard, shards, byte)) = self.shard {
+            let actual = shard_of(&record.key, shards, byte);
+
+            if actual != shard {
                 return Err(Error::malformed(
                     STATE,
                     format!(
-                        "{} belongs to shard {}, not shard {shard}",
+                        "{} belongs to shard {actual}, not shard {shard}",
                         hex::encode(&record.key),
-                        shard_of(&record.key, shards),
                     ),
                 ));
             }
@@ -311,18 +332,20 @@ impl OrderCheck {
 #[cfg(test)]
 mod tests {
     use dolos_cardano::model::{
-        AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
-        AddressStats, AssetKey, AssetMintChunk, AssetMintSet, AssetState, DRepState, EpochState,
-        EraState, FirstMintSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressSet,
-        PaymentStats, PoolState, ProposalState,
+        AccountAddressEpochs, AccountAddressSet, AccountEpochLog, AccountHistoryState, AccountKey,
+        AccountState, AccountStats, AddressStats, AssetMintChunk, AssetMintSet, DRepState,
+        DatumKey, DatumState, EpochState, EraState, FirstMintSet, FixedNamespace, GovState,
+        MetadataLabelState, PaymentAddressSet, PaymentStats, PoolState, ProposalState,
     };
+
+    use dolos_cardano::pallas::ledger::primitives::StakeCredential;
 
     use super::*;
     use crate::UTXOS;
 
-    /// An asset key: 32 bytes, any of them, so a byte picks its shard.
+    /// A datum key: 32 bytes, any of them, so a byte picks its shard.
     fn entity_key(byte: u8) -> EntityKey {
-        EntityKey::of(&AssetKey([byte; 32].into()))
+        EntityKey::of(&DatumKey([byte; 32].into()))
     }
 
     fn txo(byte: u8, index: u32) -> TxoRef {
@@ -343,8 +366,8 @@ mod tests {
     fn an_entity_record_round_trips() {
         let original = entity(&entity_key(0x5a), &vec![0x82, 0x01, 0x02]);
 
-        let encoded = encode(AssetState::NS, &original).unwrap();
-        let decoded = decode(AssetState::NS, encoded.as_bytes()).unwrap();
+        let encoded = encode(DatumState::NS, &original).unwrap();
+        let decoded = decode(DatumState::NS, encoded.as_bytes()).unwrap();
 
         assert_eq!(decoded, original);
         assert_eq!(as_entity(&decoded), entity_key(0x5a));
@@ -372,6 +395,7 @@ mod tests {
         }
 
         keyed(AccountState::NS, &credential).unwrap();
+        keyed(AccountHistoryState::NS, &credential).unwrap();
         keyed(DRepState::NS, &[[0x22].as_slice(), &[7; 28]].concat()).unwrap();
 
         // an address: an account and a base address's header and payment
@@ -409,15 +433,19 @@ mod tests {
             (MetadataLabelState::NS, vec![1; 32]),
             (DRepState::NS, vec![0x22; 32]),
             (AccountState::NS, vec![1; 32]),
+            (AccountHistoryState::NS, vec![1; 32]),
             (AccountEpochLog::NS, vec![1; 32]),
             (AccountAddressSet::NS, staged(&[])),
             (AccountAddressSet::NS, staged(&[1; 57])),
             (AccountAddressSet::NS, credential.clone()),
-            (AccountAddressChunk::NS, vec![1; 32]),
+            (AccountAddressEpochs::NS, vec![1; 32]),
             (AssetMintSet::NS, vec![1; 48]),
             (AssetMintChunk::NS, vec![1; 36]),
             // an archive-only log holds no state, even under its log key
-            (AccountAddressChunk::NS, credential.clone()),
+            (
+                AccountAddressEpochs::NS,
+                [credential.as_slice(), &[0; 4]].concat(),
+            ),
             (AddressStats::NS, [epoch.as_slice(), &credential].concat()),
             (AddressStats::NS, [epoch.as_slice(), &staked, &[1]].concat()),
             (
@@ -477,7 +505,7 @@ mod tests {
             Some(UtxoPosition::new(u64::MAX, UtxoPosition::MAX_TX_INDEX)),
         ];
 
-        for era in [0u16, 23, 24, 255, 256, u16::MAX] {
+        for era in UTXO_ERAS {
             for position in positions {
                 let value = UtxoValue::new(EraCbor(era, vec![0xff; 3]), position);
                 let composed = encode_utxo_value(&value).unwrap();
@@ -534,14 +562,12 @@ mod tests {
         }
     }
 
-    /// The era is a `u16` in the stores and a CBOR uint on the wire, so the
-    /// widths disagree and the decoder narrows. `encode_utxo_value` cannot
-    /// reach the refusal — a `UtxoValue` already holds a `u16` — so the wire
-    /// bytes are built directly, which is the only way an out-of-range era
-    /// arrives at all.
+    /// The era is one of Pallas's seven, and a CBOR uint on the wire, so the
+    /// decoder refuses every other number, including the ones past a `u16`.
+    /// The wire bytes are built directly, which is how an unknown era arrives.
     #[test]
     fn an_out_of_range_era_is_refused() {
-        for era in [u64::from(u16::MAX) + 1, u64::MAX] {
+        for era in [0, 8, u64::from(u16::MAX), u64::from(u16::MAX) + 1, u64::MAX] {
             let wire = frame::encode(|e| {
                 e.array(2)?.u64(era)?.bytes(&[])?;
                 Ok(())
@@ -564,15 +590,15 @@ mod tests {
         let utxo_record = utxo(&txo(1, 0), &unpositioned(1, Vec::new())).unwrap();
 
         assert!(as_utxo(&entity_record).is_err());
-        assert!(encode(AssetState::NS, &utxo_record).is_err());
+        assert!(encode(DatumState::NS, &utxo_record).is_err());
         assert!(encode(UTXOS, &entity_record).is_err());
     }
 
     #[test]
     fn a_wrong_width_key_is_refused() {
         for (ns, width) in [
-            (AssetState::NS, UTXO_KEY_LEN),
-            (AssetState::NS, 0),
+            (DatumState::NS, UTXO_KEY_LEN),
+            (DatumState::NS, 0),
             (UTXOS, 32),
             (UTXOS, UTXO_KEY_LEN + 1),
         ] {
@@ -618,30 +644,39 @@ mod tests {
 
         assert!(encode("receipts", &record).is_err());
 
-        let wire = encode(AssetState::NS, &record).unwrap();
+        let wire = encode(DatumState::NS, &record).unwrap();
         assert!(decode("receipts", wire.as_bytes()).is_err());
     }
 
-    /// Hash-derived keys spread evenly over the sixteen shards, which is the
+    /// Hash-derived bytes spread evenly over the sixteen shards, which is the
     /// premise the shard split rests on — and a single-blob namespace is
     /// always shard 0, whatever its keys.
     #[test]
     fn sharding_is_the_first_nibble_or_the_single_blob() {
-        assert_eq!(shard_of(&[0x00], 16), 0);
-        assert_eq!(shard_of(&[0x0f], 16), 0);
-        assert_eq!(shard_of(&[0x10], 16), 1);
-        assert_eq!(shard_of(&[0xff], 16), 15);
+        assert_eq!(shard_of(&[0x00], 16, 0), 0);
+        assert_eq!(shard_of(&[0x0f], 16, 0), 0);
+        assert_eq!(shard_of(&[0x10], 16, 0), 1);
+        assert_eq!(shard_of(&[0xff], 16, 0), 15);
 
         let mut counts = [0usize; 16];
         for byte in 0u8..=255 {
-            counts[shard_of(&[byte], 16) as usize] += 1;
+            counts[shard_of(&[byte], 16, 0) as usize] += 1;
         }
 
         assert!(counts.iter().all(|c| *c == 16), "{counts:?}");
 
         for byte in [0x00, 0x0f, 0x10, 0xff] {
-            assert_eq!(shard_of(&[byte], 1), 0, "{byte:#x}");
+            assert_eq!(shard_of(&[byte], 1, 0), 0, "{byte:#x}");
         }
+    }
+
+    /// The shard byte picks which byte's nibble counts, and no other byte
+    /// moves the shard.
+    #[test]
+    fn sharding_reads_the_shard_byte() {
+        assert_eq!(shard_of(&[0xff, 0xff, 0xff, 0xff, 0x30], 16, 4), 3);
+        assert_eq!(shard_of(&[0x00, 0x00, 0x00, 0x00, 0x30], 16, 4), 3);
+        assert_eq!(shard_of(&[0x30, 0x00, 0x00, 0x00, 0xa0], 16, 4), 10);
     }
 
     /// The two key widths shard the same way, so one rule covers every kind.
@@ -650,8 +685,58 @@ mod tests {
         let entity_record = entity(&entity_key(0xc3), &Vec::new());
         let utxo_record = utxo(&txo(0xc3, 0), &unpositioned(1, Vec::new())).unwrap();
 
-        assert_eq!(shard_of(&entity_record.key, 16), 12);
-        assert_eq!(shard_of(&utxo_record.key, 16), 12);
+        assert_eq!(shard_of(&entity_record.key, 16, 0), 12);
+        assert_eq!(shard_of(&utxo_record.key, 16, 0), 12);
+    }
+
+    /// An account shards on its credential hash, not on the CBOR header every
+    /// account key opens with: two accounts whose hashes differ in the high
+    /// nibble of their first byte land in different shards, and every
+    /// account's shard is that nibble, whichever credential variant it is.
+    #[test]
+    fn accounts_shard_on_the_first_hash_byte() {
+        let (_, ns, shards, byte) = crate::STATE_KINDS
+            .into_iter()
+            .find(|(_, ns, _, _)| *ns == AccountState::NS)
+            .unwrap();
+
+        let key = |first: u8, script: bool| {
+            let mut hash = [0x77; 28];
+            hash[0] = first;
+            let credential = match script {
+                false => StakeCredential::AddrKeyhash(hash.into()),
+                true => StakeCredential::ScriptHash(hash.into()),
+            };
+            (
+                hash,
+                entity(&EntityKey::of(&AccountKey(credential)), &Vec::new()),
+            )
+        };
+
+        let (_, low) = key(0x0a, false);
+        let (_, high) = key(0xa0, false);
+        let mut order_low = OrderCheck::for_shard(0, shards, byte);
+        let mut order_high = OrderCheck::for_shard(10, shards, byte);
+
+        assert_ne!(
+            shard_of(&low.key, shards, byte),
+            shard_of(&high.key, shards, byte)
+        );
+        order_low.check(&low).unwrap();
+        order_high.check(&high).unwrap();
+        assert!(order_low.check(&high).is_err());
+
+        for first in 0u8..=255 {
+            for script in [false, true] {
+                let (hash, record) = key(first, script);
+                encode(ns, &record).unwrap();
+                assert_eq!(
+                    shard_of(&record.key, shards, byte),
+                    hash[0] >> 4,
+                    "{first:#x} script={script}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -674,7 +759,7 @@ mod tests {
 
     #[test]
     fn a_record_from_another_shard_is_refused() {
-        let mut order = OrderCheck::for_shard(0, 16);
+        let mut order = OrderCheck::for_shard(0, 16, 0);
 
         order
             .check(&entity(&entity_key(0x0a), &Vec::new()))
@@ -686,7 +771,7 @@ mod tests {
         assert!(matches!(err, Error::MalformedRecord { .. }), "{err:?}");
 
         // Under a single-blob count the same keys are all shard 0.
-        let mut single = OrderCheck::for_shard(0, 1);
+        let mut single = OrderCheck::for_shard(0, 1, 0);
         single
             .check(&entity(&entity_key(0x0a), &Vec::new()))
             .unwrap();

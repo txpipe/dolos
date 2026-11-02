@@ -14,12 +14,16 @@ use std::process::Command;
 use std::sync::Arc;
 
 use dolos::adapters::DomainAdapter;
+use dolos::engine::DomainBuilder;
+use dolos_cardano::CardanoLogic;
 use dolos_core::{
     config::{CardanoConfig, ChainConfig, CustomUtxo, GenesisConfig, RootConfig},
     import::ImportExt as _,
-    BootstrapExt as _, ChainLogic as _, Domain as _, QueryLimiter, StateStore as _,
+    ArchiveStore as _, BootstrapExt as _, ChainLogic as _, ChainPoint, Domain as _, Genesis,
+    QueryLimiter, RawBlock, StateStore as _, WalStore as _, WorkUnit,
 };
 use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
+use pallas::ledger::traverse::MultiEraBlock;
 
 /// A path as a TOML string *value*, quotes and escapes included.
 ///
@@ -55,7 +59,7 @@ impl Node {
         // runs against.
         let toml = format!(
             r#"
-            compatibility = "v2-alpha.1"
+            compatibility = "v2-alpha.2"
 
             [chain]
             protocol = "cardano"
@@ -109,29 +113,48 @@ impl Node {
     /// Apply synthetic blocks through the real domain, then close every store
     /// so the publishing process can open them.
     pub fn sync(&self) {
+        // Inside epoch zero, so the ledger stays epoch-coherent and the
+        // `strict` assertions in `dolos-cardano` hold — see the note on the
+        // export crate's own harness fixture.
+        self.sync_chain(
+            Arc::new(dolos_cardano::include::preview::load()),
+            GenesisConfig::in_dir(self.root.path()),
+            SyntheticBlockConfig {
+                block_count: 3,
+                txs_per_block: 2,
+                slot: 100,
+                ..Default::default()
+            },
+        );
+    }
+
+    /// [`Self::sync`] over `genesis`, which the files `files` names hold, and
+    /// the synthetic blocks `blocks` configures.
+    pub fn sync_chain(
+        &self,
+        genesis: Arc<dolos_core::Genesis>,
+        files: GenesisConfig,
+        blocks: SyntheticBlockConfig,
+    ) {
         dolos::storage::ensure_storage_path(&self.config).unwrap();
 
         let stores =
             dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&self.config).unwrap();
-        let genesis = Arc::new(dolos_cardano::include::preview::load());
 
-        // Inside epoch zero, so the ledger stays epoch-coherent and the
-        // `strict` assertions in `dolos-cardano` hold — see the note on the
-        // export crate's own harness fixture.
-        let (blocks, _, chain_config) = build_synthetic_blocks(SyntheticBlockConfig {
-            block_count: 3,
-            txs_per_block: 2,
-            slot: 100,
-            ..Default::default()
-        });
+        let (blocks, _, chain_config) = build_synthetic_blocks(blocks);
 
         // The synthetic chain's initial UTxOs are seeded through the chain
         // config's `custom_utxos`, so they are part of this chain's genesis.
         // Persist them into `dolos.toml`: a separate process replaying from
-        // origin (`doctor rebuild-state`) runs genesis from the file and must
+        // origin (`data rebuild`) runs genesis from the file and must
         // seed the same set. Only a custom network carries them, so the file
-        // becomes preview's genesis under a custom chain.
-        self.write_chain(&self.custom_chain(2, chain_config.custom_utxos.clone()));
+        // becomes the genesis under a custom chain.
+        self.write_chain(&ChainConfig::custom(CardanoConfig {
+            magic: genesis.network_magic(),
+            is_testnet: true,
+            genesis: files,
+            custom_utxos: chain_config.custom_utxos.clone(),
+        }));
 
         let chain = dolos_cardano::CardanoLogic::initialize::<DomainAdapter>(
             chain_config,
@@ -211,42 +234,6 @@ impl Node {
         drop(stores);
 
         last
-    }
-
-    /// Move the stores one block past the boundary [`Self::stand_at_boundary`]
-    /// put them on: an empty block a few slots later in epoch 1, chained onto
-    /// the cursor's, with the cursor on it. Where a node that kept syncing
-    /// past `stop_epoch` stands.
-    pub fn step_past_boundary(&self) {
-        use dolos_cardano::pallas::ledger::traverse::MultiEraBlock;
-        use dolos_core::{
-            ArchiveStore as _, ArchiveWriter as _, StateStore as _, StateWriter as _,
-        };
-        use dolos_testing::blocks::make_conway_block_with_prev;
-
-        let stores =
-            dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&self.config).unwrap();
-
-        let cursor = stores.state.read_cursor().unwrap().unwrap();
-        let body = stores
-            .archive
-            .get_block_by_slot(&cursor.slot())
-            .unwrap()
-            .unwrap();
-        let number = MultiEraBlock::decode(&body).unwrap().number();
-
-        let (next, next_body) =
-            make_conway_block_with_prev(cursor.slot() + 5, cursor.hash(), number + 1);
-
-        let archive = stores.archive.start_writer().unwrap();
-        archive.apply(&next, &next_body).unwrap();
-        archive.commit().unwrap();
-
-        let state = stores.state.start_writer().unwrap();
-        state.set_cursor(next).unwrap();
-        state.commit().unwrap();
-
-        drop(stores);
     }
 
     /// Write a directory stele as a restore fixture through the retained
@@ -353,4 +340,103 @@ pub fn assert_ok(output: &std::process::Output) -> String {
     );
 
     stdout
+}
+
+/// A node over `tables` on the synthetic chain's network, and that chain's
+/// blocks, for the tests that sync it live through [`start`].
+pub fn fixture(tables: &str) -> (Node, Arc<Genesis>, Vec<RawBlock>) {
+    let mut node = Node::with_tables(tables);
+    let (blocks, _, chain) = build_synthetic_blocks(SyntheticBlockConfig {
+        block_count: 4,
+        slot: 100,
+        ..Default::default()
+    });
+    node.config.chain = node.custom_chain(2, chain.custom_utxos);
+    node.write_chain(&node.config.chain);
+
+    let genesis = Arc::new(dolos_cardano::include::preview::load());
+
+    (node, genesis, blocks)
+}
+
+pub fn start(node: &Node, genesis: &Arc<Genesis>) -> DomainAdapter {
+    DomainBuilder::new(&node.config, genesis.clone())
+        .build()
+        .unwrap()
+}
+
+pub fn point(block: &RawBlock) -> ChainPoint {
+    let block = MultiEraBlock::decode(block).unwrap();
+    ChainPoint::Specific(block.slot(), block.hash())
+}
+
+/// Where in a work unit's lifecycle a crash comes.
+#[derive(Clone, Copy, Debug)]
+pub enum CrashAfter {
+    /// After compute, before any commit.
+    Compute,
+    /// After the WAL commit.
+    Wal,
+    /// After the WAL and state commits.
+    State,
+}
+
+/// Feed `blocks` through the work-unit lifecycle, stopping each block's unit
+/// where `crash` says. Genesis, which a fresh node's first block brings, runs
+/// whole.
+pub fn feed_until_crash(domain: &DomainAdapter, blocks: &[RawBlock], crash: CrashAfter) {
+    let mut chain = domain.write_chain();
+
+    for block in blocks {
+        if !chain.can_receive_block() {
+            drain_until_crash(&mut chain, domain, crash);
+        }
+        chain.receive_block(block.clone()).unwrap();
+    }
+
+    drain_until_crash(&mut chain, domain, crash);
+}
+
+fn drain_until_crash(chain: &mut CardanoLogic, domain: &DomainAdapter, crash: CrashAfter) {
+    while let Some(mut work) = chain.pop_work::<DomainAdapter>(domain) {
+        if WorkUnit::<DomainAdapter>::name(&work) == "genesis" {
+            dolos_core::sync::execute_work_unit(domain, &mut work).unwrap();
+            continue;
+        }
+
+        WorkUnit::<DomainAdapter>::initialize(&mut work, domain).unwrap();
+
+        let shards = WorkUnit::<DomainAdapter>::start_shard(&work)
+            ..WorkUnit::<DomainAdapter>::total_shards(&work);
+
+        for shard in shards {
+            WorkUnit::<DomainAdapter>::load(&mut work, domain, shard).unwrap();
+            WorkUnit::<DomainAdapter>::compute(&mut work, shard).unwrap();
+
+            if matches!(crash, CrashAfter::Compute) {
+                continue;
+            }
+
+            WorkUnit::<DomainAdapter>::commit_wal(&mut work, domain, shard).unwrap();
+
+            if matches!(crash, CrashAfter::State) {
+                WorkUnit::<DomainAdapter>::commit_state(&mut work, domain, shard).unwrap();
+            }
+        }
+    }
+}
+
+/// The WAL tip, state cursor and archive tip, read without recovery.
+pub fn store_positions(node: &Node) -> (Option<ChainPoint>, Option<ChainPoint>, Option<u64>) {
+    let stores =
+        dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&node.config).unwrap();
+
+    let wal = stores.wal.find_tip().unwrap().map(|(point, _)| point);
+    let state = stores.state.read_cursor().unwrap();
+    let archive = stores.archive.get_tip().unwrap().map(|(slot, _)| slot);
+
+    stores.state.shutdown().unwrap();
+    stores.archive.shutdown().unwrap();
+
+    (wal, state, archive)
 }

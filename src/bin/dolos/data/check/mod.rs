@@ -6,8 +6,9 @@
 //! reports every disagreement it finds rather than stopping at the first.
 //!
 //! It is the at-rest complement of the sync-time guards, not a replacement:
-//! `dolos doctor wal-integrity` still owns the WAL, and nothing here runs
-//! during sync or repairs anything it finds.
+//! `dolos sync status` still owns the WAL, and nothing here runs during sync
+//! or repairs anything it finds. It opens the stores without writing to them,
+//! prints what it found on stdout, and exits 3 when that is anything.
 //!
 //! Each check lives in its own module and exposes a pure function over the
 //! data it inspects plus a `run` that reads that data from the open stores.
@@ -19,7 +20,10 @@
 
 use clap::ValueEnum;
 use dolos_core::config::RootConfig;
+use serde::Serialize;
 use std::time::{Duration, Instant};
+
+use crate::output::{FormatArgs, Unhealthy};
 
 mod accounts;
 mod archive;
@@ -28,7 +32,8 @@ mod epoch_log;
 mod totals;
 
 /// The five checks, cheapest first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum CheckKind {
     /// WAL, archive and state tips tell one story
     Cursors,
@@ -136,6 +141,9 @@ pub struct Args {
     /// check to run; repeatable, runs all of them when omitted
     #[arg(long = "check", value_enum)]
     checks: Vec<CheckKind>,
+
+    #[command(flatten)]
+    format: FormatArgs,
 }
 
 impl Args {
@@ -153,16 +161,69 @@ impl Args {
     }
 }
 
-/// What one check cost, reported whether or not it found anything.
+/// What one check found, and what it cost, reported whether or not it found
+/// anything.
 ///
 /// The full-scan checks are minutes on mainnet, and an operator deciding
 /// whether to run this after every restore needs the number rather than a
 /// warning about it.
-struct Timing {
+#[derive(Debug, Serialize)]
+struct Ran {
     check: CheckKind,
+    #[serde(skip)]
     elapsed: Duration,
-    issues: usize,
-    not_assertable: usize,
+    elapsed_ms: u128,
+    issues: Vec<String>,
+    not_assertable: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct Report {
+    checks: Vec<Ran>,
+}
+
+impl Report {
+    fn issues(&self) -> usize {
+        self.checks.iter().map(|ran| ran.issues.len()).sum()
+    }
+}
+
+impl std::fmt::Display for Report {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for ran in &self.checks {
+            for detail in &ran.issues {
+                writeln!(f, "[{}] {detail}", ran.check)?;
+            }
+
+            for detail in &ran.not_assertable {
+                writeln!(f, "[{}] not assertable: {detail}", ran.check)?;
+            }
+        }
+
+        writeln!(f)?;
+
+        for ran in &self.checks {
+            let skipped = match ran.not_assertable.len() {
+                0 => String::new(),
+                count => format!(", {count} not assertable at this tip"),
+            };
+
+            writeln!(
+                f,
+                "{:<20} {:>10.2?}  {} issue(s){}",
+                ran.check.name(),
+                ran.elapsed,
+                ran.issues.len(),
+                skipped,
+            )?;
+        }
+
+        if self.issues() == 0 {
+            write!(f, "\nno consistency issues found")?;
+        }
+
+        Ok(())
+    }
 }
 
 pub fn run(
@@ -170,11 +231,10 @@ pub fn run(
     args: &Args,
     feedback: &crate::feedback::Feedback,
 ) -> miette::Result<()> {
-    let stores = crate::common::open_data_stores(config)?;
+    let stores = crate::common::open_existing_stores(config, dolos::storage::Access::Observe)?;
     let genesis = crate::common::open_genesis(config)?;
 
-    let mut issues: Vec<Issue> = Vec::new();
-    let mut timings: Vec<Timing> = Vec::new();
+    let mut report = Report { checks: Vec::new() };
 
     for check in args.selected() {
         let progress = feedback.indeterminate_progress_bar();
@@ -198,51 +258,29 @@ pub fn run(
 
         let found = found?;
 
-        for issue in &found.issues {
-            eprintln!("{issue}");
-        }
-
-        for skipped in &found.not_assertable {
-            println!("{skipped}");
-        }
-
-        timings.push(Timing {
+        report.checks.push(Ran {
             check,
             elapsed,
-            issues: found.issues.len(),
-            not_assertable: found.not_assertable.len(),
+            elapsed_ms: elapsed.as_millis(),
+            issues: found.issues.into_iter().map(|x| x.detail).collect(),
+            not_assertable: found.not_assertable.into_iter().map(|x| x.detail).collect(),
         });
-
-        issues.extend(found.issues);
     }
 
-    println!();
+    crate::output::emit(&report, &args.format)?;
 
-    for timing in &timings {
-        let skipped = match timing.not_assertable {
-            0 => String::new(),
-            count => format!(", {count} not assertable at this tip"),
-        };
-
-        println!(
-            "{:<20} {:>10.2?}  {} issue(s){}",
-            timing.check.name(),
-            timing.elapsed,
-            timing.issues,
-            skipped,
-        );
+    match report.issues() {
+        0 => Ok(()),
+        issues => Err(Unhealthy(format!(
+            "found {issues} consistency issue(s) across {} check(s)",
+            report
+                .checks
+                .iter()
+                .filter(|ran| !ran.issues.is_empty())
+                .count(),
+        ))
+        .into()),
     }
-
-    if issues.is_empty() {
-        println!("\nno consistency issues found");
-        return Ok(());
-    }
-
-    Err(miette::miette!(
-        "found {} consistency issue(s) across {} check(s)",
-        issues.len(),
-        timings.iter().filter(|x| x.issues > 0).count(),
-    ))
 }
 
 #[cfg(test)]
@@ -330,7 +368,7 @@ mod tests {
         let anchors = totals::load_anchors(domain.state(), &epoch, boundaries.pv10_epoch).unwrap();
 
         let (found, referent_issues) =
-            totals::recompute(domain.state(), anchors, |_, _| {}).unwrap();
+            totals::recompute(domain.state(), domain.archive(), anchors, |_, _| {}).unwrap();
         issues.extend(referent_issues);
         issues.extend(
             totals::check_pots(
@@ -369,8 +407,8 @@ mod tests {
         kinds
     }
 
-    /// A state cursor pushed past everything else — the shape `dolos doctor
-    /// reset-wal` exists to repair.
+    /// A state cursor pushed past everything else — the shape `dolos sync
+    /// recover --discard-wal` exists to repair.
     #[test]
     fn a_state_cursor_ahead_of_the_stores_is_reported() {
         let domain = ToyDomain::new(None, None);
@@ -542,8 +580,13 @@ mod tests {
         writer.write_entity_typed(&key, &account).unwrap();
         writer.commit().unwrap();
 
-        let (found, issues) =
-            totals::recompute(domain.state(), Default::default(), |_, _| {}).unwrap();
+        let (found, issues) = totals::recompute(
+            domain.state(),
+            domain.archive(),
+            Default::default(),
+            |_, _| {},
+        )
+        .unwrap();
 
         assert!(issues.is_empty(), "{issues:#?}");
         assert_eq!(found.registered_pools, 1);
@@ -570,7 +613,13 @@ mod tests {
         writer.write_entity_typed(&key, &account).unwrap();
         writer.commit().unwrap();
 
-        let (_, issues) = totals::recompute(domain.state(), Default::default(), |_, _| {}).unwrap();
+        let (_, issues) = totals::recompute(
+            domain.state(),
+            domain.archive(),
+            Default::default(),
+            |_, _| {},
+        )
+        .unwrap();
 
         assert_eq!(issues.len(), 1, "{issues:#?}");
         assert!(
@@ -680,6 +729,53 @@ mod tests {
         writer.commit().unwrap();
     }
 
+    /// Write `drep`'s own row, registered at `registered` and unregistered at
+    /// `unregistered`.
+    fn write_drep_span(
+        domain: &ToyDomain,
+        drep: &DRep,
+        registered: u64,
+        unregistered: Option<u64>,
+    ) {
+        let mut row = dolos_cardano::model::DRepState::new(
+            drep.clone(),
+            dolos_cardano::model::DRepExpiry::new(0, 0),
+        );
+        row.registered_at = Some((registered, 0));
+        row.unregistered_at = unregistered.map(|slot| (slot, 0));
+
+        let writer = domain.state().start_writer().unwrap();
+        writer
+            .write_entity_typed(&DRepKey::from(drep), &row)
+            .unwrap();
+        writer.commit().unwrap();
+    }
+
+    fn read_drep(domain: &ToyDomain, key: &DRepKey) -> dolos_cardano::model::DRepState {
+        domain
+            .state()
+            .read_entity_typed::<dolos_cardano::model::DRepState>(key)
+            .unwrap()
+            .expect("the drep row")
+    }
+
+    /// Move `drep`'s state row to the final-row log keyed at `slot`, by the
+    /// write ESTART makes: the archive commits first, then the state deletes
+    /// the row.
+    fn move_drep_to_log(domain: &ToyDomain, drep: &DRep, slot: u64) {
+        let key = DRepKey::from(drep);
+        let row = read_drep(domain, &key);
+
+        let mut finals = dolos_cardano::final_rows::FinalRows::default();
+        finals.push(slot, &key, &row);
+
+        let archive = domain.archive().start_writer().unwrap();
+        let state = domain.state().start_writer().unwrap();
+        finals.write(&state, &archive).unwrap();
+        archive.commit().unwrap();
+        state.commit().unwrap();
+    }
+
     /// A DRep row reached through a `DRep::Key` that identifies itself as a
     /// `DRep::Script`. The key is derived from the identifier, so no node
     /// wrote this — and it takes the real store to prove the check reaches
@@ -692,7 +788,13 @@ mod tests {
         write_drep(&domain, &DRep::Key(hash), DRep::Script(hash), None);
         write_voter(&domain, 0x52, DRep::Key(hash), 100);
 
-        let (_, issues) = totals::recompute(domain.state(), Default::default(), |_, _| {}).unwrap();
+        let (_, issues) = totals::recompute(
+            domain.state(),
+            domain.archive(),
+            Default::default(),
+            |_, _| {},
+        )
+        .unwrap();
 
         assert_eq!(issues.len(), 1, "{issues:#?}");
         assert!(
@@ -723,16 +825,91 @@ mod tests {
             pv10_boundary: None,
         };
 
-        let (_, issues) = totals::recompute(domain.state(), anchors, |_, _| {}).unwrap();
+        let (_, issues) =
+            totals::recompute(domain.state(), domain.archive(), anchors, |_, _| {}).unwrap();
+
+        assert_eq!(issues.len(), 1, "{issues:#?}");
+        assert!(issues[0].detail.contains("owed a drop"), "{}", issues[0]);
+    }
+
+    /// The same missing drop once ESTART has moved the retired DRep to the
+    /// final-row log: the check reads the final row as it read the state row.
+    #[test]
+    fn a_drop_a_moved_drep_was_owed_is_reported() {
+        let domain = ToyDomain::new(None, None);
+        let drep = DRep::Key(pallas::crypto::hash::Hash::<28>::from([0x57; 28]));
+
+        write_drep(&domain, &drep, drep.clone(), Some((200, 0)));
+        write_voter(&domain, 0x58, drep.clone(), 100);
+        move_drep_to_log(&domain, &drep, 300);
+
+        let anchors = totals::Anchors {
+            live_epoch_start: Some(500),
+            pv10_boundary: Some(50),
+        };
+
+        let (_, issues) =
+            totals::recompute(domain.state(), domain.archive(), anchors, |_, _| {}).unwrap();
+
+        assert_eq!(issues.len(), 1, "{issues:#?}");
+        assert!(issues[0].detail.contains("owed a drop"), "{}", issues[0]);
+    }
+
+    /// A moved DRep that registered again: its fresh state row, never
+    /// unregistered, replaces the final row, so a delegation older than the
+    /// logged retirement owes no drop.
+    #[test]
+    fn a_fresh_state_row_replaces_the_final_row() {
+        let domain = ToyDomain::new(None, None);
+        let drep = DRep::Key(pallas::crypto::hash::Hash::<28>::from([0x59; 28]));
+
+        write_drep_span(&domain, &drep, 1, Some(200));
+        move_drep_to_log(&domain, &drep, 300);
+        write_drep_span(&domain, &drep, 600, None);
+        write_voter(&domain, 0x5a, drep, 100);
+
+        let anchors = totals::Anchors {
+            live_epoch_start: Some(500),
+            pv10_boundary: Some(50),
+        };
+
+        let (_, issues) =
+            totals::recompute(domain.state(), domain.archive(), anchors, |_, _| {}).unwrap();
+
+        assert!(issues.is_empty(), "{issues:#?}");
+    }
+
+    /// A DRep moved twice: the newer final row replaces the older one, so a
+    /// delegation between the two retirements owes the second retirement's
+    /// drop.
+    #[test]
+    fn a_newer_final_row_replaces_an_older_one() {
+        let domain = ToyDomain::new(None, None);
+        let drep = DRep::Key(pallas::crypto::hash::Hash::<28>::from([0x5b; 28]));
+
+        write_drep_span(&domain, &drep, 1, Some(200));
+        move_drep_to_log(&domain, &drep, 300);
+        write_drep_span(&domain, &drep, 600, Some(900));
+        move_drep_to_log(&domain, &drep, 950);
+        write_voter(&domain, 0x5c, drep, 700);
+
+        let anchors = totals::Anchors {
+            live_epoch_start: Some(1000),
+            pv10_boundary: None,
+        };
+
+        let (_, issues) =
+            totals::recompute(domain.state(), domain.archive(), anchors, |_, _| {}).unwrap();
 
         assert_eq!(issues.len(), 1, "{issues:#?}");
         assert!(issues[0].detail.contains("owed a drop"), "{}", issues[0]);
     }
 
     /// A live delegation to a credential with no row at all, made before the
-    /// protocol-10 boundary whose migration drops exactly those. A row is
-    /// never deleted, so the absence is not history — it is the migration
-    /// missing, or the row.
+    /// protocol-10 boundary whose migration drops exactly those. A DRep that
+    /// leaves state keeps its final row in the log until pruning drops it, so
+    /// the absence is the migration missing, the row, or a pruned retirement
+    /// whose drop is missing.
     ///
     /// The companion case — the same delegation made *after* that boundary,
     /// which is the shape the two legitimate preprod accounts have — is the
@@ -750,7 +927,8 @@ mod tests {
             pv10_boundary: Some(500),
         };
 
-        let (_, issues) = totals::recompute(domain.state(), anchors, |_, _| {}).unwrap();
+        let (_, issues) =
+            totals::recompute(domain.state(), domain.archive(), anchors, |_, _| {}).unwrap();
 
         assert_eq!(issues.len(), 1, "{issues:#?}");
         assert!(
@@ -764,7 +942,10 @@ mod tests {
     /// cheapest-first order regardless of how it was typed.
     #[test]
     fn selection_normalizes_to_cheapest_first() {
-        let all = Args { checks: vec![] };
+        let all = Args {
+            checks: vec![],
+            format: Default::default(),
+        };
         assert_eq!(all.selected(), CheckKind::ALL.to_vec());
 
         let picked = Args {
@@ -774,6 +955,7 @@ mod tests {
                 CheckKind::Totals,
                 CheckKind::EpochLog,
             ],
+            format: Default::default(),
         };
 
         assert_eq!(

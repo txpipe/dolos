@@ -14,8 +14,8 @@ use crate::{
     owned::OwnedMultiEraOutput,
     pallas_extras::{self, stake_cred_to_drep},
     roll::BlockVisitor,
-    DRepActivity, DRepDormancyRelease, DRepExpiry, DRepExpiryUpdate, DRepKey, DRepRegistration,
-    DRepSighting, DRepUnRegistration, GovDormancyReset, PParamsSet,
+    DRepActivity, DRepDormancyRelease, DRepExpiry, DRepExpiryUpdate, DRepKey, DRepObservation,
+    DRepRegistration, DRepUnRegistration, GovDormancyReset, PParamsSet,
 };
 
 fn cert_drep(cert: &MultiEraCert) -> Option<DRep> {
@@ -32,7 +32,7 @@ fn cert_drep(cert: &MultiEraCert) -> Option<DRep> {
 
 /// The DRep a certificate puts on chain, as db-sync's `drep_hash` records it:
 /// the target of a vote delegation or the subject of a DRep certificate.
-fn cert_sighting(cert: &MultiEraCert) -> Option<DRep> {
+fn cert_observation(cert: &MultiEraCert) -> Option<DRep> {
     pallas_extras::cert_as_vote_delegation(cert)
         .map(|delegation| delegation.drep)
         .or_else(|| cert_drep(cert))
@@ -259,11 +259,11 @@ impl BlockVisitor for DRepStateVisitor {
         let cert_index = self.cert_index;
         self.cert_index += 1;
 
-        // Sightings mirror db-sync's `drep_hash` rows, which db-sync only
+        // Observations mirror db-sync's `drep_hash` rows, which db-sync only
         // writes for certs of valid txs, the only certs the crawl visits.
-        if let Some(drep) = cert_sighting(cert) {
+        if let Some(drep) = cert_observation(cert) {
             let at = (block.slot(), *order, cert_index);
-            deltas.add_for_entity(DRepSighting::new(drep, at, cert_anchor(cert)));
+            deltas.add_for_entity(DRepObservation::new(drep, at, cert_anchor(cert)));
         }
 
         let Some(drep) = cert_drep(cert) else {
@@ -348,12 +348,12 @@ mod tests {
         assert_eq!(targets, vec![key(1), key(2), key(3)]);
     }
 
-    mod sightings {
+    mod observations {
         use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
         use pallas::ledger::primitives::{conway::Certificate, StakeCredential};
 
         use super::*;
-        use crate::DRepSightingState;
+        use crate::DRepObservationState;
 
         const REGISTERED: [u8; 28] = [0xd1; 28];
         // named by one tx, the larger key first: certificate order and key
@@ -391,10 +391,10 @@ mod tests {
             DRepKey::from(DRep::Key(hash.into()))
         }
 
-        /// Each sighting the roll records carries its certificate's place in
+        /// Each observation the roll records carries its certificate's place in
         /// its transaction.
         #[test]
-        fn roll_sightings_carry_the_certificate_position() {
+        fn roll_observations_carry_the_certificate_position() {
             let raw = block();
             let block = MultiEraBlock::decode(&raw).unwrap();
 
@@ -414,12 +414,12 @@ mod tests {
             }
 
             let first_seen = |hash: [u8; 28]| {
-                let ns_key = dolos_core::NsKey::of::<DRepSightingState>(&key(hash));
+                let ns_key = dolos_core::NsKey::of::<DRepObservationState>(&key(hash));
 
                 deltas.entities[&ns_key]
                     .iter()
                     .filter_map(|delta| match delta {
-                        crate::CardanoDelta::DRepSighting(sighting) => Some(sighting.at),
+                        crate::CardanoDelta::DRepObservation(observation) => Some(observation.at),
                         _ => None,
                     })
                     .min()

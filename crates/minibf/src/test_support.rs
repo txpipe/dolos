@@ -1,5 +1,9 @@
 use std::{
-    sync::Arc,
+    future::Future,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -12,14 +16,14 @@ use dolos_cardano::periods::stats::TOTALS;
 use dolos_core::{
     config::{CacheConfig, HistoryConfig, HistoryWindow, MinibfConfig, RoutePrefix},
     import::ImportExt as _,
-    CacheStore as _, Domain, StateStore,
+    CacheStore as _, Domain, QueryLimiter, StateStore,
 };
 use dolos_testing::{
     synthetic::{
         build_synthetic_blocks, seed_account_stake_logs, seed_epoch_logs, seed_reward_logs,
         SyntheticBlockConfig, SyntheticVectors,
     },
-    toy_domain::ToyDomain,
+    toy_domain::{MemoryStores, ToyDomain, ToyStores},
 };
 use http_body_util::BodyExt;
 use tower::util::ServiceExt;
@@ -400,8 +404,8 @@ pub fn stake_address_chain() -> SyntheticBlockConfig {
     }
 }
 
-pub struct TestDomainBuilder {
-    domain: ToyDomain,
+pub struct TestDomainBuilder<B: ToyStores = MemoryStores> {
+    domain: ToyDomain<B>,
     vectors: SyntheticVectors,
 }
 
@@ -423,6 +427,17 @@ impl TestDomainBuilder {
 
     /// The synthetic chain over the preview genesis as `adjust` leaves it.
     pub fn new_with_synthetic_and_genesis(
+        cfg: SyntheticBlockConfig,
+        adjust: impl FnOnce(&mut dolos_core::Genesis),
+    ) -> Self {
+        Self::new_with_synthetic_in(cfg, adjust)
+    }
+}
+
+impl<B: ToyStores> TestDomainBuilder<B> {
+    /// [`TestDomainBuilder::new_with_synthetic_and_genesis`] over a fresh
+    /// set of `B` stores.
+    pub fn new_with_synthetic_in(
         mut cfg: SyntheticBlockConfig,
         adjust: impl FnOnce(&mut dolos_core::Genesis),
     ) -> Self {
@@ -445,11 +460,11 @@ impl TestDomainBuilder {
         }
         let (blocks, vectors, chain_config) = build_synthetic_blocks(cfg);
 
-        let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+        let domain = ToyDomain::<B>::with_backend(genesis, chain_config, None, None);
         domain
             .import_blocks(blocks.clone())
             .expect("failed to import synthetic blocks");
-        let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state())
+        let summary = dolos_cardano::eras::load_era_summary::<ToyDomain<B>>(domain.state())
             .expect("era summary");
         let tip_slot = domain
             .state()
@@ -485,7 +500,7 @@ impl TestDomainBuilder {
         Self { domain, vectors }
     }
 
-    pub fn finish(self) -> (ToyDomain, SyntheticVectors) {
+    pub fn finish(self) -> (ToyDomain<B>, SyntheticVectors) {
         (self.domain, self.vectors)
     }
 }
@@ -587,7 +602,8 @@ impl TestApp {
         Self::from_domain(domain, vectors, None, minibf)
     }
 
-    fn from_domain(
+    /// App over `domain`, its chain described by `vectors`.
+    pub fn from_domain(
         domain: ToyDomain,
         vectors: SyntheticVectors,
         fault: Option<TestFault>,
@@ -722,6 +738,48 @@ impl TestApp {
 
         summary.epoch_start(epoch)
     }
+}
+
+/// App whose address holds `assets` assets of one policy, minted in its first
+/// block, on a query limiter of `permits`.
+pub fn many_assets_app(assets: usize, permits: usize) -> TestApp {
+    let mints = (0..assets)
+        .map(|i| ([0x5a; 28], format!("M{i:02}"), 1))
+        .collect();
+
+    let cfg = SyntheticBlockConfig {
+        block_count: 5,
+        txs_per_block: 1,
+        mints_by_block: vec![vec![mints]],
+        ..Default::default()
+    };
+
+    TestApp::new_with_cfg_and_domain(cfg, |domain| {
+        domain.with_query_limiter(QueryLimiter::new(permits))
+    })
+}
+
+/// The most archive entity-index reads `app` runs at once while `f` runs, with
+/// `f`'s output. Each read is held a few milliseconds, so that reads that may
+/// overlap do: an asset read starts with one, under a query permit.
+pub async fn readers_at_once<T>(app: &TestApp, f: impl Future<Output = T>) -> (usize, T) {
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+
+    app.facade.inner.during_entity_slots({
+        let (in_flight, peak) = (in_flight.clone(), peak.clone());
+
+        move || {
+            let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(5));
+            in_flight.fetch_sub(1, Ordering::SeqCst);
+        }
+    });
+
+    let out = f.await;
+
+    (peak.load(Ordering::SeqCst), out)
 }
 
 /// The delay of a slow-read fault in a stall test.

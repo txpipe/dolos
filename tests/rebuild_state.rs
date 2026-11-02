@@ -1,4 +1,4 @@
-//! `dolos doctor rebuild-state`, end to end against real on-disk stores.
+//! `dolos data rebuild`, end to end against real on-disk stores.
 //!
 //! The rebuild-equality claim: a chain built through the import lifecycle,
 //! its state wiped, rebuilt from nothing but the instance's own archive,
@@ -148,7 +148,7 @@ fn rebuild(node: &Node, extra: &[&str]) -> std::process::Output {
     command
         .arg("--config")
         .arg(node.config_path())
-        .args(["doctor", "rebuild-state"])
+        .args(["data", "rebuild"])
         .args(extra);
 
     command.output().unwrap()
@@ -165,7 +165,7 @@ fn an_in_place_rebuild_reproduces_the_synced_state() {
     let before = InstanceContents::read(&node);
     assert!(before.state.cursor.is_some(), "fixture did not sync");
 
-    let stdout = assert_ok(&rebuild(&node, &["--force"]));
+    let stdout = assert_ok(&rebuild(&node, &["--yes"]));
     assert!(stdout.contains("rebuilt in place"), "{stdout}");
 
     let after = InstanceContents::read(&node);
@@ -187,7 +187,7 @@ fn rewrite_logs_reproduces_the_log_rows_and_leaves_blocks_alone() {
 
     let before = InstanceContents::read(&node);
 
-    assert_ok(&rebuild(&node, &["--force", "--rewrite-logs"]));
+    assert_ok(&rebuild(&node, &["--yes", "--rewrite-logs"]));
 
     let after = InstanceContents::read(&node);
 
@@ -199,9 +199,9 @@ fn rewrite_logs_reproduces_the_log_rows_and_leaves_blocks_alone() {
 }
 
 /// An archive written before scripts in auxiliary data were tagged has no
-/// `script` tag for them, so once rolling history prunes a script's first
-/// block, `script_by_hash` cannot find a later one. `--rewrite-logs`
-/// re-applies the index of every block it replays, which fills them in.
+/// `script` tag for them, so `script_by_hash` cannot find them and the roll
+/// takes each repeat for a first sighting. `--rewrite-logs` re-applies the
+/// index of every block it replays, which fills them in.
 #[test]
 fn rewrite_logs_fills_in_index_entries_an_older_archive_lacks() {
     use dolos_cardano::indexes::archive_dimensions::SCRIPT;
@@ -252,7 +252,7 @@ fn rewrite_logs_fills_in_index_entries_an_older_archive_lacks() {
         assert_eq!(tagged(&stores.archive), 0);
     }
 
-    assert_ok(&rebuild(&node, &["--force", "--rewrite-logs"]));
+    assert_ok(&rebuild(&node, &["--yes", "--rewrite-logs"]));
 
     let after = InstanceContents::read(&node);
     assert_eq!(after.tags, before.tags);
@@ -293,6 +293,188 @@ fn target_and_ephemeral_leave_the_instance_untouched() {
     );
 }
 
+/// A node synced over devnet's genesis with 700-slot epochs and `k` = 10,
+/// starting at Alonzo, so ESTART seals an epoch two boundaries after it.
+/// Every block's first tx carries the same three scripts.
+fn sync_across_sealed_epochs() -> Node {
+    sync_across_sealed_epochs_from(350, 350, vec![])
+}
+
+/// [`sync_across_sealed_epochs`] with its blocks at `first_slot` and every
+/// `slot_step` after, and the given txs of each block phase-2 invalid.
+fn sync_across_sealed_epochs_from(
+    first_slot: u64,
+    slot_step: u64,
+    invalid_txs_by_block: Vec<Vec<u32>>,
+) -> Node {
+    let node = Node::new();
+    let root = node.root.path();
+    dolos_cardano::include::devnet::save(root).unwrap();
+
+    let patch = |file: &str, edit: &dyn Fn(&mut serde_json::Value)| {
+        let path = root.join(file);
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        edit(&mut json);
+        std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+    };
+
+    patch("shelley.json", &|json| {
+        json["epochLength"] = 700.into();
+        json["securityParam"] = 10.into();
+    });
+    patch("byron.json", &|json| {
+        json["protocolConsts"]["k"] = 10.into()
+    });
+
+    let files = dolos_core::config::GenesisConfig {
+        force_protocol: Some(6),
+        ..dolos_core::config::GenesisConfig::in_dir(root)
+    };
+
+    let genesis = dolos_core::Genesis::from_file_paths(
+        &files.byron_path,
+        &files.shelley_path,
+        &files.alonzo_path,
+        &files.conway_path,
+        files.force_protocol,
+    )
+    .unwrap();
+
+    // plain, balanced txs, as the period-log seal tests run them
+    node.sync_chain(
+        std::sync::Arc::new(genesis),
+        files,
+        dolos_testing::synthetic::SyntheticBlockConfig {
+            block_count: 16,
+            txs_per_block: 1,
+            slot: first_slot,
+            slot_step,
+            invalid_txs_by_block,
+            plain_txs: true,
+            seed_amount: dolos_testing::MIN_UTXO_AMOUNT + 7,
+            asset_names_by_block: (0..16).map(|i| format!("M{i:03}")).collect(),
+            ..Default::default()
+        },
+    );
+
+    node
+}
+
+/// The script entries of an archive's entity index.
+fn script_entries(archive: &dolos::storage::ArchiveStoreBackend) -> Vec<(Vec<u8>, u64)> {
+    archive
+        .iter_entity_records(&[dolos_cardano::indexes::entities::SCRIPT], 0..u64::MAX)
+        .unwrap()
+        .map(|record| {
+            let record = record.unwrap();
+            (record.key().to_vec(), record.slot)
+        })
+        .collect()
+}
+
+/// `--target` over an archive whose seals indexed every script: the roll's
+/// witness reads the source archive's entity index below each batch, so the
+/// scripts every block repeats are staged once, in the epoch of their first
+/// carrier, long sealed when the replay reaches the later blocks. A witness
+/// that read no index would stage them again in the unsealed epochs and the
+/// rebuilt state would differ. The batch bound is the next two tests'.
+#[test]
+fn a_target_rebuild_reads_the_source_entity_index_across_sealed_epochs() {
+    let node = sync_across_sealed_epochs();
+    let before = InstanceContents::read(&node);
+
+    {
+        let stores =
+            dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&node.config).unwrap();
+        let entries = script_entries(&stores.archive);
+
+        assert_eq!(entries.len(), 3, "the seal indexed {entries:?}");
+        assert!(entries.iter().all(|(_, slot)| *slot == 350));
+    }
+
+    assert!(
+        before.state.entities["first-scripts"].is_empty(),
+        "the first carrier's epoch was not sealed"
+    );
+
+    let target = node.root.path().join("rebuilt-state");
+    assert_ok(&rebuild(
+        &node,
+        &["--target", &target.display().to_string()],
+    ));
+
+    let rebuilt =
+        dolos::storage::StateStoreBackend::open_fjall(&target, dolos_fjall::Preset::Standard)
+            .unwrap();
+
+    assert_eq!(StateContents::read(&rebuilt), before.state);
+}
+
+/// `--target` stopped at epoch 1, before the replay seals the first
+/// carrier's epoch: the source index already holds the scripts' entries, at
+/// the first carrier's slot, so a witness that reads the index at or past
+/// the batch takes the first carrier for a repeat and stages nothing. Bounded
+/// below the batch, it stages each script once.
+#[test]
+fn a_stopped_target_rebuild_stages_the_first_carrier() {
+    let node = sync_across_sealed_epochs();
+
+    let target = node.root.path().join("rebuilt-state");
+    assert_ok(&rebuild(
+        &node,
+        &[
+            "--target",
+            &target.display().to_string(),
+            "--stop-epoch",
+            "1",
+        ],
+    ));
+
+    let rebuilt =
+        dolos::storage::StateStoreBackend::open_fjall(&target, dolos_fjall::Preset::Standard)
+            .unwrap();
+
+    let staged = &StateContents::read(&rebuilt).entities["first-scripts"];
+    assert_eq!(staged.len(), 3, "staged {staged:?}");
+}
+
+/// The chain's first block carries the scripts in an invalid tx only, so
+/// their first carrier is the second block, which shares a batch with the
+/// third: a witness bounded at the batch's last slot reads the first
+/// carrier's own index entries as earlier ones and stages nothing.
+#[test]
+fn a_stopped_target_rebuild_bounds_the_witness_at_the_batch_start() {
+    let node = sync_across_sealed_epochs_from(100, 200, vec![vec![0]]);
+
+    {
+        let stores =
+            dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&node.config).unwrap();
+        let entries = script_entries(&stores.archive);
+
+        assert_eq!(entries.len(), 3, "the seal indexed {entries:?}");
+        assert!(entries.iter().all(|(_, slot)| *slot == 300));
+    }
+
+    let target = node.root.path().join("rebuilt-state");
+    assert_ok(&rebuild(
+        &node,
+        &[
+            "--target",
+            &target.display().to_string(),
+            "--stop-epoch",
+            "1",
+        ],
+    ));
+
+    let rebuilt =
+        dolos::storage::StateStoreBackend::open_fjall(&target, dolos_fjall::Preset::Standard)
+            .unwrap();
+
+    let staged = &StateContents::read(&rebuilt).entities["first-scripts"];
+    assert_eq!(staged.len(), 3, "staged {staged:?}");
+}
+
 /// A `--target` holding a state store a release that predates store
 /// identities wrote is refused, and left as it was.
 #[test]
@@ -318,23 +500,92 @@ fn a_target_holding_an_unmarked_store_is_refused() {
     assert_eq!(unmarked.read_cursor().unwrap(), Some(ChainPoint::Origin));
 }
 
-/// The in-place wipe asks first. With no terminal attached there is nobody to
-/// ask, so the command refuses before touching anything — `--force` is the
-/// non-interactive spelling of yes.
+/// The in-place wipe never prompts: without `--yes` the command names the
+/// store it would wipe and exits 2 before touching anything.
 #[test]
-fn without_force_a_non_interactive_rebuild_refuses_before_touching_anything() {
+fn without_yes_an_in_place_rebuild_refuses_before_touching_anything() {
     let node = Node::new();
     node.sync();
 
     let before = InstanceContents::read(&node);
+    let files = read_dir_bytes(&node.config.storage.path);
 
-    let output = rebuild(&node, &[]);
-    assert!(!output.status.success());
+    let state = node.config.storage.state_path().unwrap();
+    let wal = node.config.wal_path().unwrap();
+    let archive = node.config.storage.archive_path().unwrap();
+
+    // An observer of the archive is no reason to refuse otherwise: the
+    // refusal comes before any store opens.
+    let observer = dolos_fjall::view::View::of(&archive.join("index"), &archive).unwrap();
+
+    for (flags, rewritten) in [
+        (&[][..], vec![&state, &wal]),
+        (&["--rewrite-logs"][..], vec![&state, &wal, &archive]),
+    ] {
+        let output = rebuild(&node, flags);
+        assert_eq!(output.status.code(), Some(2));
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("--yes"), "{stderr}");
+
+        for path in rewritten {
+            assert!(stderr.contains(&path.display().to_string()), "{stderr}");
+        }
+    }
+
+    drop(observer);
+
+    // Before the contents are read back: a writable open rewrites files.
+    assert_eq!(read_dir_bytes(&node.config.storage.path), files);
+    assert_eq!(InstanceContents::read(&node), before);
+}
+
+/// A live view of the state refuses an in-place rebuild before any store
+/// opens: the wipe would empty the store under its reader.
+#[test]
+fn a_live_view_of_the_state_refuses_an_in_place_rebuild() {
+    let node = Node::new();
+    node.sync();
+
+    let state = node.config.storage.state_path().unwrap();
+    let view = dolos_fjall::view::View::of(&state, &state).unwrap();
+
+    // Before any store opens: the first writable open rewrites files.
+    let files = read_dir_bytes(&node.config.storage.path);
+
+    let output = rebuild(&node, &["--yes"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(read_dir_bytes(&node.config.storage.path), files);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("--force"), "{stderr}");
+    assert!(stderr.contains("holds the state store"), "{stderr}");
+    // miette wraps a long path, so the view's own folder name is matched.
+    let held = view.path().parent().unwrap().file_name().unwrap();
+    assert!(stderr.contains(&*held.to_string_lossy()), "{stderr}");
 
-    assert_eq!(InstanceContents::read(&node), before);
+    drop(view);
+}
+
+/// A `--target` holding anything is refused before the archive opens for
+/// writing, which would rewrite its files.
+#[test]
+fn a_target_holding_files_is_refused_before_the_archive_opens() {
+    let node = Node::new();
+    node.sync();
+
+    let archive = node.config.storage.archive_path().unwrap();
+    let archive_files = read_dir_bytes(&archive);
+
+    let target = node.root.path().join("rebuilt-state");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("notes"), b"the operator's").unwrap();
+
+    let output = rebuild(&node, &["--target", &target.display().to_string()]);
+    assert_eq!(output.status.code(), Some(1));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("not empty"), "{stderr}");
+    assert_eq!(read_dir_bytes(&archive), archive_files);
 }
 
 /// A zero chunk imports no blocks, so the replay would end instantly. In
@@ -347,8 +598,8 @@ fn a_zero_chunk_is_refused_before_touching_anything() {
 
     let before = InstanceContents::read(&node);
 
-    let output = rebuild(&node, &["--force", "--chunk", "0"]);
-    assert!(!output.status.success());
+    let output = rebuild(&node, &["--yes", "--chunk", "0"]);
+    assert_eq!(output.status.code(), Some(2));
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("--chunk"), "{stderr}");
@@ -363,9 +614,65 @@ fn stop_epoch_requires_an_isolated_output() {
     let node = Node::new();
     node.sync();
 
-    let output = rebuild(&node, &["--force", "--stop-epoch", "1"]);
-    assert!(!output.status.success());
+    let output = rebuild(&node, &["--yes", "--stop-epoch", "1"]);
+    assert_eq!(output.status.code(), Some(2));
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("--target"), "{stderr}");
+}
+
+/// A rebuild replays the archive, so without one it refuses, naming it, and
+/// creates no archive and wipes no state.
+#[test]
+fn a_rebuild_without_an_archive_is_refused() {
+    let node = Node::new();
+    node.sync();
+
+    let archive = node.config.storage.archive_path().unwrap();
+    std::fs::remove_dir_all(&archive).unwrap();
+
+    let state = node.config.storage.state_path().unwrap();
+    let before = read_dir_bytes(&state);
+
+    let output = rebuild(&node, &["--yes"]);
+    assert_eq!(output.status.code(), Some(1));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no store at"), "{stderr}");
+    assert!(stderr.contains("archive"), "{stderr}");
+
+    assert!(!archive.exists());
+    assert_eq!(read_dir_bytes(&state), before);
+}
+
+/// Every file under `dir`, with its bytes; one another handle holds locked,
+/// which Windows refuses to read, with its length instead.
+fn read_dir_bytes(dir: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
+    let mut found = BTreeMap::new();
+    let mut pending = vec![dir.to_path_buf()];
+
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                // ERROR_LOCK_VIOLATION: Windows file locks are mandatory.
+                Err(error) if cfg!(windows) && error.raw_os_error() == Some(33) => {
+                    let length = std::fs::metadata(&path).unwrap().len();
+                    format!("locked, {length} bytes").into_bytes()
+                }
+                Err(error) => panic!("{}: {error}", path.display()),
+            };
+
+            found.insert(path, bytes);
+        }
+    }
+
+    found
 }

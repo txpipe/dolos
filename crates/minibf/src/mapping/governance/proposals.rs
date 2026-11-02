@@ -26,16 +26,15 @@ use crate::mapping::{
     stake_cred_to_address, IntoModel, Unrounded,
 };
 
-pub fn governance_type(action: &ProposalAction) -> Option<GovernanceType> {
+pub fn governance_type(action: &ProposalAction) -> GovernanceType {
     match action {
-        ProposalAction::ParamChange(_) => Some(GovernanceType::ParameterChange),
-        ProposalAction::HardFork(_) => Some(GovernanceType::HardForkInitiation),
-        ProposalAction::TreasuryWithdrawal(_) => Some(GovernanceType::TreasuryWithdrawals),
-        ProposalAction::NoConfidence => Some(GovernanceType::NoConfidence),
-        ProposalAction::UpdateCommittee { .. } => Some(GovernanceType::NewCommittee),
-        ProposalAction::NewConstitution { .. } => Some(GovernanceType::NewConstitution),
-        ProposalAction::Info => Some(GovernanceType::InfoAction),
-        ProposalAction::Other => None,
+        ProposalAction::ParamChange(_) => GovernanceType::ParameterChange,
+        ProposalAction::HardFork(_) => GovernanceType::HardForkInitiation,
+        ProposalAction::TreasuryWithdrawal(_) => GovernanceType::TreasuryWithdrawals,
+        ProposalAction::NoConfidence => GovernanceType::NoConfidence,
+        ProposalAction::UpdateCommittee { .. } => GovernanceType::NewCommittee,
+        ProposalAction::NewConstitution { .. } => GovernanceType::NewConstitution,
+        ProposalAction::Info => GovernanceType::InfoAction,
     }
 }
 
@@ -150,9 +149,6 @@ impl ProposalModelBuilder {
             ProposalAction::UpdateCommittee { .. } => proposal::GovernanceType::NewCommittee,
             ProposalAction::NewConstitution { .. } => proposal::GovernanceType::NewConstitution,
             ProposalAction::Info => proposal::GovernanceType::InfoAction,
-            // read_proposal rejects a legacy row that the archive cannot
-            // resolve, so this arm never renders.
-            ProposalAction::Other => proposal::GovernanceType::InfoAction,
         }
     }
 
@@ -271,20 +267,17 @@ mod tests {
         let cases = [
             (
                 ProposalAction::ParamChange(PParamsSet::default()),
-                Some(GovernanceType::ParameterChange),
+                GovernanceType::ParameterChange,
             ),
             (
                 ProposalAction::HardFork((10, 0)),
-                Some(GovernanceType::HardForkInitiation),
+                GovernanceType::HardForkInitiation,
             ),
             (
                 ProposalAction::TreasuryWithdrawal(vec![]),
-                Some(GovernanceType::TreasuryWithdrawals),
+                GovernanceType::TreasuryWithdrawals,
             ),
-            (
-                ProposalAction::NoConfidence,
-                Some(GovernanceType::NoConfidence),
-            ),
+            (ProposalAction::NoConfidence, GovernanceType::NoConfidence),
             (
                 ProposalAction::UpdateCommittee {
                     to_remove: vec![],
@@ -294,7 +287,7 @@ mod tests {
                         denominator: 2,
                     },
                 },
-                Some(GovernanceType::NewCommittee),
+                GovernanceType::NewCommittee,
             ),
             (
                 ProposalAction::NewConstitution {
@@ -304,11 +297,9 @@ mod tests {
                     },
                     guardrail_script: None,
                 },
-                Some(GovernanceType::NewConstitution),
+                GovernanceType::NewConstitution,
             ),
-            (ProposalAction::Info, Some(GovernanceType::InfoAction)),
-            // the legacy catch-all carries no action to name
-            (ProposalAction::Other, None),
+            (ProposalAction::Info, GovernanceType::InfoAction),
         ];
 
         for (action, expected) in cases {
@@ -329,7 +320,7 @@ mod tests {
             canceled_epoch: canceled,
             deposit: Some(100_000_000),
             reward_account: Some(StakeCredential::AddrKeyhash([7u8; 28].into())),
-            proposed_in: Some(640),
+            proposed_in: 640,
             parent: None,
             purpose: None,
             anchor: None,

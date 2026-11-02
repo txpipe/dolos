@@ -14,12 +14,17 @@ publisher artifact has been released and qualified; never run old and new
 publishers against the same stores or repository head. The Stelae deployment
 documentation defines the compatible upgrade and rollback procedure.
 
-The supported Dolos command surface remains:
+The rest of the `dolos snapshot` family followed in Dolos v2: `digest`,
+`verify` and `inspect` are now `stelae-publisher` commands too, and Dolos keeps
+only the restoring side. The supported command surface is:
 
-- `dolos snapshot digest` for deterministic local reproduction;
-- `dolos snapshot verify [--reproduce]` for transport and store-backed checks;
-- `dolos snapshot inspect` for repository metadata; and
+- `stelae-publisher digest` for deterministic local reproduction;
+- `stelae-publisher verify [--reproduce]` for transport and store-backed checks;
+- `stelae-publisher inspect` for repository metadata; and
 - `dolos bootstrap stelae` for directory or OCI restoration.
+
+The Dolos library functions behind them (`export::{digest_document,
+verify_reproduction}`, `registry::Repository::{inspect, verify}`) stay.
 
 Embedded hosts retain `ReplayWorkspace`, `SnapshotSource`,
 `SnapshotRepository`, profile planning/encoding and restoration. Repository
@@ -39,7 +44,7 @@ commit.
 
 | Surface | Before | After |
 | --- | --- | --- |
-| `dolos snapshot` | `publish`, `backfill`, `digest`, `verify`, `inspect` | `digest`, `verify`, `inspect` |
+| `dolos snapshot` | `publish`, `backfill`, `digest`, `verify`, `inspect` | `digest`, `verify`, `inspect`; in v2, none (all in `stelae-publisher`) |
 | root `mithril` feature | Mithril bootstrap plus `dolos-snapshot/backfill` | Mithril bootstrap only |
 | `dolos-snapshot` | optional backfill dependencies and publisher policy module | profile/driver-level encode, repository, restore and reproduction APIs |
 | production processes | existing Dolos publisher binaries | unchanged until an explicit Stelae rollout |

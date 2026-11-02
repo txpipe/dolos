@@ -99,11 +99,13 @@ pub fn run(sh: &Shell, args: &BootstrapArgs) -> Result<()> {
         .with_context(|| format!("writing config: {}", config_path.display()))?;
 
     // Only use seed if not skipped and configured
+    let mut seeded = false;
     if !args.skip_seed {
         if let Some(ref seed) = seed_path {
             if seed.exists() {
                 println!("Copying seed data: {}", seed.display());
                 copy_dir_recursive(seed, &data_dir)?;
+                seeded = true;
             } else {
                 bail!("seed directory not found: {}", seed.display());
             }
@@ -127,11 +129,18 @@ pub fn run(sh: &Shell, args: &BootstrapArgs) -> Result<()> {
     let _dir_guard = sh.push_dir(&repo_root);
 
     let verbose_flag: &[&str] = if args.verbose { &["--verbose"] } else { &[] };
+    // A seeded instance resumes the replay from the seed's position; otherwise
+    // `--force` replaces any data the instance already holds.
+    let data_flag: &[&str] = match (seeded, args.force) {
+        (true, _) => &["--continue"],
+        (false, true) => &["--force"],
+        (false, false) => &[],
+    };
     let stop_epoch = args.stop_epoch.to_string();
 
     cmd!(
         sh,
-        "cargo run --release --bin dolos -- --config {config_path} bootstrap {verbose_flag...} mithril --skip-download --skip-validation --retain-snapshot --download-dir {snapshot_dir} --stop-epoch {stop_epoch}"
+        "cargo run --release --bin dolos -- --config {config_path} bootstrap {verbose_flag...} mithril --skip-download --skip-validation --retain-snapshot --download-dir {snapshot_dir} --stop-epoch {stop_epoch} {data_flag...}"
     )
     .run()?;
 

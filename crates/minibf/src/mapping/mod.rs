@@ -41,7 +41,9 @@ use blockfrost_openapi::models::{
 use dolos_cardano::pallas_extras;
 use dolos_core::{async_query::BlockRefMeta, TxHash, TxoIdx, TxoRef, UtxoValue};
 
+pub mod accounts;
 pub mod address_stats;
+pub mod assets;
 pub mod blocks;
 pub mod cost_models;
 pub mod direct_json;

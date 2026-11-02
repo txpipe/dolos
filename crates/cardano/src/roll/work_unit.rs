@@ -70,6 +70,7 @@ where
             self.genesis.clone(),
             &self.cache,
             domain.state(),
+            domain.archive(),
             &mut self.batch,
         )?;
 

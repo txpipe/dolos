@@ -39,25 +39,24 @@ pub struct PoolParams {
     pub pool_metadata: Option<PoolMetadata>,
 }
 
-/// A registered pool. Indexes 11 and 12 held fields that left the record;
-/// they must not be reused.
+/// A registered pool.
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PoolState {
-    #[n(1)]
+    #[n(0)]
     pub operator: PoolHash,
 
-    #[n(2)]
+    #[n(1)]
     pub snapshot: EpochValue<PoolSnapshot>,
 
-    #[n(13)]
+    #[n(2)]
     pub retiring_epoch: Option<u64>,
 
-    #[n(16)]
+    #[n(3)]
     pub deposit: u64,
 
     /// The pool's highest-nonce CIP-151 registration signed by its cold key
     /// in a valid transaction. `None` before any registration.
-    #[n(17)]
+    #[n(4)]
     #[cbor(default)]
     pub calidus: Option<CalidusRegistration>,
 }
@@ -85,32 +84,32 @@ pub struct CalidusRegistration {
 /// Pool state that is epoch-specific
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PoolSnapshot {
-    #[n(1)]
+    #[n(0)]
     pub is_retired: bool,
 
-    #[n(2)]
+    #[n(1)]
     pub blocks_minted: u32,
 
-    #[n(3)]
+    #[n(2)]
     pub params: PoolParams,
 
-    #[n(4)]
+    #[n(3)]
     pub is_new: bool,
 
     /// The active stake delegated to the pool in this snapshot's epoch.
     /// `None` while the snapshot is live; ESTART fills it when the snapshot
     /// freezes into `mark`.
-    #[n(5)]
+    #[n(4)]
     pub stake: Option<u64>,
 
     /// The accounts delegated to the pool in this snapshot's epoch, frozen
     /// with `stake`.
-    #[n(6)]
+    #[n(5)]
     pub delegators: Option<u64>,
 
     /// The part of `stake` delegated by the pool's own owners, frozen with
     /// `stake`.
-    #[n(7)]
+    #[n(6)]
     pub live_pledge: Option<u64>,
 }
 
@@ -179,9 +178,46 @@ hash_key!(
 
 display_as_stored!(PoolKey);
 
-entity_boilerplate!(PoolState, "pools", state = PoolKey);
+entity_boilerplate!(PoolState, "pools", state = PoolKey, log = PoolKey);
+
+/// A retired pool's final row is its last state row: the API serves its
+/// parameters and calidus key from it.
+impl crate::final_rows::FinalRow for PoolState {
+    fn final_row(&self) -> Self {
+        self.clone()
+    }
+}
 
 impl PoolState {
+    /// Whether the boundary about to rotate this row moves it to the
+    /// final-row log (`crate::final_rows`): once rotated, every snapshot is
+    /// retired. The rotation makes `live` the new `mark`, `mark` the new `set`
+    /// and `set` the new `go`, and the new `live` is `next`, or a copy of
+    /// `live` when nothing is scheduled, so those are the snapshots it checks.
+    /// A pool always holds `mark` and `set` by then, since it registered
+    /// before the epoch it retires at; a row without them stays.
+    ///
+    /// No ledger rule reads such a pool: RUPD last reads it in the epoch after
+    /// its retiring one, and every other reader takes the branch of an absent
+    /// row on a retired snapshot. A pool retiring at epoch `r` moves at the
+    /// boundary opening `r + 3` (see [`Self::final_row_epoch`]).
+    pub fn leaves_state(&self) -> bool {
+        let retired = |snapshot: Option<&PoolSnapshot>| snapshot.is_some_and(|x| x.is_retired);
+
+        retired(self.snapshot.live())
+            && retired(self.snapshot.mark())
+            && retired(self.snapshot.set())
+            && self.snapshot.next().is_none_or(|x| x.is_retired)
+    }
+
+    /// The epoch a pool retiring at `retiring_epoch` keys its final row at:
+    /// the epoch the boundary that moves it closes. Its snapshot of
+    /// `retiring_epoch - 1` is the last one not retired, and the rotation that
+    /// takes it out of `go` is the boundary opening `retiring_epoch + 3`.
+    pub fn final_row_epoch(retiring_epoch: Epoch) -> Epoch {
+        retiring_epoch + 2
+    }
+
     pub fn live_saturation(&self) -> RationalNumber {
         // TODO: implement
         RationalNumber {
