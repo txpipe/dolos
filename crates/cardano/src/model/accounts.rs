@@ -514,7 +514,7 @@ pub struct AccountHistoryState {
     #[n(0)]
     pub lifetime_rewards: u64,
 
-    /// The epoch of the newest deregistration among the retired lives;
+    /// The slot of the newest deregistration among the retired lives;
     /// absent when none deregistered. It sets `active_epoch` when the
     /// credential has no live row, or a row with neither date.
     #[n(1)]
