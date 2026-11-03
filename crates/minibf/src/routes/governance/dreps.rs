@@ -21,7 +21,7 @@ use serde::Deserialize;
 use crate::{
     error::Error,
     mapping::governance::dreps::{drep_amount, drep_is_expired, drep_is_retired, drep_list_item},
-    offchain::{cached_drep_metadata, fetch_drep_metadata, settle_within, unfetched, OnOverload},
+    offchain::{cached_drep_metadata, fetch_listed_drep_metadata, settle_within, unfetched},
     pagination::{Order, Pagination, PaginationParameters},
     scan::{EntityScan, ENTITY_CHUNK},
     Facade,
@@ -387,13 +387,10 @@ where
         .flat_map(|row| row.observation.anchor.clone())
         .collect();
 
-    // a page shows what it has rather than wait on a backlog of loads
-    let on_overload = OnOverload::Unfetched;
-
     let metadata = page_metadata(
         &anchors,
         |anchor| cached_drep_metadata(cache, anchor),
-        |anchor| fetch_drep_metadata(cache, &gateways, anchor, on_overload),
+        |anchor| fetch_listed_drep_metadata(cache, &gateways, anchor),
         PAGE_METADATA_DEADLINE,
     )
     .await;

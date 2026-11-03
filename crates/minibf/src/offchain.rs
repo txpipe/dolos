@@ -348,6 +348,35 @@ pub async fn fetch_drep_metadata<C: CacheStore>(
     fetch_anchor_metadata(cache, DREP_CACHE, ipfs_gateways, anchor, on_overload).await
 }
 
+/// The metadata of `anchor` for a `/governance/dreps` row that has just missed
+/// the cache. A miss at the pending fill limit gets the anchor alone: a page
+/// shows what it has rather than wait on a backlog of loads.
+pub async fn fetch_listed_drep_metadata<C: CacheStore>(
+    cache: &C,
+    ipfs_gateways: &[String],
+    anchor: &Anchor,
+) -> DrepsInnerMetadata {
+    let body = load_missed_body(
+        cache,
+        &MetadataLocation::from(anchor),
+        DREP_CACHE,
+        OnOverload::Unfetched,
+        || fetch_anchor_body(anchor.clone(), ipfs_gateways.to_vec()),
+    )
+    .await;
+
+    anchor_metadata(anchor, body)
+}
+
+async fn fetch_anchor_body(
+    anchor: Anchor,
+    ipfs_gateways: Vec<String>,
+) -> Result<Vec<u8>, Option<DrepsInnerMetadataError>> {
+    anchor_offchain_body(&anchor.url, anchor.content_hash.as_ref(), &ipfs_gateways)
+        .await
+        .map_err(Some)
+}
+
 /// The metadata of a proposal anchor, from the cache, else fetched and kept.
 /// Waits at most [`anchor_fetch_budget`], the wait for a fill permit included.
 /// Past it, reports a connection error, as a fetch timeout does.
@@ -453,13 +482,22 @@ pub async fn fetch_pool_metadata<C: CacheStore>(
         .unwrap_or_else(|_| (None, Some(pool_connection_error(&metadata.url))))
 }
 
-/// The metadata of a pool and its last fetch error, for a list row. A miss at
-/// the pending fill limit gets no metadata.
+/// The metadata of a pool and its last fetch error, for a list row that has
+/// just missed the cache. A miss at the pending fill limit gets no metadata.
 pub async fn fetch_listed_pool_metadata<C: CacheStore>(
     cache: &C,
     metadata: &PoolMetadata,
 ) -> PoolMetadataLoad {
-    load_pool_metadata(cache, metadata, OnOverload::Unfetched, fetch_pool_body).await
+    let body = load_missed_body(
+        cache,
+        &MetadataLocation::from(metadata),
+        POOL_CACHE,
+        OnOverload::Unfetched,
+        || fetch_pool_body(metadata.clone()),
+    )
+    .await;
+
+    pool_metadata_of(body)
 }
 
 async fn fetch_pool_body(
@@ -512,6 +550,22 @@ where
         return cached;
     }
 
+    load_missed_body(cache, location, namespaces, on_overload, fetch).await
+}
+
+/// [`load_body`] for a caller that has just missed the cache for `location`.
+async fn load_missed_body<C, F, Fut>(
+    cache: &C,
+    location: &MetadataLocation,
+    namespaces: MetadataCache,
+    on_overload: OnOverload,
+    fetch: F,
+) -> MetadataBody
+where
+    C: CacheStore,
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<Vec<u8>, Option<DrepsInnerMetadataError>>> + Send + 'static,
+{
     let filled = match shared_fill(cache, location, namespaces, on_overload, &fetch).await {
         None => return MetadataBody::Unfetched,
         // a namespace that failed to register, which `register` warned of
