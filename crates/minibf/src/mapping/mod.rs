@@ -695,7 +695,7 @@ fn offchain_http_response_error(url: &str, status: StatusCode) -> DrepsInnerMeta
     )
 }
 
-fn offchain_connection_error(url: &str) -> DrepsInnerMetadataError {
+pub(crate) fn offchain_connection_error(url: &str) -> DrepsInnerMetadataError {
     DrepsInnerMetadataError::new(
         Code::ConnectionError,
         format!("The client cannot connect to {url}."),

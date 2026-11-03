@@ -10,7 +10,8 @@ use std::{convert::Infallible, future::Future, path::Path, time::Duration};
 
 use crate::mapping::{
     anchor_fetch_budget, anchor_metadata_from_body, anchor_offchain_body,
-    offchain_hash_mismatch_error, pool_fetch_error, pool_offchain_body, PoolOffchainMetadata,
+    offchain_connection_error, offchain_hash_mismatch_error, pool_connection_error,
+    pool_fetch_error, pool_offchain_body, PoolOffchainMetadata,
 };
 
 // The fetch itself, with its public-address gate, redirect limit, `ipfs://`
@@ -349,6 +350,7 @@ pub async fn fetch_drep_metadata<C: CacheStore>(
 
 /// The metadata of a proposal anchor, from the cache, else fetched and kept.
 /// Waits at most [`anchor_fetch_budget`], the wait for a fill permit included.
+/// Past it, reports a connection error, as a fetch timeout does.
 pub async fn fetch_proposal_metadata<C: CacheStore>(
     cache: &C,
     ipfs_gateways: &[String],
@@ -364,9 +366,14 @@ pub async fn fetch_proposal_metadata<C: CacheStore>(
 
     let deadline = anchor_fetch_budget(&anchor.url, ipfs_gateways);
 
+    // a fetch under way continues and keeps its own result
     tokio::time::timeout(deadline, load)
         .await
-        .unwrap_or_else(|_| unfetched(anchor))
+        .unwrap_or_else(|_| {
+            let mut out = unfetched(anchor);
+            out.error = Some(Box::new(offchain_connection_error(&anchor.url)));
+            out
+        })
 }
 
 async fn fetch_anchor_metadata<C: CacheStore>(
@@ -432,16 +439,18 @@ pub async fn cached_pool_metadata<C: CacheStore>(
 }
 
 /// The metadata of a pool and its last fetch error, for a single-pool request.
-/// Waits at most [`POOL_REQUEST_DEADLINE`].
+/// Waits at most [`POOL_REQUEST_DEADLINE`]. Past it, reports a connection
+/// error, as a fetch timeout does.
 pub async fn fetch_pool_metadata<C: CacheStore>(
     cache: &C,
     metadata: &PoolMetadata,
 ) -> PoolMetadataLoad {
     let load = load_pool_metadata(cache, metadata, OnOverload::Inline, fetch_pool_body);
 
+    // a fetch under way continues and keeps its own result
     tokio::time::timeout(POOL_REQUEST_DEADLINE, load)
         .await
-        .unwrap_or((None, None))
+        .unwrap_or_else(|_| (None, Some(pool_connection_error(&metadata.url))))
 }
 
 /// The metadata of a pool and its last fetch error, for a list row. A miss at
