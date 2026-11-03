@@ -1,0 +1,20 @@
+A Cardano data-node built in Rust
+
+Usage: dolos [OPTIONS] <COMMAND>
+
+Commands:
+  init       Initialize the node configuration
+  daemon     Run the node in all its glory
+  sync       Sync from the upstream peer, and inspect, recover or roll back the WAL
+  serve      Just serve data through apis
+  data       Commands to interact with data
+  config     Commands over the configuration file
+  cache      Fill, clear, inspect and check the cache, with the node stopped
+  service    Install the node as an OS service, or uninstall it
+  bootstrap  Fill the node's stores from a Stelae snapshot, Mithril or a local ImmutableDB
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+  -c, --config <CONFIG>  
+  -h, --help             Print help
+  -V, --version          Print version

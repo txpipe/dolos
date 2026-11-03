@@ -11,8 +11,9 @@ pub const DATUM_NS: &str = "datums";
 /// State of a witness datum with reference counting.
 ///
 /// Datums are keyed by their hash (32 bytes) and store:
-/// - `refcount`: Number of UTxOs currently referencing this datum
-/// - `bytes`: The raw CBOR-encoded datum bytes
+/// - `refcount`: Number of live UTxOs whose datum option is this hash
+/// - `bytes`: The raw CBOR-encoded datum bytes, empty until a transaction
+///   producing one of those UTxOs witnesses the datum
 #[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DatumState {
     #[n(0)]
@@ -58,8 +59,8 @@ pub(crate) mod testing {
 
 /// Delta for incrementing a datum's reference count.
 ///
-/// Emitted when a UTxO is produced with a `DatumOption::Hash` that references
-/// a datum present in the transaction's witness set.
+/// Emitted for every UTxO produced with a `DatumOption::Hash`, carrying the
+/// datum when the transaction witnesses it and empty bytes otherwise.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatumRefIncrement {
     pub(crate) datum_hash: Hash<32>,
@@ -68,6 +69,9 @@ pub struct DatumRefIncrement {
     /// For undo: was this datum newly created (true) or did it already exist
     /// (false)?
     pub(crate) was_new: bool,
+
+    /// For undo: did this delta set the bytes of a row that had none?
+    pub(crate) filled: bool,
 }
 
 impl DatumRefIncrement {
@@ -76,6 +80,7 @@ impl DatumRefIncrement {
             datum_hash,
             datum_bytes,
             was_new: false,
+            filled: false,
         }
     }
 }
@@ -90,13 +95,17 @@ impl dolos_core::EntityDelta for DatumRefIncrement {
     fn apply(&mut self, entity: &mut Option<DatumState>) {
         match entity {
             Some(state) => {
-                // Existing datum - just increment refcount
                 self.was_new = false;
+                self.filled = state.bytes.is_empty() && !self.datum_bytes.is_empty();
                 state.refcount = state.refcount.saturating_add(1);
+
+                if self.filled {
+                    state.bytes = self.datum_bytes.clone();
+                }
             }
             None => {
-                // New datum - create with refcount=1
                 self.was_new = true;
+                self.filled = false;
                 *entity = Some(DatumState::new(self.datum_bytes.clone()));
             }
         }
@@ -107,13 +116,18 @@ impl dolos_core::EntityDelta for DatumRefIncrement {
             *entity = None;
         } else if let Some(state) = entity {
             state.refcount = state.refcount.saturating_sub(1);
+
+            if self.filled {
+                state.bytes.clear();
+            }
         }
     }
 }
 
 /// Delta for decrementing a datum's reference count.
 ///
-/// Emitted when a UTxO is consumed that had a `DatumOption::Hash`.
+/// Emitted when a UTxO is consumed that had a `DatumOption::Hash`, which its
+/// production counted.
 /// If the refcount reaches zero, the datum is removed from the state store.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatumRefDecrement {
@@ -201,6 +215,51 @@ mod tests {
     }
 
     #[test]
+    fn test_datum_increment_unwitnessed_then_witnessed() {
+        let hash = Hash::new([1u8; 32]);
+        let bytes = vec![0x01, 0x02, 0x03];
+
+        let mut unwitnessed = DatumRefIncrement::new(hash, vec![]);
+        let mut entity: Option<DatumState> = None;
+        unwitnessed.apply(&mut entity);
+        let counted = entity.clone();
+        assert_eq!(
+            counted,
+            Some(DatumState {
+                refcount: 1,
+                bytes: vec![]
+            })
+        );
+
+        let mut witnessed = DatumRefIncrement::new(hash, bytes.clone());
+        witnessed.apply(&mut entity);
+        assert!(witnessed.filled);
+        assert_eq!(entity, Some(DatumState { refcount: 2, bytes }));
+
+        witnessed.undo(&mut entity);
+        assert_eq!(entity, counted);
+    }
+
+    #[test]
+    fn test_datum_increment_keeps_known_bytes() {
+        let hash = Hash::new([1u8; 32]);
+        let bytes = vec![0x01, 0x02, 0x03];
+        let known = Some(DatumState {
+            refcount: 1,
+            bytes: bytes.clone(),
+        });
+
+        let mut unwitnessed = DatumRefIncrement::new(hash, vec![]);
+        let mut entity = known.clone();
+        unwitnessed.apply(&mut entity);
+        assert!(!unwitnessed.filled);
+        assert_eq!(entity, Some(DatumState { refcount: 2, bytes }));
+
+        unwitnessed.undo(&mut entity);
+        assert_eq!(entity, known);
+    }
+
+    #[test]
     fn test_datum_decrement_to_zero() {
         let hash = Hash::new([1u8; 32]);
         let bytes = vec![0x01, 0x02, 0x03];
@@ -235,7 +294,9 @@ mod tests {
     }
 
     use super::testing::any_datum_state;
-    use crate::model::testing::{self as root, assert_delta_roundtrip};
+    use crate::model::testing::{
+        self as root, assert_delta_roundtrip, assert_delta_serde_roundtrip,
+    };
     use proptest::prelude::*;
 
     prop_compose! {
@@ -270,6 +331,22 @@ mod tests {
             delta in any_datum_ref_decrement(),
         ) {
             assert_delta_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn datum_ref_increment_serde_roundtrip(
+            entity in prop::option::of(any_datum_state()),
+            delta in any_datum_ref_increment(),
+        ) {
+            assert_delta_serde_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn datum_ref_decrement_serde_roundtrip(
+            entity in prop::option::of(any_datum_state()),
+            delta in any_datum_ref_decrement(),
+        ) {
+            assert_delta_serde_roundtrip(entity, delta);
         }
     }
 }

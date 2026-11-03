@@ -13,6 +13,10 @@ use serde::{Deserialize, Serialize};
 
 use super::{epochs::Lovelace, pools::PoolHash, pparams::PParamsSet};
 
+/// A governance action, one variant per Conway action.
+///
+/// Variant order is also part of the WAL format (bincode positional
+/// encoding): append only, never reorder.
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ProposalAction {
     #[n(0)]
@@ -24,19 +28,10 @@ pub enum ProposalAction {
     #[n(2)]
     TreasuryWithdrawal(#[n(0)] Vec<(StakeCredential, Coin)>),
 
-    /// Legacy catch-all for governance actions that weren't tracked in full.
-    /// Kept so pre-existing rows decode; new rows use the specific variants
-    /// below.
     #[n(3)]
-    Other,
-
-    // Variants below are backward-compatible additions: old rows only carry
-    // indexes 0..=3, so they keep decoding. Variant order is also part of the
-    // WAL format (bincode positional encoding) — append only, never reorder.
-    #[n(4)]
     NoConfidence,
 
-    #[n(5)]
+    #[n(4)]
     UpdateCommittee {
         #[n(0)]
         to_remove: Vec<StakeCredential>,
@@ -49,7 +44,7 @@ pub enum ProposalAction {
         threshold: RationalNumber,
     },
 
-    #[n(6)]
+    #[n(5)]
     NewConstitution {
         #[n(0)]
         anchor: Anchor,
@@ -58,23 +53,21 @@ pub enum ProposalAction {
         guardrail_script: Option<ScriptHash>,
     },
 
-    #[n(7)]
+    #[n(6)]
     Info,
 }
 
 impl ProposalAction {
-    /// The lineage tree this action belongs to. Derived from the action
-    /// itself rather than read off `ProposalState.purpose`, so rows written
-    /// before the field existed still resolve their purpose at enactment.
-    /// `None` for the actions that have no lineage — `TreasuryWithdrawal`,
-    /// `Info`, and the legacy `Other` catch-all.
+    /// The lineage tree this action belongs to, derived from the action
+    /// itself. `None` for the actions that have no lineage:
+    /// `TreasuryWithdrawal` and `Info`.
     pub fn purpose(&self) -> Option<GovPurpose> {
         match self {
             Self::ParamChange(_) => Some(GovPurpose::PParamUpdate),
             Self::HardFork(_) => Some(GovPurpose::HardFork),
             Self::NoConfidence | Self::UpdateCommittee { .. } => Some(GovPurpose::Committee),
             Self::NewConstitution { .. } => Some(GovPurpose::Constitution),
-            Self::TreasuryWithdrawal(_) | Self::Info | Self::Other => None,
+            Self::TreasuryWithdrawal(_) | Self::Info => None,
         }
     }
 }
@@ -214,14 +207,10 @@ pub struct ProposalState {
     #[n(8)]
     pub reward_account: Option<StakeCredential>,
 
-    // Fields below are backward-compatible additions: absent in pre-existing
-    // rows, they decode as `None` / empty. Existing indexes are frozen.
-    // Indexes 13..=15 held unbounded vote histories; they are retired and
-    // never reused.
     /// Epoch in which the proposal was submitted. Drives the snapshot filter
     /// at epoch boundaries (`max_epoch` stays as the expiry bound).
     #[n(9)]
-    pub proposed_in: Option<Epoch>,
+    pub proposed_in: Epoch,
 
     /// Lineage parent declared by the action: the previous governance action
     /// id of the same purpose (`None` for the root of the tree, and always
@@ -239,21 +228,21 @@ pub struct ProposalState {
     pub anchor: Option<Anchor>,
 
     /// Constitutional-committee votes, keyed by the member's hot credential.
-    #[n(16)]
+    #[n(13)]
     #[cbor(default)]
     pub cc_votes: BTreeMap<StakeCredential, VoteEntry>,
 
     /// DRep votes, keyed by the DRep credential.
-    #[n(17)]
+    #[n(14)]
     #[cbor(default)]
     pub drep_votes: BTreeMap<StakeCredential, VoteEntry>,
 
     /// Stake-pool operator votes, keyed by the pool operator key hash.
-    #[n(18)]
+    #[n(15)]
     #[cbor(default)]
     pub spo_votes: BTreeMap<PoolHash, VoteEntry>,
 
-    #[n(19)]
+    #[n(16)]
     #[cbor(default)]
     pub cost_models_present: bool,
 }
@@ -357,7 +346,6 @@ pub(crate) mod testing {
             Just(ProposalAction::HardFork((9, 0))),
             root::any_stake_credential()
                 .prop_map(|cred| { ProposalAction::TreasuryWithdrawal(vec![(cred, 1_000_000)]) }),
-            Just(ProposalAction::Other),
             Just(ProposalAction::NoConfidence),
             (
                 root::any_stake_credential(),
@@ -412,7 +400,7 @@ pub(crate) mod testing {
             max_epoch in prop::option::of(root::any_epoch()),
             ratified_epoch in prop::option::of(root::any_epoch()),
             canceled_epoch in prop::option::of(root::any_epoch()),
-            proposed_in in prop::option::of(root::any_epoch()),
+            proposed_in in root::any_epoch(),
             parent in prop::option::of(root::any_gov_action_id()),
             purpose in prop::option::of(any_gov_purpose()),
             anchor in prop::option::of(root::any_anchor()),
@@ -729,10 +717,9 @@ impl dolos_core::EntityDelta for NewProposal {
             // [`ProposalResolved`].
             ratified_epoch: None,
             canceled_epoch: None,
-            // `proposed_in` derives from data this legacy delta already
-            // carries, so WAL replay of old rows populates it too. The
-            // remaining phase-2 fields weren't captured at the time.
-            proposed_in: Some(self.current_epoch),
+            // The phase-2 fields after `proposed_in` weren't captured by
+            // this legacy delta.
+            proposed_in: self.current_epoch,
             parent: None,
             purpose: None,
             anchor: None,
@@ -845,7 +832,7 @@ impl dolos_core::EntityDelta for NewProposalV2 {
             // Unresolved until a boundary rules on it ([`ProposalResolved`]).
             ratified_epoch: None,
             canceled_epoch: None,
-            proposed_in: Some(self.current_epoch),
+            proposed_in: self.current_epoch,
             parent: self.parent.clone(),
             purpose: self.purpose,
             anchor: self.anchor.clone(),
@@ -1054,27 +1041,10 @@ impl dolos_core::EntityDelta for ProposalResolved {
 mod compat_tests {
     use super::*;
 
-    /// Replica of the on-disk `ProposalState` shape before the phase-2
-    /// governance additions (indexes 0..=8, four-variant action). Encoding
-    /// this and decoding it as the current `ProposalState` proves that
-    /// pre-existing rows keep decoding, with the new fields empty.
+    /// A `ProposalState` row that stops before `proposed_in` (index 9), the
+    /// shape rows had before the field existed.
     #[derive(Debug, Encode, Decode, Clone, PartialEq, Eq)]
-    enum LegacyProposalAction {
-        #[n(0)]
-        ParamChange(#[n(0)] PParamsSet),
-
-        #[n(1)]
-        HardFork(#[n(0)] ProtocolVersion),
-
-        #[n(2)]
-        TreasuryWithdrawal(#[n(0)] Vec<(StakeCredential, Coin)>),
-
-        #[n(3)]
-        Other,
-    }
-
-    #[derive(Debug, Encode, Decode, Clone, PartialEq, Eq)]
-    struct LegacyProposalState {
+    struct RowWithoutProposedIn {
         #[n(0)]
         slot: BlockSlot,
 
@@ -1085,7 +1055,7 @@ mod compat_tests {
         idx: u32,
 
         #[n(3)]
-        action: LegacyProposalAction,
+        action: ProposalAction,
 
         #[n(4)]
         max_epoch: Option<Epoch>,
@@ -1104,51 +1074,28 @@ mod compat_tests {
     }
 
     #[test]
-    fn legacy_rows_decode_with_new_fields_empty() {
-        let actions = [
-            LegacyProposalAction::ParamChange(PParamsSet::default()),
-            LegacyProposalAction::HardFork((9, 0)),
-            LegacyProposalAction::TreasuryWithdrawal(vec![(
-                StakeCredential::AddrKeyhash([7u8; 28].into()),
-                42,
-            )]),
-            LegacyProposalAction::Other,
-        ];
+    fn a_row_without_proposed_in_is_refused() {
+        let row = RowWithoutProposedIn {
+            slot: 1234,
+            tx: [1u8; 32].into(),
+            idx: 3,
+            action: ProposalAction::Info,
+            max_epoch: Some(500),
+            ratified_epoch: None,
+            canceled_epoch: Some(400),
+            deposit: Some(100_000_000),
+            reward_account: Some(StakeCredential::AddrKeyhash([2u8; 28].into())),
+        };
 
-        for action in actions {
-            let legacy = LegacyProposalState {
-                slot: 1234,
-                tx: [1u8; 32].into(),
-                idx: 3,
-                action,
-                max_epoch: Some(500),
-                ratified_epoch: None,
-                canceled_epoch: Some(400),
-                deposit: Some(100_000_000),
-                reward_account: Some(StakeCredential::AddrKeyhash([2u8; 28].into())),
-            };
+        let bytes = minicbor::to_vec(&row).unwrap();
 
-            let bytes = minicbor::to_vec(&legacy).unwrap();
-            let decoded: ProposalState = minicbor::decode(&bytes).unwrap();
+        assert!(minicbor::decode::<ProposalState>(&bytes).is_err());
 
-            assert_eq!(decoded.slot, legacy.slot);
-            assert_eq!(decoded.tx, legacy.tx);
-            assert_eq!(decoded.idx, legacy.idx);
-            assert_eq!(decoded.max_epoch, legacy.max_epoch);
-            assert_eq!(decoded.ratified_epoch, legacy.ratified_epoch);
-            assert_eq!(decoded.canceled_epoch, legacy.canceled_epoch);
-            assert_eq!(decoded.deposit, legacy.deposit);
-            assert_eq!(decoded.reward_account, legacy.reward_account);
-
-            assert_eq!(decoded.proposed_in, None);
-            assert_eq!(decoded.parent, None);
-            assert_eq!(decoded.purpose, None);
-            assert_eq!(decoded.anchor, None);
-            assert!(decoded.cc_votes.is_empty());
-            assert!(decoded.drep_votes.is_empty());
-            assert!(decoded.spo_votes.is_empty());
-            assert!(!decoded.cost_models_present);
-        }
+        let mut null_proposed_in = bytes;
+        assert_eq!(null_proposed_in[0], 0x89);
+        null_proposed_in[0] = 0x8a;
+        null_proposed_in.push(0xf6);
+        assert!(minicbor::decode::<ProposalState>(&null_proposed_in).is_err());
     }
 
     #[test]
@@ -1169,7 +1116,7 @@ mod compat_tests {
             canceled_epoch: None,
             deposit: Some(100_000_000),
             reward_account: Some(StakeCredential::AddrKeyhash([2u8; 28].into())),
-            proposed_in: Some(490),
+            proposed_in: 490,
             parent: Some(GovActionId {
                 transaction_id: [3u8; 32].into(),
                 action_index: 0,
@@ -1219,9 +1166,17 @@ mod compat_tests {
             let decoded: ProposalState = minicbor::decode(&bytes).unwrap();
             assert_eq!(decoded, state);
 
+            let mut decoder = minicbor::Decoder::new(&bytes);
+            assert_eq!(decoder.array().unwrap(), Some(17));
+            for _ in 0..16 {
+                decoder.skip().unwrap();
+            }
+            assert_eq!(decoder.bool().unwrap(), cost_models_present);
+            assert_eq!(decoder.position(), bytes.len());
+
             let mut legacy = bytes;
-            assert_eq!(legacy[0], 0x94);
-            legacy[0] = 0x93;
+            assert_eq!(legacy[0], 0x91);
+            legacy[0] = 0x90;
             legacy.pop();
             let decoded: ProposalState = minicbor::decode(&legacy).unwrap();
             assert_eq!(
@@ -1260,7 +1215,7 @@ mod prop_tests {
         ) -> NewProposal {
             NewProposal::new(
                 slot, tx, idx,
-                ProposalAction::Other,
+                ProposalAction::Info,
                 deposit, reward_account, validity_period,
                 current_epoch, network_magic, protocol,
             )
@@ -1392,7 +1347,7 @@ mod prop_tests {
             canceled_epoch: None,
             deposit: None,
             reward_account: None,
-            proposed_in: Some(1),
+            proposed_in: 1,
             parent: None,
             purpose: None,
             anchor: None,
@@ -1677,7 +1632,7 @@ mod resolution_tests {
             canceled_epoch: None,
             deposit: Some(100),
             reward_account: None,
-            proposed_in: Some(500),
+            proposed_in: 500,
             parent: None,
             purpose: None,
             anchor: None,

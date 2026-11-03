@@ -1,0 +1,19 @@
+Fill the node's stores from a Stelae snapshot, Mithril or a local ImmutableDB
+
+Usage: dolos bootstrap [OPTIONS] [COMMAND]
+
+Commands:
+  mithril      Download a Mithril-certified ImmutableDB and replay it
+  stelae       Restore a Stelae snapshot
+  immutabledb  Replay the ImmutableDB of a local Cardano node database
+  help         Print this message or the help of the given subcommand(s)
+
+Options:
+      --force            Replace any data already in storage
+      --skip-if-data     Exit 0 without bootstrapping when storage already holds a node, as an
+                         interrupted replay that has committed leaves one for `--continue` to
+                         resume; data without one, as a bootstrap interrupted before it commits a
+                         cursor leaves, and a store this release refuses are errors instead
+      --verbose          Enable verbose logging output
+  -c, --config <CONFIG>  
+  -h, --help             Print help

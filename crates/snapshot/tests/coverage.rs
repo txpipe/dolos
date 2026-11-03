@@ -25,8 +25,8 @@ use dolos_cardano::{
 use dolos_core::{EntityKind, ExactKind, IndexRecord, Namespace};
 use dolos_snapshot::{
     entity_kind_for, entity_layer_for, layers::indexes, log_kind_for, log_ns_for, namespaces,
-    shards_for, state_kind_for, state_ns_for, ENTITY_INDEX_KINDS, ENTITY_KINDS, EPOCH_KINDS,
-    LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
+    shard_byte_for, shards_for, state_kind_for, state_ns_for, ENTITY_INDEX_KINDS, ENTITY_KINDS,
+    EPOCH_KINDS, LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
 };
 
 /// The namespaces this profile carries are exactly the two schemas', plus the
@@ -54,7 +54,7 @@ fn namespace_registry_matches_the_schemas() {
 
     let state_kinds: BTreeSet<Namespace> = STATE_KINDS
         .into_iter()
-        .map(|(_, ns, _)| ns)
+        .map(|(_, ns, _, _)| ns)
         .filter(|ns| *ns != UTXOS)
         .collect();
 
@@ -163,7 +163,7 @@ fn the_golden_indexes_layer_covers_every_dimension_and_kind() {
 /// freezing its media type.
 #[test]
 fn the_golden_state_layers_cover_every_namespace() {
-    let expected: BTreeSet<Namespace> = STATE_KINDS.into_iter().map(|(_, ns, _)| ns).collect();
+    let expected: BTreeSet<Namespace> = STATE_KINDS.into_iter().map(|(_, ns, _, _)| ns).collect();
 
     let present: BTreeSet<Namespace> = common::state_layers()
         .into_iter()
@@ -195,7 +195,10 @@ fn the_golden_stele_covers_every_state_kind() {
         .filter_map(|(kind, _, _)| state_ns_for(kind).map(|_| *kind))
         .collect();
 
-    let expected: BTreeSet<&str> = STATE_KINDS.into_iter().map(|(kind, _, _)| kind).collect();
+    let expected: BTreeSet<&str> = STATE_KINDS
+        .into_iter()
+        .map(|(kind, _, _, _)| kind)
+        .collect();
 
     assert_eq!(
         present, expected,
@@ -375,14 +378,14 @@ fn the_golden_stele_covers_every_entity_kind() {
 /// Done criterion 3's table half: the STATE_KINDS table, held to its own rule.
 ///
 /// The same discipline `log_kinds_derive_from_their_namespaces` applies, plus
-/// the column the log table does not have — the shard count, which is
-/// specification rather than tuning and so is pinned here namespace by
-/// namespace.
+/// the columns the log table does not have — the shard count and shard byte,
+/// which are specification rather than tuning and so are pinned here namespace
+/// by namespace.
 #[test]
 fn state_kinds_derive_from_their_namespaces() {
     let mut kinds = Vec::new();
 
-    for (kind, ns, shards) in STATE_KINDS {
+    for (kind, ns, shards, byte) in STATE_KINDS {
         assert_eq!(kind, format!("state-{ns}"), "{ns}");
 
         // Both directions of the lookup, against the spelling and not against
@@ -391,6 +394,7 @@ fn state_kinds_derive_from_their_namespaces() {
         assert_eq!(state_kind_for(ns), Some(kind), "{ns}");
         assert_eq!(state_ns_for(kind), Some(ns), "{kind}");
         assert_eq!(shards_for(ns), Some(shards), "{ns}");
+        assert_eq!(shard_byte_for(ns), Some(byte), "{ns}");
 
         kinds.push(kind);
     }
@@ -405,7 +409,7 @@ fn state_kinds_derive_from_their_namespaces() {
     // restore the same records twice.
     let distinct_kinds: BTreeSet<&str> = kinds.iter().copied().collect();
     let distinct_namespaces: BTreeSet<Namespace> =
-        STATE_KINDS.into_iter().map(|(_, ns, _)| ns).collect();
+        STATE_KINDS.into_iter().map(|(_, ns, _, _)| ns).collect();
 
     assert_eq!(distinct_kinds.len(), STATE_KINDS.len());
     assert_eq!(distinct_namespaces.len(), STATE_KINDS.len());
@@ -423,7 +427,7 @@ fn state_kinds_derive_from_their_namespaces() {
         .collect();
 
     assert_eq!(
-        STATE_KINDS.map(|(_, ns, _)| ns).to_vec(),
+        STATE_KINDS.map(|(_, ns, _, _)| ns).to_vec(),
         registered,
         "STATE_KINDS and the state namespaces disagree"
     );
@@ -440,13 +444,22 @@ fn state_kinds_derive_from_their_namespaces() {
     // split sixteen ways, and every other namespace is a single blob. Changing
     // one of these is a media-type-version event for that kind, so it is spelled
     // out here rather than derived from the table it is checking.
-    for (_, ns, shards) in STATE_KINDS {
+    for (_, ns, shards, byte) in STATE_KINDS {
         let expected = match ns {
             "utxos" | "accounts" | "datums" => 16,
             _ => 1,
         };
 
         assert_eq!(shards, expected, "{ns}");
+
+        // The first hash byte of the key: an account key opens with its stake
+        // credential's four-byte CBOR header, which carries no entropy.
+        let expected = match ns {
+            "accounts" => 4,
+            _ => 0,
+        };
+
+        assert_eq!(byte, expected, "{ns}");
     }
 
     // Nothing else is a state kind — `state`, above all, which is what these
@@ -458,4 +471,5 @@ fn state_kinds_derive_from_their_namespaces() {
     // And a namespace this profile does not define has neither kind nor count.
     assert_eq!(state_kind_for("receipts"), None);
     assert_eq!(shards_for("receipts"), None);
+    assert_eq!(shard_byte_for("receipts"), None);
 }

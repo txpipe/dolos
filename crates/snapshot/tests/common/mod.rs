@@ -23,14 +23,14 @@
 use dolos_cardano::{
     indexes::archive_dimensions,
     model::{
-        AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountKey, AccountState,
-        AccountStats, AddressKey, AddressStats, AssetKey, AssetMintChunk, AssetMintSet,
-        DRepEpochLog, DRepKey, DRepSightingState, DRepState, DatumKey, DatumState, EpochState,
-        EraKey, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk, FirstScriptSet,
-        FixedNamespace as _, GovState, MetadataLabelState, PaymentAddressChunk, PaymentAddressKey,
-        PaymentAddressSet, PaymentKey, PaymentStats, PendingMirState, PendingRewardState,
-        PolicyKey, PolicyMintChunk, PoolEpochLog, PoolKey, PoolState, ProposalKey, ProposalState,
-        PrunedAccountState, ScriptKey,
+        AccountAddressEpochs, AccountAddressSet, AccountEpochLog, AccountHistoryState, AccountKey,
+        AccountState, AccountStats, AddressKey, AddressStats, AssetKey, AssetMintChunk,
+        AssetMintSet, DRepEpochLog, DRepKey, DRepObservationState, DRepState, DatumKey, DatumState,
+        EpochState, EraKey, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
+        FirstScriptSet, FixedNamespace as _, GovState, MetadataLabelState, PaymentAddressEpochs,
+        PaymentAddressKey, PaymentAddressSet, PaymentKey, PaymentStats, PendingMirState,
+        PendingRewardState, PolicyFirstMintChunk, PolicyKey, PoolEpochLog, PoolKey, PoolState,
+        ProposalKey, ProposalState, ScriptKey,
     },
     pallas::ledger::primitives::{conway::DRep, StakeCredential},
     periods::{GroupKey, Ungrouped},
@@ -42,7 +42,6 @@ use dolos_core::{
 use dolos_snapshot::{
     layers::{
         blocks::BlockRecord,
-        digests::ImmutableDigests,
         logs::LogRecord,
         state::{self, StateRecord},
     },
@@ -55,6 +54,7 @@ use stelae::{
     inscription::LayerDescriptor,
     Digest, Profile, SteleReader, SteleWriter,
 };
+use stelae_driver::digests::ImmutableDigests;
 
 pub const NETWORK_MAGIC: u64 = dolos_snapshot::MAINNET_MAGIC;
 
@@ -73,21 +73,14 @@ pub const POINT_HASH: [u8; 32] = [0x0b; 32];
 /// of these and stops — see [`state_layers`].
 pub const SHARDS: [u8; 2] = [0, 1];
 
-/// The one shard an account key reaches: every one starts with the CBOR
-/// header of its credential, `0x82`.
-pub const ACCOUNT_SHARD: u8 = 8;
-
-/// The shards the fixture populates for `ns`'s kind, published in `shards`.
-pub fn populated_shards(ns: Namespace, shards: u8) -> Vec<u8> {
-    if shards > 1 && ns == AccountState::NS {
-        return vec![ACCOUNT_SHARD];
-    }
-
+/// The shards the fixture populates for a kind published in `shards`.
+pub fn populated_shards(shards: u8) -> Vec<u8> {
     SHARDS.into_iter().filter(|shard| *shard < shards).collect()
 }
 
 /// A key of `ns`'s kind, stored, made from `byte`. Where the kind allows, the
-/// key's first byte is `byte`, which picks its shard.
+/// key's shard byte is `byte`, which picks its shard: the first byte for most
+/// kinds, the first hash byte after an account key's credential header.
 pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
     let credential = AccountKey(StakeCredential::AddrKeyhash([byte; 28].into()));
     let payment = PaymentKey([byte; 28].into());
@@ -102,11 +95,11 @@ pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
         | AccountEpochLog::NS
         | PendingMirState::NS
         | PendingRewardState::NS
-        | PrunedAccountState::NS
-        | AccountAddressChunk::NS => keys::encode(&credential),
+        | AccountHistoryState::NS => keys::encode(&credential),
+        AccountAddressEpochs::NS => keys::encode(&(credential, u32::from(byte))),
         AccountStats::NS => keys::encode(&(u64::from(byte), credential)),
         AddressStats::NS => keys::encode(&(u64::from(byte), address)),
-        PaymentAddressChunk::NS => keys::encode(&payment),
+        PaymentAddressEpochs::NS => keys::encode(&(payment, u32::from(byte))),
         PaymentAddressSet::NS => keys::encode(&GroupKey {
             group: payment,
             epoch: u64::from(byte),
@@ -124,14 +117,14 @@ pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
             member: (u64::from(byte), u32::from(byte)),
         }),
         DatumState::NS => keys::encode(&DatumKey([byte; 32].into())),
-        DRepEpochLog::NS | DRepSightingState::NS | DRepState::NS => {
+        DRepEpochLog::NS | DRepObservationState::NS | DRepState::NS => {
             keys::encode(&DRepKey(DRep::Key([byte; 28].into())))
         }
         EpochState::NS | GovState::NS => keys::encode(&()),
         MetadataLabelState::NS => keys::encode(&u64::from(byte)),
         EraState::NS => keys::encode(&EraKey::from(u16::from(byte))),
         FirstMintChunk::NS | FirstScriptChunk::NS => keys::encode(&u32::from(byte)),
-        PolicyMintChunk::NS => keys::encode(&(PolicyKey([byte; 28].into()), u32::from(byte))),
+        PolicyFirstMintChunk::NS => keys::encode(&(PolicyKey([byte; 28].into()), u32::from(byte))),
         PoolState::NS | PoolEpochLog::NS => keys::encode(&PoolKey([byte; 28].into())),
         ProposalState::NS => keys::encode(&ProposalKey::new([byte; 32].into(), u32::from(byte))),
         FirstScriptSet::NS => keys::encode(&GroupKey {
@@ -282,15 +275,14 @@ pub fn entities(kind: EntityKind) -> Vec<EntityRecord> {
 ///
 /// One layer per namespace, so a kind's shards are the ones its spec'd count
 /// allows and its fixture keys reach: both of [`SHARDS`] for `datums` and
-/// `utxos`, [`ACCOUNT_SHARD`] alone for `accounts`,
-/// and shard 0 for every single blob. Every state namespace is among them —
-/// which is what `the_golden_state_layers_cover_every_namespace` holds this
-/// to.
+/// `utxos` and `accounts`, and shard 0 for every single blob. Every state
+/// namespace is among them — which is what
+/// `the_golden_state_layers_cover_every_namespace` holds this to.
 pub fn state_layers() -> Vec<(&'static str, Namespace, u8)> {
     STATE_KINDS
         .into_iter()
-        .flat_map(|(kind, ns, shards)| {
-            populated_shards(ns, shards)
+        .flat_map(|(kind, ns, shards, _)| {
+            populated_shards(shards)
                 .into_iter()
                 .map(move |shard| (kind, ns, shard))
         })
@@ -305,7 +297,7 @@ pub fn state_layers() -> Vec<(&'static str, Namespace, u8)> {
 /// The namespace strings are frozen by the kinds in the layer headers instead,
 /// which is where they now live on the wire.
 ///
-/// The key's first byte carries the shard in its high nibble, so the record
+/// The key's shard byte carries the shard in its high nibble, so the record
 /// lands in the layer that claims it under [`state_layers`] — the routing rule
 /// [`dolos_snapshot::shard_of`] applies, spelled out here because the fixture
 /// writes layers directly rather than through the export's router.
@@ -407,9 +399,9 @@ pub fn write_layer(
 /// per populated shard in each role, dump and tip.
 pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
     use dolos_snapshot::layers::{
-        blocks, digests as digests_layer, entities as entities_layer, indexes as indexes_layer,
-        logs,
+        blocks, entities as entities_layer, indexes as indexes_layer, logs,
     };
+    use stelae_driver::digests as digests_layer;
 
     let mut layers: Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> = vec![
         (
@@ -445,8 +437,8 @@ pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
     // ordering rule as well as the two scope shapes. The records are the same
     // in both; what tells the layers apart is the epoch in the header and the
     // epoch in the descriptor scope.
-    for (kind, ns, shards) in STATE_KINDS {
-        let populated = populated_shards(ns, shards);
+    for (kind, ns, shards, _) in STATE_KINDS {
+        let populated = populated_shards(shards);
 
         for scope in [dump_scope as fn(u8) -> StateScope, state_scope] {
             for shard in populated.iter().copied() {
@@ -462,7 +454,9 @@ pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
     layers.push((
         DIGESTS,
         Box::new(digests_scope()),
-        encode_all(&self::digests(), digests_layer::encode),
+        encode_all(&self::digests(), |record| {
+            Ok(digests_layer::encode(record)?)
+        }),
     ));
 
     layers

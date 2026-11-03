@@ -193,8 +193,8 @@ fn canary_encodings_are_deterministic() {
 }
 
 #[test]
-fn revision_four_proposals_default_cost_models_presence_to_false() {
-    let bytes = decode_hex(include_str!("registry/goldens/proposals.rev4.hex"));
+fn revision_one_proposals_default_cost_models_presence_to_false() {
+    let bytes = decode_hex(include_str!("registry/goldens/proposals.rev1.hex"));
     let decoded: dolos_cardano::model::ProposalState = minicbor::decode(&bytes).unwrap();
     let mut expected = registry::canaries::proposal_state();
     expected.cost_models_present = false;

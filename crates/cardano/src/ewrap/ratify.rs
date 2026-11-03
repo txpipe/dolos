@@ -204,7 +204,6 @@ pub fn action_priority(action: &ProposalAction) -> u8 {
         ProposalAction::ParamChange(_) => 4,
         ProposalAction::TreasuryWithdrawal(_) => 5,
         ProposalAction::Info => 6,
-        ProposalAction::Other => 7,
     }
 }
 
@@ -357,7 +356,7 @@ fn committee_threshold(input: &RatifyInput, run: &RunState, action: &ProposalAct
         ProposalAction::NoConfidence | ProposalAction::UpdateCommittee { .. } => {
             Some(zero_threshold())
         }
-        ProposalAction::Info | ProposalAction::Other => None,
+        ProposalAction::Info => None,
         _ => {
             let committee = run.committee.as_ref()?;
 
@@ -413,7 +412,7 @@ fn drep_threshold(run: &RunState, action: &ProposalAction, cost_models_present: 
             cost_models_present,
         )),
         ProposalAction::TreasuryWithdrawal(_) => Some(thresholds.treasury_withdrawal),
-        ProposalAction::Info | ProposalAction::Other => None,
+        ProposalAction::Info => None,
     }
 }
 
@@ -472,7 +471,7 @@ fn spo_threshold(run: &RunState, action: &ProposalAction) -> Threshold {
             }
         }
         ProposalAction::TreasuryWithdrawal(_) => Some(zero_threshold()),
-        ProposalAction::Info | ProposalAction::Other => None,
+        ProposalAction::Info => None,
     }
 }
 
@@ -697,7 +696,7 @@ fn enact(run: &mut RunState, proposal: &RatifyProposal) {
                 threshold: threshold.clone(),
             });
         }
-        ProposalAction::NewConstitution { .. } | ProposalAction::Info | ProposalAction::Other => (),
+        ProposalAction::NewConstitution { .. } | ProposalAction::Info => (),
     }
 
     if let Some(purpose) = proposal.action.purpose() {
@@ -1734,7 +1733,7 @@ mod tests {
             canceled_epoch: None,
             deposit: None,
             reward_account: None,
-            proposed_in: Some(1),
+            proposed_in: 1,
             parent: None,
             purpose: None,
             anchor: None,

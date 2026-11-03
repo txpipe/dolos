@@ -1,0 +1,10 @@
+Roll the WAL, the state and the archive back to a block the WAL holds
+
+Usage: dolos sync rollback [OPTIONS] --slot <SLOT> --hash <HASH>
+
+Options:
+      --slot <SLOT>      The slot of the block to roll back to
+      --hash <HASH>      The hash of the block to roll back to
+      --yes              Go ahead with what the command destroys
+  -c, --config <CONFIG>  
+  -h, --help             Print help

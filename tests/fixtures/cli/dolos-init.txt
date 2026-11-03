@@ -1,0 +1,27 @@
+Initialize the node configuration
+
+Usage: dolos init [OPTIONS]
+
+Options:
+      --known-network <KNOWN_NETWORK>
+          Use one of the well-known networks
+      --remote-peer <REMOTE_PEER>
+          Remote peer to use as source
+      --max-chain-history <MAX_CHAIN_HISTORY>
+          How much history of the chain to keep on disk
+      --serve-grpc <SERVE_GRPC>
+          Serve clients via gRPC [possible values: true, false]
+      --serve-minibf <SERVE_MINIBF>
+          Serve clients minibf via HTTP [possible values: true, false]
+      --serve-minikupo <SERVE_MINIKUPO>
+          Serve clients via a MiniKupo-compatible HTTP endpoint [possible values: true, false]
+      --serve-trp <SERVE_TRP>
+          Serve clients TRP [possible values: true, false]
+      --serve-ouroboros <SERVE_OUROBOROS>
+          Serve clients via Ouroboros [possible values: true, false]
+      --enable-relay <ENABLE_RELAY>
+          Enable relay operations [possible values: true, false]
+  -c, --config <CONFIG>
+          
+  -h, --help
+          Print help

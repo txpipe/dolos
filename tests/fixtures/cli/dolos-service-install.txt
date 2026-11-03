@@ -1,0 +1,16 @@
+registers `dolos daemon` with this configuration to start at login, or at boot with `--system`
+
+Usage: dolos service install [OPTIONS] [NAME]
+
+Arguments:
+  [NAME]  The instance's name, 1 to 48 of a-z, 0-9 and -; without it,
+          `{chain.protocol}-{chain.network}` from the configuration
+
+Options:
+      --system           A system unit, started at boot and installed as root (Linux only), of the
+                         file `--config` names; without it, the user's, started at login
+      --start            Start it now as well
+      --format <FORMAT>  How to print the result: text for people, JSON for scripts [default: text]
+                         [possible values: text, json]
+  -c, --config <CONFIG>  
+  -h, --help             Print help

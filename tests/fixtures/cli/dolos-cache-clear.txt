@@ -1,0 +1,9 @@
+wipes a namespace, or all, recording its keys for `warm --previous`
+
+Usage: dolos cache clear [OPTIONS] <--namespace <NAMESPACE>|--all>
+
+Options:
+      --namespace <NAMESPACE>  the namespace to wipe
+      --all                    wipe every namespace
+  -c, --config <CONFIG>        
+  -h, --help                   Print help

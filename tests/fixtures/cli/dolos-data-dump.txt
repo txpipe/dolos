@@ -1,0 +1,13 @@
+prints records from the state, the logs or the blocks
+
+Usage: dolos data dump [OPTIONS] <COMMAND>
+
+Commands:
+  state   dumps the entities of a state namespace
+  logs    dumps the records of a log namespace
+  blocks  dumps the archive's blocks
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -c, --config <CONFIG>  
+  -h, --help             Print help
