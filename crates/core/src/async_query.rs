@@ -1,12 +1,14 @@
 use std::{
     collections::{HashMap, HashSet},
+    future::Future,
     sync::Arc,
+    time::Duration,
 };
 
 use futures_util::{stream, StreamExt as _};
 use itertools::Itertools as _;
 
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraTx};
 
@@ -136,21 +138,86 @@ pub const LOCATE_CHUNK: usize = 256;
 ///
 /// A closure must never wait on async work: it would hold its permit while the
 /// work it waits on may need another. The types cannot enforce this.
+///
+/// The limiter also admits heavy scans, the requests whose answer can read a
+/// large part of a store: at most [`Self::heavy_limit`] at once across every
+/// API, each waiting at most [`Self::heavy_queue`] for a slot. Work run inside
+/// [`HeavyAdmission::scope`] holds at most [`Self::heavy_share`] permits in
+/// all, so the rest stay free for every other request, and each blocking
+/// closure it starts keeps the request's slot taken until it ends.
 #[derive(Debug, Clone)]
 pub struct QueryLimiter {
     permits: Arc<Semaphore>,
     cap: usize,
+    heavy: Arc<HeavyScans>,
+}
+
+#[derive(Debug)]
+struct HeavyScans {
+    slots: Arc<Semaphore>,
+    limit: usize,
+    queue: Duration,
+    share: Arc<Semaphore>,
+    share_cap: usize,
+}
+
+tokio::task_local! {
+    static HEAVY_SCAN: HeavyAdmission;
+}
+
+/// A heavy scan's slot, taken by [`QueryLimiter::admit_heavy`].
+///
+/// The slot is free again once the admission and every clone of it are
+/// dropped. Each blocking closure started inside [`Self::scope`] holds a
+/// clone, so a request dropped mid-scan (a deadline, a client gone) frees its
+/// slot only when the work it started has ended.
+#[derive(Debug, Clone)]
+pub struct HeavyAdmission {
+    slot: Arc<OwnedSemaphorePermit>,
+}
+
+impl HeavyAdmission {
+    /// Run `f` as this heavy scan: its blocking query work counts against the
+    /// heavy share and keeps the slot taken until it ends.
+    pub async fn scope<F: Future>(self, f: F) -> F::Output {
+        HEAVY_SCAN.scope(self, f).await
+    }
+}
+
+fn limiter_closed() -> DomainError {
+    DomainError::ArchiveError(ArchiveError::InternalError(
+        "query limiter closed".to_string(),
+    ))
 }
 
 impl QueryLimiter {
     pub const DEFAULT_CAP: usize = 32;
+    pub const DEFAULT_HEAVY_LIMIT: usize = 8;
+    pub const DEFAULT_HEAVY_QUEUE: Duration = Duration::from_secs(5);
 
-    /// A limiter of `cap` permits, at least one.
+    /// A limiter of `cap` permits, at least one, with the default heavy-scan
+    /// admission.
     pub fn new(cap: usize) -> Self {
+        Self::with_heavy_scans(cap, Self::DEFAULT_HEAVY_LIMIT, Self::DEFAULT_HEAVY_QUEUE)
+    }
+
+    /// A limiter of `cap` permits that admits `heavy_limit` heavy scans at
+    /// once, at least one, each waiting at most `heavy_queue` for a slot.
+    pub fn with_heavy_scans(cap: usize, heavy_limit: usize, heavy_queue: Duration) -> Self {
         let cap = cap.max(1);
+        let heavy_limit = heavy_limit.max(1);
+        let share_cap = (cap / 2).max(1);
+
         Self {
             permits: Arc::new(Semaphore::new(cap)),
             cap,
+            heavy: Arc::new(HeavyScans {
+                slots: Arc::new(Semaphore::new(heavy_limit)),
+                limit: heavy_limit,
+                queue: heavy_queue,
+                share: Arc::new(Semaphore::new(share_cap)),
+                share_cap,
+            }),
         }
     }
 
@@ -165,24 +232,108 @@ impl QueryLimiter {
 
     /// Blocking closures one request may run at once, so that a single
     /// request cannot take every permit.
+    ///
+    /// Inside a heavy scan of this limiter it is the heavy share divided
+    /// among the heavy slots, at least one, so admitted scans together stay
+    /// within the share.
     pub fn fan_out(&self) -> usize {
-        (self.cap / 2).clamp(1, 16)
+        let fan_out = (self.cap / 2).clamp(1, 16);
+
+        if self.current_heavy_scan().is_some() {
+            (self.heavy.share_cap / self.heavy.limit).clamp(1, fan_out)
+        } else {
+            fan_out
+        }
+    }
+
+    /// Heavy scans admitted at once.
+    pub fn heavy_limit(&self) -> usize {
+        self.heavy.limit
+    }
+
+    /// The longest a heavy scan waits for a slot before it is refused.
+    pub fn heavy_queue(&self) -> Duration {
+        self.heavy.queue
+    }
+
+    /// Permits heavy scans hold at most, together: half the cap, at least
+    /// one.
+    pub fn heavy_share(&self) -> usize {
+        self.heavy.share_cap
+    }
+
+    /// Heavy slots taken, by live requests and by blocking work that
+    /// outlived its request.
+    pub fn heavy_admitted(&self) -> usize {
+        self.heavy.limit - self.heavy.slots.available_permits()
+    }
+
+    /// Permits held by heavy scans' running closures.
+    pub fn heavy_in_use(&self) -> usize {
+        self.heavy.share_cap - self.heavy.share.available_permits()
+    }
+
+    /// Take a heavy-scan slot, waiting at most [`Self::heavy_queue`] for one
+    /// in arrival order; `None` once the wait runs out.
+    pub async fn admit_heavy(&self) -> Option<HeavyAdmission> {
+        let slots = self.heavy.slots.clone();
+
+        let slot = if self.heavy.queue.is_zero() {
+            slots.try_acquire_owned().ok()?
+        } else {
+            tokio::time::timeout(self.heavy.queue, slots.acquire_owned())
+                .await
+                .ok()?
+                .ok()?
+        };
+
+        Some(HeavyAdmission {
+            slot: Arc::new(slot),
+        })
+    }
+
+    /// The heavy scan the current task runs under, when this limiter
+    /// admitted it.
+    fn current_heavy_scan(&self) -> Option<HeavyAdmission> {
+        HEAVY_SCAN
+            .try_with(HeavyAdmission::clone)
+            .ok()
+            .filter(|admission| Arc::ptr_eq(admission.slot.semaphore(), &self.heavy.slots))
     }
 
     /// Run `f` on the blocking pool once a permit is free. The permit moves
     /// into the closure and is returned when it ends, panics included.
+    ///
+    /// Inside a heavy scan the closure first takes a permit of the heavy
+    /// share, and holds it and the scan's slot until it ends.
     pub async fn run_blocking<T, F>(&self, f: F) -> Result<T, DomainError>
     where
         T: Send + 'static,
         F: FnOnce() -> T + Send + 'static,
     {
-        let permit = self.permits.clone().acquire_owned().await.map_err(|_| {
-            DomainError::ArchiveError(ArchiveError::InternalError(
-                "query limiter closed".to_string(),
-            ))
-        })?;
+        let heavy = self.current_heavy_scan();
+
+        let share = match &heavy {
+            Some(_) => Some(
+                self.heavy
+                    .share
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| limiter_closed())?,
+            ),
+            None => None,
+        };
+
+        let permit = self
+            .permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| limiter_closed())?;
+
         let handle = tokio::task::spawn_blocking(move || {
-            let _permit = permit;
+            let _held = (permit, share, heavy);
             f()
         });
 
@@ -715,6 +866,187 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(limiter.in_use(), 0);
         assert_eq!(limiter.run_blocking(|| 7).await.unwrap(), 7);
+    }
+
+    const SHORT_QUEUE: Duration = Duration::from_millis(100);
+
+    /// A blocking closure that runs until its gate opens, and tells when it
+    /// has started.
+    fn gated() -> (
+        impl FnOnce() + Send + 'static,
+        std::sync::mpsc::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let (open, gate) = std::sync::mpsc::channel::<()>();
+        let (started, running) = tokio::sync::oneshot::channel();
+
+        let closure = move || {
+            let _ = started.send(());
+            let _ = gate.recv();
+        };
+
+        (closure, open, running)
+    }
+
+    #[test]
+    fn heavy_defaults_are_eight_slots_a_five_second_queue_and_half_the_cap() {
+        let limiter = QueryLimiter::default();
+
+        assert_eq!(limiter.heavy_limit(), 8);
+        assert_eq!(limiter.heavy_queue(), Duration::from_secs(5));
+        assert_eq!(limiter.heavy_share(), 16);
+
+        let small = QueryLimiter::with_heavy_scans(1, 0, Duration::ZERO);
+        assert_eq!((small.heavy_limit(), small.heavy_share()), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn heavy_fan_out_divides_the_share_among_the_slots() {
+        for (cap, heavy, light_fan_out, heavy_fan_out) in [
+            (32, 8, 16, 2),
+            (64, 4, 16, 8),
+            (8, 8, 4, 1),
+            (16, 2, 8, 4),
+            (1, 1, 1, 1),
+        ] {
+            let limiter = QueryLimiter::with_heavy_scans(cap, heavy, SHORT_QUEUE);
+            assert_eq!(limiter.fan_out(), light_fan_out, "cap {cap}");
+
+            let admission = limiter.admit_heavy().await.expect("a free slot");
+            let inside = admission.scope(async { limiter.fan_out() }).await;
+            assert_eq!(inside, heavy_fan_out, "cap {cap}, heavy {heavy}");
+        }
+    }
+
+    #[tokio::test]
+    async fn another_limiters_heavy_scan_is_light_here() {
+        let first = QueryLimiter::with_heavy_scans(8, 1, SHORT_QUEUE);
+        let second = QueryLimiter::with_heavy_scans(8, 1, SHORT_QUEUE);
+
+        let admission = first.admit_heavy().await.expect("a free slot");
+        let fan_out = admission.scope(async { second.fan_out() }).await;
+
+        assert_eq!(fan_out, 4);
+    }
+
+    #[tokio::test]
+    async fn a_full_heavy_limit_refuses_after_its_queue() {
+        let limiter = QueryLimiter::with_heavy_scans(32, 2, SHORT_QUEUE);
+        let _held = [
+            limiter.admit_heavy().await.expect("first slot"),
+            limiter.admit_heavy().await.expect("second slot"),
+        ];
+
+        let started = std::time::Instant::now();
+        assert!(limiter.admit_heavy().await.is_none());
+        assert!(started.elapsed() >= SHORT_QUEUE, "{:?}", started.elapsed());
+        assert_eq!(limiter.heavy_admitted(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_queued_heavy_scan_enters_when_a_slot_frees() {
+        let limiter = QueryLimiter::with_heavy_scans(32, 1, Duration::from_secs(5));
+        let held = limiter.admit_heavy().await.expect("first slot");
+
+        let waiting = tokio::spawn({
+            let limiter = limiter.clone();
+            async move { limiter.admit_heavy().await.is_some() }
+        });
+
+        tokio::time::sleep(SHORT_QUEUE).await;
+        drop(held);
+
+        assert!(waiting.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_zero_queue_refuses_at_once() {
+        let limiter = QueryLimiter::with_heavy_scans(32, 1, Duration::ZERO);
+        let _held = limiter.admit_heavy().await.expect("first slot");
+
+        assert!(limiter.admit_heavy().await.is_none());
+    }
+
+    /// A request dropped mid-scan (a deadline, a client gone) leaves its
+    /// blocking closure running; the slot stays taken until it ends, so no
+    /// replacement enters beside it.
+    #[tokio::test]
+    async fn a_dropped_heavy_scan_keeps_its_slot_until_its_closure_ends() {
+        let limiter = QueryLimiter::with_heavy_scans(4, 1, SHORT_QUEUE);
+        let (closure, open, running) = gated();
+
+        let admission = limiter.admit_heavy().await.expect("a free slot");
+        let request = tokio::spawn({
+            let limiter = limiter.clone();
+            admission.scope(async move { limiter.run_blocking(closure).await })
+        });
+
+        running.await.unwrap();
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+
+        assert_eq!(limiter.heavy_admitted(), 1);
+        assert_eq!(limiter.heavy_in_use(), 1);
+        assert_eq!(limiter.in_use(), 1);
+        assert!(limiter.admit_heavy().await.is_none());
+
+        open.send(()).unwrap();
+        let replacement = limiter.admit_heavy().await;
+        assert!(replacement.is_some());
+        drop(replacement);
+
+        assert_eq!(limiter.heavy_admitted(), 0);
+        assert_eq!(limiter.heavy_in_use(), 0);
+        assert_eq!(limiter.in_use(), 0);
+    }
+
+    /// Heavy scans that start more closures than their fan-out still hold at
+    /// most the heavy share, and a light closure runs beside them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn heavy_scans_hold_at_most_their_share() {
+        for (cap, heavy) in [(8, 2), (32, 8), (6, 4)] {
+            let limiter = QueryLimiter::with_heavy_scans(cap, heavy, SHORT_QUEUE);
+            let share = limiter.heavy_share();
+            let mut gates = Vec::new();
+            let mut scans = Vec::new();
+
+            for _ in 0..heavy {
+                let admission = limiter.admit_heavy().await.expect("a free slot");
+                let mut closures = Vec::new();
+
+                for _ in 0..cap {
+                    let (closure, open, _) = gated();
+                    gates.push(open);
+                    closures.push(closure);
+                }
+
+                let limiter = limiter.clone();
+                scans.push(tokio::spawn(admission.scope(async move {
+                    let runs = closures.into_iter().map(|c| limiter.run_blocking(c));
+                    futures_util::future::join_all(runs).await
+                })));
+            }
+
+            tokio::time::sleep(SHORT_QUEUE).await;
+            assert_eq!(limiter.heavy_in_use(), share, "cap {cap}, heavy {heavy}");
+            assert_eq!(limiter.in_use(), share, "cap {cap}, heavy {heavy}");
+
+            let light = tokio::time::timeout(Duration::from_secs(5), limiter.run_blocking(|| 7));
+            assert_eq!(light.await.expect("light closure waited").unwrap(), 7);
+
+            for open in gates {
+                let _ = open.send(());
+            }
+
+            for scan in scans {
+                for result in scan.await.unwrap() {
+                    result.unwrap();
+                }
+            }
+
+            assert_eq!(limiter.heavy_in_use(), 0);
+            assert_eq!(limiter.heavy_admitted(), 0);
+        }
     }
 
     /// The ordinary slot holds one block and the index already named it, so

@@ -602,6 +602,24 @@ impl TestApp {
         Self::from_domain(domain, vectors, None, minibf)
     }
 
+    /// App on a query limiter of `limiter` whose requests time out after
+    /// `request_timeout_seconds`.
+    pub fn new_admitting(
+        fault: Option<TestFault>,
+        limiter: QueryLimiter,
+        request_timeout_seconds: u64,
+    ) -> Self {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+        let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
+        let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"))
+            .with_request_timeout_seconds(request_timeout_seconds);
+        Self::from_domain(domain.with_query_limiter(limiter), vectors, fault, minibf)
+    }
+
     /// App over `domain`, its chain described by `vectors`.
     pub fn from_domain(
         domain: ToyDomain,
