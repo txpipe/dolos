@@ -13,6 +13,7 @@ use tx3_resolver::trp::{
     TxStatus, TxWitness,
 };
 
+use dolos_cardano::validate::{check_cbor_depth, MAX_TX_CBOR_DEPTH};
 use dolos_core::{Domain, MempoolAwareUtxoStore, MempoolStore as _, StateStore as _, SubmitExt};
 
 use crate::{compiler::load_compiler, utxos::UtxoStoreAdapter};
@@ -49,6 +50,8 @@ pub async fn trp_resolve<D: Domain>(
 }
 
 fn apply_witnesses(original: &[u8], witnesses: &[TxWitness]) -> Result<Vec<u8>, Error> {
+    check_cbor_depth(original, MAX_TX_CBOR_DEPTH)?;
+
     let tx = pallas::ledger::traverse::MultiEraTx::decode(original)?;
 
     let mut tx = tx.as_conway().ok_or(Error::UnsupportedTxEra)?.to_owned();
@@ -65,6 +68,8 @@ fn apply_witnesses(original: &[u8], witnesses: &[TxWitness]) -> Result<Vec<u8>, 
             }
             TxWitness::RawWitness(h) => {
                 let bytes: Vec<u8> = h.clone().into();
+                check_cbor_depth(&bytes, MAX_TX_CBOR_DEPTH)
+                    .map_err(|e| Error::InvalidParams(format!("invalid witness set cbor: {e}")))?;
                 let witness_set: WitnessSet = pallas::codec::minicbor::decode(&bytes)
                     .map_err(|e| Error::InvalidParams(format!("invalid witness set cbor: {e}")))?;
 
@@ -642,5 +647,59 @@ mod tests {
         let tx_hash: pallas::crypto::hash::Hash<32> = tx_hash_bytes.as_slice().into();
         let status = MempoolStore::check_status(context.domain.mempool(), &tx_hash);
         assert_eq!(status.stage, MempoolTxStage::Pending);
+    }
+
+    #[tokio::test]
+    async fn test_submit_rejects_deeply_nested_cbor() {
+        let context = setup_test_context().await;
+
+        let args = json!({
+            "quantity": 2_000_000,
+            "sender": TestAddress::Carol.as_str().to_string(),
+            "receiver": TestAddress::Dave.as_str().to_string(),
+        });
+        let req = json!({
+            "tir": {
+                "version": "v1beta0",
+                "content": SUBJECT_PROTOCOL,
+                "encoding": "hex"
+            },
+            "args": args,
+            "env": {},
+        })
+        .to_string();
+        let resolved = trp_resolve(Params::new(Some(req.as_str())), context.clone())
+            .await
+            .unwrap();
+
+        // Replace the auxiliary data with one metadatum nested 20,000 arrays deep.
+        let tx = hex::decode(&resolved.tx).unwrap();
+        let mut d = pallas::codec::minicbor::Decoder::new(&tx);
+        d.array().unwrap();
+        let start = d.position();
+        d.skip().unwrap();
+        d.skip().unwrap();
+        let end = d.position();
+
+        let mut deep = vec![0x84];
+        deep.extend_from_slice(&tx[start..end]);
+        deep.extend_from_slice(&[0xf5, 0xa1, 0x01]);
+        deep.extend(std::iter::repeat_n(0x81, 20_000));
+        deep.push(0x00);
+
+        let (sk, pk) = TestAddress::Carol.keypair();
+        let signature = sk.sign(hex::decode(&resolved.hash).unwrap());
+
+        let req = json!({
+            "tx": { "content": hex::encode(&deep), "contentType": "hex" },
+            "witnesses": [{
+                "key": { "content": hex::encode(pk.as_ref()), "contentType": "hex" },
+                "signature": { "content": hex::encode(signature.as_ref()), "contentType": "hex" },
+                "type": "ed25519"
+            }]
+        })
+        .to_string();
+        let result = trp_submit(Params::new(Some(req.as_str())), context.clone()).await;
+        assert!(matches!(result, Err(Error::MinicborError(_))));
     }
 }

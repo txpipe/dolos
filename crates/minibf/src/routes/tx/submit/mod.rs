@@ -107,6 +107,42 @@ mod tests {
         .await;
     }
 
+    /// Rebuilds `tx` with auxiliary data that nests one metadatum `depth`
+    /// arrays deep.
+    fn with_nested_metadata(tx: &[u8], depth: usize) -> Vec<u8> {
+        let mut d = pallas::codec::minicbor::Decoder::new(tx);
+        d.array().unwrap();
+        let start = d.position();
+        d.skip().unwrap();
+        d.skip().unwrap();
+        let end = d.position();
+
+        let mut out = vec![0x84];
+        out.extend_from_slice(&tx[start..end]);
+        out.push(0xf5);
+        out.extend_from_slice(&[0xa1, 0x01]);
+        out.extend(std::iter::repeat_n(0x81, depth));
+        out.push(0x00);
+        out
+    }
+
+    #[tokio::test]
+    async fn tx_submit_bad_request_deeply_nested_cbor() {
+        let app = TestApp::new();
+        let body = with_nested_metadata(&app.vectors().tx_cbor, 20_000);
+        assert_status(&app, "application/cbor", body, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn tx_submit_cbor_at_depth_limit_does_not_overflow() {
+        let app = TestApp::new();
+        // The tx array and the metadata map add two levels.
+        let depth = dolos_cardano::validate::MAX_TX_CBOR_DEPTH - 2;
+        let body = with_nested_metadata(&app.vectors().tx_cbor, depth);
+        dolos_cardano::validate::check_cbor_depth(&body, depth + 2).expect("body within limit");
+        assert_status(&app, "application/cbor", body, StatusCode::BAD_REQUEST).await;
+    }
+
     #[tokio::test]
     #[ignore]
     async fn tx_submit_not_found() {

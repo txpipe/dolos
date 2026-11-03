@@ -4,11 +4,73 @@ use dolos_core::{
     ChainError, ChainPoint, Domain, EraCbor, Genesis, MempoolAwareUtxoStore, MempoolTx,
 };
 
+use pallas::codec::minicbor::{self, data::Type, Decoder};
 use pallas::ledger::{
     primitives::{NetworkId, TransactionInput},
     traverse::{MultiEraInput, MultiEraOutput, MultiEraTx},
 };
 use tracing::debug;
+
+/// Maximum nesting depth of arrays, maps and tags in a received transaction.
+pub const MAX_TX_CBOR_DEPTH: usize = 256;
+
+/// Rejects a CBOR item that nests arrays, maps and tags deeper than
+/// `max_depth`. Reads the first item only and does not recurse.
+pub fn check_cbor_depth(cbor: &[u8], max_depth: usize) -> Result<(), minicbor::decode::Error> {
+    let mut d = Decoder::new(cbor);
+
+    // Items still to read in each open container; `None` is indefinite.
+    let mut open: Vec<Option<u64>> = Vec::new();
+
+    loop {
+        match open.last_mut() {
+            Some(Some(0)) => {
+                open.pop();
+                if open.is_empty() {
+                    return Ok(());
+                }
+                continue;
+            }
+            Some(None) if d.datatype()? == Type::Break => {
+                d.set_position(d.position() + 1);
+                open.pop();
+                if open.is_empty() {
+                    return Ok(());
+                }
+                continue;
+            }
+            Some(Some(remaining)) => *remaining -= 1,
+            _ => (),
+        }
+
+        let position = d.position();
+
+        let items = match d.datatype()? {
+            Type::Array | Type::ArrayIndef => d.array()?,
+            Type::Map | Type::MapIndef => d.map()?.map(|len| len.saturating_mul(2)),
+            Type::Tag => {
+                d.tag()?;
+                Some(1)
+            }
+            _ => {
+                d.skip()?;
+                if open.is_empty() {
+                    return Ok(());
+                }
+                continue;
+            }
+        };
+
+        if open.len() == max_depth {
+            return Err(minicbor::decode::Error::message(format!(
+                "cbor nests deeper than {max_depth} levels"
+            ))
+            .at(position));
+        }
+
+        open.push(items);
+    }
+}
 
 pub fn validate_tx<D: Domain>(
     cbor: &[u8],
@@ -16,6 +78,8 @@ pub fn validate_tx<D: Domain>(
     tip: Option<ChainPoint>,
     genesis: &Genesis,
 ) -> Result<MempoolTx, ChainError> {
+    check_cbor_depth(cbor, MAX_TX_CBOR_DEPTH)?;
+
     let tx = MultiEraTx::decode(cbor)?;
     let hash = tx.hash();
 
@@ -98,6 +162,8 @@ pub fn evaluate_tx<D: Domain>(
     cbor: &[u8],
     utxos: &MempoolAwareUtxoStore<D>,
 ) -> Result<pallas::ledger::validate::phase2::EvalReport, ChainError> {
+    check_cbor_depth(cbor, MAX_TX_CBOR_DEPTH)?;
+
     let tx = MultiEraTx::decode(cbor)?;
 
     use dolos_core::TxoRef;
@@ -131,4 +197,92 @@ pub fn evaluate_tx<D: Domain>(
         .map_err(|e| ChainError::Phase2EvaluationError(e.to_string()))?;
 
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nested_arrays(depth: usize) -> Vec<u8> {
+        let mut cbor = vec![0x81; depth];
+        cbor.push(0x00);
+        cbor
+    }
+
+    #[test]
+    fn depth_at_limit_passes() {
+        assert!(check_cbor_depth(&nested_arrays(4), 4).is_ok());
+    }
+
+    #[test]
+    fn depth_over_limit_fails() {
+        assert!(check_cbor_depth(&nested_arrays(5), 4).is_err());
+    }
+
+    #[test]
+    fn leaf_has_no_depth() {
+        assert!(check_cbor_depth(&[0x00], 0).is_ok());
+        assert!(check_cbor_depth(&[0x81, 0x00], 0).is_err());
+    }
+
+    #[test]
+    fn tags_count_as_levels() {
+        // 121([121([0])])
+        let cbor = [0xd8, 0x79, 0x81, 0xd8, 0x79, 0x81, 0x00];
+        assert!(check_cbor_depth(&cbor, 4).is_ok());
+        assert!(check_cbor_depth(&cbor, 3).is_err());
+    }
+
+    #[test]
+    fn maps_count_keys_and_values() {
+        // {[0]: {0: [0]}}
+        let cbor = [0xa1, 0x81, 0x00, 0xa1, 0x00, 0x81, 0x00];
+        assert!(check_cbor_depth(&cbor, 3).is_ok());
+        assert!(check_cbor_depth(&cbor, 2).is_err());
+    }
+
+    #[test]
+    fn indefinite_containers_close_on_break() {
+        // [_ [_ 0], [_ ]]
+        let cbor = [0x9f, 0x9f, 0x00, 0xff, 0x9f, 0xff, 0xff];
+        assert!(check_cbor_depth(&cbor, 2).is_ok());
+        assert!(check_cbor_depth(&cbor, 1).is_err());
+
+        // {_ 0: [_ ]}
+        let cbor = [0xbf, 0x00, 0x9f, 0xff, 0xff];
+        assert!(check_cbor_depth(&cbor, 2).is_ok());
+    }
+
+    #[test]
+    fn sibling_containers_do_not_add_depth() {
+        // [[0], [0], [0]]
+        let cbor = [0x83, 0x81, 0x00, 0x81, 0x00, 0x81, 0x00];
+        assert!(check_cbor_depth(&cbor, 2).is_ok());
+    }
+
+    #[test]
+    fn empty_containers_close() {
+        // [[], {}, 0]
+        let cbor = [0x83, 0x80, 0xa0, 0x00];
+        assert!(check_cbor_depth(&cbor, 2).is_ok());
+    }
+
+    #[test]
+    fn truncated_input_fails() {
+        assert!(check_cbor_depth(&[0x82, 0x00], 8).is_err());
+        assert!(check_cbor_depth(&[0x9f, 0x00], 8).is_err());
+        assert!(check_cbor_depth(&[], 8).is_err());
+    }
+
+    #[test]
+    fn huge_declared_length_fails_fast() {
+        // array of 2^64-1 items with one item present
+        let cbor = [0x9b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00];
+        assert!(check_cbor_depth(&cbor, 8).is_err());
+    }
+
+    #[test]
+    fn deep_input_does_not_overflow() {
+        assert!(check_cbor_depth(&nested_arrays(1_000_000), MAX_TX_CBOR_DEPTH).is_err());
+    }
 }
