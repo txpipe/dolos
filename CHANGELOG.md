@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.6.3] - 2026-11-03
+
+### 🐛 Bug Fixes
+
+- *(lts/v1)* Resolve tokio and zstd security advisories (#1557)
+
+### 🔧 Continuous Integration
+
+- Keep lts/v1 releases off the latest image tag (#1491)
+
+### ⚙️ Miscellaneous Tasks
+
+- *(lts/v1)* Bump pallas to 1.4.0 (#1556)
+
+## [1.6.2] - 2026-10-21
+
+### Release
+
+- V1.6.2
+
 ## [1.6.1] - 2026-09-17
 
 ### 🔧 Continuous Integration
