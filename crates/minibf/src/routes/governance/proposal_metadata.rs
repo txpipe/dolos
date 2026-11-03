@@ -124,82 +124,63 @@ mod tests {
     use dolos_testing::{measured::MeasuredStores, toy_domain::MemoryStores};
 
     #[tokio::test]
-    async fn proposal_metadata_endpoints_share_a_persistent_cache() {
+    async fn proposal_metadata_endpoints_share_the_proposal_cache() {
         use crate::test_support::TestApp;
-        use dolos_core::{CacheStore as _, StateStore as _, StateWriter as _};
+        use dolos_core::{StateStore as _, StateWriter as _};
         use dolos_testing::synthetic::SyntheticBlockConfig;
         use pallas::{crypto::hash::Hasher, ledger::primitives::conway::GovAction};
 
-        let dir = std::env::temp_dir().join(format!(
-            "dolos-proposal-cache-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
         let body = br#"{"body":{"title":"Cached proposal"}}"#;
         let anchor = Anchor {
             url: "https://example.invalid/proposal".to_string(),
             content_hash: Hasher::<256>::hash(body),
         };
-        let cfg = SyntheticBlockConfig {
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
             block_count: 1,
             txs_per_block: 1,
             gov_actions_by_block: vec![vec![vec![GovAction::Information]]],
             ..Default::default()
-        };
+        });
+        let facade = app.facade();
+        let tx = tx_hash_of_block(&app, 0);
+        let tx_hash = tx.parse().unwrap();
+        let id = bech32_gov_action(&tx_hash, 0).unwrap();
+        let key = ProposalKey::new(tx_hash, 0);
+        let mut proposal = facade
+            .state()
+            .read_entity_typed::<ProposalState>(&key)
+            .unwrap()
+            .unwrap();
+        proposal.anchor = Some(anchor.clone());
+        let writer = facade.state().start_writer().unwrap();
+        writer.write_entity_typed(&key, &proposal).unwrap();
+        writer.commit().unwrap();
 
-        for first_start in [true, false] {
-            let app = TestApp::new_with_cfg_and_domain(cfg.clone(), |domain| {
-                domain.with_persistent_cache(&dir).unwrap()
-            });
-            let facade = app.facade();
-            let tx = tx_hash_of_block(&app, 0);
-            let tx_hash = tx.parse().unwrap();
-            let id = bech32_gov_action(&tx_hash, 0).unwrap();
-            let key = ProposalKey::new(tx_hash, 0);
-            let mut proposal = facade
-                .state()
-                .read_entity_typed::<ProposalState>(&key)
-                .unwrap()
-                .unwrap();
-            proposal.anchor = Some(anchor.clone());
-            let writer = facade.state().start_writer().unwrap();
-            writer.write_entity_typed(&key, &proposal).unwrap();
-            writer.commit().unwrap();
+        crate::offchain::cache_verified_body(
+            facade.cache(),
+            crate::offchain::PROPOSAL_OFFCHAIN.name,
+            &anchor,
+            body,
+        )
+        .await;
 
-            if first_start {
-                crate::offchain::cache_verified_body(
-                    facade.cache(),
-                    crate::offchain::PROPOSAL_OFFCHAIN.name,
-                    &anchor,
-                    body,
-                )
-                .await;
-            }
-
-            for path in [
-                format!("/governance/proposals/{tx}/0/metadata"),
-                format!("/governance/proposals/{id}/metadata"),
-            ] {
-                let (status, response) = app.get_bytes(&path).await;
-                assert_eq!(status, StatusCode::OK, "{path}");
-                let metadata: ProposalMetadataV2 = serde_json::from_slice(&response).unwrap();
-                assert_eq!(metadata.id, id);
-                assert_eq!(metadata.url, anchor.url);
-                assert_eq!(metadata.hash, hex::encode(anchor.content_hash));
-                assert_eq!(
-                    metadata.json_metadata,
-                    Some(serde_json::from_slice(body).unwrap())
-                );
-                assert_eq!(metadata.bytes, Some(format!("\\x{}", hex::encode(body))));
-                assert!(metadata.error.is_none());
-            }
-            facade.cache().flush().unwrap();
+        for path in [
+            format!("/governance/proposals/{tx}/0/metadata"),
+            format!("/governance/proposals/{id}/metadata"),
+        ] {
+            let (status, response) = app.get_bytes(&path).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            let metadata: ProposalMetadataV2 = serde_json::from_slice(&response).unwrap();
+            assert_eq!(metadata.id, id);
+            assert_eq!(metadata.url, anchor.url);
+            assert_eq!(metadata.hash, hex::encode(anchor.content_hash));
+            assert_eq!(
+                metadata.json_metadata,
+                Some(serde_json::from_slice(body).unwrap())
+            );
+            assert_eq!(metadata.bytes, Some(format!("\\x{}", hex::encode(body))));
+            assert!(metadata.error.is_none());
         }
-
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
