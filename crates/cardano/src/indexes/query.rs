@@ -557,7 +557,10 @@ where
         let key = DatumKey(*datum_hash);
         self.run_blocking(move |domain| {
             let datum_state: Option<DatumState> = domain.state().read_entity_typed(&key)?;
-            Ok(datum_state.map(|s| s.bytes))
+            // A row without bytes counts UTxOs whose datum no tx witnessed
+            Ok(datum_state
+                .map(|s| s.bytes)
+                .filter(|bytes| !bytes.is_empty()))
         })
         .await
     }

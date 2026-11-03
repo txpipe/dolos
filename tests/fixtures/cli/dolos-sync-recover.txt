@@ -1,0 +1,12 @@
+Bring the state and the archive up to the WAL tip, as a crash left them
+
+Usage: dolos sync recover [OPTIONS]
+
+Options:
+      --discard-wal      When the WAL cannot bring the stores to its tip, reset it to the state
+                         cursor instead, losing its rollback history
+      --dry-run          Print what recovery would do, and change nothing
+      --format <FORMAT>  How to print the result: text for people, JSON for scripts [default: text]
+                         [possible values: text, json]
+  -c, --config <CONFIG>  
+  -h, --help             Print help

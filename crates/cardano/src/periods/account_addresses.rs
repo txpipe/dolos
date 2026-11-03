@@ -1,9 +1,9 @@
 //! Account addresses: the addresses each account saw in each epoch, serving
 //! `/accounts/{stake}/addresses`.
 //!
-//! A sealed epoch holds one row per account that saw an address in it, at
-//! `epoch_start(e) ‖ account`, listing its addresses in order of first
-//! appearance within the epoch. An address active in several epochs is in
+//! A sealed epoch holds the pages of each account that saw an address in it,
+//! at `epoch_start(e) ‖ account ‖ page`, listing its addresses in order of
+//! first appearance within the epoch. An address active in several epochs is in
 //! each of their rows, so readers keep its first appearance and drop the
 //! rest.
 //!
@@ -20,18 +20,15 @@ use dolos_core::{
     ArchiveStore, ArchiveWriter as _, BlockSlot, ChainError, Domain, Entity as _, RangeOf,
     StateStore,
 };
-use pallas::{
-    codec::minicbor::bytes::ByteVec,
-    ledger::{
-        addresses::{Network, StakeAddress},
-        primitives::Epoch,
-    },
+use pallas::ledger::{
+    addresses::{Network, StakeAddress},
+    primitives::Epoch,
 };
 
-use super::{GroupKey, Period};
+use super::{ChunkRow as _, GroupKey, Period};
 use crate::{
     indexes::{entities, CardanoArchiveIndexExt as _, SlotOrder},
-    pallas_extras, AccountAddressChunk, AccountAddressSet, AccountKey, AddressKey, ChainSummary,
+    pallas_extras, AccountAddressEpochs, AccountAddressSet, AccountKey, AddressKey, ChainSummary,
     FixedNamespace as _,
 };
 
@@ -132,16 +129,16 @@ pub(crate) fn seal<D: Domain>(
                     .is_none_or(|(next, _)| next.group != key.group || next.epoch != key.epoch);
 
                 if closes {
-                    let addresses = staged_addresses(std::mem::take(&mut group))
-                        .into_iter()
-                        .map(ByteVec::from)
-                        .collect();
+                    let addresses = staged_addresses(std::mem::take(&mut group));
+                    let pages = super::chunk::<AccountAddressEpochs>(addresses);
 
-                    writer.write_log_typed(
-                        chain.epoch_start(key.epoch),
-                        &key.group,
-                        &AccountAddressChunk { addresses },
-                    )?;
+                    for (page, row) in (0u32..).zip(pages) {
+                        writer.write_log_typed(
+                            chain.epoch_start(key.epoch),
+                            &(key.group.clone(), page),
+                            &row,
+                        )?;
+                    }
                 }
             }
 
@@ -222,11 +219,11 @@ fn first_appearances<D: Domain>(
     let epochs: Vec<Epoch> = epochs.collect();
 
     for batch in epochs.chunks(EPOCH_BATCH) {
-        let sealed = super::read_sealed::<_, AccountAddressChunk>(
+        let sealed = super::read_sealed::<_, AccountAddressEpochs>(
             archive,
             chain,
             batch.iter().copied(),
-            |_| account.clone(),
+            |_| (account.clone(), 0),
         )?;
 
         let mut here = BTreeMap::new();
@@ -237,15 +234,26 @@ fn first_appearances<D: Domain>(
             }
         }
 
-        for (_, period) in super::join(here, sealed) {
+        for (epoch, period) in super::join(here, sealed) {
             let addresses = match period {
                 Period::Staged(rows) => staged_addresses(rows),
                 Period::Sealed(raw) => {
-                    AccountAddressChunk::decode_entity(AccountAddressChunk::NS, &raw)?
-                        .addresses
-                        .into_iter()
-                        .map(Vec::from)
-                        .collect()
+                    let first =
+                        AccountAddressEpochs::decode_entity(AccountAddressEpochs::NS, &raw)?;
+                    let pages = super::chunks_of(first.count);
+                    let mut addresses = first.into_items();
+
+                    for row in super::load_chunks::<_, AccountAddressEpochs>(
+                        archive,
+                        chain,
+                        epoch,
+                        1..pages,
+                        |page| (account.clone(), page),
+                    )? {
+                        addresses.extend(row.into_items());
+                    }
+
+                    addresses
                 }
             };
 
@@ -305,7 +313,7 @@ mod tests {
     use pallas::ledger::primitives::StakeCredential;
 
     use super::*;
-    use crate::periods::{is_sealable, GroupKey, GroupRow as _};
+    use crate::periods::{is_sealable, GroupKey, GroupRow as _, CHUNK_LEN};
     use crate::AddressKey;
 
     /// The epoch the sealing boundary opens: 5 and 6 are immutable at it, 7 is
@@ -383,10 +391,10 @@ mod tests {
         )
     }
 
-    fn logs(domain: &ToyDomain) -> Vec<(BlockSlot, AccountKey, AccountAddressChunk)> {
+    fn logs(domain: &ToyDomain) -> Vec<(BlockSlot, (AccountKey, u32), AccountAddressEpochs)> {
         domain
             .archive()
-            .iter_logs_typed::<AccountAddressChunk>(None)
+            .iter_logs_typed::<AccountAddressEpochs>(None)
             .unwrap()
             .map(Result::unwrap)
             .collect()
@@ -593,6 +601,207 @@ mod tests {
             if done {
                 break;
             }
+
+            crash_after += 1;
+        }
+    }
+
+    /// `n` distinct addresses under `a` in epoch 5, in the order they appear.
+    fn seeded_with(n: u32) -> (ToyDomain, Vec<Vec<u8>>) {
+        let domain = ToyDomain::new(None, None);
+        let start = chain(&domain).epoch_start(5);
+        let writer = domain.state().start_writer().unwrap();
+        let mut addresses = Vec::new();
+
+        for i in 0..n {
+            // appear against byte order, so the page order is the chain's
+            let address = [[0x01].as_slice(), &(n - i).to_be_bytes()].concat();
+            let row = AccountAddressSet {
+                account: a(),
+                address: address.clone(),
+                epoch: 5,
+                slot: start + 1,
+                tx_index: i,
+                output_index: 0,
+            };
+
+            writer.write_entity_typed(&row.key(), &row).unwrap();
+            addresses.push(address);
+        }
+
+        writer.commit().unwrap();
+
+        (domain, addresses)
+    }
+
+    #[test]
+    fn a_group_seals_into_pages_of_chunk_len() {
+        for n in [0u32, 1, 255, 256, 257, 65_536] {
+            let (domain, addresses) = seeded_with(n);
+            seal_as(&domain, &domain).unwrap();
+
+            let logs = logs(&domain);
+            let expected = (n as usize).div_ceil(CHUNK_LEN);
+            assert_eq!(logs.len(), expected, "{n} entries");
+
+            for (i, (_, (account, page), row)) in logs.iter().enumerate() {
+                assert_eq!(account, &AccountKey(a()));
+                assert_eq!(*page as usize, i, "{n} entries");
+                assert_eq!(row.count, u64::from(n), "{n} entries, page {i}");
+                assert_eq!(
+                    row.addresses.len(),
+                    CHUNK_LEN.min(n as usize - i * CHUNK_LEN),
+                    "{n} entries, page {i}"
+                );
+            }
+
+            let sealed: Vec<Vec<u8>> = logs
+                .into_iter()
+                .flat_map(|(_, _, row)| row.into_items())
+                .collect();
+            assert_eq!(sealed, addresses, "{n} entries");
+        }
+    }
+
+    #[test]
+    fn a_listing_crosses_page_boundaries_in_both_orders() {
+        let (domain, addresses) = seeded_with(600);
+
+        let windows = [(250, 10), (255, 2), (0, 600), (500, 100), (256, 256)];
+        let listed = |domain: &ToyDomain| -> Vec<Vec<Vec<u8>>> {
+            let chain = chain(domain);
+            let mut out = Vec::new();
+
+            for order in [SlotOrder::Asc, SlotOrder::Desc] {
+                for (skip, count) in windows {
+                    out.push(
+                        page(
+                            domain,
+                            &chain,
+                            0..=BOUNDARY,
+                            &AccountKey(a()),
+                            order,
+                            skip,
+                            count,
+                        )
+                        .unwrap(),
+                    );
+                }
+            }
+
+            out
+        };
+
+        let before = listed(&domain);
+        seal_as(&domain, &domain).unwrap();
+        assert_eq!(logs(&domain).len(), 3);
+        assert!(staged(&domain).is_empty());
+
+        let after = listed(&domain);
+        assert_eq!(after, before);
+
+        let reversed: Vec<Vec<u8>> = addresses.iter().rev().cloned().collect();
+
+        for (i, (skip, count)) in windows.into_iter().enumerate() {
+            assert_eq!(after[i], addresses[skip..skip + count]);
+            assert_eq!(after[windows.len() + i], reversed[skip..skip + count]);
+        }
+    }
+
+    /// 300 addresses under `a` in each of epochs 5 and 6, two pages each.
+    /// Epoch 6's entry 270, on its page 1, repeats epoch 5's entry 260, on
+    /// its page 1. Returns the listing in first-appearance order.
+    fn two_paged_epochs() -> (ToyDomain, Vec<Vec<u8>>) {
+        let domain = ToyDomain::new(None, None);
+        let chain = chain(&domain);
+        let writer = domain.state().start_writer().unwrap();
+        let mut listing = Vec::new();
+
+        for epoch in [5u8, 6] {
+            for i in 0..300u32 {
+                let address = match (epoch, i) {
+                    (6, 270) => [[0x01, 5].as_slice(), &260u32.to_be_bytes()].concat(),
+                    _ => [[0x01, epoch].as_slice(), &i.to_be_bytes()].concat(),
+                };
+
+                let row = AccountAddressSet {
+                    account: a(),
+                    address: address.clone(),
+                    epoch: epoch.into(),
+                    slot: chain.epoch_start(epoch.into()) + 1,
+                    tx_index: i,
+                    output_index: 0,
+                };
+
+                writer.write_entity_typed(&row.key(), &row).unwrap();
+
+                if !listing.contains(&address) {
+                    listing.push(address);
+                }
+            }
+        }
+
+        writer.commit().unwrap();
+
+        (domain, listing)
+    }
+
+    /// Each sealed epoch's later pages are its own: a listing over two
+    /// multi-page epochs answers as the staged rows did, keeps the repeat's
+    /// first appearance, and answers so between any two commits of the seal
+    /// and after a crash re-run.
+    #[test]
+    fn later_pages_are_read_from_their_own_epoch() {
+        let full = |domain: &ToyDomain, order| {
+            page(
+                domain,
+                &chain(domain),
+                0..=BOUNDARY,
+                &AccountKey(a()),
+                order,
+                0,
+                1_000,
+            )
+            .unwrap()
+        };
+
+        let (clean, listing) = two_paged_epochs();
+        assert_eq!(listing.len(), 599);
+
+        let reversed: Vec<Vec<u8>> = listing.iter().rev().cloned().collect();
+        assert_eq!(full(&clean, SlotOrder::Asc), listing);
+
+        seal_as(&clean, &clean).unwrap();
+        assert_eq!(logs(&clean).len(), 4);
+        assert!(staged(&clean).is_empty());
+        assert_eq!(full(&clean, SlotOrder::Asc), listing);
+        assert_eq!(full(&clean, SlotOrder::Desc), reversed);
+
+        let mut crash_after = 0;
+
+        loop {
+            let (domain, _) = two_paged_epochs();
+            let crashing =
+                FaultyToyDomain::new(domain.clone(), TestFault::CrashAfterCommits(crash_after));
+            let done = seal_as(&crashing, &domain).is_ok();
+
+            assert_eq!(
+                full(&domain, SlotOrder::Asc),
+                listing,
+                "commit {crash_after}"
+            );
+
+            if done {
+                break;
+            }
+
+            seal_as(&domain, &domain).expect("re-run");
+            assert_eq!(logs(&domain), logs(&clean), "commit {crash_after}");
+            assert_eq!(
+                full(&domain, SlotOrder::Desc),
+                reversed,
+                "commit {crash_after}"
+            );
 
             crash_after += 1;
         }

@@ -12,21 +12,13 @@ First check the configuration, run from this folder:
 cargo run -- config check
 ```
 
-Then "bootstrap" the instance:
-
-```bash
-cargo run -- bootstrap relay
-```
-
-This will initialize the data directory starting the chain from scratch using the genesis files.
-
-Once the instance is bootstrapped, you can start the node by running the following command:
+Then start the node:
 
 ```bash
 cargo run -- daemon
 ```
 
-This will start the node and you'll be able to query the node using the different APIs (gRPC, Ouroboros or TRP).
+A fresh data directory needs no bootstrap: the node starts the chain from scratch using the genesis files, and you'll be able to query it using the different APIs (gRPC, Ouroboros or TRP).
 
 ## Example Query
 

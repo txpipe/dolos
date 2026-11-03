@@ -1,13 +1,19 @@
 use std::collections::VecDeque;
+use std::sync::Arc;
 
+use dolos_core::config::RetryConfig;
 use gasket::framework::*;
 use itertools::Itertools as _;
 use pallas::crypto::hash::Hash;
 use pallas::network::facades::PeerClient;
-use pallas::network::miniprotocols::txsubmission::{EraTxBody, EraTxId, Request, TxIdAndSize};
+use pallas::network::miniprotocols::txsubmission::{
+    self, EraTxBody, EraTxId, Request, TxIdAndSize,
+};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
+use super::retry::{Attempts, Failure};
+use super::SyncProgress;
 use crate::adapters::storage::MempoolBackend;
 use crate::prelude::*;
 
@@ -36,14 +42,53 @@ fn to_n2n_body(mempool_tx: MempoolTx) -> EraTxBody {
 }
 
 pub struct Worker {
-    peer_session: PeerClient,
+    /// The session, until the worker's teardown aborts it.
+    peer_session: Option<PeerClient>,
     unfulfilled_request: Option<usize>,
     /// Tracks the hashes of tx IDs we've propagated to the peer, in order.
     /// Used to map the protocol's positional ack count to specific tx hashes.
     propagated_hashes: VecDeque<TxHash>,
+    /// Whether the peer sent this session a request yet.
+    requested: bool,
 }
 
 impl Worker {
+    /// Connect to the peer and start tx-submission: one attempt.
+    async fn open(stage: &Stage) -> Result<Self, Failure> {
+        debug!("connecting to peer");
+
+        let mut peer_session = PeerClient::connect(&stage.peer_address, stage.network_magic)
+            .await
+            .map_err(|error| Failure::connecting(&error))?;
+
+        info!(
+            address = stage.peer_address,
+            magic = stage.network_magic,
+            "connected to peer"
+        );
+
+        debug!("sending txsubmit init message");
+
+        if let Err(error) = peer_session.txsubmission().send_init().await {
+            peer_session.abort().await;
+            return Err(Failure::new("starting tx-submission", &error));
+        }
+
+        Ok(Self {
+            peer_session: Some(peer_session),
+            unfulfilled_request: Default::default(),
+            propagated_hashes: VecDeque::new(),
+            requested: false,
+        })
+    }
+
+    fn txsubmission(&mut self) -> &mut txsubmission::Client {
+        self.peer_session
+            .as_mut()
+            .expect("the session is open until teardown")
+            .txsubmission()
+    }
+
     async fn propagate_txs(
         &mut self,
         mempool: &MempoolBackend,
@@ -57,11 +102,10 @@ impl Worker {
 
         let payload = txs.iter().map(to_n2n_reply).collect_vec();
 
-        self.peer_session
-            .txsubmission()
+        self.txsubmission()
             .reply_tx_ids(payload)
             .await
-            .inspect_err(|err| warn!(error=%err, "error replying with tx ids"))
+            .inspect_err(|error| ended("replying with tx ids", error))
             .or_restart()?;
 
         Ok(())
@@ -111,46 +155,52 @@ impl Worker {
         }
     }
 
-    async fn schedule_next(&mut self) -> Result<WorkSchedule<Request<EraTxId>>, WorkerError> {
+    /// The peer's next request. A session that ends before the first one
+    /// is a failed attempt; one that ends later reconnects at once. A real
+    /// node asks only a minute into a session, so a link that drops sessions
+    /// sooner fails every one: the count starts again whenever the pull
+    /// stage delivers meanwhile.
+    async fn schedule_next(
+        &mut self,
+        stage: &Stage,
+    ) -> Result<WorkSchedule<Request<EraTxId>>, WorkerError> {
         debug!("waiting for request from upstream peer");
 
-        let req = self
-            .peer_session
-            .txsubmission()
-            .next_request()
-            .await
-            .or_restart()?;
+        let next = self.txsubmission().next_request().await;
 
-        Ok(WorkSchedule::Unit(req))
+        match next {
+            Ok(request) => {
+                if !self.requested {
+                    self.requested = true;
+                    stage.attempts.reset();
+                }
+
+                Ok(WorkSchedule::Unit(request))
+            }
+            Err(error) if self.requested => {
+                ended("waiting for the peer's next request", &error);
+                Err(WorkerError::Restart)
+            }
+            Err(error) => {
+                let failure = Failure::new("waiting for the peer's first request", &error);
+                stage.attempts.failed(failure).await?;
+                Err(WorkerError::Restart)
+            }
+        }
     }
 }
 
 #[async_trait::async_trait(?Send)]
 impl gasket::framework::Worker<Stage> for Worker {
+    /// Retried here rather than by gasket, so that every failed attempt in a
+    /// row is counted and waits the backoff of its place in the count.
     async fn bootstrap(stage: &Stage) -> Result<Self, WorkerError> {
-        debug!("connecting to peer");
-
-        let mut peer_session = PeerClient::connect(&stage.peer_address, stage.network_magic)
-            .await
-            .or_retry()?;
-
-        info!(
-            address = stage.peer_address,
-            magic = stage.network_magic,
-            "connected to peer"
-        );
-
-        debug!("sending txsubmit init message");
-
-        peer_session.txsubmission().send_init().await.or_restart()?;
-
-        let worker = Self {
-            peer_session,
-            unfulfilled_request: Default::default(),
-            propagated_hashes: VecDeque::new(),
-        };
-
-        Ok(worker)
+        loop {
+            match Self::open(stage).await {
+                Ok(worker) => return Ok(worker),
+                Err(failure) => stage.attempts.failed(failure).await?,
+            }
+        }
     }
 
     async fn schedule(
@@ -160,7 +210,7 @@ impl gasket::framework::Worker<Stage> for Worker {
         if let Some(request) = self.unfulfilled_request.take() {
             self.schedule_unfulfilled(stage, request).await
         } else {
-            self.schedule_next().await
+            self.schedule_next(stage).await
         }
     }
 
@@ -209,18 +259,32 @@ impl gasket::framework::Worker<Stage> for Worker {
 
                 let to_send = found.into_iter().map(to_n2n_body).collect_vec();
 
-                let result = self.peer_session.txsubmission().reply_txs(to_send).await;
-
-                if let Err(err) = &result {
-                    warn!(err=%err, "error sending txs upstream")
-                }
-
-                result.or_restart()?;
+                self.txsubmission()
+                    .reply_txs(to_send)
+                    .await
+                    .inspect_err(|error| ended("sending txs", error))
+                    .or_restart()?;
             }
         };
 
         Ok(())
     }
+
+    /// Abort the session: pallas's multiplexer outlives a dropped client,
+    /// holding the socket, until a write to it fails, and after a peer's FIN
+    /// none may.
+    async fn teardown(&mut self) -> Result<(), WorkerError> {
+        if let Some(session) = self.peer_session.take() {
+            session.abort().await;
+        }
+
+        Ok(())
+    }
+}
+
+/// A session that ended once the peer had asked: it reconnects at once.
+fn ended(what: &str, error: &txsubmission::Error) {
+    warn!(cause = %Failure::new(what, error), "the tx-submission session ended, reconnecting");
 }
 
 #[derive(Stage)]
@@ -229,11 +293,22 @@ pub struct Stage {
     peer_address: String,
     network_magic: u64,
     mempool: MempoolBackend,
+
+    /// Connections and sessions that failed in a row before the peer sent a
+    /// request, with no pull delivery between them.
+    attempts: Attempts,
 }
 
 impl Stage {
-    pub fn new(peer_address: String, network_magic: u64, mempool: MempoolBackend) -> Self {
+    pub fn new(
+        peer_address: String,
+        network_magic: u64,
+        mempool: MempoolBackend,
+        retry: &RetryConfig,
+        progress: Arc<SyncProgress>,
+    ) -> Self {
         Self {
+            attempts: Attempts::new("submit", peer_address.clone(), retry.clone(), progress),
             peer_address,
             network_magic,
             mempool,

@@ -273,6 +273,12 @@ impl<K: KeyCodec> Ranged<K, StateKeys> {
         self
     }
 
+    /// The range, starting at the first key under `prefix` instead.
+    pub fn starting_at_prefix<P: KeyPrefix<K>>(mut self, prefix: &P) -> Self {
+        self.raw.start = encode(prefix);
+        self
+    }
+
     /// The range, ending before `end` instead.
     pub fn ending_before(mut self, end: &K) -> Self {
         self.raw.end = Some(encode(end));
@@ -495,6 +501,17 @@ mod tests {
         let all = RangeOf::<K>::prefix(&0xffu8);
         assert_eq!(all.raw().end, None);
         assert!(all.contains(&(0xff, (0xffff, [0xff; 3]))));
+    }
+
+    #[test]
+    fn a_range_from_a_prefix_runs_to_the_end() {
+        type K = (u8, (u16, [u8; 3]));
+
+        let range = RangeOf::<K>::all().starting_at_prefix(&7u8);
+        assert!(range.contains(&(7, (0, [0; 3]))));
+        assert!(range.contains(&(0xff, (0xffff, [0xff; 3]))));
+        assert!(!range.contains(&(6, (0xffff, [0xff; 3]))));
+        assert_eq!(range.raw().end, None);
     }
 
     #[test]

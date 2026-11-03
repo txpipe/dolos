@@ -50,8 +50,6 @@
 //!   empty store set, in the order ADR-004 specifies.
 //! - [`facade`] — supported headless assembly for planning, encoding,
 //!   inspection, verification and directory/OCI restoration.
-//! - [`preflight`] — the free-space policy both drivers refuse under, so a run
-//!   that cannot fit its volume says so at minute zero.
 //! - [`registry`] — publishing into an OCI repository: the history chain, and
 //!   the layers a publish inherits instead of rebuilding.
 //! - [`planning`] — the epoch selection every command that walks these stores
@@ -73,11 +71,6 @@ pub mod planning;
 pub mod registry;
 pub mod restore;
 pub mod source;
-
-/// The free-space policy, which is [`stelae_driver`]'s: it is one rule over
-/// paths and byte counts and knows nothing about what fills them. Re-exported
-/// at its old path.
-pub use stelae_driver::preflight;
 
 /// The bounded patience a run spends on an external that fails in bursts, which
 /// is [`stelae_driver`]'s: one policy over attempts and a clock, and nothing
@@ -109,12 +102,12 @@ pub use stelae::{dir, inscription, transport, SteleReader};
 
 use dolos_cardano::indexes::entities;
 use dolos_cardano::model::{
-    AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
-    AddressStats, AssetMintChunk, AssetMintSet, DRepEpochLog, DRepSightingState, DRepState,
-    DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
-    FirstScriptSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressChunk,
-    PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk,
-    PoolEpochLog, PoolState, ProposalState, PrunedAccountState,
+    AccountAddressEpochs, AccountAddressSet, AccountEpochLog, AccountHistoryState, AccountState,
+    AccountStats, AddressStats, AssetMintChunk, AssetMintSet, DRepEpochLog, DRepObservationState,
+    DRepState, DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
+    FirstScriptSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressEpochs,
+    PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyFirstMintChunk,
+    PoolEpochLog, PoolState, ProposalState,
 };
 use dolos_core::{ChainPoint, EntityKind, Namespace};
 use serde_json::json;
@@ -122,6 +115,7 @@ use stelae::{
     dir::LayerSpec,
     frame::{self, CanonicalCbor},
     inscription::HistoryEntry,
+    profile::MediaType,
     Compression, Profile,
 };
 
@@ -140,7 +134,7 @@ pub const INDEXES: &str = "indexes";
 
 /// Spelled by the codec that reads and writes the kind, so the vocabulary has
 /// one definition on both sides of the crate boundary.
-pub use layers::digests::DIGESTS;
+pub use stelae_driver::digests::DIGESTS;
 
 /// The namespaces the ledger writes epoch-boundary logs under: the namespace
 /// column of [`LOG_KINDS`], byte-sorted.
@@ -176,7 +170,7 @@ pub const LOG_NAMESPACES: [Namespace; LOG_KINDS.len()] = {
 /// the log namespaces are spelled, held to the entity types by
 /// `log_kinds_derive_from_their_namespaces` in `tests/coverage.rs`.
 pub const LOG_KINDS: [(&str, Namespace); 15] = [
-    ("log-account-address-chunks", AccountAddressChunk::NS),
+    ("log-account-address-epochs", AccountAddressEpochs::NS),
     ("log-account-epochs", AccountEpochLog::NS),
     ("log-account-stats", AccountStats::NS),
     ("log-address-stats", AddressStats::NS),
@@ -186,8 +180,8 @@ pub const LOG_KINDS: [(&str, Namespace); 15] = [
     ("log-epochs", EpochState::NS),
     ("log-first-mint-chunks", FirstMintChunk::NS),
     ("log-first-script-chunks", FirstScriptChunk::NS),
-    ("log-payment-address-chunks", PaymentAddressChunk::NS),
-    ("log-policy-mint-chunks", PolicyMintChunk::NS),
+    ("log-payment-address-epochs", PaymentAddressEpochs::NS),
+    ("log-policy-first-mint-chunks", PolicyFirstMintChunk::NS),
     ("log-pool-epochs", PoolEpochLog::NS),
     ("log-pools", PoolState::NS),
     ("log-proposals", ProposalState::NS),
@@ -211,18 +205,6 @@ pub const ENTITY_KINDS: [(&str, EntityKind); 3] = [
     ("entity-script", entities::SCRIPT),
     ("entity-stake", entities::STAKE),
 ];
-
-/// The entity kinds an earlier profile witnessed in a state namespace, with
-/// that namespace, in kind name order: `AssetState`'s `assets` for first
-/// mints, `ScriptState`'s `scripts` for first sightings of scripts.
-///
-/// A publisher that still declares the namespace in `parameters.schemas`
-/// kept the kind's first sightings there, so its seals wrote none of the
-/// kind's entries even where it declares the kind. This build reads the
-/// witness from the entity index and does not restore the namespace, so a
-/// restore refuses such a stele before a store is opened.
-pub const STATE_WITNESSED_KINDS: [(EntityKind, Namespace); 2] =
-    [(entities::ASSET, "assets"), (entities::SCRIPT, "scripts")];
 
 /// The entity kinds alone, in [`ENTITY_KINDS`] order: what an export walks
 /// the archive's entity index for.
@@ -259,8 +241,8 @@ pub fn entity_kind_for(kind: &str) -> Option<EntityKind> {
         .map(|(_, entity)| entity)
 }
 
-/// The state layer kinds: the namespace each carries and the shard count its
-/// tip is published in, in inscription order.
+/// The state layer kinds: the namespace each carries, the shard count its tip
+/// is published in and the key byte it shards on, in inscription order.
 ///
 /// One kind per namespace, for the same reason [`LOG_KINDS`] is one per log
 /// namespace (decision 0026): a breaking change to one namespace's record shape
@@ -275,33 +257,39 @@ pub fn entity_kind_for(kind: &str) -> Option<EntityKind> {
 ///
 /// The shard count is **specification, never tuning**: the namespaces whose
 /// populations are chain-scale — the UTxO set, accounts and datums — shard
-/// sixteen ways by the first key nibble, and every other
-/// namespace is a single blob. Re-sharding a namespace is a media-type-version
-/// event for that namespace's kind, decided by the format's owner; it is not a
-/// constant to nudge.
-pub const STATE_KINDS: [(&str, Namespace, u8); 22] = [
-    ("state-account-addresses", AccountAddressSet::NS, 1),
-    ("state-account-stats", AccountStats::NS, 1),
-    ("state-accounts", AccountState::NS, 16),
-    ("state-address-stats", AddressStats::NS, 1),
-    ("state-asset-mints", AssetMintSet::NS, 1),
-    ("state-datums", DatumState::NS, 16),
-    ("state-drep-sightings", DRepSightingState::NS, 1),
-    ("state-dreps", DRepState::NS, 1),
-    ("state-epochs", EpochState::NS, 1),
-    ("state-eras", EraState::NS, 1),
-    ("state-first-mints", FirstMintSet::NS, 1),
-    ("state-first-scripts", FirstScriptSet::NS, 1),
-    ("state-gov", GovState::NS, 1),
-    ("state-metadata-labels", MetadataLabelState::NS, 1),
-    ("state-payment-addresses", PaymentAddressSet::NS, 1),
-    ("state-payment-stats", PaymentStats::NS, 1),
-    ("state-pending-mirs", PendingMirState::NS, 1),
-    ("state-pending-rewards", PendingRewardState::NS, 1),
-    ("state-pools", PoolState::NS, 1),
-    ("state-proposals", ProposalState::NS, 1),
-    ("state-pruned-accounts", PrunedAccountState::NS, 1),
-    ("state-utxos", namespaces::UTXOS, 16),
+/// sixteen ways, and every other namespace is a single blob. Re-sharding a
+/// namespace is a media-type-version event for that namespace's kind, decided
+/// by the format's owner; it is not a constant to nudge.
+///
+/// The shard byte is the first key byte that comes from a hash, and a
+/// sixteen-way namespace shards on its high nibble ([`shard_of`]). A UTxO key
+/// opens with its transaction hash and a datum key is the datum hash, so both
+/// shard on byte 0; an account key opens with the four-byte CBOR header of its
+/// stake credential, so it shards on byte 4, the first hash byte. A single
+/// blob never reads its key, so its shard byte is 0.
+pub const STATE_KINDS: [(&str, Namespace, u8, usize); 22] = [
+    ("state-account-addresses", AccountAddressSet::NS, 1, 0),
+    ("state-account-history", AccountHistoryState::NS, 1, 0),
+    ("state-account-stats", AccountStats::NS, 1, 0),
+    ("state-accounts", AccountState::NS, 16, 4),
+    ("state-address-stats", AddressStats::NS, 1, 0),
+    ("state-asset-mints", AssetMintSet::NS, 1, 0),
+    ("state-datums", DatumState::NS, 16, 0),
+    ("state-drep-observations", DRepObservationState::NS, 1, 0),
+    ("state-dreps", DRepState::NS, 1, 0),
+    ("state-epochs", EpochState::NS, 1, 0),
+    ("state-eras", EraState::NS, 1, 0),
+    ("state-first-mints", FirstMintSet::NS, 1, 0),
+    ("state-first-scripts", FirstScriptSet::NS, 1, 0),
+    ("state-gov", GovState::NS, 1, 0),
+    ("state-metadata-labels", MetadataLabelState::NS, 1, 0),
+    ("state-payment-addresses", PaymentAddressSet::NS, 1, 0),
+    ("state-payment-stats", PaymentStats::NS, 1, 0),
+    ("state-pending-mirs", PendingMirState::NS, 1, 0),
+    ("state-pending-rewards", PendingRewardState::NS, 1, 0),
+    ("state-pools", PoolState::NS, 1, 0),
+    ("state-proposals", ProposalState::NS, 1, 0),
+    ("state-utxos", namespaces::UTXOS, 16, 0),
 ];
 
 /// The state kind names alone: what [`StateScope`] answers for
@@ -323,8 +311,8 @@ pub const STATE_KIND_NAMES: [&str; STATE_KINDS.len()] = {
 pub fn state_kind_for(ns: Namespace) -> Option<&'static str> {
     STATE_KINDS
         .into_iter()
-        .find(|(_, known, _)| *known == ns)
-        .map(|(kind, _, _)| kind)
+        .find(|(_, known, _, _)| *known == ns)
+        .map(|(kind, _, _, _)| kind)
 }
 
 /// The namespace `kind` carries state for, or `None` where the kind is not a
@@ -336,8 +324,8 @@ pub fn state_kind_for(ns: Namespace) -> Option<&'static str> {
 pub fn state_ns_for(kind: &str) -> Option<Namespace> {
     STATE_KINDS
         .into_iter()
-        .find(|(known, _, _)| *known == kind)
-        .map(|(_, ns, _)| ns)
+        .find(|(known, _, _, _)| *known == kind)
+        .map(|(_, ns, _, _)| ns)
 }
 
 /// Whether `kind` is one of the state kinds — the tip predicate the
@@ -352,8 +340,17 @@ pub fn is_state_kind(kind: &str) -> bool {
 pub fn shards_for(ns: Namespace) -> Option<u8> {
     STATE_KINDS
         .into_iter()
-        .find(|(_, known, _)| *known == ns)
-        .map(|(_, _, shards)| shards)
+        .find(|(_, known, _, _)| *known == ns)
+        .map(|(_, _, shards, _)| shards)
+}
+
+/// The key byte `ns`'s state kind shards on, or `None` where the namespace is
+/// not one this profile defines.
+pub fn shard_byte_for(ns: Namespace) -> Option<usize> {
+    STATE_KINDS
+        .into_iter()
+        .find(|(_, known, _, _)| *known == ns)
+        .map(|(_, _, _, byte)| byte)
 }
 
 /// How many state layers every publish writes: the shard counts summed. Every
@@ -394,8 +391,7 @@ pub const fn state_layer_count() -> usize {
 ///   wanted.
 ///
 /// Empty is valid and is the default: a publisher that retains nothing
-/// publishes the tip alone, which is what every stele published before
-/// decision 0026 carries.
+/// publishes the tip alone.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RetainedEpochs(Vec<u64>);
 
@@ -626,6 +622,18 @@ pub const MEDIA_TYPE_VERSION: u64 = 1;
 /// part of a stele's identity — see [`stelae::inscription`].
 pub const MEDIA_TYPE_CODEC: &str = "zstd";
 
+/// The payload media type this profile names `kind` with, whether or not it
+/// defines the kind. Stelae's [`MediaType`] spells the infix.
+pub(crate) fn payload_media_type(kind: &str) -> String {
+    MediaType {
+        vendor: MEDIA_TYPE_VENDOR.to_owned(),
+        kind: kind.to_owned(),
+        version: MEDIA_TYPE_VERSION,
+        codec: MEDIA_TYPE_CODEC.to_owned(),
+    }
+    .to_string()
+}
+
 /// Largest single record this profile writes or reads: 64 MiB.
 ///
 /// Four times the protocol's 16 MiB default, and raised for one record shape
@@ -737,18 +745,6 @@ pub enum Error {
     )]
     UndeclaredEntityKind { kind: &'static str },
 
-    /// An entity kind the stele's publisher witnessed in a state namespace
-    /// ([`STATE_WITNESSED_KINDS`]), so the stele holds none of its entries.
-    #[error(
-        "this stele's publisher keeps entity kind {kind:?}'s first sightings in state namespace \
-         {namespace:?} and wrote no {kind} entries; restoring it would take every known {kind} \
-         for a first sighting"
-    )]
-    StateWitnessedEntityKind {
-        kind: &'static str,
-        namespace: Namespace,
-    },
-
     /// An entity kind the stele declares at a different id width than this
     /// build registers: its ids could not be the ids this build looks up.
     #[error(
@@ -800,8 +796,8 @@ pub enum Error {
     /// The removed-kind rule (ADR-0027). Unlike an unknown kind, a retired one
     /// leaves nothing in the inscription to skip and report: its layers are
     /// absent, and absence is how the format spells "no records in this
-    /// window". A reader that would restore an empty `member-rewards` history
-    /// and call it a success is the failure this refuses, so it refuses before
+    /// window". A reader that would restore a namespace's history empty and
+    /// call it a success is the failure this refuses, so it refuses before
     /// a store is opened and names the namespace an operator has to go and
     /// read about.
     #[error(
@@ -832,9 +828,9 @@ pub enum Error {
     /// Raised only from a number that was actually measured against free space
     /// that was actually read — everything else warns and proceeds. One
     /// variant for both directions because it is one policy; see
-    /// [`crate::preflight`], where it is raised. There is deliberately no flag
-    /// that overrides it: `--scratch-dir` pointed at a bigger volume is the
-    /// escape hatch.
+    /// [`stelae_driver::preflight`], where it is raised. There is deliberately
+    /// no flag that overrides it: `--scratch-dir` pointed at a bigger
+    /// volume is the escape hatch.
     #[error("not enough space: {0}")]
     NotEnoughSpace(String),
 
@@ -1033,9 +1029,7 @@ impl Profile for DolosProfile {
             });
         }
 
-        Ok(format!(
-            "application/vnd.{MEDIA_TYPE_VENDOR}.stele.{kind}.v{MEDIA_TYPE_VERSION}+{MEDIA_TYPE_CODEC}"
-        ))
+        Ok(payload_media_type(kind))
     }
 
     /// The profile sets the protocol's `sequence` to the Cardano epoch, so the
@@ -1292,18 +1286,10 @@ pub fn read_position(value: &serde_json::Value) -> Result<Position, Error> {
 pub fn parameters(retained: &RetainedEpochs) -> serde_json::Value {
     let shards: serde_json::Map<String, serde_json::Value> = STATE_KINDS
         .into_iter()
-        .map(|(_, ns, shards)| (ns.to_owned(), json!(shards)))
+        .map(|(_, ns, shards, _)| (ns.to_owned(), json!(shards)))
         .collect();
 
-    let schemas: serde_json::Map<String, serde_json::Value> = SCHEMA_REVS
-        .into_iter()
-        .chain(
-            RETIRED_NAMESPACES
-                .into_iter()
-                .map(|ns| (ns, RETIRED_SCHEMA_REV)),
-        )
-        .map(|(ns, rev)| (ns.to_owned(), json!(rev)))
-        .collect();
+    let schemas = schemas(RETIRED_NAMESPACES);
 
     let entities: serde_json::Map<String, serde_json::Value> = ENTITY_KINDS
         .into_iter()
@@ -1317,6 +1303,16 @@ pub fn parameters(retained: &RetainedEpochs) -> serde_json::Value {
         "schemas": schemas,
         "stateEpochs": retained.as_slice(),
     })
+}
+
+/// `parameters.schemas`: every live namespace at its revision, and each of
+/// `retired` at [`RETIRED_SCHEMA_REV`].
+fn schemas(retired: &[Namespace]) -> serde_json::Map<String, serde_json::Value> {
+    SCHEMA_REVS
+        .into_iter()
+        .chain(retired.iter().map(|ns| (*ns, RETIRED_SCHEMA_REV)))
+        .map(|(ns, rev)| (ns.to_owned(), json!(rev)))
+        .collect()
 }
 
 /// The compression this profile publishes under.
@@ -1532,7 +1528,7 @@ impl Scope for DigestsScope {
 #[cfg(test)]
 mod tests {
     use dolos_core::BlockHash;
-    use stelae::profile::{checked_layer_media_type, checked_tag_for_sequence, MediaType};
+    use stelae::profile::{checked_layer_media_type, checked_tag_for_sequence};
 
     use super::*;
 
@@ -1544,6 +1540,8 @@ mod tests {
             let media_type = checked_layer_media_type(&DolosProfile, kind).unwrap();
             let parsed = MediaType::parse(&media_type).unwrap();
 
+            assert!(media_type.contains(".stelae."), "{media_type}");
+            assert_eq!(parsed.to_string(), media_type);
             assert_eq!(parsed.vendor, MEDIA_TYPE_VENDOR);
             assert_eq!(parsed.kind, kind);
             assert_eq!(parsed.version, MEDIA_TYPE_VERSION);
@@ -1707,15 +1705,11 @@ mod tests {
 
         assert_eq!(parameters["indexKeyHash"], INDEX_KEY_HASH);
         assert_eq!(parameters["stateEpochs"], json!([4, 100]));
-        assert!(
-            parameters.get("stateShards").is_none(),
-            "the flat shard count was replaced by the per-namespace map"
-        );
 
         // The two maps are the two tables, entry for entry — and nothing more:
         // a namespace in the JSON that no table has would be a claim about code
         // that does not exist.
-        for (_, ns, shards) in STATE_KINDS {
+        for (_, ns, shards, _) in STATE_KINDS {
             assert_eq!(parameters["shards"][ns], shards, "{ns}");
         }
         assert_eq!(
@@ -1730,7 +1724,7 @@ mod tests {
         // Plus the retired namespaces, declared at revision 0 rather than
         // dropped: what a reader that still models one consults to find out
         // that the absence of its layers is normative (ADR-0027).
-        for ns in RETIRED_NAMESPACES {
+        for &ns in RETIRED_NAMESPACES {
             assert_eq!(parameters["schemas"][ns], RETIRED_SCHEMA_REV, "{ns}");
             assert!(!NAMESPACES.contains(&ns), "{ns} is both live and retired");
         }
@@ -1740,13 +1734,24 @@ mod tests {
             SCHEMA_REVS.len() + RETIRED_NAMESPACES.len()
         );
 
+        // The same on a synthetic retirement, since the profile has none.
+        let retired = "retired-namespace";
+        assert!(!NAMESPACES.contains(&retired));
+
+        let synthetic = schemas(&[retired]);
+        assert_eq!(synthetic[retired], RETIRED_SCHEMA_REV);
+        for (ns, rev) in SCHEMA_REVS {
+            assert_eq!(synthetic[ns], rev, "{ns}");
+        }
+        assert_eq!(synthetic.len(), SCHEMA_REVS.len() + 1);
+
         // The routing rule behind the map: a sixteen-way namespace covers every
         // shard its count promises, and a single blob is always shard 0.
         let nibbles: std::collections::BTreeSet<u8> =
-            (0u8..=255).map(|b| shard_of(&[b], 16)).collect();
+            (0u8..=255).map(|b| shard_of(&[b], 16, 0)).collect();
         assert_eq!(nibbles.len(), 16);
 
-        assert!((0u8..=255).all(|b| shard_of(&[b], 1) == 0));
+        assert!((0u8..=255).all(|b| shard_of(&[b], 1, 0) == 0));
     }
 
     /// A scope belongs to the kinds whose shape it is, and to no others.

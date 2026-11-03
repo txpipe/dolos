@@ -427,7 +427,7 @@ pub(super) mod testing {
         final_rows::FinalRows,
         model::{
             gov::{GovDistr, GovState},
-            DRepSightingState,
+            DRepObservationState,
         },
         pallas_extras,
     };
@@ -492,26 +492,26 @@ pub(super) mod testing {
         seed_drep_with_anchor(domain, drep_bytes, anchor);
     }
 
-    /// The anchor the DRep's sighting carries, which both the list and
+    /// The anchor the DRep's observation carries, which both the list and
     /// `/metadata` serve.
     pub fn seed_drep_with_anchor(domain: &ToyDomain, drep_bytes: Vec<u8>, anchor: Anchor) {
         let key = drep_key(&drep_bytes).unwrap();
 
-        let mut sighting = domain
+        let mut observation = domain
             .state()
-            .read_entity_typed::<DRepSightingState>(&key)
-            .expect("failed to read drep sighting")
-            .expect("the synthetic drep has a sighting");
-        sighting.anchor = Some(anchor);
+            .read_entity_typed::<DRepObservationState>(&key)
+            .expect("failed to read drep observation")
+            .expect("the synthetic drep has a observation");
+        observation.anchor = Some(anchor);
 
         let writer = domain
             .state()
             .start_writer()
             .expect("failed to start writer");
         writer
-            .write_entity_typed(&key, &sighting)
-            .expect("failed to write drep sighting");
-        writer.commit().expect("failed to commit drep sighting");
+            .write_entity_typed(&key, &observation)
+            .expect("failed to write drep observation");
+        writer.commit().expect("failed to commit drep observation");
     }
 
     pub fn synthetic_drep() -> DRep {

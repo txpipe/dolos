@@ -1,0 +1,11 @@
+prints one entity from the state
+
+Usage: dolos data inspect [OPTIONS] --namespace <NAMESPACE>
+
+Options:
+      --namespace <NAMESPACE>  namespace of the entity
+      --key <KEY>              hex key of the entity, for namespaces that hold more than one
+      --format <FORMAT>        How to print the result: text for people, JSON for scripts [default:
+                               text] [possible values: text, json]
+  -c, --config <CONFIG>        
+  -h, --help                   Print help

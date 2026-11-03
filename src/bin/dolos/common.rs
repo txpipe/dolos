@@ -1,4 +1,4 @@
-use dolos_cardano::networks::ResolvedNetwork;
+use dolos_cardano::networks::{KnownNetwork, ResolvedNetwork};
 use dolos_core::config::{
     ConfigError, LoggingConfig, RootConfig, TelemetryConfig, DEFAULT_CONFIG_FILE,
 };
@@ -21,7 +21,6 @@ use dolos::core::Genesis;
 use dolos::engine::{DomainBuildError, DomainBuilder};
 use dolos::prelude::*;
 use dolos::storage;
-use dolos::sync::SyncLimit;
 
 pub type Stores = storage::Stores<dolos_cardano::CardanoDelta>;
 
@@ -36,16 +35,21 @@ pub fn open_wal_store(
     storage::open_wal_store(config)
 }
 
-pub fn open_archive_store(config: &RootConfig) -> Result<storage::ArchiveStoreBackend, Error> {
-    storage::open_archive_store(config)
-}
-
 pub fn open_state_store(config: &RootConfig) -> Result<storage::StateStoreBackend, Error> {
     storage::open_state_store(config)
 }
 
 pub fn open_data_stores(config: &RootConfig) -> Result<Stores, Error> {
     storage::open_data_stores(config)
+}
+
+/// The dataset's stores as they are on disk, creating, bootstrapping and
+/// catching up nothing; see [`storage::open_existing_stores`].
+pub fn open_existing_stores(
+    config: &RootConfig,
+    access: storage::Access,
+) -> Result<Stores, storage::OpenError> {
+    storage::open_existing_stores(config, access)
 }
 
 /// The configuration file a command reads and `init` writes: `--config`, else
@@ -57,12 +61,38 @@ pub fn config_file(explicit: Option<&Path>) -> &Path {
 /// Load the configuration, resolve its network against the catalog and parse
 /// its log filter.
 pub fn load_config(explicit_file: Option<&Path>) -> Result<RootConfig, ConfigError> {
-    dolos_core::config::load_checked(explicit_file, |config| {
-        ResolvedNetwork::resolve(&config.chain)
-            .map_err(|error| ConfigError::invalid(["chain.network"], error.to_string()))?;
+    dolos_core::config::load_checked(explicit_file, check_loaded)
+}
 
-        log_filter(&config.logging).map(|_| ())
-    })
+/// [`load_config`] from the file alone, without the `DOLOS_` overrides: the
+/// configuration as a process started without them reads it.
+pub fn load_file_config(file: &Path) -> Result<RootConfig, ConfigError> {
+    dolos_core::config::load_file_checked(Some(file), check_loaded)
+}
+
+fn check_loaded(config: &RootConfig) -> Result<(), ConfigError> {
+    ResolvedNetwork::resolve(&config.chain)
+        .map_err(|error| ConfigError::invalid(["chain.network"], error.to_string()))?;
+
+    log_filter(&config.logging).map(|_| ())
+}
+
+/// Parses `--known-network` / `--network` against the catalog.
+pub fn parse_known_network(name: &str) -> Result<&'static KnownNetwork, String> {
+    KnownNetwork::by_name(name).ok_or_else(|| format!("unknown network {name}"))
+}
+
+/// The configuration a command runs on. A custom network's genesis is checked
+/// before any command that could touch a store, since several of them clear
+/// data before they need it.
+pub fn load_and_check_config(config_file: &Path) -> miette::Result<RootConfig> {
+    load_config(Some(config_file))
+        .map_err(miette::Report::from_err)
+        .and_then(|config| {
+            check_network(&config)?;
+            Ok(config)
+        })
+        .context("loading configuration")
 }
 
 pub fn resolve_network(config: &RootConfig) -> miette::Result<ResolvedNetwork<'_>> {
@@ -89,33 +119,6 @@ pub fn open_genesis(config: &RootConfig) -> miette::Result<Genesis> {
         .context("loading genesis")
 }
 
-/// When `daemon` and `sync` stop.
-#[derive(Debug, Clone, Default, clap::Args)]
-pub struct StopArgs {
-    /// Stop once the ledger reaches this epoch, on its first block: the only
-    /// state a Stelae snapshot of that epoch is cut from
-    #[arg(long, value_name = "N")]
-    pub stop_epoch: Option<u64>,
-
-    /// Stop pulling once the upstream tip is reached
-    #[arg(long, conflicts_with = "max_blocks")]
-    pub until_tip: bool,
-
-    /// Stop pulling after this many blocks
-    #[arg(long, value_name = "N")]
-    pub max_blocks: Option<u64>,
-}
-
-impl StopArgs {
-    pub fn sync_limit(&self) -> SyncLimit {
-        match (self.until_tip, self.max_blocks) {
-            (true, _) => SyncLimit::UntilTip,
-            (false, Some(blocks)) => SyncLimit::MaxBlocks(blocks),
-            (false, None) => SyncLimit::NoLimit,
-        }
-    }
-}
-
 pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
     setup_domain_with_stop_epoch(config, None)
 }
@@ -134,10 +137,23 @@ pub fn setup_domain_with_stop_epoch(
         .map_err(render_domain_build_error)
 }
 
+/// A domain over `stores` as they stand, for a command that repairs or rolls
+/// them back itself; see [`DomainBuilder::assemble`].
+pub fn assemble_domain(config: &RootConfig, stores: &Stores) -> miette::Result<DomainAdapter> {
+    let genesis = Arc::new(open_genesis(config)?);
+
+    DomainBuilder::new(config, genesis)
+        .assemble(stores)
+        .map_err(render_domain_build_error)
+}
+
 /// Keep actionable executable diagnostics at the UI boundary while the
 /// library returns typed construction errors.
 fn render_domain_build_error(error: DomainBuildError) -> miette::Report {
     match error {
+        DomainBuildError::Storage(error @ Error::InUse { .. }) => {
+            miette::Report::new(storage::OpenError::from(error))
+        }
         DomainBuildError::Storage(Error::WalError(WalError::IncompatibleVersion {
             found,
             expected,
@@ -163,7 +179,7 @@ fn render_domain_build_error(error: DomainBuildError) -> miette::Report {
             };
             let help: &str = match (wal, state) {
                 (_, Some(_)) => {
-                    "run `dolos doctor reset-wal` to rebuild the WAL from the current state"
+                    "run `dolos sync recover --discard-wal` to rebuild the WAL from the current state"
                 }
                 _ => "storage may be corrupted; consider re-bootstrapping with `dolos bootstrap`",
             };
@@ -177,7 +193,7 @@ pub fn setup_tracing_error_only() -> miette::Result<()> {
     let filter = Targets::new().with_default(tracing::Level::ERROR);
 
     tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .with(filter)
         .init();
 
@@ -226,6 +242,7 @@ fn log_filter(config: &LoggingConfig) -> Result<Targets, ConfigError> {
     Ok(filter)
 }
 
+/// Logs go to stderr, which leaves stdout to a command's result.
 pub fn setup_tracing(
     config: &LoggingConfig,
     telemetry: Option<&TelemetryConfig>,
@@ -260,7 +277,7 @@ pub fn setup_tracing(
     #[cfg(not(feature = "debug"))]
     {
         tracing_subscriber::registry()
-            .with(tracing_subscriber::fmt::layer())
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
             .with(otel_layer)
             .with(filter)
             .init();
@@ -269,7 +286,7 @@ pub fn setup_tracing(
     #[cfg(feature = "debug")]
     {
         tracing_subscriber::registry()
-            .with(tracing_subscriber::fmt::layer())
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
             .with(console_subscriber::spawn())
             .with(otel_layer)
             .with(filter)
@@ -319,27 +336,88 @@ pub fn hook_exit_token() -> CancellationToken {
     cancel
 }
 
-pub async fn run_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationToken) {
-    loop {
+/// Run the pipeline until it ends or `exit` is cancelled, then tear it down.
+/// Returns the stages that ended on their own when one did, which is a
+/// failure: `exit` is then cancelled, so the rest of the process winds down.
+pub async fn run_pipeline(
+    pipeline: gasket::daemon::Daemon,
+    exit: CancellationToken,
+) -> Option<Vec<String>> {
+    let ended = loop {
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(5)) => {
-                if pipeline.should_stop() {
-                    debug!("pipeline should stop");
-
-                    // trigger cancel so that stages stop early
+                if pipeline.has_ended() {
+                    warn!("the sync pipeline ended");
                     exit.cancel();
-                    break;
+                    break Some(ended_stages(&pipeline));
+                }
+
+                if pipeline.is_terminated() {
+                    debug!("termination requested");
+                    exit.cancel();
+                    break None;
                 }
             }
             _ = exit.cancelled() => {
                 debug!("exit requested");
-                break;
+                break None;
             }
         }
-    }
+    };
 
     debug!("shutting down pipeline");
     pipeline.teardown();
+
+    ended
+}
+
+/// The names of the pipeline's stages that have ended.
+pub fn ended_stages(pipeline: &gasket::daemon::Daemon) -> Vec<String> {
+    use gasket::runtime::{StagePhase, TetherState};
+
+    pipeline
+        .tethers()
+        .filter(|tether| {
+            !matches!(tether.check_state(), TetherState::Alive(phase) if phase != StagePhase::Ended)
+        })
+        .map(|tether| tether.name().to_string())
+        .collect()
+}
+
+/// The error for a sync whose pipeline ended on its own, said after `what`:
+/// why a stage gave up on the upstream peer, or else which stages stopped.
+pub fn sync_failure(
+    what: &str,
+    failure: Option<&dolos::sync::UpstreamFailure>,
+    ended: &[String],
+) -> miette::Report {
+    match failure {
+        Some(failure) if failure.refused => miette::miette!(
+            help = "a peer refuses the handshake of a node on another network, or of one \
+                    with no protocol version in common: check that `upstream.peer_address` \
+                    serves the configured chain",
+            "{what}: {failure}"
+        ),
+        Some(failure) => miette::miette!(
+            help = "`[sync.retry]` sets how many failed attempts in a row are retried, \
+                    and the backoff between them",
+            "{what}: {failure}"
+        ),
+        None => miette::miette!(
+            help = "the log above says why",
+            "{what}: {}",
+            stopped(ended)
+        ),
+    }
+}
+
+/// `the pull stage stopped`, `the pull and apply stages stopped`.
+fn stopped(stages: &[String]) -> String {
+    match stages {
+        [] => "the pipeline stopped".into(),
+        [stage] => format!("the {stage} stage stopped"),
+        [init @ .., last] => format!("the {} and {last} stages stopped", init.join(", ")),
+    }
 }
 
 /// Drains the serving drivers, cancelling the rest once any one of them fails.
@@ -408,6 +486,37 @@ mod tests {
             ..Default::default()
         };
         assert!(log_filter(&config).is_err());
+    }
+
+    #[test]
+    fn a_sync_failure_points_at_what_to_check() {
+        use dolos::sync::UpstreamFailure;
+
+        let failure = |refused| UpstreamFailure {
+            message: "the pull stage gave up on the upstream peer".into(),
+            refused,
+        };
+
+        let help = |failure: Option<&UpstreamFailure>| {
+            let report = sync_failure("the sync stopped", failure, &["pull".into()]);
+            let help = report.help().map(|help| help.to_string());
+            (report.to_string(), help.unwrap_or_default())
+        };
+
+        let (message, refused) = help(Some(&failure(true)));
+        assert_eq!(
+            message,
+            "the sync stopped: the pull stage gave up on the upstream peer"
+        );
+        assert!(refused.contains("another network"), "{refused}");
+        assert!(!refused.contains("[sync.retry]"), "{refused}");
+
+        let (_, retried) = help(Some(&failure(false)));
+        assert!(retried.starts_with("`[sync.retry]`"), "{retried}");
+
+        let (message, stopped) = help(None);
+        assert_eq!(message, "the sync stopped: the pull stage stopped");
+        assert_eq!(stopped, "the log above says why");
     }
 
     #[tokio::test]

@@ -2,11 +2,13 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use pallas::codec::minicbor::{self, Decode, Encode};
-use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
+use redb::{ReadableTable, ReadableTableMetadata, TableDefinition};
 use thiserror::Error;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::{debug, warn};
+
+use crate::handle::Handle;
 
 use dolos_core::{
     config::RedbMempoolConfig, ChainPoint, EraCbor, MempoolError, MempoolEvent, MempoolPage,
@@ -674,7 +676,7 @@ impl FinalizedTable {
 
 #[derive(Clone)]
 pub struct RedbMempool {
-    db: Arc<redb::Database>,
+    db: Arc<Handle>,
     updates: broadcast::Sender<MempoolEvent>,
 }
 
@@ -717,7 +719,27 @@ impl RedbMempool {
             .create(path)
             .map_err(|e| MempoolError::Internal(Box::new(e)))?;
 
-        Self::from_db(db)
+        Self::from_db(Handle::Writable(db))
+    }
+
+    /// Open an existing mempool read-only (see [`Handle`]), without creating
+    /// its tables.
+    pub fn open_read_only(
+        path: impl AsRef<std::path::Path>,
+        config: &RedbMempoolConfig,
+    ) -> Result<Self, MempoolError> {
+        let db = Handle::open_read_only(
+            path,
+            1024 * 1024 * config.cache.unwrap_or(DEFAULT_CACHE_SIZE_MB),
+        )
+        .map_err(|e| MempoolError::Internal(Box::new(e)))?;
+
+        let (updates, _) = broadcast::channel(16);
+
+        Ok(Self {
+            db: Arc::new(db),
+            updates,
+        })
     }
 
     pub fn in_memory() -> Result<Self, MempoolError> {
@@ -725,10 +747,10 @@ impl RedbMempool {
             .create_with_backend(redb::backends::InMemoryBackend::new())
             .map_err(|e| MempoolError::Internal(Box::new(e)))?;
 
-        Self::from_db(db)
+        Self::from_db(Handle::Writable(db))
     }
 
-    fn from_db(db: redb::Database) -> Result<Self, MempoolError> {
+    fn from_db(db: Handle) -> Result<Self, MempoolError> {
         let (updates, _) = broadcast::channel(16);
 
         let out = Self {

@@ -22,18 +22,19 @@ use std::collections::BTreeMap;
 
 use dolos_cardano::{
     model::{
-        AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AuthHistory,
-        CalidusRegistration, Committee, CommitteeAuthorization, Constitution, DRepDelegation,
-        DRepEpochLog, DRepExpiry, DRepSightingState, DRepState, DatumState, EndStats, EpochState,
-        EpochValue, EraBoundary, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
+        AccountAddressEpochs, AccountAddressItem, AccountAddressSet, AccountEpochLog,
+        AccountHistoryState, AccountState, AuthHistory, CalidusRegistration, Committee,
+        CommitteeAuthorization, Constitution, DRepDelegation, DRepEpochLog, DRepExpiry,
+        DRepObservationState, DRepState, DatumState, EndStats, EpochState, EpochValue, EraBoundary,
+        EraState, FirstMintChunk, FirstMintItem, FirstMintSet, FirstScriptChunk, FirstScriptItem,
         FirstScriptSet, GovDistr, GovRoots, GovState, MetadataLabelState, Nonces, PParamValue,
-        PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk, PoolDelegation,
-        PoolEpochLog, PoolParams, PoolSnapshot, PoolState, PoolTally, ProposalAction,
-        ProposalState, PrunedAccountState, RollingStats, ShardProgress, Stake, VoteEntry,
+        PParamsSet, PendingMirState, PendingRewardState, PolicyFirstMintChunk, PolicyFirstMintItem,
+        PoolDelegation, PoolEpochLog, PoolParams, PoolSnapshot, PoolState, ProposalAction,
+        ProposalState, RollingStats, Stake, VoteEntry,
     },
     model::{
-        AccountStats, AddressStats, AssetMintChunk, AssetMintSet, PaymentAddressChunk,
-        PaymentAddressSet, PaymentStats, Sum, UnitSums,
+        AccountStats, AddressStats, AssetMintChunk, AssetMintSet, PaymentAddressEpochs,
+        PaymentAddressItem, PaymentAddressSet, PaymentStats, Sum, UnitSums,
     },
     pallas::{
         codec::utils::Bytes,
@@ -138,16 +139,10 @@ pub fn drep_epoch_log() -> DRepEpochLog {
     }
 }
 
-/// The one float in the whole profile.
-///
-/// `relative_size` is pinned at an exactly-representable power of two, so the
-/// golden fixes the IEEE-754 bits and nothing else: a value that needed
-/// rounding would pin the rounding rather than the field.
 pub fn pool_epoch_log() -> PoolEpochLog {
     PoolEpochLog {
         blocks_minted: 42,
         total_stake: 123_456_789_000,
-        relative_size: 0.015625,
         delegators_count: 317,
         live_pledge: 30_000_000_000,
         total_rewards: 4_400_000_000,
@@ -200,16 +195,27 @@ pub fn first_mint_chunk() -> FirstMintChunk {
     FirstMintChunk {
         count: 258,
         subjects: vec![
-            [hash28(0xb0).as_slice(), b"first"].concat().into(),
-            [hash28(0xb1).as_slice(), b"second"].concat().into(),
+            FirstMintItem {
+                subject: [hash28(0xb0).as_slice(), b"first"].concat().into(),
+            },
+            FirstMintItem {
+                subject: [hash28(0xb1).as_slice(), b"second"].concat().into(),
+            },
         ],
     }
 }
 
-pub fn policy_mint_chunk() -> PolicyMintChunk {
-    PolicyMintChunk {
+pub fn policy_first_mint_chunk() -> PolicyFirstMintChunk {
+    PolicyFirstMintChunk {
         count: 257,
-        names: vec![b"first".to_vec().into(), b"second".to_vec().into()],
+        names: vec![
+            PolicyFirstMintItem {
+                name: b"first".to_vec().into(),
+            },
+            PolicyFirstMintItem {
+                name: b"second".to_vec().into(),
+            },
+        ],
     }
 }
 
@@ -249,13 +255,18 @@ pub fn address_stats() -> AddressStats {
     }
 }
 
-pub fn payment_address_chunk() -> PaymentAddressChunk {
-    PaymentAddressChunk {
+pub fn payment_address_epochs() -> PaymentAddressEpochs {
+    PaymentAddressEpochs {
+        count: 260,
         tails: vec![
-            [[0x01].as_slice(), &[0xc2; 28]].concat().into(),
-            vec![0x61].into(),
+            PaymentAddressItem {
+                tail: [[0x01].as_slice(), &[0xc2; 28]].concat().into(),
+            },
+            PaymentAddressItem {
+                tail: vec![0x61].into(),
+            },
         ],
-        tx_count: 9,
+        tx_count: Some(9),
     }
 }
 
@@ -319,15 +330,20 @@ pub fn account_address_set() -> AccountAddressSet {
     }
 }
 
-pub fn account_address_chunk() -> AccountAddressChunk {
-    AccountAddressChunk {
+pub fn account_address_epochs() -> AccountAddressEpochs {
+    AccountAddressEpochs {
+        count: 261,
         addresses: vec![
-            [[0x01].as_slice(), &[0xb5; 28], &[0xb6; 28]]
-                .concat()
-                .into(),
-            [[0x31].as_slice(), &[0xb7; 28], &[0xb6; 28]]
-                .concat()
-                .into(),
+            AccountAddressItem {
+                address: [[0x01].as_slice(), &[0xb5; 28], &[0xb6; 28]]
+                    .concat()
+                    .into(),
+            },
+            AccountAddressItem {
+                address: [[0x31].as_slice(), &[0xb7; 28], &[0xb6; 28]]
+                    .concat()
+                    .into(),
+            },
         ],
     }
 }
@@ -343,7 +359,10 @@ pub fn first_script_set() -> FirstScriptSet {
 pub fn first_script_chunk() -> FirstScriptChunk {
     FirstScriptChunk {
         count: 259,
-        hashes: vec![hash28(0xa0), hash28(0xa1)],
+        hashes: vec![
+            FirstScriptItem { hash: hash28(0xa0) },
+            FirstScriptItem { hash: hash28(0xa1) },
+        ],
     }
 }
 
@@ -354,8 +373,8 @@ pub fn datum_state() -> DatumState {
     }
 }
 
-pub fn drep_sighting_state() -> DRepSightingState {
-    DRepSightingState {
+pub fn drep_observation_state() -> DRepObservationState {
+    DRepObservationState {
         first_seen: (44_444, 2, 1),
         anchor: Some(anchor(0xa2)),
     }
@@ -458,6 +477,9 @@ fn end_stats() -> EndStats {
     }
 }
 
+/// The sync cursors are the exception to every `Option` being `Some`: a
+/// published row carries them null and false, and the boundary check refuses
+/// a state that has any set.
 pub fn epoch_state() -> EpochState {
     EpochState {
         number: 402,
@@ -492,32 +514,12 @@ pub fn epoch_state() -> EpochState {
         }),
         end: Some(end_stats()),
         incentives: Some(epoch_incentives(9)),
-        ewrap_progress: Some(ShardProgress {
-            committed: 3,
-            total: 8,
-        }),
-        estart_progress: Some(ShardProgress {
-            committed: 5,
-            total: 8,
-        }),
-        rupd_progress: Some(ShardProgress {
-            committed: 7,
-            total: 8,
-        }),
+        ewrap_progress: None,
+        estart_progress: None,
+        rupd_progress: None,
         active_stake: Some(21_000_000_000_000_000),
-        estart_tally: Some(BTreeMap::from([
-            (hash28(0xc5), pool_tally(1)),
-            (hash28(0xc6), pool_tally(2)),
-        ])),
-        ewrap_finalized: true,
-    }
-}
-
-fn pool_tally(seed: u8) -> PoolTally {
-    PoolTally {
-        stake: 1_000_000_000_000 + seed as u64,
-        delegators: 300 + seed as u64,
-        live_pledge: 50_000_000_000 + seed as u64,
+        estart_tally: None,
+        ewrap_finalized: false,
     }
 }
 
@@ -616,10 +618,11 @@ pub fn gov_state() -> GovState {
     }
 }
 
+/// A complete distribution, every shard merged, as a published row has it.
 fn gov_distr(seed: u8, epoch_offset: Epoch) -> GovDistr {
     GovDistr {
         closing_epoch: 500 + epoch_offset,
-        committed_shards: 6,
+        committed_shards: 8,
         total_shards: 8,
         drep_distr: BTreeMap::from([
             (DRep::Key(hash28(seed)), 111_000_000u64),
@@ -649,8 +652,8 @@ pub fn pending_mir_state() -> PendingMirState {
     }
 }
 
-pub fn pruned_account_state() -> PrunedAccountState {
-    PrunedAccountState {
+pub fn account_history_state() -> AccountHistoryState {
+    AccountHistoryState {
         lifetime_rewards: 4_981_449,
         deregistered_at: Some(171_234_567),
     }
@@ -757,7 +760,7 @@ pub fn proposal_state() -> ProposalState {
         canceled_epoch: Some(513),
         deposit: Some(100_000_000_000),
         reward_account: Some(StakeCredential::AddrKeyhash(hash28(0x17))),
-        proposed_in: Some(508),
+        proposed_in: 508,
         parent: Some(gov_action_id(0x18, 4)),
         purpose: Some(dolos_cardano::model::GovPurpose::Committee),
         anchor: Some(anchor(0x19)),
@@ -940,7 +943,6 @@ pub fn every_proposal_action() -> Vec<(&'static str, ProposalAction)> {
                 (StakeCredential::ScriptHash(hash28(0x23)), 2_000_000),
             ]),
         ),
-        ("Other", ProposalAction::Other),
         ("NoConfidence", ProposalAction::NoConfidence),
         (
             "UpdateCommittee",
