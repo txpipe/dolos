@@ -31,7 +31,7 @@ A namespace has one of two validity models:
 
 The disk tier is a single Redb file, `<storage.path>/cache/cache.redb`. Its writes skip the fsync, and the node makes them durable when it shuts down, so a crash loses at most the entries written since. A file found corrupt, cut short, or laid out by another release, such as one you rolled back from, is recreated empty; one that fails to open for another reason, such as its permissions, is an error and the node does not start.
 
-DRep, proposal and pool metadata each have their own namespaces and fetch limits. One kind never waits for the fetches of another. DRep and proposal metadata run at most 16 fetches at once and keep at most 64 in progress, because such a body can reach 3 MB. Pool metadata runs at most 64 fetches at once and keeps at most 128 in progress, because a pool body is at most 512 bytes. A fetch continues after its request ends and keeps its result for the next request.
+DRep, proposal and pool metadata each have their own namespaces and fetch limits. One kind never waits for the fetches of another. DRep and proposal metadata each run at most 16 fetches at once and keep at most 64 in progress, because such a body can reach 3 MB. Pool metadata runs at most 64 fetches at once and keeps at most 128 in progress, because a pool body is at most 512 bytes. A fetch continues after its request ends and keeps its result for the next request.
 
 A verified body stays available during an upstream outage until a tier evicts it. A new advertised hash starts a new fetch.
 
