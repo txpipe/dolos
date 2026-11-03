@@ -179,7 +179,8 @@ pub fn remove_legacy_dir(storage_path: &Path) {
 }
 
 /// What a miss gets while its namespace already has [`MAX_PENDING_LOADS`]
-/// fetches under way, or [`MAX_PENDING_POOL_LOADS`] for pools.
+/// fetches under way, or [`MAX_PENDING_POOL_LOADS`] for pools, and what it
+/// gets when its shared retry also failed at another url.
 #[derive(Debug, Clone, Copy)]
 pub enum OnOverload {
     /// Its anchor alone, unfetched, the way a list row past its page deadline
@@ -484,7 +485,8 @@ where
 }
 
 /// The body of `location`: cached, joined from a flight, or fetched and kept.
-/// At the pending fill limit, `on_overload` decides.
+/// At the pending fill limit, or when the shared retry also failed at another
+/// url, `on_overload` decides.
 async fn load_body<C, F, Fut>(
     cache: &C,
     location: &MetadataLocation,
@@ -514,9 +516,10 @@ where
     let filled = if failed_elsewhere(&filled, location) {
         match shared_fill(cache, location, namespaces, on_overload, &fetch).await {
             None => return MetadataBody::Unfetched,
-            Some(filled) if failed_elsewhere(&filled, location) => {
-                inline_fill(cache, location, namespaces, fetch()).await
-            }
+            Some(filled) if failed_elsewhere(&filled, location) => match on_overload {
+                OnOverload::Unfetched => return MetadataBody::Unfetched,
+                OnOverload::Inline => inline_fill(cache, location, namespaces, fetch()).await,
+            },
             Some(filled) => filled,
         }
     } else {
@@ -1167,6 +1170,110 @@ mod tests {
         assert_eq!(fetched.unwrap().ticker, "POOL");
         assert!(error.is_none());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    // see the note above `a_shared_failure_at_another_url_retries_the_own_url`.
+    // A finished flight wakes its waiters in join order, so the request at
+    // the third url starts the shared retry and the list row joins it.
+    #[tokio::test]
+    async fn a_list_row_whose_shared_retry_fails_elsewhere_goes_out_unfetched() {
+        let cache = memory_cache();
+        let dead = pool_metadata(POOL_BODY);
+        let mut third = dead.clone();
+        third.url = "https://third.invalid/pool.json".to_string();
+        let mut row = dead.clone();
+        row.url = "https://mirror.invalid/pool.json".to_string();
+
+        // `failing(url)` fails at `url` once `release` opens
+        let release = Arc::new(Semaphore::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let failing = |url: &str| {
+            let (failure, release, calls) = (
+                crate::mapping::pool_connection_error(url),
+                release.clone(),
+                calls.clone(),
+            );
+            move |_| {
+                let (failure, release, calls) = (failure.clone(), release.clone(), calls.clone());
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    // each permit releases one fetch
+                    release.acquire().await.unwrap().forget();
+                    Err(Some(failure))
+                }
+            }
+        };
+
+        let first = tokio::spawn({
+            let (cache, dead, fetch) = (cache.clone(), dead.clone(), failing(&dead.url));
+            async move { load_pool_metadata(&cache, &dead, OnOverload::Inline, fetch).await }
+        });
+        within(async {
+            while calls.load(Ordering::SeqCst) < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+
+        // each closure call marks a join: the first of the shared fetch, the
+        // second of the shared retry
+        let joins = |n: usize, joined: &Arc<AtomicUsize>| {
+            let joined = joined.clone();
+            within(async move {
+                while joined.load(Ordering::SeqCst) < n {
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+        let (third_joins, row_joins) =
+            (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let retry = tokio::spawn({
+            let (cache, third, joined, fetch) = (
+                cache.clone(),
+                third.clone(),
+                third_joins.clone(),
+                failing(&third.url),
+            );
+            async move {
+                load_pool_metadata(&cache, &third, OnOverload::Inline, move |metadata| {
+                    joined.fetch_add(1, Ordering::SeqCst);
+                    fetch(metadata)
+                })
+                .await
+            }
+        });
+        joins(1, &third_joins).await;
+
+        let served = Arc::new(AtomicUsize::new(0));
+        let listed = tokio::spawn({
+            let (cache, row, joined, serve) = (
+                cache.clone(),
+                row.clone(),
+                row_joins.clone(),
+                serving_pool(POOL_BODY, &served),
+            );
+            async move {
+                load_pool_metadata(&cache, &row, OnOverload::Unfetched, move |metadata| {
+                    joined.fetch_add(1, Ordering::SeqCst);
+                    serve(metadata)
+                })
+                .await
+            }
+        });
+        joins(1, &row_joins).await;
+
+        // the shared fetch fails at the dead url, the retry at the third url
+        release.add_permits(1);
+        joins(2, &third_joins).await;
+        joins(2, &row_joins).await;
+        release.add_permits(1);
+
+        let (fetched, error) = within(listed).await.unwrap();
+        assert!(fetched.is_none());
+        assert!(error.is_none());
+        assert_eq!(served.load(Ordering::SeqCst), 0);
+        assert!(within(first).await.unwrap().1.is_some());
+        assert!(within(retry).await.unwrap().1.is_some());
     }
 
     /// `wait`'s output, or a test failure after five seconds rather than a
