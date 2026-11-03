@@ -83,7 +83,7 @@ mod tests {
         routes::assets::testing::*,
         test_support::{first_mint_chain, first_mint_policies, TestApp, TestFault},
     };
-    use dolos_cardano::{indexes::AsyncCardanoQueryExt, model::PolicyMintChunk};
+    use dolos_cardano::{indexes::AsyncCardanoQueryExt, model::PolicyFirstMintChunk};
     use dolos_core::{ArchiveStore as _, AsyncQueryFacade, StateStore as _};
     use dolos_testing::{synthetic::SyntheticBlockConfig, toy_domain::ToyDomain};
     use futures_util::StreamExt;
@@ -199,7 +199,7 @@ mod tests {
 
         let sealed = domain
             .archive()
-            .iter_logs_typed::<PolicyMintChunk>(None)
+            .iter_logs_typed::<PolicyFirstMintChunk>(None)
             .unwrap()
             .count();
         assert!(sealed > 4, "{sealed} sealed rows");

@@ -64,6 +64,12 @@ impl Stake {
     pub fn withdrawable(&self) -> u64 {
         sub!(self.rewards_sum, self.withdrawals_sum)
     }
+
+    /// No balance: no UTxO value, at a pointer address or otherwise, and no
+    /// reward balance.
+    pub fn is_empty(&self) -> bool {
+        self.utxo_sum == 0 && self.utxo_sum_at_pointer_addresses == 0 && self.withdrawable() == 0
+    }
 }
 
 impl TransitionDefault for Stake {
@@ -106,7 +112,7 @@ impl TransitionDefault for DRepDelegation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode)]
+#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Serialize)]
 pub struct AccountState {
     #[n(0)]
     pub registered_at: Option<u64>,
@@ -444,6 +450,98 @@ impl AccountState {
         match self.drep.live() {
             Some(DRepDelegation::Delegated(drep)) => Some(drep),
             _ => None,
+        }
+    }
+
+    /// Whether the row is dead: the account is unregistered, holds no
+    /// balance, every stake snapshot is empty and every delegation snapshot
+    /// undelegated, and no retired pool is left to serve. Registration
+    /// history does not keep a row alive: [`Self::remainder`] keeps what the
+    /// API serves of it. ESTART deletes a dead row, unless it deregistered in
+    /// the closing epoch, which waits for the next boundary
+    /// ([`crate::estart::prune::prunes`]).
+    pub fn is_dead(&self) -> bool {
+        !self.is_registered()
+            && self.retired_pool.is_none()
+            && every_snapshot(&self.stake, |x| x.is_none_or(Stake::is_empty))
+            && every_snapshot(&self.pool, |x| {
+                matches!(x, None | Some(PoolDelegation::NotDelegated))
+            })
+            && every_snapshot(&self.drep, |x| {
+                matches!(x, None | Some(DRepDelegation::NotDelegated))
+            })
+    }
+
+    /// What the row leaves in `account-history` when ESTART deletes it, or
+    /// `None` when it carries no history: no lifetime rewards and no
+    /// deregistration.
+    pub fn remainder(&self) -> Option<AccountHistoryState> {
+        let remainder = AccountHistoryState {
+            lifetime_rewards: self.stake.live().map(|x| x.rewards_sum).unwrap_or_default(),
+            deregistered_at: self.deregistered_at,
+        };
+
+        (remainder != AccountHistoryState::default()).then_some(remainder)
+    }
+}
+
+fn every_snapshot<T: Clone + std::fmt::Debug>(
+    value: &EpochValue<T>,
+    holds: impl Fn(Option<&T>) -> bool,
+) -> bool {
+    [
+        value.next(),
+        value.live(),
+        value.mark(),
+        value.set(),
+        value.go(),
+    ]
+    .into_iter()
+    .all(holds)
+}
+
+/// The retained history of a credential's retired lives: lifetime rewards
+/// summed over every pruned life, and the newest deregistration.
+///
+/// Keyed by the credential's [`AccountKey`]. ESTART adds a life to it in the
+/// commit that prunes the life's dead row; nothing during sync reads it. A
+/// dead row holds no reward balance, so its lifetime withdrawals equal its
+/// lifetime rewards, and one sum serves both. A credential with no retired
+/// life that carried history has no row.
+#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
+pub struct AccountHistoryState {
+    /// Rewards earned over every retired life; 0 when none earned any.
+    #[n(0)]
+    pub lifetime_rewards: u64,
+
+    /// The slot of the newest deregistration among the retired lives;
+    /// absent when none deregistered. It sets `active_epoch` when the
+    /// credential has no live row, or a row with neither date.
+    #[n(1)]
+    pub deregistered_at: Option<u64>,
+}
+
+entity_boilerplate!(AccountHistoryState, "account-history", state = AccountKey);
+
+impl AccountHistoryState {
+    /// Add a later pruned life of the same credential.
+    pub fn absorb(&mut self, later: &AccountHistoryState) {
+        self.lifetime_rewards = add!(self.lifetime_rewards, later.lifetime_rewards);
+        self.deregistered_at = self.deregistered_at.max(later.deregistered_at);
+    }
+
+    /// Add the pruned history back to `account`, the credential's live row or
+    /// a fresh one, so it serves what the row would have served had ESTART
+    /// never pruned it: the lifetime sums, and the deregistration when the
+    /// row has neither date.
+    pub fn restore(&self, account: &mut AccountState) {
+        let mut live = account.stake.live().cloned().unwrap_or_default();
+        live.rewards_sum = add!(live.rewards_sum, self.lifetime_rewards);
+        live.withdrawals_sum = add!(live.withdrawals_sum, self.lifetime_rewards);
+        account.stake.reset(Some(live));
+
+        if account.registered_at.is_none() && account.deregistered_at.is_none() {
+            account.deregistered_at = self.deregistered_at;
         }
     }
 }

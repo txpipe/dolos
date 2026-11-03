@@ -10,10 +10,10 @@ use std::process::Command;
 
 use dolos_cardano::networks::{KnownNetwork, ResolvedNetwork};
 use dolos_core::config::{
-    load, load_checked, ArchiveStoreConfig, CacheConfig, ChainConfig, ConfigError, CustomUtxo,
-    FjallPreset, GenesisConfig, HistoryConfig, HistoryMode, HistoryWindow, LoggingConfig,
-    MempoolConfig, Protocol, RetryConfig, RootConfig, StateStoreConfig, StoreType, SyncConfig,
-    TelemetryConfig, UpstreamConfig, MIGRATION_GUIDE_URL,
+    load, load_checked, override_variables, ArchiveStoreConfig, CacheConfig, ChainConfig,
+    ConfigError, CustomUtxo, FjallPreset, GenesisConfig, HistoryConfig, HistoryMode, HistoryWindow,
+    LoggingConfig, MempoolConfig, Protocol, RetryConfig, RootConfig, StateStoreConfig, StoreType,
+    SyncConfig, TelemetryConfig, UpstreamConfig, MIGRATION_GUIDE_URL,
 };
 use dolos_core::Genesis;
 use serial_test::serial;
@@ -80,7 +80,7 @@ fn the_ordinary_example_parses() {
     ));
 
     assert_eq!(config, expected);
-    assert_eq!(config.compatibility().as_str(), "v2-alpha.1");
+    assert_eq!(config.compatibility().as_str(), "v2-alpha.2");
 }
 
 #[test]
@@ -401,23 +401,28 @@ fn compatibility_is_checked_first() {
     assert!(matches!(missing, ConfigError::MissingCompatibility));
     let message = missing.to_string();
     assert!(message.contains("`compatibility`"), "{message}");
-    assert!(message.contains("\"v2-alpha.1\""), "{message}");
+    assert!(message.contains("\"v2-alpha.2\""), "{message}");
 
     let malformed = load(Some(&fixture("compatibility/malformed.toml"))).unwrap_err();
     assert!(matches!(malformed, ConfigError::MalformedCompatibility(_)));
     assert!(malformed.to_string().contains("found 2"), "{malformed}");
 
-    let unsupported = load(Some(&fixture("compatibility/unsupported.toml"))).unwrap_err();
-    assert!(matches!(
-        unsupported,
-        ConfigError::UnsupportedCompatibility(_)
-    ));
-    let message = unsupported.to_string();
-    assert!(message.contains("\"v2-alpha.0\""), "{message}");
-    assert!(message.contains("supports \"v2-alpha.1\""), "{message}");
+    for (file, declared) in [
+        ("compatibility/unsupported.toml", "v2-alpha.0"),
+        ("compatibility/previous-alpha.toml", "v2-alpha.1"),
+    ] {
+        let unsupported = load(Some(&fixture(file))).unwrap_err();
+        assert!(matches!(
+            unsupported,
+            ConfigError::UnsupportedCompatibility(_)
+        ));
+        let message = unsupported.to_string();
+        assert!(message.contains(&format!("\"{declared}\"")), "{message}");
+        assert!(message.contains("supports \"v2-alpha.2\""), "{message}");
+    }
 
     let supported = load(Some(&fixture("ordinary.toml"))).unwrap();
-    assert_eq!(supported.compatibility().as_str(), "v2-alpha.1");
+    assert_eq!(supported.compatibility().as_str(), "v2-alpha.2");
 }
 
 #[test]
@@ -435,8 +440,7 @@ fn older_files_point_to_the_migration_guide() {
 }
 
 /// The binary in `cwd`, without the `DOLOS_` variables the in-process tests
-/// set. `data summary` opens every store, so a refused file shows that none
-/// was.
+/// set.
 fn run_dolos(cwd: &Path, args: &[&str]) -> std::process::Output {
     run_dolos_with_env(cwd, args, &[])
 }
@@ -477,10 +481,10 @@ fn plant_store_markers(dir: &Path) -> Vec<PathBuf> {
 /// Commands that clear or rewrite storage before they need genesis, and one
 /// that only reads.
 const STORE_COMMANDS: [&[&str]; 4] = [
-    &["bootstrap", "relay", "--force"],
-    &["doctor", "rebuild-state", "--force"],
-    &["doctor", "reset-wal"],
-    &["data", "summary"],
+    &["bootstrap", "immutabledb", "--force", "--source", "db"],
+    &["data", "rebuild", "--yes"],
+    &["sync", "recover", "--discard-wal"],
+    &["sync", "status"],
 ];
 
 fn assert_refused_with_stores_intact(dir: &Path, markers: &[PathBuf], message: &str) {
@@ -515,46 +519,215 @@ fn an_invalid_log_filter_stops_every_command_before_its_stores() {
 
     assert_refused_with_stores_intact(dir.path(), &markers, "logging.filter");
 
-    let output = run_dolos(dir.path(), &["doctor", "check"]);
+    let output = run_dolos(dir.path(), &["config", "check"]);
     assert!(!output.status.success());
 }
 
-/// The genesis files land where the configuration reads them, whatever the
-/// working directory.
-#[test]
-#[serial]
-fn reset_genesis_writes_the_configured_files() {
-    let dir = tempfile::tempdir().unwrap();
-    let elsewhere = tempfile::tempdir().unwrap();
+/// The embedded Byron, Shelley, Alonzo and Conway files of a known network.
+fn embedded_genesis(network: &str) -> [(&'static str, &'static [u8]); 4] {
+    use dolos_cardano::include::{mainnet, preprod, preview};
 
-    let path = dir.path().join("dolos.toml");
-    let config = std::fs::read_to_string(fixture("custom.toml"))
-        .unwrap()
-        .replace("magic = 42", "magic = 2");
-    std::fs::write(&path, config).unwrap();
-
-    let output = run_dolos(
-        elsewhere.path(),
-        &[
-            "--config",
-            path.to_str().unwrap(),
-            "doctor",
-            "reset-genesis",
+    let files = match network {
+        "mainnet" => [
+            mainnet::BYRON,
+            mainnet::SHELLEY,
+            mainnet::ALONZO,
+            mainnet::CONWAY,
         ],
-    );
+        "preprod" => [
+            preprod::BYRON,
+            preprod::SHELLEY,
+            preprod::ALONZO,
+            preprod::CONWAY,
+        ],
+        "preview" => [
+            preview::BYRON,
+            preview::SHELLEY,
+            preview::ALONZO,
+            preview::CONWAY,
+        ],
+        other => panic!("no embedded genesis for {other}"),
+    };
+
+    let [byron, shelley, alonzo, conway] = files;
+
+    [
+        ("byron.json", byron),
+        ("shelley.json", shelley),
+        ("alonzo.json", alonzo),
+        ("conway.json", conway),
+    ]
+}
+
+fn assert_embedded_genesis(dir: &Path, network: &str) {
+    for (name, bytes) in embedded_genesis(network) {
+        assert_eq!(
+            std::fs::read(dir.join(name)).unwrap(),
+            bytes,
+            "{network} {name}"
+        );
+    }
+}
+
+/// The names in `dir`, sorted.
+fn entries(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// With `--network` no configuration is read: from an empty directory the
+/// four embedded files are written and nothing else. A second run refuses and
+/// keeps them; `--force` overwrites.
+#[test]
+fn write_genesis_for_a_named_network_needs_no_configuration() {
+    let dir = tempfile::tempdir().unwrap();
+    let args = [
+        "config",
+        "write-genesis",
+        "--network",
+        "preview",
+        "--dir",
+        "out",
+    ];
+
+    let output = run_dolos(dir.path(), &args);
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
 
-    for era in ["byron", "shelley", "alonzo", "conway"] {
-        assert!(dir.path().join(format!("genesis/{era}.json")).is_file());
-    }
-    assert_eq!(std::fs::read_dir(elsewhere.path()).unwrap().count(), 0);
+    let out = dir.path().join("out");
+    assert_embedded_genesis(&out, "preview");
+    assert_eq!(entries(dir.path()), ["out"]);
 
-    let config = check(&path).unwrap();
-    assert_eq!(config.chain.cardano.unwrap().magic, 2);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for (name, _) in embedded_genesis("preview") {
+        let path = Path::new("out").join(name);
+        assert!(stdout.contains(&path.display().to_string()), "{stdout}");
+    }
+
+    let shelley = out.join("shelley.json");
+    std::fs::write(&shelley, "edited").unwrap();
+
+    let output = run_dolos(dir.path(), &args);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("shelley.json"), "{stderr}");
+    assert!(stderr.contains("--force"), "{stderr}");
+    assert_eq!(std::fs::read(&shelley).unwrap(), b"edited");
+
+    let output = run_dolos(dir.path(), &[&args[..], &["--force"]].concat());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_embedded_genesis(&out, "preview");
+}
+
+/// One existing file is enough to refuse: only it is named, and none of the
+/// others is written.
+#[test]
+fn write_genesis_refuses_naming_only_the_existing_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+    std::fs::write(out.join("conway.json"), "edited").unwrap();
+
+    let output = run_dolos(
+        dir.path(),
+        &[
+            "config",
+            "write-genesis",
+            "--network",
+            "preview",
+            "--dir",
+            "out",
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("conway.json"), "{stderr}");
+
+    for name in ["byron.json", "shelley.json", "alonzo.json"] {
+        assert!(!stderr.contains(name), "{name}: {stderr}");
+    }
+
+    assert_eq!(entries(&out), ["conway.json"]);
+    assert_eq!(std::fs::read(out.join("conway.json")).unwrap(), b"edited");
+}
+
+/// Without `--network` the configuration's network is written to
+/// `./genesis`, and nothing appears under `storage.path`.
+#[test]
+fn write_genesis_writes_the_configured_network() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(fixture("minimal.toml"), dir.path().join("dolos.toml")).unwrap();
+
+    let output = run_dolos(dir.path(), &["config", "write-genesis"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_embedded_genesis(&dir.path().join("genesis"), "preprod");
+    assert_eq!(entries(dir.path()), ["dolos.toml", "genesis"]);
+}
+
+/// A custom network's genesis is never generated, whether it is configured
+/// or named, and not even when its magic is a known network's.
+#[test]
+fn write_genesis_refuses_a_custom_network() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = std::fs::read_to_string(fixture("custom.toml"))
+        .unwrap()
+        .replace("magic = 42", "magic = 2");
+    std::fs::write(dir.path().join("dolos.toml"), config).unwrap();
+
+    let message = "custom genesis is never generated; provide the files";
+
+    let output = run_dolos(dir.path(), &["config", "write-genesis"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains(message), "{stderr}");
+
+    let output = run_dolos(
+        dir.path(),
+        &["config", "write-genesis", "--network", "custom"],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains(message), "{stderr}");
+
+    assert_eq!(entries(dir.path()), ["dolos.toml"]);
+}
+
+/// `config --help` lists the configuration commands.
+#[test]
+fn config_help_lists_check_and_write_genesis() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let output = run_dolos(dir.path(), &["config", "--help"]);
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let commands: Vec<&str> = stdout
+        .lines()
+        .skip_while(|line| !line.starts_with("Commands:"))
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .filter_map(|line| line.strip_prefix("  "))
+        .filter(|line| !line.starts_with(' '))
+        .filter_map(|line| line.split_whitespace().next())
+        .collect();
+
+    assert_eq!(commands, ["check", "write-genesis", "help"], "{stdout}");
 }
 
 /// What tells the known networks' genesis apart. Their Alonzo genesis is the
@@ -572,8 +745,8 @@ fn fingerprint(genesis: &Genesis) -> impl PartialEq + std::fmt::Debug {
     )
 }
 
-/// The files `reset-genesis` writes for a network load to the genesis Dolos
-/// embeds for it.
+/// The files `config write-genesis` writes for a network load to the genesis
+/// Dolos embeds for it.
 #[test]
 fn every_known_network_saves_the_genesis_it_embeds() {
     for network in KnownNetwork::all() {
@@ -621,7 +794,7 @@ fn an_older_file_opens_no_store() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::copy(fixture(name), dir.path().join("dolos.toml")).unwrap();
 
-        let output = run_dolos(dir.path(), &["data", "summary"]);
+        let output = run_dolos(dir.path(), &["sync", "status"]);
         let stderr = String::from_utf8_lossy(&output.stderr);
 
         assert!(!output.status.success(), "{name}");
@@ -638,7 +811,7 @@ fn an_older_file_opens_no_store() {
 fn only_the_selected_file_is_read() {
     let dir = tempfile::tempdir().unwrap();
 
-    let output = run_dolos(dir.path(), &["data", "summary"]);
+    let output = run_dolos(dir.path(), &["sync", "status"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(!output.status.success());
@@ -650,7 +823,7 @@ fn only_the_selected_file_is_read() {
     let elsewhere = dir.path().join("elsewhere.toml");
     let output = run_dolos(
         dir.path(),
-        &["--config", elsewhere.to_str().unwrap(), "data", "summary"],
+        &["--config", elsewhere.to_str().unwrap(), "sync", "status"],
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
 
@@ -672,14 +845,14 @@ fn the_given_file_is_not_merged_with_the_default_one() {
     let given = dir.path().join("given.toml");
     std::fs::copy(fixture("ephemeral.toml"), &given).unwrap();
 
-    let output = run_dolos(dir.path(), &["data", "summary"]);
+    let output = run_dolos(dir.path(), &["config", "check"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success());
     assert!(stderr.contains("max_concurrent_queries"), "{stderr}");
 
     let output = run_dolos(
         dir.path(),
-        &["--config", given.to_str().unwrap(), "data", "summary"],
+        &["--config", given.to_str().unwrap(), "config", "check"],
     );
     assert!(
         output.status.success(),
@@ -814,7 +987,7 @@ fn config_check_prints_the_network_and_stores() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("dolos.toml"),
-        "compatibility = \"v2-alpha.1\"\n\n[chain]\nprotocol = \"cardano\"\nnetwork = \"PreView\"\n\n[storage.cache]\nenabled = false\n",
+        "compatibility = \"v2-alpha.2\"\n\n[chain]\nprotocol = \"cardano\"\nnetwork = \"PreView\"\n\n[storage.cache]\nenabled = false\n",
     )
     .unwrap();
     assert_check_prints(
@@ -826,7 +999,7 @@ fn config_check_prints_the_network_and_stores() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("other.toml"),
-        "compatibility = \"v2-alpha.1\"\n\n[chain]\nprotocol = \"cardano\"\nnetwork = \"preview\"\n\n[history]\nmode = \"none\"\n",
+        "compatibility = \"v2-alpha.2\"\n\n[chain]\nprotocol = \"cardano\"\nnetwork = \"preview\"\n\n[history]\nmode = \"none\"\n",
     )
     .unwrap();
     assert_check_prints(
@@ -913,12 +1086,29 @@ fn shipped_configurations_pass_config_check() {
         let name = scenario.display().to_string();
         let dir = copy_files(&scenario);
 
-        let output = run_dolos(dir.path(), &["doctor", "reset-genesis"]);
-        assert!(
-            output.status.success(),
-            "{name}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        // A custom scenario runs on preview's genesis; a known network's is
+        // built in.
+        let config = std::fs::read_to_string(dir.path().join("dolos.toml")).unwrap();
+
+        if config.contains("network = \"custom\"") {
+            let output = run_dolos(
+                dir.path(),
+                &[
+                    "config",
+                    "write-genesis",
+                    "--network",
+                    "preview",
+                    "--dir",
+                    ".",
+                    "--force",
+                ],
+            );
+            assert!(
+                output.status.success(),
+                "{name}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
 
         assert_config_check_passes(dir.path(), &name);
     }
@@ -961,7 +1151,7 @@ fn as_config_file(block: &str) -> String {
         return block.to_string();
     }
 
-    let mut file = String::from("compatibility = \"v2-alpha.1\"\n\n");
+    let mut file = String::from("compatibility = \"v2-alpha.2\"\n\n");
 
     if !block.lines().any(|line| line.trim() == "[chain]") {
         file.push_str("[chain]\nprotocol = \"cardano\"\nnetwork = \"mainnet\"\n\n");
@@ -1015,6 +1205,98 @@ fn init_refuses_a_custom_config_without_its_genesis() {
     assert!(stderr.contains("untouched"), "{stderr}");
     assert_eq!(std::fs::read(&path).unwrap(), before);
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+/// Without a terminal, `init --known-network` writes the selected file and
+/// nothing else: no store, no genesis, no prompt. It names the next step.
+#[test]
+#[serial]
+fn init_without_a_terminal_writes_only_the_configuration() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("node.toml");
+
+    let output = run_dolos(
+        dir.path(),
+        &[
+            "--config",
+            path.to_str().unwrap(),
+            "init",
+            "--known-network",
+            "preview",
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}{stderr}");
+
+    assert_eq!(entries(dir.path()), ["node.toml"]);
+    assert_eq!(
+        load(Some(&path)).unwrap().chain,
+        ChainConfig::known("preview")
+    );
+
+    let bootstrap = format!("dolos --config {} bootstrap", path.display());
+    assert!(stdout.contains(&bootstrap), "{stdout}");
+    assert!(!stderr.contains("Which network"), "{stderr}");
+}
+
+/// An unattended re-run keeps the file's history window unless
+/// `--max-chain-history` replaces it.
+#[test]
+#[serial]
+fn init_without_a_terminal_keeps_the_history_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dolos.toml");
+    let init = ["init", "--known-network", "preview"];
+
+    let output = run_dolos(
+        dir.path(),
+        &[&init[..], &["--max-chain-history", "86400"]].concat(),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let day = HistoryConfig::rolling(HistoryWindow::slots(86_400));
+    assert_eq!(load(Some(&path)).unwrap().history, day);
+
+    let output = run_dolos(dir.path(), &init);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(load(Some(&path)).unwrap().history, day);
+
+    let output = run_dolos(
+        dir.path(),
+        &[&init[..], &["--max-chain-history", "3600"]].concat(),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        load(Some(&path)).unwrap().history,
+        HistoryConfig::rolling(HistoryWindow::slots(3_600))
+    );
+}
+
+/// Without a terminal and without `--known-network`, `init` is a usage error
+/// naming the flags, and writes nothing.
+#[test]
+fn init_without_a_terminal_needs_a_network() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let output = run_dolos(dir.path(), &["init"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("--known-network"), "{stderr}");
+    assert_eq!(entries(dir.path()), Vec::<String>::new());
 }
 
 /// `init --config` checks the file it names: an alpha.0 file there is
@@ -1077,6 +1359,34 @@ fn variables(
         .collect()
 }
 
+/// The overrides a process started without them would not read, by name,
+/// for a warning that reads the same each time.
+#[test]
+#[serial]
+fn override_variables_are_listed_in_order() {
+    let names = [
+        "DOLOS_UPSTREAM__PEER_ADDRESS",
+        "DOLOS_STORAGE__PATH",
+        "DOLOS_SERVE__MINIBF__LISTEN_ADDRESS",
+        "DOLOS_CHAIN__NETWORK",
+        "DOLOS_SYNC__PULL_BATCH_SIZE",
+        "DOLOS_LOGGING__MAX_LEVEL",
+        "DOLOS_MEMPOOL__PATH",
+    ];
+    let mut set: Vec<_> = names
+        .iter()
+        .map(|name| (*name, std::ffi::OsStr::new("x")))
+        .collect();
+    // Not an override: it names no key within a table.
+    set.push(("DOLOS_MITHRIL_AGGREGATOR", std::ffi::OsStr::new("x")));
+
+    let listed = with_env(&set, override_variables).unwrap();
+
+    let mut sorted = names.to_vec();
+    sorted.sort();
+    assert_eq!(listed, sorted);
+}
+
 /// Every overridden key is one `full.toml` sets, so the file losing shows.
 #[test]
 #[serial]
@@ -1101,7 +1411,7 @@ fn nested_environment_variables_override_the_file() {
         "127.0.0.1:4000".parse().unwrap()
     );
     assert_eq!(config.serve.max_concurrent_queries, 8);
-    assert_eq!(config.compatibility().as_str(), "v2-alpha.1");
+    assert_eq!(config.compatibility().as_str(), "v2-alpha.2");
 }
 
 #[test]
@@ -1542,7 +1852,7 @@ fn a_variable_wrong_on_its_own_is_named() {
         (
             write(
                 "chainless.toml",
-                "compatibility = \"v2-alpha.1\"\n".to_string(),
+                "compatibility = \"v2-alpha.2\"\n".to_string(),
             ),
             &[("DOLOS_CHAIN__NETWROK", "preview")][..],
             "DOLOS_CHAIN__NETWROK",
@@ -1768,7 +2078,7 @@ fn an_override_the_binary_refuses_is_named() {
         ("DOLOS_CHAIN__NETWORK", "preveiw", "`preveiw`"),
         ("DOLOS_LOGGING__FILTER", "dolos=loud", "logging.filter"),
     ] {
-        let output = run_dolos_with_env(dir.path(), &["data", "summary"], &[(name, value)]);
+        let output = run_dolos_with_env(dir.path(), &["sync", "status"], &[(name, value)]);
         let stderr = String::from_utf8_lossy(&output.stderr);
 
         assert!(!output.status.success(), "{name}: {stderr}");
@@ -1854,4 +2164,53 @@ fn removed_and_renamed_keys_are_refused() {
             "{table} {lines}: {found}"
         );
     }
+}
+
+/// `config check --format json` prints one JSON object on stdout, and only
+/// that; a configuration it refuses exits 1 with nothing on stdout.
+#[test]
+fn config_check_prints_json_on_request() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(fixture("ordinary.toml"), dir.path().join("dolos.toml")).unwrap();
+
+    let output = run_dolos(dir.path(), &["config", "check", "--format", "json"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+
+    let checked: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let data: PathBuf = ["data"].iter().collect();
+
+    assert_eq!(checked["valid"], "dolos.toml");
+    assert_eq!(
+        checked["network"],
+        serde_json::json!({"name": "mainnet", "magic": 764824073, "testnet": false})
+    );
+    assert_eq!(checked["state"]["kind"], "fjall");
+    assert_eq!(
+        checked["state"]["path"],
+        data.join("state").display().to_string()
+    );
+    assert_eq!(checked["mempool"], serde_json::Value::Null);
+
+    let (dir, path) = beside_genesis("reject/cardano-on-a-known-network.toml", 42);
+    let output = run_dolos(
+        dir.path(),
+        &[
+            "--config",
+            path.to_str().unwrap(),
+            "config",
+            "check",
+            "--format",
+            "json",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty(), "{:?}", output.stdout);
 }

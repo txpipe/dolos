@@ -33,7 +33,7 @@ impl WorkContext {
     pub fn compute_global_deltas<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
         let mut visitor_nonces = super::nonces::BoundaryVisitor;
         let mut visitor_reset = super::reset::BoundaryVisitor;
-        let mut visitor_finals = super::final_rows::BoundaryVisitor;
+        let mut visitor_finals = super::final_rows::BoundaryVisitor::default();
 
         let pools = state.iter_entities_typed::<PoolState>(None)?;
 

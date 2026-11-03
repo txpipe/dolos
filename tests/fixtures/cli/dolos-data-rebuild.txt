@@ -1,0 +1,20 @@
+rebuilds the state store by replaying the local archive
+
+Usage: dolos data rebuild [OPTIONS]
+
+Options:
+      --target <TARGET>          Rebuild into a fresh state store at this path, leaving the
+                                 instance's own stores untouched
+      --ephemeral                Rebuild into an in-memory state store and discard it (a validation
+                                 run that writes nothing). Holds the whole ledger in RAM — pair it
+                                 with --stop-epoch on a public network, or use --target instead
+      --rewrite-logs             Also re-write what the archive derives from its blocks: the log
+                                 records (PoolEpochLog, reward logs, EpochState, period logs) and
+                                 the index entries, filling in any an older version did not index;
+                                 in-place mode only
+      --stop-epoch <STOP_EPOCH>  Stop cleanly once the replay reaches this epoch (requires --target
+                                 or --ephemeral)
+      --chunk <CHUNK>            Number of blocks to import per chunk [default: 500]
+      --yes                      Go ahead with what the command destroys
+  -c, --config <CONFIG>          
+  -h, --help                     Print help

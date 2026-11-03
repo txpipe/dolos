@@ -61,9 +61,9 @@ pub struct AvvmReclamation {
 impl AvvmReclamation {
     /// Every AVVM UTxO ref the Byron genesis distributes, redeemed or not.
     ///
-    /// The one derivation both the boundary and `dolos doctor reclaim-avvm`
-    /// go through, so the repair can never delete a ref the boundary would
-    /// have kept.
+    /// The one derivation both the boundary and the repair in
+    /// [`Self::apply_deletion`] go through, so the repair can never delete a
+    /// ref the boundary would have kept.
     pub fn genesis_refs(genesis: &Genesis) -> Vec<TxoRef> {
         pallas::interop::hardano::configs::byron::genesis_avvm_utxos(&genesis.byron)
             .iter()
@@ -156,11 +156,10 @@ impl AvvmReclamation {
     /// Delete this census from the state store, UTxO filter tags included,
     /// leaving every pot untouched.
     ///
-    /// This is the repair path — `dolos doctor reclaim-avvm` against a store
-    /// an earlier binary built, where the boundary already moved the value
-    /// and left the rows. The boundary itself does not come through here: it
-    /// stages the same deletion inside its own commit, alongside the pot
-    /// delta it must be atomic with.
+    /// This is the repair path, for a store an earlier binary built, where the
+    /// boundary already moved the value and left the rows. The boundary itself
+    /// does not come through here: it stages the same deletion inside its own
+    /// commit, alongside the pot delta it must be atomic with.
     ///
     /// The rows and their tags go in one batch, so a crash leaves either both
     /// or neither.

@@ -4,11 +4,11 @@ sidebar:
   order: 1
 ---
 
-_Dolos_ has many operation modes dependending on your requirements. Choose the one that fits your need.
+_Dolos_ has several operation modes depending on your requirements. Choose the one that fits your need. Each runs in the foreground; to run the node in the background, install it as a [service](./service).
 
 ## `daemon` mode
 
-This is the normal operation mode. When running in this mode, Dolos will perform all operations as specified in the configuration file.
+This is the normal operation mode. When running in this mode, Dolos will perform all operations as specified in the configuration file. It runs until it is stopped; if its sync gives up on the upstream peer once [`[sync.retry]`](../configuration/schema#syncretry) runs out, it exits 1, so that a supervisor can restart it.
 
 To start _Dolos_ in `daemon` mode, use the following command:
 
@@ -16,19 +16,21 @@ To start _Dolos_ in `daemon` mode, use the following command:
 dolos daemon
 ```
 
-## `sync` mode
+## `sync catchup` mode
 
-When running in this mode, Dolos will focus on a single task: synchronizing its state from the upstream node.
+When running in this mode, Dolos will focus on a single task: synchronizing its state from the upstream node. It serves nothing.
 
-To start _Dolos_ in `sync` mode, use the following command:
+To catch up with the upstream node and stop, use the following command:
 
 ```sh
-dolos sync
+dolos sync catchup
 ```
+
+`sync catchup` pulls blocks until it reaches the tip the upstream peer reports, and exits 0 once the WAL and the state have committed that point; a tip that moves on meanwhile is not waited for. It prints that target to stderr when it fixes it, and the committed point when it exits. A failed connection or intersection, or a session that ends before it delivers a block or reaches the tip, is retried as `[sync.retry]` allows; a session that delivered something reconnects at once. Running out of retries, an interruption or any other error exits 1, and the error names the cause. A catch-up submits no mempool transactions to the peer. With `--follow` it keeps following the chain past the target instead, submitting transactions, until it is stopped or an error ends it, giving up on the upstream peer included. An emulator upstream has no tip to catch up to, so it needs `--follow` or `--stop-epoch`.
 
 ## `serve` mode
 
-When running in this mode, Dolos will focus on a single task: serving data through the configured API endpoints.
+When running in this mode, Dolos will focus on a single task: serving data through the configured API endpoints, over the stores as they are, without syncing.
 
 To start _Dolos_ in `serve` mode, use the following command:
 
@@ -38,22 +40,23 @@ dolos serve
 
 ## Stopping
 
-`daemon` and `sync` run until they are stopped. To stop on a condition instead, pass it as an argument; it is not part of the configuration:
+`daemon` runs until it is stopped, and so does `sync catchup --follow`; `sync catchup` alone stops at the upstream tip. Each of them also exits 1 when its sync gives up on the upstream peer under `[sync.retry]`. To stop a sync at an epoch instead, pass it as an argument; it is not part of the configuration:
 
 | argument | effect |
 | -------- | ------ |
-| `--until-tip` | stop pulling once the upstream tip is reached |
-| `--max-blocks N` | stop pulling after `N` blocks |
-| `--stop-epoch N` | stop once the ledger reaches epoch `N`, on its first block |
+| `--stop-epoch N` | stop once the ledger reaches epoch `N`, on its first block, and exit 0; reached before the upstream tip, it wins |
 
 ```sh
-dolos sync --until-tip
+dolos sync catchup --follow --stop-epoch 120
 ```
 
 ## Summary of Modes
 
-| mode   | description                    |
-| ------ | ------------------------------ |
-| daemon | sync + serve (all-in-one)         |
-| sync   | sync from upstream peer only   |
-| serve  | serve data through APIs only   |
+| mode | description |
+| ---- | ----------- |
+| `daemon` | sync + serve (all-in-one), until stopped |
+| `sync catchup` | sync from the upstream peer up to its tip, then exit |
+| `sync catchup --follow` | sync from the upstream peer until stopped, serving nothing |
+| `serve` | serve data through APIs only, without syncing |
+
+The `sync` group also inspects, recovers and rolls back the WAL (`sync status`, `sync recover`, `sync dump`, `sync rollback`); see the [CLI reference](../reference/cli#dolos-sync).

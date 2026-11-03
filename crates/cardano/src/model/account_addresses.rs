@@ -5,10 +5,10 @@ use pallas::{
 use serde::{Deserialize, Serialize};
 
 use super::{AccountKey, AddressKey};
-use crate::periods::{GroupKey, GroupRow, StageIfAbsent};
+use crate::periods::{ChunkRow, GroupKey, GroupRow, StageIfAbsent};
 
 /// The first appearance of an address under an account within one epoch,
-/// held in state until the epoch seals into an [`AccountAddressChunk`].
+/// held in state until the epoch seals into an [`AccountAddressEpochs`].
 ///
 /// Keyed `account ‖ epoch ‖ AddressKey`, so one prefix scan returns every
 /// unsealed epoch of an account, and nothing else.
@@ -59,22 +59,59 @@ impl GroupRow for AccountAddressSet {
 
 pub type StageAccountAddress = StageIfAbsent<AccountAddressSet>;
 
-/// The addresses seen under an account in one epoch, in order of first
-/// appearance within it, built by the seal of [`AccountAddressSet`].
+/// One page of the addresses seen under an account in one epoch, in order of
+/// first appearance within it, built by the seal of [`AccountAddressSet`].
 ///
-/// Sealed at `epoch_start(e) ‖ account`. An address active in several epochs
-/// is listed in each; readers drop the repeats.
+/// Sealed at `epoch_start(e) ‖ account ‖ page (4 B)`. Page `i` holds entries
+/// `i × CHUNK_LEN` onward, and every page carries the epoch's count, so a
+/// reader learns from page 0 how many pages follow. An account that saw no
+/// address in an epoch has no page. An address active in several epochs is
+/// listed in each; readers drop the repeats.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Default)]
-pub struct AccountAddressChunk {
+pub struct AccountAddressEpochs {
+    /// The addresses the account saw in the epoch, over every page.
     #[n(0)]
-    pub addresses: Vec<ByteVec>,
+    pub count: u64,
+
+    #[n(1)]
+    pub addresses: Vec<AccountAddressItem>,
+}
+
+/// One address of an [`AccountAddressEpochs`] page.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+pub struct AccountAddressItem {
+    #[n(0)]
+    pub address: ByteVec,
 }
 
 entity_boilerplate!(
-    AccountAddressChunk,
-    "account-address-chunks",
-    log = AccountKey
+    AccountAddressEpochs,
+    "account-address-epochs",
+    log = (AccountKey, u32)
 );
+
+impl ChunkRow for AccountAddressEpochs {
+    type Item = Vec<u8>;
+
+    fn new(count: u64, items: Vec<Vec<u8>>) -> Self {
+        Self {
+            count,
+            addresses: items
+                .into_iter()
+                .map(|address| AccountAddressItem {
+                    address: address.into(),
+                })
+                .collect(),
+        }
+    }
+
+    fn into_items(self) -> Vec<Vec<u8>> {
+        self.addresses
+            .into_iter()
+            .map(|item| item.address.into())
+            .collect()
+    }
+}
 
 #[cfg(test)]
 pub(crate) mod testing {

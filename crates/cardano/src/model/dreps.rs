@@ -66,30 +66,31 @@ impl DRepExpiry {
     }
 }
 
-/// A registered DRep. Only a registration creates a row, and rows are never
-/// deleted. Indexes 1 and 7 held fields that left the record; they must not
-/// be reused.
-#[derive(Debug, Encode, Decode, Clone, PartialEq, Eq)]
+/// A registered DRep. Only a registration creates a row. ESTART moves an
+/// unregistered row no ledger rule reads again to the final-row log
+/// ([`DRepState::leaves_state_at`]), and a later registration makes a fresh
+/// row.
+#[derive(Debug, Encode, Decode, Clone, PartialEq, Eq, Serialize)]
 pub struct DRepState {
     #[n(0)]
     pub registered_at: Option<(BlockSlot, TxOrder)>,
 
-    #[n(2)]
+    #[n(1)]
     pub last_active_slot: Option<u64>,
 
-    #[n(3)]
+    #[n(2)]
     pub unregistered_at: Option<(BlockSlot, TxOrder)>,
 
-    #[n(4)]
+    #[n(3)]
     pub expired: bool,
 
-    #[n(5)]
+    #[n(4)]
     pub deposit: u64,
 
-    #[n(6)]
+    #[n(5)]
     pub identifier: DRep,
 
-    #[n(8)]
+    #[n(6)]
     pub expiry: DRepExpiry,
 }
 
@@ -119,6 +120,38 @@ impl DRepState {
                 false
             }
         }
+    }
+
+    /// Whether the boundary closing the epoch that starts at `closing_start`
+    /// moves the DRep to the final-row log (`crate::final_rows`): it
+    /// unregistered, its deposit refunded, before that epoch and before
+    /// `oldest_live`, the earliest submission among the proposals the next
+    /// boundary can still ratify (`None` when there are none).
+    ///
+    /// - **Live proposals.** The stale-vote filter is the one ledger rule that
+    ///   reads an unregistered DRep: ratify drops the votes a DRep cast before
+    ///   its newest deregistration, which a fresh row no longer holds. A vote
+    ///   cast before the deregistration is on a proposal submitted before it,
+    ///   which the rule requires to be resolved.
+    /// - **The closing epoch.** A rollback can reach that epoch's last blocks,
+    ///   and undoing an unregistration needs the row.
+    /// - **One transaction.** A DRep registered and unregistered in the same
+    ///   transaction carries equal stamps, as one unregistered and registered
+    ///   again there does, so [`Self::is_unregistered`] is false and the row
+    ///   stays.
+    pub fn leaves_state_at(
+        &self,
+        closing_start: BlockSlot,
+        oldest_live: Option<BlockSlot>,
+    ) -> bool {
+        let Some((unregistered, _)) = self.unregistered_at else {
+            return false;
+        };
+
+        self.is_unregistered()
+            && self.deposit == 0
+            && unregistered < closing_start
+            && oldest_live.is_none_or(|submitted| unregistered < submitted)
     }
 }
 
@@ -205,7 +238,15 @@ impl KeyCodec for DRepKey {
 
 display_as_stored!(DRepKey);
 
-entity_boilerplate!(DRepState, "dreps", state = DRepKey);
+entity_boilerplate!(DRepState, "dreps", state = DRepKey, log = DRepKey);
+
+/// A moved DRep's final row is its whole state row: the DRep routes read
+/// every field of it.
+impl crate::final_rows::FinalRow for DRepState {
+    fn final_row(&self) -> Self {
+        self.clone()
+    }
+}
 
 #[cfg(test)]
 pub(crate) mod testing {

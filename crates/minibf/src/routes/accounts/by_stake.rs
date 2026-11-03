@@ -13,7 +13,7 @@ use crate::{
     Facade,
 };
 
-use super::{account_appears_in_proposals, parse_account_key_param};
+use super::{parse_account_key_param, served_account};
 
 pub async fn by_stake<D>(
     Path(stake_address): Path<String>,
@@ -28,14 +28,6 @@ where
     let network = domain.get_network_id()?;
     let account_key = parse_account_key_param(&stake_address, network)?;
 
-    let state = domain
-        .read_cardano_entity::<AccountState>(&account_key.account)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    if state.is_none() && !account_appears_in_proposals(&domain, &account_key.account)? {
-        return Err(StatusCode::NOT_FOUND.into());
-    }
-
     let tip_slot = domain
         .archive()
         .get_tip()
@@ -47,10 +39,11 @@ where
         .get_chain_summary()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let state = state.unwrap_or_else(|| {
-        let (epoch, _) = chain.slot_epoch(tip_slot);
-        AccountState::new(epoch, account_key.account.credential().clone())
-    });
+    let (epoch, _) = chain.slot_epoch(tip_slot);
+
+    let Some(state) = served_account(&domain, &account_key.account, epoch)? else {
+        return Err(StatusCode::NOT_FOUND.into());
+    };
 
     let model = AccountModelBuilder {
         account_state: state,

@@ -1,0 +1,532 @@
+---
+title: Command-line reference
+sidebar:
+  label: CLI
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Every `dolos` command and flag: what it does, which stores it opens and whether it writes them, whether it asks for confirmation, how it reports and how it exits. This page is the inventory of the supported command surface. The repository's `tests/fixtures/cli/` holds each command's `--help` as the default build prints it, and `tests/cli_tree.rs` checks this page names every one of them.
+
+<Aside type="caution">
+The `--format json` output of every command is documented here and marked **unstable**: its shape may change in any release until the Dolos v2 compatibility policy rules on it. Scripts that read it should pin the release they were written against.
+</Aside>
+
+## The tree
+
+```text
+dolos [--config PATH]
+├── init
+├── config
+│   ├── check
+│   └── write-genesis [--network NAME] [--dir PATH] [--force]
+├── daemon
+├── serve
+├── bootstrap [--force | --skip-if-data]
+│   ├── mithril [--continue] [--stop-epoch N]
+│   ├── stelae
+│   └── immutabledb --source PATH [--continue] [--stop-epoch N]
+├── sync
+│   ├── catchup [--follow] [--stop-epoch N]
+│   ├── status
+│   ├── recover [--discard-wal] [--dry-run]
+│   ├── dump
+│   └── rollback
+├── data
+│   ├── stats
+│   ├── inspect
+│   ├── dump
+│   │   ├── state
+│   │   ├── logs
+│   │   └── blocks
+│   ├── check
+│   ├── housekeeping
+│   ├── reset --yes
+│   └── rebuild
+├── cache
+│   ├── warm
+│   ├── clear
+│   ├── stats
+│   └── verify
+└── service
+    ├── install [NAME] [--system] [--start]
+    └── uninstall [NAME] [--system]
+```
+
+Commands that were part of v2.0.0-alpha.0 and are not in this tree are gone, with no alias: see the [migration guide](../migration/dolos-v2#command-line) for where each went.
+
+## Conventions
+
+### The configuration file
+
+Every command takes `-c, --config PATH`, before or after the command's name. Without it, a command reads `./dolos.toml`. Only that file is read, and environment variables override it as the [introduction](../configuration/introduction) describes. A command that needs no configuration says so below: `config write-genesis --network`, `service uninstall NAME` and `init`, which writes the file.
+
+### Output channels
+
+A command's result goes to **stdout**: the report, the records of a dump, the entity an inspection prints. Progress bars, logs, warnings and errors go to **stderr**. A script can read stdout without filtering anything out of it.
+
+### `--format`
+
+`--format text|json` (default `text`) is accepted by every command that prints a report or records: `config check`, `sync status`, `sync dump`, `sync recover`, `data stats`, `data inspect`, `data dump state|logs|blocks`, `data check`, `cache stats`, `cache verify`, `service install` and `service uninstall`.
+
+- A report is printed as **one JSON object on one line**.
+- A dump prints **one JSON object per record, one per line** (JSON Lines), so it can be streamed.
+- `data dump` and `data inspect` with `--format json` (or a dump with `--layout dbsync`) log only errors on stderr; otherwise commands log warnings as well.
+
+The text form is for people. The shapes of both forms are unstable (see above).
+
+### Exit codes
+
+| code | meaning |
+| ---- | ------- |
+| `0` | the command did what it was asked |
+| `1` | it failed: an error, a refusal of the data it found, a store held by another process |
+| `2` | usage: the command line is malformed (an unknown command or flag, a missing argument, conflicting flags), or asks for something the command won't do as given, such as a destructive command without `--yes` |
+| `3` | the command ran and found the node or its data unhealthy: `sync status`, `data check` and `cache verify` |
+
+### Confirmation
+
+A command that destroys data never prompts. Without `--yes` it prints what it would destroy on stderr, changes nothing and exits `2`. The commands that take `--yes` are `data reset`, `data rebuild` (in place) and `sync rollback`.
+
+### How a command opens the stores
+
+Each command below says which of these it does:
+
+- **Opens nothing**: it reads at most the configuration.
+- **Observes**: it opens the stores that exist as they are on disk, for reading. It creates no missing store, runs no initialization and catches nothing up, so it never writes.
+- **Repairs**: it opens the stores that exist as they are on disk, for writing, creating none.
+- **Runs the node's open**: it opens the stores as `dolos daemon` does, creating a missing store, initializing an empty one from genesis and catching the state and the archive up to the WAL.
+
+The on-disk stores (fjall state and archive, redb WAL and cache) hold exclusive locks, and none of them has a read-only mode. Every command that opens a store fails with exit `1` and a "dataset in use" error while another process, such as a running `dolos daemon`, holds it: stop that process first. Every command that opens a state or archive store also checks its [compatibility identity](../architecture/data-layer#store-identity) first.
+
+### Features
+
+The release binaries are built with the default features, which give the tree above. A build from source can leave features out: without `mithril` there is no `bootstrap mithril`; without `utils` there is no `init`, no `data` group, no `sync dump` and no interactive `bootstrap` prompt. `bootstrap stelae` and `bootstrap immutabledb` need neither.
+
+## `dolos`
+
+```text
+dolos [--config PATH] <COMMAND>
+```
+
+| flag | meaning |
+| ---- | ------- |
+| `-c, --config PATH` | the configuration file, default `./dolos.toml` |
+| `-h, --help` | print help; every command takes it |
+| `-V, --version` | print the version |
+
+## Preparation
+
+### `dolos init`
+
+Writes a configuration file, at `--config` or `./dolos.toml`, and nothing else. On a terminal it asks for each setting, offering the flags' values as defaults; without one, the flags are the whole answer. It opens no store and never bootstraps: run [`bootstrap`](#dolos-bootstrap) afterwards.
+
+| flag | meaning |
+| ---- | ------- |
+| `--known-network NAME` | `mainnet`, `preprod` or `preview` |
+| `--remote-peer HOST:PORT` | the upstream peer, default the network's |
+| `--max-chain-history SLOTS` | keep a rolling history window of this many slots |
+| `--serve-grpc`, `--serve-minibf`, `--serve-minikupo`, `--serve-trp`, `--serve-ouroboros` `true\|false` | which APIs to serve |
+| `--enable-relay true\|false` | serve other nodes as a relay |
+
+- **Opens:** nothing. It writes only the configuration file. A file that is there but does not load is refused and left as it is.
+- **Exits:** `0` written; `1` on a refused file or a write error; `2` with no terminal and no `--known-network`.
+
+### `dolos config`
+
+Commands over the configuration file.
+
+### `dolos config check`
+
+Validates the configuration and prints the network and the stores it resolves to, without opening any of them.
+
+| flag | meaning |
+| ---- | ------- |
+| `--format text\|json` | how to print the result |
+
+- **Opens:** nothing; a custom network's genesis files are read and checked against its magic.
+- **Exits:** `0` valid; `1` with the error naming the field.
+
+### `dolos config write-genesis`
+
+Writes a known network's genesis files (Byron, Shelley, Alonzo, Conway). A node on a known network needs none, since they are built in; this is for tools that read them.
+
+| flag | meaning |
+| ---- | ------- |
+| `--network NAME` | `mainnet`, `preprod` or `preview`; without it, the configuration's network. Given, no configuration is read |
+| `--dir PATH` | the directory to write to, created if missing; default `./genesis` |
+| `--force` | overwrite files that are already there |
+
+- **Opens:** nothing. It writes only the four files.
+- **Exits:** `0` written; `1` when a file is already there without `--force`, or the configured network is `custom` (it has no genesis of its own to write; there is no inference from the magic).
+
+## Running
+
+### `dolos daemon`
+
+Runs the node: syncs from the upstream peer and serves the configured APIs until it is stopped. It takes no stop flags.
+
+- **Opens:** runs the node's open.
+- **Exits:** `0` when stopped; `1` on an error, including when its sync gives up on the upstream peer once [`sync.retry`](../configuration/schema#syncretry) runs out, so that a supervisor can restart it.
+
+### `dolos serve`
+
+Serves the configured APIs over the stores as they are, without syncing.
+
+- **Opens:** runs the node's open.
+- **Exits:** `0` when stopped; `1` on an error.
+
+## Bootstrap
+
+### `dolos bootstrap`
+
+Fills the stores from a source. With no source named, it asks for one on a terminal; without a terminal it exits `1`, naming the subcommands.
+
+Every source refuses when any managed store already holds data, unless told otherwise:
+
+| flag | meaning |
+| ---- | ------- |
+| `--force` | replace the data: the source's inputs are resolved and checked first, then the storage root is cleared |
+| `--skip-if-data` | exit `0` without acting when storage already holds a node |
+| `--verbose` | log more |
+
+`--force`, `--skip-if-data` and a source's `--continue` exclude one another (exit `2`). A store this release refuses (see [store identity](../architecture/data-layer#store-identity)) is an error under every flag but `--force`, which clears it; data without a committed cursor, as a bootstrap interrupted early leaves, is an error under `--skip-if-data`. `--force` clears only the storage root, and is refused, naming what to remove by hand, while a store kept outside the root holds data.
+
+- **Opens:** writes every store. Stop the node first.
+- **Exits:** `0` done or skipped; `1` refused or failed; `2` on conflicting flags.
+
+### `dolos bootstrap mithril`
+
+Downloads a Mithril-certified ImmutableDB and replays it. Needs the `mithril` feature. See [Mithril](../bootstrap/mithril).
+
+| flag | environment | meaning |
+| ---- | ----------- | ------- |
+| `--aggregator URL` | `DOLOS_MITHRIL_AGGREGATOR` | the aggregator; defaults to the network's, required on a custom network |
+| `--genesis-vkey KEY` | `DOLOS_MITHRIL_GENESIS_VKEY` | the aggregator's genesis verification key, JSON-hex; defaults to the network's, required on a custom network |
+| `--download-dir DIR` | | where the snapshot is downloaded, default `./snapshot` |
+| `--skip-validation` | | skip the certificate validation |
+| `--skip-download` | | use the snapshot already in the download directory |
+| `--retain-snapshot` | | keep the download afterwards; a replay stopped by `--stop-epoch` keeps it anyway |
+| `--download-start N`, `--download-end N` | | download only this range of immutable files (inclusive) |
+| `--continue` | | resume an interrupted replay from its committed position |
+| `--stop-epoch N` | | stop once the ledger reaches epoch `N` |
+| `--chunk-size N` | | blocks per replay batch, default `500` |
+
+### `dolos bootstrap stelae`
+
+Restores a Stelae snapshot (a stele), then starts the WAL at the restored point.
+
+| flag | environment | meaning |
+| ---- | ----------- | ------- |
+| `--source URL` | | `file://DIR`, a stele directory, or `oci://HOST/PATH`, a registry repository; defaults to the network's official repository, required on a custom network |
+| `--point POINT` | | `latest` (default) or `epoch-N`; registry sources only |
+| `--insecure` | | plaintext HTTP to the registry, for a loopback or in-cluster mirror only |
+| `--scratch-dir DIR` | | where pulled layers are staged, default `<storage.path>/scratch`; registry sources only |
+| `--skip-space-check` | | skip the disk-space preflight |
+| `--registry-user USER` | `DOLOS_STELAE_USER` | the registry user; defaults to the published read-only user on the official repository |
+| `--registry-credentials-file PATH` | | a TOML file naming `password` or `token`, instead of `DOLOS_STELAE_PASSWORD` / `DOLOS_STELAE_TOKEN` |
+
+A restore has no `--continue`: an interrupted one is run again with `--force`. A secret is never a command-line argument.
+
+### `dolos bootstrap immutabledb`
+
+Replays the ImmutableDB of a local Cardano node database through the same replay as `bootstrap mithril`. See [Local ImmutableDB](../bootstrap/local).
+
+| flag | meaning |
+| ---- | ------- |
+| `--source PATH` | required: the node database directory, holding `immutable/` and `protocolMagicId`; only read |
+| `--continue` | resume an interrupted replay from its committed position |
+| `--stop-epoch N` | stop once the ledger reaches epoch `N` |
+| `--chunk-size N` | blocks per replay batch, default `500` |
+
+A database for another network than the configured one is refused before anything is written.
+
+## Synchronization and recovery
+
+### `dolos sync`
+
+Syncs from the upstream peer, and inspects, recovers or rolls back the WAL.
+
+### `dolos sync catchup`
+
+Pulls blocks until it reaches the tip the upstream peer reports when chain-sync first gets there, and exits once the WAL and the state have committed that point. A tip that moves on meanwhile is not waited for. It prints the target on stderr when it fixes it, and the committed point when it exits. It submits no mempool transactions.
+
+| flag | meaning |
+| ---- | ------- |
+| `--follow` | keep following the chain past the target, submitting transactions, until stopped |
+| `--stop-epoch N` | stop once the ledger reaches epoch `N`, on its first block; reached first, it wins |
+
+Disconnects are retried as [`sync.retry`](../configuration/schema#syncretry) allows.
+
+- **Opens:** runs the node's open.
+- **Exits:** `0` once the target (or `--stop-epoch`) is committed; `1` on exhausted retries, an interruption or any error; `2` against an emulator upstream without `--follow` or `--stop-epoch`, since an emulator has no tip.
+
+### `dolos sync status`
+
+Where the WAL, the state and the archive stand, whether they agree, the rollback window, and whether the WAL's blocks chain. It always verifies the whole WAL, which reads every entry, and never repairs anything.
+
+| flag | meaning |
+| ---- | ------- |
+| `--format text\|json` | how to print the report |
+
+- **Opens:** observes. A missing dataset is an error; nothing is created.
+- **Exits:** `0` healthy; `3` when the stores disagree or the WAL verification fails or is partial, with the report on stdout; `1` on an error.
+
+### `dolos sync recover`
+
+Brings the state and the archive up to the WAL tip, as a crash may leave them. It plans first and prints the plan:
+
+- the WAL covers the lag: replay it;
+- the WAL cannot cover it: refuse, naming the gap, unless `--discard-wal` is given and the archive is at or beyond the state cursor; then reset the WAL to the state cursor, warning that its rollback history is lost;
+- the archive is behind the state and the WAL cannot cover it: refuse even with `--discard-wal`, pointing to `data rebuild` or `bootstrap --force`.
+
+Each step commits atomically, so an interrupted run plans again.
+
+| flag | meaning |
+| ---- | ------- |
+| `--discard-wal` | allow the WAL reset described above |
+| `--dry-run` | print the plan and change nothing |
+| `--format text\|json` | how to print the plan |
+
+- **Opens:** repairs; observes under `--dry-run`.
+- **Exits:** `0` recovered, nothing to do, or planned under `--dry-run`; `2` when the WAL cannot cover the lag and `--discard-wal` was not given; `1` refused or failed.
+
+### `dolos sync dump`
+
+Prints the WAL's entries, oldest first. Needs the `utils` feature.
+
+| flag | meaning |
+| ---- | ------- |
+| `--start SLOT` | start at the entry at, or nearest to, this slot |
+| `--limit N` | how many entries, default `100`; `0` prints them all |
+| `--format text\|json` | how to print the entries; JSON is one object per entry |
+
+- **Opens:** observes.
+- **Exits:** `0`; `1` on an error.
+
+### `dolos sync rollback`
+
+Rolls the WAL, the state and the archive back to a block the WAL holds.
+
+| flag | meaning |
+| ---- | ------- |
+| `--slot SLOT` | required: the block's slot |
+| `--hash HASH` | required: the block's hash |
+| `--yes` | go ahead |
+
+- **Opens:** repairs.
+- **Confirmation:** without `--yes`, prints what it would undo and exits `2`.
+- **Refuses** (exit `1`) while the stores disagree, pointing to `sync recover` or `sync catchup`, and a block the WAL does not hold, naming the window it holds.
+- **Exits:** `0` rolled back; `1` refused or failed.
+
+## Data
+
+The `data` group needs the `utils` feature.
+
+### `dolos data`
+
+Observes, checks and maintains the stores.
+
+### `dolos data stats`
+
+The storage footprint of the state and the archive, as each store's engine reports it.
+
+| flag | meaning |
+| ---- | ------- |
+| `--format text\|json` | how to print the report |
+
+- **Opens:** observes.
+- **Exits:** `0`; `1` on an error.
+
+### `dolos data inspect`
+
+Prints one entity from the state.
+
+| flag | meaning |
+| ---- | ------- |
+| `--namespace NAME` | required: the state namespace |
+| `--key HEX` | the entity's key, for a namespace holding more than one |
+| `--format text\|json` | how to print the entity |
+
+- **Opens:** observes the state store alone.
+- **Exits:** `0`; `2` for an unknown namespace, a key that is not hex or not of the namespace, or a missing `--key`; `1` on an error.
+
+### `dolos data dump`
+
+Prints records from the state, the archive's logs or its blocks. Every dump is bounded by default:
+
+| flag | meaning |
+| ---- | ------- |
+| `--limit N` | at most this many records, default `100`; `0` streams every one |
+| `--offset N` | skip this many records first, default `0` |
+| `--format text\|json` | text, or one JSON object per record |
+
+`dump state` and `dump logs` also take `--layout table|dbsync` for their text form: a table, or comma-separated rows under cardano-db-sync's column names. `--layout dbsync` with `--format json` is a usage error.
+
+- **Opens:** observes.
+- **Exits:** `0`; `2` for an unknown namespace or conflicting flags; `1` on an error.
+
+### `dolos data dump state`
+
+The entities of a state namespace.
+
+| flag | meaning |
+| ---- | ------- |
+| `--namespace NAME` | required: the state namespace |
+
+### `dolos data dump logs`
+
+The records of an archive log namespace.
+
+| flag | meaning |
+| ---- | ------- |
+| `--namespace NAME` | required: the log namespace |
+| `--from-epoch N`, `--to-epoch N` | the first and last epoch whose logs to dump |
+
+### `dolos data dump blocks`
+
+The archive's blocks.
+
+| flag | meaning |
+| ---- | ------- |
+| `--from-slot SLOT`, `--to-slot SLOT` | the first and last slot to dump |
+
+### `dolos data check`
+
+Audits the consistency of the stores at rest and reports every disagreement it finds, rather than stopping at the first. It repairs nothing.
+
+| flag | meaning |
+| ---- | ------- |
+| `--check NAME` | repeatable; all of them when omitted. `cursors` (the WAL, archive and state tips agree), `archive-continuity` (the archive's blocks chain), `account-epochs`, `epoch-log` (the epoch log is contiguous and complete), `totals` (pot totals and delegation referents; scans the whole UTxO set) |
+| `--format text\|json` | how to print the report |
+
+- **Opens:** observes.
+- **Exits:** `0` clean; `3` when it found anything, with the report on stdout; `1` on an error.
+
+### `dolos data housekeeping`
+
+Runs housekeeping rounds until there is nothing left to do, applying the configured [`history`](../configuration/schema) policy: pruning the WAL and, in rolling mode, the archive.
+
+| flag | meaning |
+| ---- | ------- |
+| `--max-rounds N` | stop after this many rounds |
+
+- **Opens:** runs the node's open, and deletes what the policy prunes.
+- **Exits:** `0`; `1` on an error.
+
+### `dolos data reset`
+
+Removes every store the node keeps under `storage.path`: the WAL, the state, the archive with its block segments, the mempool and the cache, with what a stele restore stages there. The configuration and anything else in the directory stay. There are no per-store selectors. Afterwards, [`bootstrap`](#dolos-bootstrap) or sync from genesis.
+
+| flag | meaning |
+| ---- | ------- |
+| `--yes` | go ahead |
+
+- **Opens:** takes the stores' locks, then deletes them.
+- **Confirmation:** without `--yes`, lists the stores it would remove and exits `2`.
+- **Refuses** (exit `1`), removing nothing, while the configuration keeps a store outside `storage.path`, the root or a store is a symbolic link or a mount point, or another process holds a store. Each refusal names what to remove by hand.
+- **Exits:** `0` removed, or nothing to remove.
+
+### `dolos data rebuild`
+
+Regenerates the state store by replaying the local archive, offline: no network and no download.
+
+| flag | meaning |
+| ---- | ------- |
+| `--target PATH` | rebuild into a fresh state store at this path, leaving the node's own stores untouched |
+| `--ephemeral` | rebuild in memory and discard it: a validation run that writes nothing. It holds the whole ledger in RAM; on a public network pair it with `--stop-epoch`, or use `--target` |
+| `--rewrite-logs` | also rewrite what the archive derives from its blocks (log records and index entries); in place only |
+| `--stop-epoch N` | stop once the replay reaches epoch `N`; needs `--target` or `--ephemeral` |
+| `--chunk N` | blocks per batch, default `500` |
+| `--yes` | go ahead with the in-place rebuild |
+
+- **Opens:** repairs. In place (neither `--target` nor `--ephemeral`) it wipes and regenerates the node's state store and resets the WAL; with `--target` or `--ephemeral` it only reads the node's archive.
+- **Confirmation:** in place, without `--yes`, it names what it would rewrite and exits `2`.
+- **Exits:** `0`; `2` for `--stop-epoch` in place or `--chunk 0`; `1` on an error.
+
+## Cache
+
+The cache group works on the cache file directly, so it runs with the node stopped. See [Cache](../operations/cache).
+
+### `dolos cache`
+
+Fills, clears, inspects and checks the cache.
+
+- **Opens:** runs the node's open.
+
+### `dolos cache warm`
+
+Builds a namespace's entries ahead of the reads that would miss them, keeping those at or above the admission threshold, and prints how many it kept. Interrupted, it is run again and skips what is current.
+
+| flag | meaning |
+| ---- | ------- |
+| `--namespace NAME` | required: the namespace |
+| `--keys FILE` | the keys in a file, one per line |
+| `--previous` | the keys the namespace held when it was last cleared |
+| `--scan` | the keys the namespace finds worth warming |
+
+Exactly one of `--keys`, `--previous` and `--scan` (exit `2` otherwise).
+
+### `dolos cache clear`
+
+Wipes a namespace, or all of them, recording the keys for `warm --previous`. The cache is disposable: no answer changes, so it takes no `--yes`.
+
+| flag | meaning |
+| ---- | ------- |
+| `--namespace NAME` | the namespace to wipe |
+| `--all` | every namespace |
+
+### `dolos cache stats`
+
+Each namespace's entries, bytes on disk, format version and watermarks.
+
+| flag | meaning |
+| ---- | ------- |
+| `--format text\|json` | how to print the report |
+
+### `dolos cache verify`
+
+Rebuilds a random sample of entries without the cache and compares the answers.
+
+| flag | meaning |
+| ---- | ------- |
+| `--namespace NAME` | the namespace to check; every one with a use when omitted |
+| `--sample N` | entries rebuilt per namespace, default `100` |
+| `--format text\|json` | how to print the report |
+
+- **Exits:** `0` all match; `3` on a mismatch, with the report on stdout; `1` on an error.
+
+## Service
+
+### `dolos service`
+
+Installs `dolos daemon` as an OS service, or uninstalls it. Linux uses systemd units, user units by default; macOS uses launchd LaunchAgents, per user only. Other platforms are refused with exit `1`. See [Service](../operations/service).
+
+### `dolos service install`
+
+Registers `dolos daemon --config <file>` to start at login, or at boot with `--system`, restarting on failure: the systemd unit `dolos-<NAME>.service`, or the launchd agent `io.txpipe.dolos.<NAME>`. It runs with absolute binary and configuration paths, in the configuration file's directory, and prints the commands that start, stop and follow it.
+
+| argument / flag | meaning |
+| --------------- | ------- |
+| `NAME` | 1 to 48 of `a-z`, `0-9` and `-`; without it, `{chain.protocol}-{chain.network}` from the configuration |
+| `--system` | a system unit, installed as root (Linux only), for the file `--config` names explicitly |
+| `--start` | start it now as well |
+| `--format text\|json` | how to print the result |
+
+- **Opens:** no store; reads the configuration file alone, as the service will (a shell's `DOLOS_` overrides are ignored, with a warning), and writes the unit file.
+- **Refuses** a name already installed (updating is uninstall then install), and a configuration whose stores, ports or socket overlap an installed instance's. It never elevates itself: as a user, `--system` fails and prints the `sudo` command to run instead.
+- **Exits:** `0`; `2` on a bad or underivable name, `--system` without `--config`, or `--system` on macOS; `1` on a collision or an error.
+
+### `dolos service uninstall`
+
+Stops and unregisters one instance. Its configuration and data stay, and so do other instances.
+
+| argument / flag | meaning |
+| --------------- | ------- |
+| `NAME` | the instance; given, no configuration is read; without it, derived as `install` derives it |
+| `--system` | a system unit, removed as root (Linux only) |
+| `--format text\|json` | how to print the result |
+
+- **Opens:** no store.
+- **Exits:** `0`; `2` as for `install`; `1` when no such instance is installed, or on an error.

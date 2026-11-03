@@ -19,7 +19,7 @@ Only that file is read; there is no system-wide file merged under it. A missing 
 The file starts with the configuration contract it was written for:
 
 ```toml
-compatibility = "v2-alpha.1"
+compatibility = "v2-alpha.2"
 ```
 
 Every table refuses a key it does not know, so a misspelt or removed field fails loading instead of being ignored. To validate a file without starting the node or opening any store, run:
@@ -48,7 +48,7 @@ Shells refuse a variable name that contains `-`, so `export` and the `NAME=value
 For example, with this file:
 
 ```toml
-compatibility = "v2-alpha.1"
+compatibility = "v2-alpha.2"
 
 [chain]
 protocol = "cardano"

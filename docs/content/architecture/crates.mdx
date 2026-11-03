@@ -51,16 +51,17 @@ The binary lives in `src/bin/dolos/` and dispatches a set of top-level subcomman
 
 | Command | What it does |
 | ------- | ------------ |
-| `init` | Interactive wizard to generate configuration. |
+| `init` | Write a configuration file, prompting on a terminal. |
+| `config` | Check the configuration; write a known network's genesis files. |
 | `daemon` | Full node — runs the sync pipeline and all enabled API servers together. |
-| `sync` | Sync only — pull blocks from the upstream peer and apply them to the ledger. |
 | `serve` | Serve only — expose the APIs over already-synced data. |
-| `data` | Inspect and export stored data (dump state, logs, blocks, WAL; prune; import archive). |
-| `eval` | Evaluate a transaction against current ledger state (phase-1 and phase-2). |
-| `doctor` | Diagnose and repair (WAL integrity, rollback, reset genesis/WAL, catch-up stores). |
-| `bootstrap` | Initialize a node from a Mithril snapshot, a Dolos snapshot, or a relay. |
+| `bootstrap` | Fill the stores from a stele, Mithril or a local ImmutableDB. |
+| `sync` | Catch up with the upstream peer (or follow it); inspect, recover, dump and roll back the WAL. |
+| `data` | Observe and maintain the stores: stats, inspect, dumps, checks, housekeeping, reset, rebuild. |
+| `cache` | Warm, clear, report on and verify the cache. |
+| `service` | Install or uninstall the node as a systemd or launchd service. |
 
-The `daemon`, `sync`, and `serve` commands map directly onto the sync pipeline and serving layer described in the following pages. For how to choose between them operationally, see [Operations → Modes](../operations/modes); for `bootstrap`, see the [Bootstrap section](../bootstrap).
+The `daemon`, `sync catchup`, and `serve` commands map directly onto the sync pipeline and serving layer described in the following pages. For how to choose between them operationally, see [Operations → Modes](../operations/modes); for `bootstrap`, see the [Bootstrap section](../bootstrap); for every command and flag, the [CLI reference](../reference/cli).
 
 ## Key dependencies
 

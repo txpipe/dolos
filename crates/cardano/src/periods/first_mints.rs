@@ -21,7 +21,7 @@ use pallas::{crypto::hash::Hash, ledger::primitives::Epoch};
 use super::{ChunkRow as _, Period, Segment, CHUNK_LEN};
 use crate::{
     indexes::{entities, SlotOrder},
-    AssetKey, ChainSummary, FirstMintChunk, FirstMintSet, PolicyKey, PolicyMintChunk,
+    AssetKey, ChainSummary, FirstMintChunk, FirstMintSet, PolicyFirstMintChunk, PolicyKey,
 };
 
 fn policy_key(policy: &Hash<28>, chunk: u32) -> (PolicyKey, u32) {
@@ -89,11 +89,6 @@ fn sealed_from<A: ArchiveStore>(
     Ok(true)
 }
 
-/// The number of chunks a list of `count` entries seals into.
-fn chunks_of(count: u64) -> u32 {
-    count.div_ceil(CHUNK_LEN as u64) as u32
-}
-
 /// Writes `epoch`'s lists again from `mints`, its staged rows in mint order,
 /// over `stale`, an all-subjects list an earlier run sealed from other rows:
 /// the all-subjects list and each policy list that either names, in one
@@ -116,7 +111,7 @@ fn rewrite<A: ArchiveStore>(
         writer.write_log_typed(slot, &(i as u32), chunk)?;
     }
 
-    for i in chunks.len() as u32..chunks_of(stale.len() as u64) {
+    for i in chunks.len() as u32..super::chunks_of(stale.len() as u64) {
         writer.delete_log_typed::<FirstMintChunk>(slot, &i)?;
     }
 
@@ -131,17 +126,17 @@ fn rewrite<A: ArchiveStore>(
 
     for (policy, names) in names {
         let sealed = archive
-            .read_log_typed::<PolicyMintChunk>(slot, &policy_key(&policy, 0))?
-            .map_or(0, |head| chunks_of(head.count));
+            .read_log_typed::<PolicyFirstMintChunk>(slot, &policy_key(&policy, 0))?
+            .map_or(0, |head| super::chunks_of(head.count));
 
-        let chunks = super::chunk::<PolicyMintChunk>(names);
+        let chunks = super::chunk::<PolicyFirstMintChunk>(names);
 
         for (i, chunk) in chunks.iter().enumerate() {
             writer.write_log_typed(slot, &policy_key(&policy, i as u32), chunk)?;
         }
 
         for i in chunks.len() as u32..sealed {
-            writer.delete_log_typed::<PolicyMintChunk>(slot, &policy_key(&policy, i))?;
+            writer.delete_log_typed::<PolicyFirstMintChunk>(slot, &policy_key(&policy, i))?;
         }
     }
 
@@ -230,7 +225,7 @@ pub(crate) fn seal<D: Domain>(
             mints.sort_by_key(|row| row.mint_order());
             let names = mints.into_iter().map(|row| row.name.clone()).collect();
 
-            for (i, chunk) in super::chunk::<PolicyMintChunk>(names)
+            for (i, chunk) in super::chunk::<PolicyFirstMintChunk>(names)
                 .into_iter()
                 .enumerate()
             {
@@ -312,7 +307,7 @@ pub fn policy_page<D: Domain>(
 
     staged.retain(|epoch, _| epochs.contains(epoch));
 
-    let sealed = super::read_sealed::<_, PolicyMintChunk>(archive, chain, epochs, |_| {
+    let sealed = super::read_sealed::<_, PolicyFirstMintChunk>(archive, chain, epochs, |_| {
         policy_key(policy, 0)
     })?;
 
@@ -322,9 +317,10 @@ pub fn policy_page<D: Domain>(
         return Ok(None);
     }
 
-    let names = super::page::<PolicyMintChunk>(segments, order, skip, count, |epoch, chunks| {
-        super::load_chunks(archive, chain, epoch, chunks, |i| policy_key(policy, i))
-    })?;
+    let names =
+        super::page::<PolicyFirstMintChunk>(segments, order, skip, count, |epoch, chunks| {
+            super::load_chunks(archive, chain, epoch, chunks, |i| policy_key(policy, i))
+        })?;
 
     Ok(Some(
         names
@@ -433,7 +429,7 @@ mod tests {
 
     type Logs = (
         Vec<(BlockSlot, u32, FirstMintChunk)>,
-        Vec<(BlockSlot, (PolicyKey, u32), PolicyMintChunk)>,
+        Vec<(BlockSlot, (PolicyKey, u32), PolicyFirstMintChunk)>,
     );
 
     fn logs(domain: &ToyDomain) -> Logs {
@@ -445,7 +441,7 @@ mod tests {
             .map(Result::unwrap)
             .collect();
         let policies = archive
-            .iter_logs_typed::<PolicyMintChunk>(None)
+            .iter_logs_typed::<PolicyFirstMintChunk>(None)
             .unwrap()
             .map(Result::unwrap)
             .collect();
@@ -581,7 +577,7 @@ mod tests {
             writer.write_log_typed(slot, &(i as u32), &chunk).unwrap();
         }
 
-        let names = PolicyMintChunk::new(1, vec![b"X".to_vec()]);
+        let names = PolicyFirstMintChunk::new(1, vec![b"X".to_vec()]);
         writer
             .write_log_typed(slot, &policy_key(&R.into(), 0), &names)
             .unwrap();
@@ -759,7 +755,7 @@ mod tests {
         let sealed_all =
             crate::periods::read_sealed::<_, FirstMintChunk>(archive, &chain, 0..=BOUNDARY, |_| 0)
                 .unwrap();
-        let sealed_q = crate::periods::read_sealed::<_, PolicyMintChunk>(
+        let sealed_q = crate::periods::read_sealed::<_, PolicyFirstMintChunk>(
             archive,
             &chain,
             0..=BOUNDARY,
@@ -779,7 +775,7 @@ mod tests {
         assert_eq!(all, expected);
 
         let q = segments(crate::periods::join(staged_q, sealed_q), |row| row.name).unwrap();
-        let q = crate::periods::page::<PolicyMintChunk>(q, SlotOrder::Desc, 3, 290, |e, c| {
+        let q = crate::periods::page::<PolicyFirstMintChunk>(q, SlotOrder::Desc, 3, 290, |e, c| {
             crate::periods::load_chunks(archive, &chain, e, c, |i| policy_key(&Q.into(), i))
         })
         .unwrap();
@@ -836,7 +832,7 @@ mod tests {
             writer.write_log_typed(slot, &(i as u32), &chunk).unwrap();
         }
 
-        for (i, chunk) in crate::periods::chunk::<PolicyMintChunk>(names)
+        for (i, chunk) in crate::periods::chunk::<PolicyFirstMintChunk>(names)
             .into_iter()
             .enumerate()
         {

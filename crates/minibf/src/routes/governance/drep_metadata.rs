@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::drep_metadata::DrepMetadata;
-use dolos_cardano::model::DRepSightingState;
+use dolos_cardano::model::DRepObservationState;
 use dolos_core::Domain;
 
 use crate::{
@@ -22,7 +22,7 @@ use super::drep_key;
 /// db-sync returns the latest registration or update that still has an
 /// anchor: its query inner-joins `voting_anchor` and takes the newest row. So
 /// a registration or update without one keeps the older anchor, though the
-/// ledger clears it. The DRep's sighting holds that anchor, and the list
+/// ledger clears it. The DRep's observation holds that anchor, and the list
 /// serves it too.
 ///
 /// A DRep that never carried an anchor is a 404, not an empty body. The two
@@ -42,11 +42,11 @@ pub async fn drep_metadata<D: Domain>(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    let sighting = domain
-        .read_cardano_entity::<DRepSightingState>(&drep_key(&parsed.encoded)?)?
+    let observation = domain
+        .read_cardano_entity::<DRepObservationState>(&drep_key(&parsed.encoded)?)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let anchor = sighting.anchor.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+    let anchor = observation.anchor.as_ref().ok_or(StatusCode::NOT_FOUND)?;
 
     let hex = if parsed.is_legacy {
         hex::encode(&parsed.encoded[1..])

@@ -1,0 +1,10 @@
+Pull blocks from the upstream peer up to its tip, or on with `--follow`
+
+Usage: dolos sync catchup [OPTIONS]
+
+Options:
+      --follow           Keep following the chain once the upstream tip is committed
+      --stop-epoch <N>   Stop once the ledger reaches this epoch, on its first block: the only state
+                         a Stelae snapshot of that epoch is cut from
+  -c, --config <CONFIG>  
+  -h, --help             Print help
