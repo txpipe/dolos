@@ -3786,11 +3786,23 @@ mod index_staging {
         stage(root.path(), &store, &request, Budget::new(needed)).unwrap();
     }
 
-    /// The bytes on disk in `family`'s runs under `root`.
-    fn spooled(root: &Path, family: Family) -> u64 {
+    /// The frames on disk in `family`'s runs under `root`.
+    fn spooled(root: &Path, family: Family) -> usize {
         fs::read_dir(root.join(family.kind().unwrap()))
             .unwrap()
-            .map(|entry| entry.unwrap().metadata().unwrap().len())
+            .map(|entry| {
+                let bytes = fs::read(entry.unwrap().path()).unwrap();
+                let (mut at, mut frames) = (0, 0);
+
+                while at < bytes.len() {
+                    let header = bytes[at..at + 4].try_into().unwrap();
+                    at += 4 + u32::from_le_bytes(header) as usize;
+                    frames += 1;
+                }
+
+                assert_eq!(at, bytes.len());
+                frames
+            })
             .sum()
     }
 
@@ -3818,7 +3830,9 @@ mod index_staging {
             ),
             (entity_only, Traversal::Entities, entities),
         ] {
-            let failing = Counted::failing(store.clone(), traversal, 3);
+            // Every record before the fault lands in a requested window.
+            let routed = 3;
+            let failing = Counted::failing(store.clone(), traversal, routed);
             let written = |run_buffer: usize| {
                 let root = tempfile::tempdir().unwrap();
                 let budget = Budget {
@@ -3834,10 +3848,10 @@ mod index_staging {
                 faulted
                     .iter()
                     .map(|family| spooled(root.path(), *family))
-                    .sum::<u64>()
+                    .sum::<usize>()
             };
 
-            assert!(written(1) > 0, "{traversal:?}");
+            assert_eq!(written(1), routed, "{traversal:?}");
             assert_eq!(written(usize::MAX), 0, "{traversal:?}");
         }
     }
