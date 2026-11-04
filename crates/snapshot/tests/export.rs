@@ -2299,8 +2299,16 @@ struct Counted<S> {
     tags: Arc<AtomicUsize>,
     exacts: Arc<AtomicUsize>,
     entities: Arc<AtomicUsize>,
-    /// Exact and entity traversals end in a read error after this many records.
-    fault_after: Option<usize>,
+    /// The traversal that ends in a read error, after this many records.
+    fault: Option<(Traversal, usize)>,
+}
+
+/// One of the three index traversals a [`Counted`] store counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Traversal {
+    Tags,
+    Exacts,
+    Entities,
 }
 
 /// An iterator that ends in a read error after `after` records, when set.
@@ -2322,15 +2330,21 @@ impl<S: ArchiveStore> Counted<S> {
             tags: Arc::default(),
             exacts: Arc::default(),
             entities: Arc::default(),
-            fault_after: None,
+            fault: None,
         }
     }
 
-    fn failing(inner: S, after: usize) -> Self {
+    fn failing(inner: S, traversal: Traversal, after: usize) -> Self {
         Self {
-            fault_after: Some(after),
+            fault: Some((traversal, after)),
             ..Self::new(inner)
         }
+    }
+
+    fn fault_after(&self, traversal: Traversal) -> Option<usize> {
+        self.fault
+            .filter(|(faulted, _)| *faulted == traversal)
+            .map(|(_, after)| after)
     }
 
     /// Entity index traversals built over the store.
@@ -2354,7 +2368,7 @@ impl<S: ArchiveStore> ArchiveStore for Counted<S> {
     type LogIter = S::LogIter;
     type EntityValueIter = S::EntityValueIter;
     type SlotIter = S::SlotIter;
-    type TagIter = S::TagIter;
+    type TagIter = Faulting<S::TagIter>;
     type ExactIter = Faulting<S::ExactIter>;
     type EntityRecordIter = Faulting<S::EntityRecordIter>;
 
@@ -2453,7 +2467,10 @@ impl<S: ArchiveStore> ArchiveStore for Counted<S> {
     ) -> Result<Self::TagIter, ArchiveError> {
         self.tags.fetch_add(1, Ordering::Relaxed);
 
-        self.inner.iter_archive_tags(dimensions, slots)
+        Ok(faulting(
+            self.inner.iter_archive_tags(dimensions, slots)?,
+            self.fault_after(Traversal::Tags),
+        ))
     }
 
     fn iter_exact_records(
@@ -2464,7 +2481,7 @@ impl<S: ArchiveStore> ArchiveStore for Counted<S> {
 
         Ok(faulting(
             self.inner.iter_exact_records(slots)?,
-            self.fault_after,
+            self.fault_after(Traversal::Exacts),
         ))
     }
 
@@ -2477,7 +2494,7 @@ impl<S: ArchiveStore> ArchiveStore for Counted<S> {
 
         Ok(faulting(
             self.inner.iter_entity_records(kinds, slots)?,
-            self.fault_after,
+            self.fault_after(Traversal::Entities),
         ))
     }
 }
@@ -2954,7 +2971,7 @@ fn the_headless_facade_plans_encodes_and_reproduces_one_document() {
 /// The index staging engine: one traversal per family, partitioned into runs
 /// that finish as the layers a direct export writes.
 mod index_staging {
-    use std::{collections::BTreeSet, fs, path::Path};
+    use std::{collections::BTreeSet, fs, num::NonZeroUsize, path::Path};
 
     use dolos_cardano::EraBoundary;
     use dolos_core::{builtin::MemoryArchiveStore, ArchiveIndexDelta, Tag};
@@ -2963,7 +2980,10 @@ mod index_staging {
         Error, Scope as _, COMPRESSION_LEVEL, MAINNET_MAGIC,
     };
     use dolos_testing::blocks::{byron_ebb_slot, make_byron_ebb, BYRON_EPOCH_LENGTH};
-    use stelae::{frame::CanonicalCbor, inscription::LayerDescriptor, SteleWriter as _};
+    use stelae::{
+        frame::CanonicalCbor, inscription::LayerDescriptor, DiscardingSink, RecordSink,
+        SteleWriter as _, WrittenLayer,
+    };
 
     use super::*;
 
@@ -3563,11 +3583,18 @@ mod index_staging {
                 .collect(),
         );
 
-        for request in [every_family(&frontier), entity_only] {
-            let failing = Counted::failing(store.clone(), 3);
+        for (request, traversal) in [
+            (every_family(&frontier), Traversal::Tags),
+            (every_family(&frontier), Traversal::Exacts),
+            (entity_only, Traversal::Entities),
+        ] {
+            let failing = Counted::failing(store.clone(), traversal, 3);
             let failed = stage(root.path(), &failing, &request, unlimited());
 
-            assert!(matches!(failed, Err(Error::Archive(_))), "{failed:?}");
+            assert!(
+                matches!(failed, Err(Error::Archive(_))),
+                "{traversal:?}: {failed:?}"
+            );
 
             for family in request.epochs.keys() {
                 let marker = root.path().join(format!("{}.json", family.kind().unwrap()));
@@ -3704,6 +3731,18 @@ mod index_staging {
                 direct_layer(&store, Family::Indexes, &closed(&skeleton_summary(), 2))
             );
         }
+
+        // A marker naming fewer runs than its windows is refused, not trusted.
+        let marker = root.path().join("indexes.json");
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
+        json["runs"].as_array_mut().unwrap().pop();
+        fs::write(&marker, serde_json::to_vec(&json).unwrap()).unwrap();
+
+        assert!(matches!(
+            refusal(stage(root.path(), &store, &request, unlimited())),
+            Refusal::Corrupt { .. }
+        ));
     }
 
     #[test]
@@ -3746,26 +3785,58 @@ mod index_staging {
         stage(root.path(), &store, &request, Budget::new(needed)).unwrap();
     }
 
+    /// Every layer `request` stages, in its order.
+    fn layers_of(request: &Request) -> Vec<(Family, u64)> {
+        request
+            .epochs
+            .iter()
+            .flat_map(|(family, epochs)| epochs.iter().map(|epoch| (*family, *epoch)))
+            .collect()
+    }
+
+    /// `write_layers` returns what `write_layer` does for each layer, in
+    /// input order, and fails when any of them fails.
     #[test]
     fn buffers_and_workers_move_no_bytes() {
         let (store, frontier) = staging_archive(EPOCHS);
         let request = every_family(&frontier);
-        let layers: Vec<(Family, u64)> = request
-            .epochs
-            .iter()
-            .flat_map(|(family, epochs)| epochs.iter().map(|epoch| (*family, *epoch)))
-            .collect();
+        let layers = layers_of(&request);
+
+        let mut with_open = layers.clone();
+        with_open.insert(layers.len() / 2, (Family::Indexes, EPOCHS));
 
         let finish = |budget: Budget| {
             let root = tempfile::tempdir().unwrap();
             let staged = stage(root.path(), &store, &request, budget).unwrap();
 
-            staged.write_layers(&Discarding, &layers, EPOCHS).unwrap()
+            let one_by_one: Vec<_> = layers
+                .iter()
+                .map(|&(family, epoch)| {
+                    staged
+                        .write_layer(&Discarding, family, epoch, EPOCHS)
+                        .unwrap()
+                })
+                .collect();
+
+            assert_eq!(
+                staged.write_layers(&Discarding, &layers, EPOCHS).unwrap(),
+                one_by_one
+            );
+            assert!(matches!(
+                refusal(staged.write_layers(&Discarding, &with_open, EPOCHS)),
+                Refusal::NotClosedAt {
+                    epoch: EPOCHS,
+                    sequence: EPOCHS
+                }
+            ));
+
+            one_by_one
         };
 
         let reference = finish(unlimited());
 
         assert_eq!(reference.len(), layers.len());
+        assert!(reference.iter().any(Option::is_none));
 
         for (run_buffer, workers) in [(1, 1), (7, 3), (1 << 20, 16)] {
             let budget = Budget {
@@ -3779,6 +3850,163 @@ mod index_staging {
                 reference,
                 "buffer {run_buffer}, {workers} workers"
             );
+        }
+    }
+
+    /// Entity kinds asking for disjoint epochs still share one traversal,
+    /// spanning all their windows, and each keeps only its own windows.
+    #[test]
+    fn entity_kinds_with_disjoint_windows_share_one_traversal() {
+        let (store, frontier) = staging_archive(EPOCHS);
+        let archive = Counted::new(store.clone());
+        let root = tempfile::tempdir().unwrap();
+        let [(_, asset), (_, script), (_, stake)] = ENTITY_KINDS;
+
+        // Each window holds its kind's entries; script's epoch 1 does too,
+        // inside its own span, and must be dropped.
+        let request = request(
+            &frontier,
+            vec![
+                (Family::Entity(asset), vec![4]),
+                (Family::Entity(script), vec![0, 3]),
+                (Family::Entity(stake), vec![2]),
+            ],
+        );
+
+        let staged = stage(root.path(), &archive, &request, unlimited()).unwrap();
+
+        assert_eq!(archive.entity_traversals(), 1);
+        assert_eq!(staged.report().entity_traversals, 1);
+        assert_eq!(staged.records(Family::Entity(script), 1), None);
+
+        for (family, epochs) in &request.epochs {
+            for &epoch in epochs {
+                let expected = direct_layer(&store, *family, &closed(&skeleton_summary(), epoch));
+
+                assert!(expected.is_some(), "{family:?} epoch {epoch} is empty");
+                assert_eq!(
+                    staged
+                        .write_layer(&Discarding, *family, epoch, EPOCHS)
+                        .unwrap(),
+                    expected,
+                    "{family:?} epoch {epoch}"
+                );
+            }
+        }
+    }
+
+    /// An archive that holds the frontier block but has moved past it is not
+    /// the frozen view the frontier names.
+    #[test]
+    fn an_archive_past_its_frontier_is_refused() {
+        let (store, frontier) = staging_archive(EPOCHS);
+        let (next, body) =
+            make_conway_block_with_prev(EPOCHS * 100 + 20, frontier.hash(), EPOCHS + 1);
+        let writer = store.start_writer().unwrap();
+        writer.apply(&next, &body).unwrap();
+        writer.commit().unwrap();
+
+        let indexes = |frontier: &ChainPoint| request(frontier, vec![(Family::Indexes, vec![0])]);
+        let root = tempfile::tempdir().unwrap();
+
+        assert!(matches!(
+            refusal(stage(root.path(), &store, &indexes(&frontier), unlimited())),
+            Refusal::NotAtFrontier { .. }
+        ));
+        stage(root.path(), &store, &indexes(&next), unlimited()).unwrap();
+    }
+
+    /// A discarding transport that counts the sinks open at once. Opening one
+    /// waits a little, so finishing more layers at once than allowed shows.
+    #[derive(Default)]
+    struct Sinks {
+        live: Arc<AtomicUsize>,
+        peak: AtomicUsize,
+    }
+
+    struct Live {
+        inner: DiscardingSink,
+        _open: Open,
+    }
+
+    struct Open(Arc<AtomicUsize>);
+
+    impl Drop for Open {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    impl RecordSink for Live {
+        fn write_record(&mut self, record: &CanonicalCbor) -> Result<(), stelae::Error> {
+            self.inner.write_record(record)
+        }
+
+        fn records(&self) -> u64 {
+            self.inner.records()
+        }
+
+        fn finish(self) -> Result<WrittenLayer, stelae::Error> {
+            self.inner.finish()
+        }
+    }
+
+    impl stelae::SteleWriter for Sinks {
+        type Sink = Live;
+
+        fn layer_sink(
+            &self,
+            profile: &dyn stelae::Profile,
+            spec: &stelae::LayerSpec,
+            level: i32,
+        ) -> Result<Live, stelae::Error> {
+            let inner = Discarding.layer_sink(profile, spec, level)?;
+            let open = self.live.fetch_add(1, Ordering::SeqCst) + 1;
+            let live = Live {
+                inner,
+                _open: Open(self.live.clone()),
+            };
+
+            self.peak.fetch_max(open, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+
+            Ok(live)
+        }
+
+        fn seal(
+            &self,
+            profile: &dyn stelae::Profile,
+            inscription: &stelae::Inscription,
+        ) -> Result<stelae::Digest, stelae::Error> {
+            Discarding.seal(profile, inscription)
+        }
+    }
+
+    /// Finishing never holds more sinks, each a compression context, than the
+    /// budget's workers.
+    #[test]
+    fn finishing_holds_at_most_workers_sinks_open() {
+        let (store, frontier) = staging_archive(EPOCHS);
+        let request = every_family(&frontier);
+        let layers = layers_of(&request);
+        let root = tempfile::tempdir().unwrap();
+
+        for workers in [1, 3] {
+            let budget = Budget {
+                workers: NonZeroUsize::new(workers).unwrap(),
+                ..unlimited()
+            };
+            let staged = stage(root.path(), &store, &request, budget).unwrap();
+            let sinks = Sinks::default();
+
+            staged.write_layers(&sinks, &layers, EPOCHS).unwrap();
+
+            let peak = sinks.peak.load(Ordering::SeqCst);
+            assert!(
+                (1..=workers).contains(&peak),
+                "{peak} sinks open with {workers} workers"
+            );
+            assert_eq!(sinks.live.load(Ordering::SeqCst), 0);
         }
     }
 }

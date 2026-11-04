@@ -54,8 +54,9 @@
 //!   the layers a publish inherits instead of rebuilding.
 //! - [`planning`] — the epoch selection every command that walks these stores
 //!   takes, and the arithmetic each of them reports.
-//! - [`staging`] — one archive traversal per index family, partitioned into
-//!   durable per-epoch runs that finish as layers for several publications.
+//! - [`staging`] — one tag and one exact traversal for `indexes` and one
+//!   shared entity traversal, partitioned into durable per-epoch runs that
+//!   finish as layers for several publications.
 //! - [`node`] — what a node's own configuration says about reaching a registry:
 //!   which identity, and where it stages.
 //!

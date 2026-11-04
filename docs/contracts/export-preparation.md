@@ -1,12 +1,12 @@
 # Export preparation: index staging
 
 `dolos_snapshot::staging` stages the `indexes` and `entity-{kind}` layers of
-several prepared publications from one frozen archive view. Each index family
-costs one archive traversal, however many epochs it covers. This document is
-the contract between that engine and the boundary preparation that will drive
-it. Until that preparation routes `export::export` through it, the banded
-exporter remains the public path, and the two produce the same layer bytes for
-every closed window.
+several prepared publications from one frozen archive view. `indexes` costs
+one tag and one exact traversal, and every entity kind shares one traversal,
+however many epochs they cover. This document is the contract between that
+engine and the boundary preparation that will drive it. Until that preparation
+routes `export::export` through it, the banded exporter remains the public
+path, and the two produce the same layer bytes for every closed window.
 
 ## Inputs
 
@@ -89,7 +89,8 @@ for the same publication.
 `Staged::report()` exposes the tag, exact and entity traversals the staging
 started, the records its runs hold and the run bytes it wrote. Benchmarks read
 traversal counts from it. A staging of zero epochs starts no traversal, and one
-of any number of epochs starts at most one traversal per family.
+of any number of epochs starts at most one tag, one exact and one entity
+traversal.
 
 ## Resource budgets
 
@@ -121,7 +122,9 @@ in this order:
 
 1. Flush every run and `fsync` it.
 2. Write `{kind}.json.partial` and `fsync` it.
-3. Rename it to `{kind}.json` and `fsync` the directory.
+3. Rename it to `{kind}.json` and `fsync` the directory. Windows cannot open a
+   directory to sync it, so there a crash may lose the marker, and the family
+   is staged again.
 
 A traversal that fails, whether from a read error or the scratch limit, leaves
 no marker. Its partial runs therefore cannot be consumed, and the next staging
@@ -138,7 +141,9 @@ slots and seal boundary. When a staging finds a marker under `root`:
 - a different identity: the staging is refused (`SourceMismatch`); runs are
   never reused across sources or coverage;
 - the same identity with a run missing or off its marked size: the marker is
-  removed and the family is staged again.
+  removed and the family is staged again;
+- a marker that does not parse, or names a different number of runs than
+  windows: the staging is refused (`Corrupt`).
 
 Consumption checks every frame's length and canonical form while it streams.
 At the end it checks the record count, the byte count and the checksum, before
@@ -165,8 +170,9 @@ deletes `root` once the last publication that needs them has committed.
 | `Corrupt` | A run or marker failed its framing, canonical form or marker check. |
 | `Io` | The filesystem failed. |
 
-Archive read errors are terminal and surface as `Error::Archive`. Order
-violations surface as the codecs' `OutOfOrder`.
+A frontier without a hash fails with `Error::UnanchoredPoint`. Archive read
+errors are terminal and surface as `Error::Archive`. Order violations surface
+as the codecs' `OutOfOrder`.
 
 ## Not covered here
 

@@ -1,9 +1,10 @@
 //! Bounded staging of the `indexes` and `entity-{kind}` layers.
 //!
-//! One archive traversal per family partitions its records into per-epoch
-//! runs on disk, so one frozen archive view can finish the closed windows of
-//! several prepared publications. The contract, including what a later view
-//! cannot reproduce, is `docs/contracts/export-preparation.md`.
+//! One tag and one exact traversal for `indexes`, and one traversal shared by
+//! every entity kind, partition their records into per-epoch runs on disk, so
+//! one frozen archive view can finish the closed windows of several prepared
+//! publications. The contract, including what a later view cannot reproduce,
+//! is `docs/contracts/export-preparation.md`.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -210,9 +211,9 @@ pub struct Staged {
 /// Stage `request` under `root`, reusing any family a complete earlier
 /// staging there holds for the same identity.
 ///
-/// Tags, exact records and every pending entity kind are each traversed once,
-/// whatever the number of epochs. Records outside the requested windows are
-/// dropped.
+/// Tags and exact records are traversed once each, and every pending entity
+/// kind shares one traversal, whatever the number of epochs. Records outside
+/// the requested windows are dropped.
 pub fn stage<A: ArchiveStore>(
     root: &Path,
     archive: &A,
@@ -546,13 +547,24 @@ fn span(windows: &[Window]) -> Option<std::ops::Range<BlockSlot>> {
 }
 
 fn read_marker(path: &Path) -> Result<Option<Marker>, Error> {
-    match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|e| corrupt(path, e.to_string())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(io(e)),
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(io(e)),
+    };
+
+    let marker: Marker =
+        serde_json::from_slice(&bytes).map_err(|e| corrupt(path, e.to_string()))?;
+    let (runs, windows) = (marker.runs.len(), marker.identity.windows.len());
+
+    if runs != windows {
+        return Err(corrupt(
+            path,
+            format!("it names {runs} runs for {windows} windows"),
+        ));
     }
+
+    Ok(Some(marker))
 }
 
 /// Whether every run a marker names is on disk at its recorded size.
@@ -764,10 +776,20 @@ impl Spool<'_> {
                 file.sync_all()
             })
             .and_then(|_| fs::rename(&partial, &path))
-            .and_then(|_| File::open(self.root)?.sync_all())
+            .and_then(|_| sync_dir(self.root))
             .map_err(io)?;
 
         Ok(marker)
+    }
+}
+
+/// Make a rename in `dir` durable. Windows cannot open a directory to sync
+/// it, so there a crash may lose the marker and the family is staged again.
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    if cfg!(unix) {
+        File::open(dir)?.sync_all()
+    } else {
+        Ok(())
     }
 }
 
