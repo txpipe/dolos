@@ -4193,7 +4193,9 @@ mod boundary_preparation {
                 block_hash: hash.to_vec(),
                 block_number: number,
                 tx_hashes: match tagged {
-                    true => vec![[[0xee; 24].as_slice(), &slot.to_be_bytes()].concat()],
+                    true => [0xee, 0xdd]
+                        .map(|byte| [[byte; 24].as_slice(), &slot.to_be_bytes()].concat())
+                        .to_vec(),
                     false => vec![],
                 },
                 tags,
@@ -4288,8 +4290,14 @@ mod boundary_preparation {
             let epoch = self.epoch;
             let start = self.start(epoch);
 
+            // The reward update writes the epoch before, after its boundary.
             let writer = self.archive.start_writer().unwrap();
             self.log(&writer, PoolEpochLog::NS, epoch, 1, 12);
+
+            if epoch > 0 {
+                self.log(&writer, PoolEpochLog::NS, epoch - 1, 2, 13);
+            }
+
             writer.commit().unwrap();
 
             let number = self.number;
@@ -4886,7 +4894,6 @@ mod boundary_preparation {
         for damaged in [
             original[..original.len() / 2].to_owned(),
             original.replace("\"capture_from\":1", "\"capture_from\":2"),
-            original.replace("\"format\":1", "\"format\":2"),
         ] {
             assert_ne!(damaged, original);
             fs::write(&path, damaged).unwrap();
@@ -4910,6 +4917,120 @@ mod boundary_preparation {
 
         chain.prepare(&store, &[]).unwrap();
         store.load(2).unwrap();
+    }
+
+    /// Rewrite a manifest in place under a checksum that matches it, as a build
+    /// of another format or a damaged claim would read.
+    fn rewrite_manifest(path: &Path, edit: impl Fn(&str) -> String) {
+        let raw = fs::read_to_string(path).unwrap();
+        let start = raw.find("\"manifest\":").unwrap() + "\"manifest\":".len();
+        let manifest = edit(&raw[start..raw.len() - 1]);
+
+        assert_ne!(manifest, raw[start..raw.len() - 1]);
+
+        let checksum = xxhash_rust::xxh3::xxh3_64(manifest.as_bytes());
+
+        fs::write(
+            path,
+            format!("{{\"checksum\":{checksum},\"manifest\":{manifest}}}"),
+        )
+        .unwrap();
+    }
+
+    /// Another build's format is refused on its own account.
+    #[test]
+    fn a_manifest_of_another_format_is_refused() {
+        let root = tempdir();
+        let store = store(root.path());
+
+        Chain::at(Shape::Shelley, 2).prepare(&store, &[]).unwrap();
+
+        store.load(2).unwrap();
+        rewrite_manifest(&root.path().join("bundles/2.json"), |manifest| {
+            manifest.replace("\"format\":1", "\"format\":2")
+        });
+
+        let reason = match preparation_refusal(store.load(2)) {
+            Refusal::Corrupt { reason, .. } => reason,
+            other => panic!("{other:?}"),
+        };
+
+        assert!(reason.contains("format 2"), "{reason}");
+    }
+
+    /// A manifest's claims about a payload are held against the payload as it
+    /// is read, so one that lies produces no layer.
+    #[test]
+    fn a_payload_is_held_to_what_its_manifest_claims() {
+        let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let bundle = chain.prepare(&store, &[]).unwrap();
+
+        chain.advance_to(3);
+
+        let staged = chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &export::First,
+        );
+
+        let tail = bundle
+            .layers()
+            .find(|layer| layer.kind == INDEXES)
+            .unwrap()
+            .records;
+
+        rewrite_manifest(&root.path().join("bundles/2.json"), |manifest| {
+            manifest.replacen(
+                &format!("\"records\":{tail}"),
+                &format!("\"records\":{}", tail + 1),
+                1,
+            )
+        });
+
+        let lying = store.load(2).unwrap();
+        let refused = chain.finalize(
+            finished_root.path(),
+            &store,
+            &lying,
+            &staged,
+            &export::First,
+        );
+
+        assert!(matches!(
+            preparation_refusal(refused),
+            Refusal::Corrupt { sequence: 2, .. }
+        ));
+        assert!(!finished_root.path().join("inscription.json").exists());
+    }
+
+    /// The window before the boundary is captured even under a seal that would
+    /// call it final: its rows still settle.
+    #[test]
+    fn the_window_before_the_boundary_is_always_captured() {
+        let root = tempdir();
+        let store = store(root.path());
+        let chain = Chain::at(Shape::Shelley, 2);
+        let delta = chain.boundary_delta.clone().unwrap();
+
+        let bundle = prepare::prepare(
+            &store,
+            &chain.plan(&[]),
+            &chain.archive,
+            &chain.state,
+            &Request {
+                store_contract: CONTRACT.to_owned(),
+                mutable_slots: 0,
+                tail: IndexTail::Delta(&delta),
+            },
+            &Observer::silent(),
+        )
+        .unwrap();
+
+        assert!(bundle
+            .layers()
+            .any(|layer| layer.kind == "log-account-epochs" && layer.scope["epoch"] == 1));
     }
 
     /// A manifest renamed to another sequence names the one it was written for.
@@ -5443,9 +5564,11 @@ mod boundary_preparation {
         let delta = chain.boundary_delta.clone().unwrap();
         let watcher = Arc::new(Watcher::default());
 
+        // Retained epochs due at the boundary, one it would adopt and one it
+        // cuts, are not captured: its tip is what a publication describes twice.
         let bundle = prepare::prepare(
             &store,
-            &chain.plan(&[]),
+            &chain.plan(&[1, 2]),
             &chain.archive,
             &chain.state,
             &Request {

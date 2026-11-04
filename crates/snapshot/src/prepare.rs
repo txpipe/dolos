@@ -594,8 +594,8 @@ pub fn prepare<A: ArchiveStore, S: StateStore>(
     let summary = dolos_cardano::eras::load_chain_summary_from_state(state)?;
     let oldest_unsealed = *unsealed_epochs(&summary, request.mutable_slots, plan.sequence).start();
 
-    // Account rows settle one boundary after their window closes, whatever the
-    // seal says.
+    // The window before the boundary still takes the reward update's pool rows
+    // and its settled account rows, whatever the seal says.
     let capture_from = oldest_unsealed.min(plan.sequence.saturating_sub(1));
 
     // The tip is the retained dump a publication cuts at this boundary: one
@@ -883,8 +883,9 @@ impl Prepared<'_> {
         epoch < self.bundle.manifest.oldest_unsealed
     }
 
-    /// Stream a payload into `spec`'s layer of `stele`. The payload is proven
-    /// before the sink is finished, so a damaged one produces no descriptor.
+    /// Stream a payload into `spec`'s layer of `stele`. The payload is held to
+    /// its descriptor before the sink is finished, so a damaged one produces no
+    /// layer.
     pub(crate) fn replay<W: SteleWriter>(
         &self,
         stele: &W,
@@ -920,19 +921,7 @@ impl Prepared<'_> {
 
         reader.finish().map_err(|e| corrupt(sequence, e))?;
 
-        let finished = sink.finish()?;
-
-        if finished.descriptor != written.descriptor {
-            return Err(corrupt(
-                sequence,
-                format!(
-                    "the {} layer at {} finished as a different layer than was captured",
-                    written.descriptor.kind, written.descriptor.scope
-                ),
-            ));
-        }
-
-        Ok(finished)
+        Ok(sink.finish()?)
     }
 }
 

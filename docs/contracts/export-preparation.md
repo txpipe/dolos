@@ -85,10 +85,12 @@ asks it, so a captured payload may go unused. `is_settled` still holds a publish
 to the predecessor's own sequence for `log-account-epochs`.
 
 **Why the log windows.** `capture_from` is the lower of `P - 1` and the oldest
-epoch the boundary could not seal. Below it no later boundary writes: `P - 1`'s
-account rows settle at the boundary into `P + 1`, a seal writes only epochs it
-just sealed, and Byron's short epochs stay unsealed for several boundaries, so
-they are captured for as long.
+epoch the boundary could not seal. Below it nothing writes again. `P`'s window
+grows with its epoch and its closing boundary. `P - 1` takes the reward update's
+pool rows in the middle of `P`, and its account and pool rows settle at the
+boundary into `P + 1`. A seal writes only the epochs it just sealed, and Byron's
+short epochs stay unsealed for several boundaries, so they are captured for as
+long.
 
 **The index tail.** `boundary::check` proves the tail is one block, the cursor's.
 `IndexTail::Delta` takes that block's `ArchiveIndexDelta`, which
@@ -143,8 +145,7 @@ is required recovery data: nothing else holds that boundary.
 **Loading** checks the checksum, the format, the sequence, the owner and that
 every payload is present at its recorded size. Contents are checked as they are
 read: a replay holds each payload to its `diffId`, size and record count before
-the sink finishes, and the rebuilt descriptor to the captured one, so a damaged
-payload produces no descriptor and no stele.
+the sink finishes, so a damaged payload produces no layer and no stele.
 
 **Finalization** first holds the sources to the bundle: the staged runs' network,
 store contract and frontier, the boundary block in the archive and the horizon.
