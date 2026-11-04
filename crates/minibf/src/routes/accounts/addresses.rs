@@ -167,11 +167,7 @@ mod tests {
         test_support::{TestApp, TestFault},
     };
     use blockfrost_openapi::models::account_addresses_content_inner::AccountAddressesContentInner;
-    use dolos_cardano::{
-        indexes::AsyncCardanoQueryExt,
-        model::{EpochValue, PoolParams, PoolSnapshot},
-        pallas_extras,
-    };
+    use dolos_cardano::{indexes::AsyncCardanoQueryExt, pallas_extras};
     use dolos_core::{StateStore as _, StateWriter as _};
     use dolos_testing::{synthetic::SyntheticBlockConfig, toy_domain::ToyDomain};
     use futures_util::StreamExt;
@@ -220,39 +216,6 @@ mod tests {
         let addresses: Vec<AccountAddressesContentInner> =
             serde_json::from_slice(&bytes).expect("failed to parse account addresses");
         assert!(addresses.is_empty());
-    }
-
-    /// A pool state whose only link to an account is its reward account.
-    fn reward_only_pool(operator: [u8; 28], reward_account: Vec<u8>) -> PoolState {
-        let params = PoolParams {
-            vrf_keyhash: Hash::from([0u8; 32]),
-            pledge: 0,
-            cost: 0,
-            margin: pallas::ledger::primitives::conway::RationalNumber {
-                numerator: 0,
-                denominator: 1,
-            },
-            reward_account,
-            pool_owners: vec![],
-            relays: vec![],
-            pool_metadata: None,
-        };
-        let snapshot = PoolSnapshot {
-            is_retired: false,
-            blocks_minted: 0,
-            params,
-            is_new: false,
-            stake: None,
-            delegators: None,
-            live_pledge: None,
-        };
-        PoolState {
-            operator: Hash::from(operator),
-            snapshot: EpochValue::with_live(3, snapshot),
-            retiring_epoch: None,
-            deposit: 0,
-            calidus: None,
-        }
     }
 
     #[tokio::test]

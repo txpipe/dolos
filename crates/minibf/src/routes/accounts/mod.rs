@@ -454,6 +454,42 @@ pub(super) mod testing {
         );
     }
 
+    /// A pool state whose only link to an account is its reward account.
+    pub fn reward_only_pool(
+        operator: [u8; 28],
+        reward_account: Vec<u8>,
+    ) -> dolos_cardano::model::PoolState {
+        let params = dolos_cardano::model::PoolParams {
+            vrf_keyhash: Hash::from([0u8; 32]),
+            pledge: 0,
+            cost: 0,
+            margin: pallas::ledger::primitives::conway::RationalNumber {
+                numerator: 0,
+                denominator: 1,
+            },
+            reward_account,
+            pool_owners: vec![],
+            relays: vec![],
+            pool_metadata: None,
+        };
+        let snapshot = dolos_cardano::model::PoolSnapshot {
+            is_retired: false,
+            blocks_minted: 0,
+            params,
+            is_new: false,
+            stake: None,
+            delegators: None,
+            live_pledge: None,
+        };
+        dolos_cardano::model::PoolState {
+            operator: Hash::from(operator),
+            snapshot: dolos_cardano::model::EpochValue::with_live(3, snapshot),
+            retiring_epoch: None,
+            deposit: 0,
+            calidus: None,
+        }
+    }
+
     pub fn asset_unit(policy: [u8; 28]) -> String {
         format!("{}{}", hex::encode(policy), hex::encode(b"tok"))
     }

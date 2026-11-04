@@ -4,7 +4,7 @@ sidebar:
   order: 1
 ---
 
-_Dolos_ has many operation modes dependending on your requirements. Choose the one that fits your need.
+_Dolos_ has several operation modes depending on your requirements. Choose the one that fits your need. Each runs in the foreground; to run the node in the background, install it as a [service](./service).
 
 ## `daemon` mode
 
@@ -16,11 +16,11 @@ To start _Dolos_ in `daemon` mode, use the following command:
 dolos daemon
 ```
 
-## `sync` mode
+## `sync catchup` mode
 
-When running in this mode, Dolos will focus on a single task: synchronizing its state from the upstream node.
+When running in this mode, Dolos will focus on a single task: synchronizing its state from the upstream node. It serves nothing.
 
-To start _Dolos_ in `sync` mode, use the following command:
+To catch up with the upstream node and stop, use the following command:
 
 ```sh
 dolos sync catchup
@@ -30,7 +30,7 @@ dolos sync catchup
 
 ## `serve` mode
 
-When running in this mode, Dolos will focus on a single task: serving data through the configured API endpoints.
+When running in this mode, Dolos will focus on a single task: serving data through the configured API endpoints, over the stores as they are, without syncing.
 
 To start _Dolos_ in `serve` mode, use the following command:
 
@@ -52,8 +52,11 @@ dolos sync catchup --follow --stop-epoch 120
 
 ## Summary of Modes
 
-| mode   | description                    |
-| ------ | ------------------------------ |
-| daemon | sync + serve (all-in-one)         |
-| sync   | sync from upstream peer only   |
-| serve  | serve data through APIs only   |
+| mode | description |
+| ---- | ----------- |
+| `daemon` | sync + serve (all-in-one), until stopped |
+| `sync catchup` | sync from the upstream peer up to its tip, then exit |
+| `sync catchup --follow` | sync from the upstream peer until stopped, serving nothing |
+| `serve` | serve data through APIs only, without syncing |
+
+The `sync` group also inspects, recovers and rolls back the WAL (`sync status`, `sync recover`, `sync dump`, `sync rollback`); see the [CLI reference](../reference/cli#dolos-sync).
