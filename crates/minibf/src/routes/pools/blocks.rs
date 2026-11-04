@@ -1,5 +1,7 @@
 //! `/pools/{pool_id}/blocks`: the blocks a pool minted.
 
+use std::ops::RangeInclusive;
+
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -23,6 +25,10 @@ use super::{parse_pool_id_bounded, pool_exists};
 /// so the page is a key-only slot scan plus one body read per listed block.
 /// The cost does not grow with the page number, so deep pages stay cheap and
 /// the scan budget does not apply.
+///
+/// The scan starts at the oldest block held. The disk archive sweeps the tags
+/// of a pruned block after the block, so a tag can outlive its block for a
+/// while; a slot the scan never lists takes no page position.
 pub async fn by_id_blocks<D>(
     Path(id): Path<String>,
     Query(mut params): Query<PaginationParameters>,
@@ -44,16 +50,22 @@ where
 
     let tip = domain.get_tip_slot()?;
 
-    let (page_slots, minted_any) = pool_block_page_slots(
-        &domain,
-        pool,
-        tip,
-        pagination.order,
-        pagination.skip(),
-        pagination.count,
-        POOL_BLOCKS_CHUNK,
-    )
-    .await?;
+    let (page_slots, minted_any) = match oldest_block_slot(&domain).await? {
+        Some(oldest) if oldest <= tip => {
+            pool_block_page_slots(
+                &domain,
+                pool,
+                oldest..=tip,
+                pagination.order,
+                pagination.skip(),
+                pagination.count,
+                POOL_BLOCKS_CHUNK,
+            )
+            .await?
+        }
+        // An archive without a block up to the tip holds no block of the pool.
+        _ => (Vec::new(), false),
+    };
 
     let page = domain
         .blocking(move |domain| {
@@ -65,8 +77,10 @@ where
                     .get_block_by_slot(&slot)
                     .map_err(log_and_500("failed to read a block of a pool"))?;
 
-                // A tagged slot always holds a block, and a Byron block is
-                // never tagged. Skip either, rather than fail the page.
+                // A tagged slot at or after the oldest block held holds a
+                // block, unless a prune moved that bound since it was read;
+                // and a Byron block is never tagged. Skip either, rather than
+                // fail the page.
                 let Some(body) = body else {
                     tracing::warn!(slot, "pool blocks index points at a missing block");
                     continue;
@@ -87,8 +101,13 @@ where
     // Blockfrost 404s a pool that db-sync never saw. A `PoolState` row, in
     // state or in the final-row log, covers every pool that registered on
     // chain, and a pool must register before it can mint. The index acts as a
-    // second proof of existence, for any issuer that has no entity.
-    if !minted_any && !pool_exists(&domain, pool).await? {
+    // second proof of existence, for any issuer that has no entity: a tag
+    // proves the pool minted even where the block it names is pruned, so this
+    // probe reads the index from slot 0.
+    if !minted_any
+        && !pool_exists(&domain, pool).await?
+        && !pool_tags_a_block(&domain, pool, tip).await?
+    {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -98,14 +117,55 @@ where
 /// Pool block index slots read per blocking task while a page is located.
 const POOL_BLOCKS_CHUNK: usize = 4096;
 
-/// The slots of one page of the blocks `pool` minted up to `tip`, and whether
-/// the pool minted any. The index is read `chunk` slots per blocking task; a
-/// pool tags at most one block per slot, so each chunk resumes past the last
-/// slot it read.
-async fn pool_block_page_slots<D>(
+/// The slot of the oldest block the archive holds, `None` for an empty one.
+async fn oldest_block_slot<D>(domain: &Facade<D>) -> Result<Option<BlockSlot>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    domain
+        .blocking(|domain| {
+            let mut blocks = domain
+                .archive()
+                .get_range(None, None)
+                .map_err(log_and_500("failed to read the oldest block"))?;
+
+            Ok(blocks.next().map(|(slot, _)| slot))
+        })
+        .await
+}
+
+/// Whether the index tags a block up to `tip` with `pool`, held or pruned.
+async fn pool_tags_a_block<D>(
     domain: &Facade<D>,
     pool: PoolHash,
     tip: BlockSlot,
+) -> Result<bool, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    domain
+        .blocking(move |domain| {
+            let first = domain
+                .archive()
+                .slots_by_pool_blocks(pool.as_slice(), 0, tip)
+                .map_err(log_and_500("failed to read the pool blocks index"))?
+                .next()
+                .transpose()
+                .map_err(log_and_500("failed to read the pool blocks index"))?;
+
+            Ok(first.is_some())
+        })
+        .await
+}
+
+/// The slots of one page of the blocks `pool` minted within `held`, the slots
+/// the archive holds blocks for, and whether the pool minted any. The index is
+/// read `chunk` slots per blocking task; a pool tags at most one block per
+/// slot, so each chunk resumes past the last slot it read.
+async fn pool_block_page_slots<D>(
+    domain: &Facade<D>,
+    pool: PoolHash,
+    held: RangeInclusive<BlockSlot>,
     order: crate::pagination::Order,
     skip: usize,
     count: usize,
@@ -114,7 +174,7 @@ async fn pool_block_page_slots<D>(
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let (mut start, mut end) = (0, tip);
+    let (mut start, mut end) = held.into_inner();
     let mut seen = 0usize;
     let mut page = Vec::new();
     let mut minted_any = false;
@@ -160,8 +220,9 @@ where
         }
 
         match order {
+            crate::pagination::Order::Asc if last >= end => break,
             crate::pagination::Order::Asc => start = last + 1,
-            crate::pagination::Order::Desc if last == 0 => break,
+            crate::pagination::Order::Desc if last <= start => break,
             crate::pagination::Order::Desc => end = last - 1,
         }
     }
@@ -180,6 +241,8 @@ mod tests {
         },
         test_support::{TestApp, TestFault},
     };
+    use dolos_cardano::indexes::archive_dimensions;
+    use dolos_core::{ArchiveIndexDelta, ArchiveWriter as _, Tag};
     use pallas::crypto::hash::Hasher;
 
     /// Every synthetic block is minted by the same fixed issuer key, so the
@@ -327,6 +390,125 @@ mod tests {
         assert!(hashes.is_empty());
     }
 
+    /// Prunes the two oldest blocks of the toy chain and returns their slots.
+    fn prune_two_oldest_blocks(app: &TestApp) -> Vec<BlockSlot> {
+        let facade = app.facade();
+        let archive = facade.archive();
+
+        let slots: Vec<BlockSlot> = archive
+            .get_range(None, None)
+            .expect("blocks")
+            .map(|(slot, _)| slot)
+            .collect();
+        assert!(slots.len() > 2, "too few blocks to prune two");
+
+        let (last, _) = archive.get_tip().expect("tip").expect("a tip");
+        let done = archive
+            .prune_history(last - slots[2], None, None)
+            .expect("prune");
+        assert!(done);
+
+        let oldest = archive
+            .get_range(None, None)
+            .expect("blocks")
+            .next()
+            .map(|(slot, _)| slot);
+        assert_eq!(oldest, Some(slots[2]));
+
+        slots[..2].to_vec()
+    }
+
+    /// Tags `slots` as blocks of `pool`, with no block behind the tags.
+    ///
+    /// The disk archive sweeps the tags of a pruned block after the block,
+    /// so a tag can outlive its block. The memory archive drops both at once,
+    /// so a test writes the tags of the pruned blocks again by hand.
+    fn tag_pool_blocks(app: &TestApp, pool: &[u8], slots: &[BlockSlot]) {
+        let stale: Vec<ArchiveIndexDelta> = slots
+            .iter()
+            .map(|&slot| ArchiveIndexDelta {
+                slot,
+                block_hash: Vec::new(),
+                block_number: None,
+                tx_hashes: Vec::new(),
+                tags: vec![Tag::new(archive_dimensions::POOL_BLOCKS, pool)],
+            })
+            .collect();
+
+        let facade = app.facade();
+        let writer = facade.archive().start_writer().expect("writer");
+        writer.apply_index(&stale).expect("stale tags");
+        writer.commit().expect("commit");
+    }
+
+    #[tokio::test]
+    async fn pools_blocks_skip_the_tags_of_pruned_blocks() {
+        let app = TestApp::new();
+        let pool = toy_issuer_pool();
+
+        let (_, bytes) = app
+            .get_bytes(&format!("/pools/{pool}/blocks?count=100"))
+            .await;
+        let whole: Vec<String> = serde_json::from_slice(&bytes).unwrap();
+
+        let pruned = prune_two_oldest_blocks(&app);
+        tag_pool_blocks(&app, Hasher::<224>::hash(&[0x10, 0x11]).as_slice(), &pruned);
+
+        let held = &whole[2..];
+        let last_page = held.len();
+
+        for (query, expected) in [
+            ("count=1", &held[..1]),
+            ("count=100", held),
+            (&*format!("order=desc&count=1&page={last_page}"), &held[..1]),
+            (
+                &*format!("order=desc&count=1&page={}", last_page + 1),
+                &held[..0],
+            ),
+        ] {
+            let (status, bytes) = app
+                .get_bytes(&format!("/pools/{pool}/blocks?{query}"))
+                .await;
+
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "unexpected status {status} for {query} with body: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+
+            let hashes: Vec<String> = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(hashes, expected, "{query}");
+        }
+    }
+
+    /// A pool with no entity and no block held, which the index still tags
+    /// below the oldest block: the tag proves that the pool minted.
+    #[tokio::test]
+    async fn pools_blocks_pruned_tag_still_proves_the_pool() {
+        let app = TestApp::new();
+        let operator = [0xee; 28];
+        let pool = bech32_pool(operator).expect("valid pool id");
+        let path = format!("/pools/{pool}/blocks");
+
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+
+        let pruned = prune_two_oldest_blocks(&app);
+        tag_pool_blocks(&app, &operator, &pruned[..1]);
+
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let hashes: Vec<String> = serde_json::from_slice(&bytes).unwrap();
+        assert!(hashes.is_empty());
+    }
+
     #[tokio::test]
     async fn pools_blocks_bad_request() {
         let app = TestApp::new();
@@ -423,21 +605,22 @@ mod tests {
         let pool = Hasher::<224>::hash(&[0x10, 0x11]);
         let tip = facade.get_tip_slot().expect("tip");
 
-        let whole_asc = pool_block_page_slots(&facade, pool, tip, Order::Asc, 0, 100, usize::MAX)
-            .await
-            .expect("slots");
+        let whole_asc =
+            pool_block_page_slots(&facade, pool, 0..=tip, Order::Asc, 0, 100, usize::MAX)
+                .await
+                .expect("slots");
         assert!(whole_asc.0.len() > 2, "too few blocks to split into chunks");
 
         for order in [Order::Asc, Order::Desc] {
             for (skip, count) in [(0, 100), (1, 2), (2, 1), (3, 5), (10, 5)] {
                 let whole =
-                    pool_block_page_slots(&facade, pool, tip, order, skip, count, usize::MAX)
+                    pool_block_page_slots(&facade, pool, 0..=tip, order, skip, count, usize::MAX)
                         .await
                         .expect("slots");
 
                 for chunk in [1, 2] {
                     let chunked =
-                        pool_block_page_slots(&facade, pool, tip, order, skip, count, chunk)
+                        pool_block_page_slots(&facade, pool, 0..=tip, order, skip, count, chunk)
                             .await
                             .expect("slots");
                     assert_eq!(chunked, whole, "{order:?}, skip {skip}, count {count}");
