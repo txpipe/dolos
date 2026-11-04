@@ -12,7 +12,8 @@ pub trait WalStore: Clone + Send + Sync + 'static {
 
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), WalError>;
 
-    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, WalError>;
+    fn prune_history(&self, max_slots: u64, max_prune_slots: Option<u64>)
+        -> Result<bool, WalError>;
 
     fn locate_point(&self, around: BlockSlot) -> Result<Option<ChainPoint>, WalError>;
 
