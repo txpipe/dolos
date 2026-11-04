@@ -2299,6 +2299,20 @@ struct Counted<S> {
     tags: Arc<AtomicUsize>,
     exacts: Arc<AtomicUsize>,
     entities: Arc<AtomicUsize>,
+    /// Exact and entity traversals end in a read error after this many records.
+    fault_after: Option<usize>,
+}
+
+/// An iterator that ends in a read error after `after` records, when set.
+type Faulting<I> =
+    std::iter::Chain<std::iter::Take<I>, std::option::IntoIter<<I as Iterator>::Item>>;
+
+fn faulting<T, I: Iterator<Item = Result<T, ArchiveError>>>(
+    iter: I,
+    after: Option<usize>,
+) -> Faulting<I> {
+    iter.take(after.unwrap_or(usize::MAX))
+        .chain(after.map(|_| Err(ArchiveError::InternalError("injected read fault".into()))))
 }
 
 impl<S: ArchiveStore> Counted<S> {
@@ -2308,6 +2322,14 @@ impl<S: ArchiveStore> Counted<S> {
             tags: Arc::default(),
             exacts: Arc::default(),
             entities: Arc::default(),
+            fault_after: None,
+        }
+    }
+
+    fn failing(inner: S, after: usize) -> Self {
+        Self {
+            fault_after: Some(after),
+            ..Self::new(inner)
         }
     }
 
@@ -2333,8 +2355,8 @@ impl<S: ArchiveStore> ArchiveStore for Counted<S> {
     type EntityValueIter = S::EntityValueIter;
     type SlotIter = S::SlotIter;
     type TagIter = S::TagIter;
-    type ExactIter = S::ExactIter;
-    type EntityRecordIter = S::EntityRecordIter;
+    type ExactIter = Faulting<S::ExactIter>;
+    type EntityRecordIter = Faulting<S::EntityRecordIter>;
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
         self.inner.start_writer()
@@ -2440,7 +2462,10 @@ impl<S: ArchiveStore> ArchiveStore for Counted<S> {
     ) -> Result<Self::ExactIter, ArchiveError> {
         self.exacts.fetch_add(1, Ordering::Relaxed);
 
-        self.inner.iter_exact_records(slots)
+        Ok(faulting(
+            self.inner.iter_exact_records(slots)?,
+            self.fault_after,
+        ))
     }
 
     fn iter_entity_records(
@@ -2450,7 +2475,10 @@ impl<S: ArchiveStore> ArchiveStore for Counted<S> {
     ) -> Result<Self::EntityRecordIter, ArchiveError> {
         self.entities.fetch_add(1, Ordering::Relaxed);
 
-        self.inner.iter_entity_records(kinds, slots)
+        Ok(faulting(
+            self.inner.iter_entity_records(kinds, slots)?,
+            self.fault_after,
+        ))
     }
 }
 
@@ -2921,4 +2949,836 @@ fn the_headless_facade_plans_encodes_and_reproduces_one_document() {
 
     assert_eq!(reproduced.canonicalize().unwrap(), document.canonical);
     assert_eq!(inscription.digest().unwrap(), document.identity);
+}
+
+/// The index staging engine: one traversal per family, partitioned into runs
+/// that finish as the layers a direct export writes.
+mod index_staging {
+    use std::{collections::BTreeSet, fs, path::Path};
+
+    use dolos_cardano::EraBoundary;
+    use dolos_core::{builtin::MemoryArchiveStore, ArchiveIndexDelta, Tag};
+    use dolos_snapshot::{
+        staging::{self, Budget, Family, Refusal, Request, Staged},
+        Error, Scope as _, COMPRESSION_LEVEL, MAINNET_MAGIC,
+    };
+    use dolos_testing::blocks::{byron_ebb_slot, make_byron_ebb, BYRON_EPOCH_LENGTH};
+    use stelae::{frame::CanonicalCbor, inscription::LayerDescriptor, SteleWriter as _};
+
+    use super::*;
+
+    /// Closed hundred-slot epochs in the staging fixture before its frontier.
+    const EPOCHS: u64 = 6;
+
+    /// Seals an epoch at the second boundary after it, as Shelley epochs are.
+    const MUTABLE: u64 = 50;
+
+    fn families() -> Vec<Family> {
+        std::iter::once(Family::Indexes)
+            .chain(ENTITY_KINDS.map(|(_, kind)| Family::Entity(kind)))
+            .collect()
+    }
+
+    /// Two blocks' index records per epoch of the skeleton geometry, entity
+    /// entries in most windows with ids out of slot order, and a block opening
+    /// epoch `epochs` as the frontier.
+    fn staging_archive(epochs: u64) -> (MemoryArchiveStore, ChainPoint) {
+        let store = MemoryArchiveStore::new(dolos_cardano::model::build_log_schema());
+        let writer = store.start_writer().unwrap();
+        let mut deltas = Vec::new();
+
+        for epoch in 0..epochs {
+            for block in 0..2u64 {
+                let slot = epoch * 100 + block * 40 + 10;
+                let unique = |tag: u64| [(slot | tag << 32).to_be_bytes(); 4].concat();
+
+                deltas.push(ArchiveIndexDelta {
+                    slot,
+                    block_hash: unique(1),
+                    block_number: Some(slot),
+                    tx_hashes: vec![unique(2)],
+                    tags: archive_dimensions::ALL
+                        .into_iter()
+                        .map(|dimension| Tag::new(dimension, unique(3)[..28].to_vec()))
+                        .collect(),
+                });
+            }
+
+            for (i, (_, kind)) in ENTITY_KINDS.into_iter().enumerate() {
+                if (epoch + i as u64).is_multiple_of(3) {
+                    continue;
+                }
+
+                for (byte, offset) in [(0x30, 20), (0x10, 60)] {
+                    let id = vec![byte + epoch as u8; kind.key_len()];
+                    writer
+                        .write_entity(kind, &id, epoch * 100 + offset)
+                        .unwrap();
+                }
+            }
+        }
+
+        writer.apply_index(&deltas).unwrap();
+
+        let (frontier, body) = make_conway_block_with_prev(epochs * 100 + 10, None, epochs);
+        writer.apply(&frontier, &body).unwrap();
+        writer.commit().unwrap();
+
+        (store, frontier)
+    }
+
+    fn request(frontier: &ChainPoint, epochs: Vec<(Family, Vec<u64>)>) -> Request {
+        Request {
+            network_magic: MAINNET_MAGIC,
+            frontier: frontier.clone(),
+            store_contract: dolos_core::compat::SUPPORTED_CONTRACTS[0].to_owned(),
+            epochs: epochs
+                .into_iter()
+                .map(|(family, epochs)| (family, epochs.into_iter().collect::<BTreeSet<_>>()))
+                .collect(),
+        }
+    }
+
+    /// Every family: the closed windows for `indexes`, the sealed ones for
+    /// the entity kinds.
+    fn every_family(frontier: &ChainPoint) -> Request {
+        let epochs = families()
+            .into_iter()
+            .map(|family| match family {
+                Family::Indexes => (family, (0..EPOCHS).collect()),
+                Family::Entity(_) => (family, (0..EPOCHS - 1).collect()),
+            })
+            .collect();
+
+        request(frontier, epochs)
+    }
+
+    fn stage<A: ArchiveStore>(
+        root: &Path,
+        archive: &A,
+        request: &Request,
+        budget: Budget,
+    ) -> Result<Staged, Error> {
+        staging::stage(root, archive, &skeleton_summary(), MUTABLE, request, budget)
+    }
+
+    fn unlimited() -> Budget {
+        Budget::new(u64::MAX)
+    }
+
+    fn closed(summary: &ChainSummary, epoch: u64) -> EpochWindow {
+        EpochWindow {
+            epoch,
+            start_slot: summary.epoch_start(epoch),
+            end_slot: summary.epoch_start(epoch + 1) - 1,
+        }
+    }
+
+    /// `family`'s layer for `window` from a traversal of that window alone:
+    /// the layer staging has to reproduce.
+    fn direct_layer<A: ArchiveStore>(
+        archive: &A,
+        family: Family,
+        window: &EpochWindow,
+    ) -> Option<LayerDescriptor> {
+        let records: Vec<CanonicalCbor> = match family {
+            Family::Indexes => archive
+                .iter_archive_tags(&archive_dimensions::ALL, window.slots())
+                .unwrap()
+                .map(|tag| indexes::encode(&tag.unwrap().into()).unwrap())
+                .chain(
+                    archive
+                        .iter_exact_records(window.slots())
+                        .unwrap()
+                        .map(|exact| indexes::encode(&exact.unwrap().into()).unwrap()),
+                )
+                .collect(),
+            Family::Entity(kind) => archive
+                .iter_entity_records(&[kind], window.slots())
+                .unwrap()
+                .map(|record| entities::encode(&record.unwrap()).unwrap())
+                .collect(),
+        };
+
+        if records.is_empty() && family != Family::Indexes {
+            return None;
+        }
+
+        let spec = window
+            .scope(MAINNET_MAGIC)
+            .layer_spec(family.kind().unwrap())
+            .unwrap();
+
+        Some(
+            Discarding
+                .write_layer(&DolosProfile, &spec, COMPRESSION_LEVEL, &records)
+                .unwrap()
+                .descriptor,
+        )
+    }
+
+    fn refusal(result: Result<impl std::fmt::Debug, Error>) -> Refusal {
+        match result.unwrap_err() {
+            Error::Staging(refusal) => refusal,
+            other => panic!("not a staging refusal: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn one_traversal_per_family_stages_every_closed_window() {
+        let (store, frontier) = staging_archive(EPOCHS);
+        let archive = Counted::new(store);
+        let root = tempfile::tempdir().unwrap();
+        let request = every_family(&frontier);
+
+        let staged = stage(root.path(), &archive, &request, unlimited()).unwrap();
+
+        assert_eq!(archive.traversals(), (1, 1));
+        assert_eq!(archive.entity_traversals(), 1);
+
+        let report = staged.report();
+        assert_eq!(
+            (
+                report.tag_traversals,
+                report.exact_traversals,
+                report.entity_traversals
+            ),
+            (1, 1, 1)
+        );
+
+        let mut empty_entity_windows = 0;
+
+        for (family, epochs) in &request.epochs {
+            for &epoch in epochs {
+                let expected =
+                    direct_layer(&archive.inner, *family, &closed(&skeleton_summary(), epoch));
+                let staged = staged
+                    .write_layer(&Discarding, *family, epoch, EPOCHS)
+                    .unwrap();
+
+                empty_entity_windows += usize::from(expected.is_none());
+                assert_eq!(staged, expected, "{family:?} epoch {epoch}");
+            }
+        }
+
+        assert!(
+            empty_entity_windows > 0,
+            "the fixture leaves entity windows empty"
+        );
+    }
+
+    /// Staged closed windows are byte-identical to the exporter's own layers
+    /// for the same publication.
+    #[test]
+    fn staged_layers_are_the_ones_the_exporter_writes() {
+        let cases = [
+            (index_across_the_skeleton(), vec![Family::Indexes]),
+            (
+                entities_across_the_skeleton(),
+                families().into_iter().skip(1).collect(),
+            ),
+        ];
+
+        for (store, families) in cases {
+            let archive = with_skeleton_blocks(store);
+            let inscription = export::export(
+                &Discarding,
+                &skeleton_plan(),
+                &archive,
+                &skeleton_state(),
+                None,
+                &export::First,
+                &Observer::silent(),
+            )
+            .unwrap();
+
+            let root = tempfile::tempdir().unwrap();
+            let epochs = families
+                .iter()
+                .map(|family| (*family, vec![0, 1]))
+                .collect();
+
+            // Entries seal at the next boundary, as the fixture writes them.
+            let staged = staging::stage(
+                root.path(),
+                &archive,
+                &skeleton_summary(),
+                0,
+                &request(&skeleton_point(), epochs),
+                unlimited(),
+            )
+            .unwrap();
+
+            for family in families {
+                for epoch in [0, 1] {
+                    let exported = inscription
+                        .layers
+                        .iter()
+                        .find(|layer| {
+                            layer.kind == family.kind().unwrap() && layer.scope["epoch"] == epoch
+                        })
+                        .cloned();
+
+                    let layer = staged.write_layer(&Discarding, family, epoch, 2).unwrap();
+
+                    assert_eq!(layer, exported, "{family:?} epoch {epoch}");
+                }
+            }
+        }
+    }
+
+    /// Inherited and unselected epochs get no run, and their records reach no
+    /// neighbour.
+    #[test]
+    fn only_the_requested_epochs_are_staged() {
+        let (store, frontier) = staging_archive(EPOCHS);
+        let root = tempfile::tempdir().unwrap();
+        let (_, asset) = ENTITY_KINDS[0];
+
+        let request = request(
+            &frontier,
+            vec![
+                (Family::Indexes, vec![1, 3]),
+                (Family::Entity(asset), vec![1, 4]),
+            ],
+        );
+        let staged = stage(root.path(), &store, &request, unlimited()).unwrap();
+
+        for epoch in [0, 2, 4, 5] {
+            assert_eq!(staged.records(Family::Indexes, epoch), None, "{epoch}");
+            assert!(matches!(
+                refusal(staged.write_layer(&Discarding, Family::Indexes, epoch, EPOCHS)),
+                Refusal::NotStaged { epoch: e, .. } if e == epoch
+            ));
+        }
+
+        for (family, epochs) in &request.epochs {
+            for &epoch in epochs {
+                assert_eq!(
+                    staged
+                        .write_layer(&Discarding, *family, epoch, EPOCHS)
+                        .unwrap(),
+                    direct_layer(&store, *family, &closed(&skeleton_summary(), epoch)),
+                    "{family:?} epoch {epoch}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zero_and_one_epoch_stagings() {
+        let (store, frontier) = staging_archive(EPOCHS);
+
+        for epochs in [
+            vec![],
+            families().into_iter().map(|f| (f, vec![])).collect(),
+        ] {
+            let archive = Counted::new(store.clone());
+            let root = tempfile::tempdir().unwrap();
+
+            let staged = stage(
+                root.path(),
+                &archive,
+                &request(&frontier, epochs),
+                unlimited(),
+            )
+            .unwrap();
+
+            assert_eq!(staged.report(), staging::Report::default());
+            assert_eq!(archive.traversals(), (0, 0));
+            assert_eq!(archive.entity_traversals(), 0);
+        }
+
+        let archive = Counted::new(store.clone());
+        let root = tempfile::tempdir().unwrap();
+        let one = request(&frontier, vec![(Family::Indexes, vec![EPOCHS - 1])]);
+
+        let staged = stage(root.path(), &archive, &one, unlimited()).unwrap();
+
+        assert_eq!(archive.traversals(), (1, 1));
+        assert_eq!(
+            staged
+                .write_layer(&Discarding, Family::Indexes, EPOCHS - 1, EPOCHS)
+                .unwrap(),
+            direct_layer(
+                &store,
+                Family::Indexes,
+                &closed(&skeleton_summary(), EPOCHS - 1)
+            )
+        );
+    }
+
+    /// An entity window is in the frontier's archive once sealed, but a
+    /// publication before that seal must not carry it, whatever its
+    /// first-seen slot says.
+    #[test]
+    fn an_entity_window_publishes_only_once_its_seal_has_run() {
+        let (store, frontier) = staging_archive(EPOCHS);
+        let summary = skeleton_summary();
+        let (_, asset) = ENTITY_KINDS[0];
+        let family = Family::Entity(asset);
+
+        // One and a half epochs of mutable slots: an epoch seals three
+        // boundaries on.
+        let mutable = 150;
+        assert_eq!(staging::sealed_by(&summary, mutable, 2, EPOCHS), Some(5));
+        assert_eq!(staging::sealed_by(&summary, mutable, 4, EPOCHS), None);
+
+        let root = tempfile::tempdir().unwrap();
+        let staged = staging::stage(
+            root.path(),
+            &store,
+            &summary,
+            mutable,
+            &request(&frontier, vec![(family, vec![2])]),
+            unlimited(),
+        )
+        .unwrap();
+
+        assert_eq!(staged.records(family, 2), Some(2));
+
+        for sequence in 3..5 {
+            assert!(!staged.publishes(family, 2, sequence).unwrap());
+            assert_eq!(
+                staged
+                    .write_layer(&Discarding, family, 2, sequence)
+                    .unwrap(),
+                None
+            );
+        }
+
+        for sequence in 5..=EPOCHS {
+            assert!(staged.publishes(family, 2, sequence).unwrap());
+            assert_eq!(
+                staged
+                    .write_layer(&Discarding, family, 2, sequence)
+                    .unwrap(),
+                direct_layer(&store, family, &closed(&summary, 2))
+            );
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let unsealed = staging::stage(
+            root.path(),
+            &store,
+            &summary,
+            mutable,
+            &request(&frontier, vec![(family, vec![4])]),
+            unlimited(),
+        );
+
+        assert!(matches!(
+            refusal(unsealed),
+            Refusal::Unsealed { epoch: 4, .. }
+        ));
+    }
+
+    /// Twenty-slot epochs to epoch 3, then hundred-slot ones: the shape of
+    /// mainnet's Byron to Shelley transition.
+    fn two_era_summary() -> ChainSummary {
+        let boundary = |epoch, slot| EraBoundary {
+            epoch,
+            slot,
+            timestamp: slot,
+        };
+
+        let mut chain = ChainSummary::default();
+
+        chain.append_era(
+            1,
+            EraState {
+                start: boundary(0, 0),
+                end: Some(boundary(3, 60)),
+                epoch_length: 20,
+                slot_length: 1,
+                protocol: 1,
+            },
+        );
+        chain.append_era(
+            2,
+            EraState {
+                start: boundary(3, 60),
+                end: None,
+                epoch_length: 100,
+                slot_length: 1,
+                protocol: 2,
+            },
+        );
+
+        chain
+    }
+
+    #[test]
+    fn windows_and_seals_follow_the_chain_summary_across_eras() {
+        let summary = two_era_summary();
+        let store = MemoryArchiveStore::new(dolos_cardano::model::build_log_schema());
+        let writer = store.start_writer().unwrap();
+
+        let deltas: Vec<ArchiveIndexDelta> = [5u64, 19, 25, 45, 59, 60, 159, 170]
+            .into_iter()
+            .map(|slot| ArchiveIndexDelta {
+                slot,
+                block_hash: vec![slot as u8; 32],
+                block_number: Some(slot),
+                tx_hashes: vec![],
+                tags: vec![Tag::new(archive_dimensions::ALL[0], vec![slot as u8; 28])],
+            })
+            .collect();
+
+        writer.apply_index(&deltas).unwrap();
+
+        let (frontier, body) = make_conway_block_with_prev(270, None, 9);
+        writer.apply(&frontier, &body).unwrap();
+        writer.commit().unwrap();
+
+        let root = tempfile::tempdir().unwrap();
+        let staged = staging::stage(
+            root.path(),
+            &store,
+            &summary,
+            MUTABLE,
+            &request(&frontier, vec![(Family::Indexes, (0..5).collect())]),
+            unlimited(),
+        )
+        .unwrap();
+
+        for epoch in 0..5 {
+            assert_eq!(
+                staged
+                    .write_layer(&Discarding, Family::Indexes, epoch, 5)
+                    .unwrap(),
+                direct_layer(&store, Family::Indexes, &closed(&summary, epoch)),
+                "epoch {epoch}"
+            );
+        }
+
+        // Two blocks per window, each a tag and two exact records.
+        assert_eq!(staged.records(Family::Indexes, 0), Some(6));
+        assert_eq!(staged.records(Family::Indexes, 3), Some(6));
+
+        // Short Byron epochs take more boundaries to seal than Shelley ones.
+        let seals: Vec<_> = (0..4)
+            .map(|epoch| staging::sealed_by(&summary, MUTABLE, epoch, 5))
+            .collect();
+        assert_eq!(seals, [Some(4), Some(4), Some(4), Some(5)]);
+    }
+
+    /// A Byron main block shares its boundary block's slot, so an archive
+    /// holding it is past a frontier at that boundary block.
+    #[test]
+    fn a_main_block_sharing_the_frontier_slot_is_past_it() {
+        let mut summary = ChainSummary::default();
+        summary.append_era(
+            0,
+            EraState {
+                start: EraBoundary {
+                    epoch: 0,
+                    slot: 0,
+                    timestamp: 0,
+                },
+                end: None,
+                epoch_length: BYRON_EPOCH_LENGTH,
+                slot_length: 20,
+                protocol: 0,
+            },
+        );
+
+        let last = make_conway_block_with_prev(byron_ebb_slot(1) - 2, None, 1);
+        let ebb = make_byron_ebb(1, last.0.hash().unwrap());
+        let main = make_conway_block_with_prev(byron_ebb_slot(1), ebb.0.hash(), 2);
+
+        let archive = |blocks: &[&(ChainPoint, dolos_core::RawBlock)]| {
+            let store = MemoryArchiveStore::new(dolos_cardano::model::build_log_schema());
+            let writer = store.start_writer().unwrap();
+
+            for (point, body) in blocks {
+                writer.apply(point, body).unwrap();
+            }
+
+            writer.commit().unwrap();
+            store
+        };
+
+        let staged_at = |store: &MemoryArchiveStore, frontier: &ChainPoint| {
+            let root = tempfile::tempdir().unwrap();
+            let request = request(frontier, vec![(Family::Indexes, vec![0])]);
+
+            staging::stage(root.path(), store, &summary, MUTABLE, &request, unlimited())
+        };
+
+        let past = archive(&[&last, &ebb, &main]);
+        assert!(matches!(
+            refusal(staged_at(&past, &ebb.0)),
+            Refusal::NotAtFrontier { .. }
+        ));
+        staged_at(&past, &main.0).unwrap();
+
+        staged_at(&archive(&[&last, &ebb]), &ebb.0).unwrap();
+    }
+
+    #[test]
+    fn open_windows_are_never_staged_or_published() {
+        let (store, frontier) = staging_archive(EPOCHS);
+        let root = tempfile::tempdir().unwrap();
+
+        let open = stage(
+            root.path(),
+            &store,
+            &request(&frontier, vec![(Family::Indexes, vec![EPOCHS])]),
+            unlimited(),
+        );
+        assert!(matches!(
+            refusal(open),
+            Refusal::OpenWindow { epoch: EPOCHS, .. }
+        ));
+
+        let staged = stage(root.path(), &store, &every_family(&frontier), unlimited()).unwrap();
+
+        // A publication's own window is its boundary tail, captured there.
+        assert!(matches!(
+            refusal(staged.write_layer(&Discarding, Family::Indexes, 3, 3)),
+            Refusal::NotClosedAt {
+                epoch: 3,
+                sequence: 3
+            }
+        ));
+        assert!(matches!(
+            refusal(staged.write_layer(&Discarding, Family::Indexes, 3, EPOCHS + 1)),
+            Refusal::PastFrontier { .. }
+        ));
+    }
+
+    /// A traversal that fails leaves no completion marker, so nothing it
+    /// wrote can be consumed, and a healthy retry stages afresh.
+    #[test]
+    fn a_failed_traversal_leaves_nothing_to_consume() {
+        let (store, frontier) = staging_archive(EPOCHS);
+        let root = tempfile::tempdir().unwrap();
+        let entity_only = request(
+            &frontier,
+            families()
+                .into_iter()
+                .skip(1)
+                .map(|family| (family, vec![1, 2]))
+                .collect(),
+        );
+
+        for request in [every_family(&frontier), entity_only] {
+            let failing = Counted::failing(store.clone(), 3);
+            let failed = stage(root.path(), &failing, &request, unlimited());
+
+            assert!(matches!(failed, Err(Error::Archive(_))), "{failed:?}");
+
+            for family in request.epochs.keys() {
+                let marker = root.path().join(format!("{}.json", family.kind().unwrap()));
+                assert!(!marker.exists(), "{family:?} was marked complete");
+            }
+        }
+
+        let archive = Counted::new(store.clone());
+        let staged = stage(root.path(), &archive, &every_family(&frontier), unlimited()).unwrap();
+
+        assert_eq!(staged.report().reused, 0);
+        assert_eq!(archive.traversals(), (1, 1));
+        assert_eq!(
+            staged
+                .write_layer(&Discarding, Family::Indexes, 2, EPOCHS)
+                .unwrap(),
+            direct_layer(&store, Family::Indexes, &closed(&skeleton_summary(), 2))
+        );
+    }
+
+    #[test]
+    fn a_complete_staging_is_reused_and_another_source_is_refused() {
+        let (store, frontier) = staging_archive(EPOCHS);
+        let root = tempfile::tempdir().unwrap();
+        let full = every_family(&frontier);
+
+        let first = stage(root.path(), &store, &full, unlimited()).unwrap();
+
+        let archive = Counted::new(store.clone());
+        let again = stage(root.path(), &archive, &full, unlimited()).unwrap();
+
+        assert_eq!(again.report().reused, families().len() as u64);
+        assert_eq!(again.report().records, first.report().records);
+        assert_eq!(again.report().bytes, 0);
+        assert_eq!(archive.traversals(), (0, 0));
+        assert_eq!(archive.entity_traversals(), 0);
+
+        let contract = Request {
+            store_contract: "v0-other".to_owned(),
+            ..full.clone()
+        };
+
+        let coverage = request(
+            &frontier,
+            vec![(Family::Indexes, (0..EPOCHS - 1).collect())],
+        );
+
+        // The same coverage from the archive one block on: stageable, but not
+        // the source the runs came from.
+        let (other, _) = staging_archive(EPOCHS);
+        let (next, body) =
+            make_conway_block_with_prev(EPOCHS * 100 + 20, frontier.hash(), EPOCHS + 1);
+        let writer = other.start_writer().unwrap();
+        writer.apply(&next, &body).unwrap();
+        writer.commit().unwrap();
+
+        let moved = Request {
+            frontier: next,
+            ..full.clone()
+        };
+        stage(
+            tempfile::tempdir().unwrap().path(),
+            &other,
+            &moved,
+            unlimited(),
+        )
+        .unwrap();
+
+        for (store, request) in [(&store, contract), (&store, coverage), (&other, moved)] {
+            let refused = stage(root.path(), store, &request, unlimited());
+
+            assert!(
+                matches!(refusal(refused), Refusal::SourceMismatch { .. }),
+                "{request:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_damaged_run_is_never_finished() {
+        let (store, frontier) = staging_archive(EPOCHS);
+        let root = tempfile::tempdir().unwrap();
+        let request = request(&frontier, vec![(Family::Indexes, (0..EPOCHS).collect())]);
+        let run = root.path().join("indexes").join("2.run");
+
+        stage(root.path(), &store, &request, unlimited()).unwrap();
+        let intact = fs::read(&run).unwrap();
+
+        let mut flipped = intact.clone();
+        *flipped.last_mut().unwrap() ^= 0x01;
+
+        let mut oversized = intact.clone();
+        oversized[..4].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        let truncated = intact[..intact.len() - 1].to_vec();
+
+        // The same size, so a restage reuses the run and the replay catches it.
+        for damaged in [flipped, oversized] {
+            fs::write(&run, &damaged).unwrap();
+            let staged = stage(root.path(), &store, &request, unlimited()).unwrap();
+
+            assert_eq!(staged.report().reused, 1);
+            assert!(matches!(
+                refusal(staged.write_layer(&Discarding, Family::Indexes, 2, EPOCHS)),
+                Refusal::Corrupt { .. }
+            ));
+        }
+
+        // A staging made before the damage still refuses to finish the run.
+        fs::write(&run, &intact).unwrap();
+        let staged = stage(root.path(), &store, &request, unlimited()).unwrap();
+        fs::write(&run, &truncated).unwrap();
+
+        assert!(matches!(
+            refusal(staged.write_layer(&Discarding, Family::Indexes, 2, EPOCHS)),
+            Refusal::Corrupt { .. }
+        ));
+
+        // A run off its marked size, or a missing marker, is staged again.
+        for incomplete in [false, true] {
+            if incomplete {
+                fs::remove_file(root.path().join("indexes.json")).unwrap();
+            }
+
+            let archive = Counted::new(store.clone());
+            let staged = stage(root.path(), &archive, &request, unlimited()).unwrap();
+
+            assert_eq!(staged.report().reused, 0);
+            assert_eq!(archive.traversals(), (1, 1));
+            assert_eq!(
+                staged
+                    .write_layer(&Discarding, Family::Indexes, 2, EPOCHS)
+                    .unwrap(),
+                direct_layer(&store, Family::Indexes, &closed(&skeleton_summary(), 2))
+            );
+        }
+    }
+
+    #[test]
+    fn the_scratch_budget_is_a_hard_limit() {
+        let (store, frontier) = staging_archive(EPOCHS);
+        let request = every_family(&frontier);
+
+        let root = tempfile::tempdir().unwrap();
+        let needed = stage(root.path(), &store, &request, unlimited())
+            .unwrap()
+            .report()
+            .bytes;
+
+        let root = tempfile::tempdir().unwrap();
+        let refused = stage(root.path(), &store, &request, Budget::new(needed - 1));
+
+        assert!(matches!(
+            refusal(refused),
+            Refusal::ScratchExceeded { limit } if limit == needed - 1
+        ));
+
+        // The index pass fit and stays complete; the entity pass that crossed
+        // the budget is not marked.
+        assert!(root.path().join("indexes.json").exists());
+
+        for (kind, _) in ENTITY_KINDS {
+            assert!(!root.path().join(format!("{kind}.json")).exists(), "{kind}");
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let refused = stage(root.path(), &store, &request, Budget::new(1));
+
+        assert!(matches!(
+            refusal(refused),
+            Refusal::ScratchExceeded { limit: 1 }
+        ));
+        assert!(!root.path().join("indexes.json").exists());
+
+        let root = tempfile::tempdir().unwrap();
+        stage(root.path(), &store, &request, Budget::new(needed)).unwrap();
+    }
+
+    #[test]
+    fn buffers_and_workers_move_no_bytes() {
+        let (store, frontier) = staging_archive(EPOCHS);
+        let request = every_family(&frontier);
+        let layers: Vec<(Family, u64)> = request
+            .epochs
+            .iter()
+            .flat_map(|(family, epochs)| epochs.iter().map(|epoch| (*family, *epoch)))
+            .collect();
+
+        let finish = |budget: Budget| {
+            let root = tempfile::tempdir().unwrap();
+            let staged = stage(root.path(), &store, &request, budget).unwrap();
+
+            staged.write_layers(&Discarding, &layers, EPOCHS).unwrap()
+        };
+
+        let reference = finish(unlimited());
+
+        assert_eq!(reference.len(), layers.len());
+
+        for (run_buffer, workers) in [(1, 1), (7, 3), (1 << 20, 16)] {
+            let budget = Budget {
+                run_buffer,
+                workers: workers.try_into().unwrap(),
+                ..unlimited()
+            };
+
+            assert_eq!(
+                finish(budget),
+                reference,
+                "buffer {run_buffer}, {workers} workers"
+            );
+        }
+    }
 }
