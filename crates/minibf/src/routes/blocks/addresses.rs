@@ -1,4 +1,7 @@
-use std::collections::{BTreeSet, HashMap};
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::Arc,
+};
 
 use axum::{
     extract::{Path, Query, State},
@@ -59,7 +62,7 @@ where
     };
 
     // genesis outputs, by tx hash, the first time an input misses the archive
-    let mut genesis_outputs: Option<HashMap<Hash<32>, String>> = None;
+    let mut genesis_outputs: Option<Arc<HashMap<Hash<32>, String>>> = None;
 
     // Addresses of each tx's outputs plus the outputs it spends. A spent
     // genesis output is not in the archive, so it is read off the genesis
@@ -84,12 +87,7 @@ where
             }
 
             if genesis_outputs.is_none() {
-                let outputs = genesis::genesis_txs(&domain.genesis())?
-                    .into_iter()
-                    .map(|tx| (tx.hash, tx.address))
-                    .collect();
-
-                genesis_outputs = Some(outputs);
+                genesis_outputs = Some(genesis::genesis_outputs(&domain.genesis())?);
             }
 
             let spent = genesis_outputs.as_ref().and_then(|x| x.get(input.hash()));

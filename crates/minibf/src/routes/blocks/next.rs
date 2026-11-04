@@ -9,15 +9,11 @@ use futures::future::try_join_all;
 use itertools::Either;
 use pallas::ledger::traverse::MultiEraBlock;
 
-use crate::{
-    error::Error,
-    pagination::{Pagination, PaginationParameters},
-    Facade,
-};
+use crate::{error::Error, pagination::PaginationParameters, Facade};
 
 use super::{
-    blocks_after, build_block_model, genesis, load_block_by_hash_or_number, parse_hash_or_number,
-    tip_block,
+    blocks_after, blocks_after_bound, build_block_model, count_and_page, genesis,
+    load_block_by_hash_or_number, parse_hash_or_number, tip_block,
 };
 
 pub async fn by_hash_or_number_next<D>(
@@ -28,7 +24,7 @@ pub async fn by_hash_or_number_next<D>(
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let pagination = Pagination::try_from(params)?;
+    let pagination = count_and_page(params)?;
 
     let hash_or_number = parse_hash_or_number(&hash_or_number)?;
     let is_genesis = match &hash_or_number {
@@ -41,30 +37,38 @@ where
         false => Some(load_block_by_hash_or_number(&domain, &hash_or_number).await?),
     };
 
-    let bodies = {
-        let mut iterator = match &curr {
-            None => domain
-                .archive()
-                .get_range(None, None)
-                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
-            Some(curr) => {
-                let curr =
-                    MultiEraBlock::decode(curr).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-                blocks_after(&domain, &curr)?
-            }
-        };
-
-        // key-only skip, no block data read
-        iterator.skip_forward(pagination.from());
-
-        iterator
-            .take(pagination.count)
-            .map(|(_, body)| body)
-            .collect::<Vec<_>>()
-    };
-
     let tip = tip_block(&domain)?;
     let chain = domain.get_chain_summary()?;
+
+    let bodies = {
+        let curr = curr
+            .as_deref()
+            .map(MultiEraBlock::decode)
+            .transpose()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let tip = MultiEraBlock::decode(&tip).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        // an impossible page is empty without a walk
+        if pagination.from() >= blocks_after_bound(curr.as_ref(), &tip, &chain) {
+            Vec::new()
+        } else {
+            let mut iterator = match &curr {
+                None => domain
+                    .archive()
+                    .get_range(None, None)
+                    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
+                Some(curr) => blocks_after(&domain, curr)?,
+            };
+
+            // key-only skip, no block data read
+            iterator.skip_forward(pagination.from());
+
+            iterator
+                .take(pagination.count)
+                .map(|(_, body)| body)
+                .collect::<Vec<_>>()
+        }
+    };
 
     let futures = bodies
         .iter()
@@ -106,6 +110,27 @@ mod tests {
         .await;
 
         assert_eq!(desc, asc);
+
+        // as is any other value, like `from` and `to`: Blockfrost reads
+        // `count` and `page` here and nothing else
+        for query in ["order=a", "from=abc&to=x", "from=1e3"] {
+            let ignored =
+                get_blocks(&app, &format!("/blocks/{}/next?{query}", first.block_hash)).await;
+
+            assert_eq!(ignored, asc, "{query}");
+        }
+    }
+
+    #[tokio::test]
+    async fn blocks_next_impossible_page_is_empty() {
+        let app = TestApp::new();
+        let first = app.vectors().blocks.first().expect("missing block vectors");
+
+        for id in [first.block_hash.as_str(), GENESIS_HASH] {
+            let path = format!("/blocks/{id}/next?count=100&page=21474836");
+
+            assert!(get_blocks(&app, &path).await.is_empty(), "{id}");
+        }
     }
 
     #[tokio::test]

@@ -8,15 +8,11 @@ use dolos_core::{archive::Skippable as _, Domain};
 use futures::future::try_join_all;
 use pallas::ledger::traverse::MultiEraBlock;
 
-use crate::{
-    error::Error,
-    pagination::{Pagination, PaginationParameters},
-    Facade,
-};
+use crate::{error::Error, pagination::PaginationParameters, Facade};
 
 use super::{
-    blocks_before, build_block_model, genesis, load_block_by_hash_or_number, names_genesis,
-    parse_hash_or_number, tip_block,
+    blocks_before, blocks_before_bound, build_block_model, count_and_page, genesis,
+    load_block_by_hash_or_number, names_genesis, parse_hash_or_number, tip_block,
 };
 
 pub async fn by_hash_or_number_previous<D>(
@@ -27,7 +23,7 @@ pub async fn by_hash_or_number_previous<D>(
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let pagination = Pagination::try_from(params)?;
+    let pagination = count_and_page(params)?;
 
     let hash_or_number = parse_hash_or_number(&hash_or_number)?;
 
@@ -37,6 +33,9 @@ where
 
     let curr = load_block_by_hash_or_number(&domain, &hash_or_number).await?;
 
+    let tip = tip_block(&domain)?;
+    let chain = domain.get_chain_summary()?;
+
     // walking back, the page starts `from` blocks before the reference block
     // and the genesis block closes the chain
     let (bodies, reaches_genesis) = {
@@ -45,15 +44,19 @@ where
 
         let from = pagination.from();
 
+        // an impossible page is empty without a walk
+        let possible = from < blocks_before_bound(&block, &chain);
+
         // key-only skip; the block before the page tells whether it starts at all
         let skipped = match from {
+            _ if !possible => None,
             0 => None,
             _ => {
                 iter.skip_backward(from - 1);
                 iter.next_back().map(|(_, body)| body)
             }
         };
-        let starts = from == 0 || skipped.is_some();
+        let starts = possible && (from == 0 || skipped.is_some());
 
         match starts {
             true => {
@@ -79,9 +82,6 @@ where
             false => (Vec::new(), false),
         }
     };
-
-    let tip = tip_block(&domain)?;
-    let chain = domain.get_chain_summary()?;
 
     let futures = bodies
         .iter()
@@ -138,6 +138,30 @@ mod tests {
         .await;
 
         assert_eq!(desc, asc);
+
+        // as is any other value, like `from` and `to`: Blockfrost reads
+        // `count` and `page` here and nothing else
+        for query in ["order=a", "from=abc&to=x", "from=1e3"] {
+            let ignored = get_blocks(
+                &app,
+                &format!("/blocks/{}/previous?{query}", last.block_hash),
+            )
+            .await;
+
+            assert_eq!(ignored, asc, "{query}");
+        }
+    }
+
+    #[tokio::test]
+    async fn blocks_previous_impossible_page_is_empty() {
+        let app = TestApp::new();
+        let last = app.vectors().blocks.last().expect("missing block vectors");
+        let path = format!(
+            "/blocks/{}/previous?count=100&page=21474836",
+            last.block_hash
+        );
+
+        assert!(get_blocks(&app, &path).await.is_empty());
     }
 
     #[tokio::test]

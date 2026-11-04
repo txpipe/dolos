@@ -8,7 +8,7 @@ use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraBlock};
 use crate::{
     error::Error,
     mapping::IntoModel,
-    pagination::{Order, Pagination},
+    pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
 
@@ -171,7 +171,9 @@ fn block_hash(body: &[u8]) -> Result<Hash<32>, StatusCode> {
 
 /// The archive's blocks after `block`, in chain order. A boundary block shares
 /// its slot with the main block after it, so the walk starts at the slot and
-/// steps over everything up to the block itself.
+/// steps over everything up to the block itself, and no further: a block the
+/// archive no longer holds at its slot, pruned or rolled back since it was
+/// read, is not found rather than searched for across the rest of the chain.
 fn blocks_after<'a, D: Domain>(
     domain: &Facade<D>,
     block: &MultiEraBlock,
@@ -182,18 +184,24 @@ fn blocks_after<'a, D: Domain>(
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
 
     let hash = block.hash();
+    let mut found = false;
 
-    for (_, body) in iter.by_ref() {
+    for (slot, body) in iter.by_ref() {
+        if slot != block.slot() {
+            break;
+        }
+
         if block_hash(&body)? == hash {
+            found = true;
             break;
         }
     }
 
-    Ok(iter)
+    found.then_some(iter).ok_or(StatusCode::NOT_FOUND)
 }
 
 /// The archive's blocks before `block`, in chain order, to be walked from the
-/// back.
+/// back. Bounded to the block's slot like [`blocks_after`].
 fn blocks_before<'a, D: Domain>(
     domain: &Facade<D>,
     block: &MultiEraBlock,
@@ -204,14 +212,65 @@ fn blocks_before<'a, D: Domain>(
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
 
     let hash = block.hash();
+    let mut found = false;
 
-    while let Some((_, body)) = iter.next_back() {
+    while let Some((slot, body)) = iter.next_back() {
+        if slot != block.slot() {
+            break;
+        }
+
         if block_hash(&body)? == hash {
+            found = true;
             break;
         }
     }
 
-    Ok(iter)
+    found.then_some(iter).ok_or(StatusCode::NOT_FOUND)
+}
+
+/// An upper bound on the archive's blocks after `block`, or on all of them
+/// for `None`: the heights up to the tip, plus one boundary block per epoch,
+/// which carries no height of its own. A page offset past it is empty, so
+/// the walk never pays for an impossible page.
+fn blocks_after_bound(
+    block: Option<&MultiEraBlock>,
+    tip: &MultiEraBlock,
+    chain: &ChainSummary,
+) -> usize {
+    let (tip_epoch, _) = chain.slot_epoch(tip.slot());
+
+    let bound = match block {
+        Some(block) => {
+            let (epoch, _) = chain.slot_epoch(block.slot());
+
+            tip.number().saturating_sub(block.number()) + tip_epoch.saturating_sub(epoch) + 1
+        }
+        None => tip.number() + tip_epoch + 2,
+    };
+
+    usize::try_from(bound).unwrap_or(usize::MAX)
+}
+
+/// An upper bound on the archive's blocks before `block`: its height, plus
+/// one boundary block per epoch up to its own. See [`blocks_after_bound`].
+fn blocks_before_bound(block: &MultiEraBlock, chain: &ChainSummary) -> usize {
+    let (epoch, _) = chain.slot_epoch(block.slot());
+
+    usize::try_from(block.number() + epoch + 1).unwrap_or(usize::MAX)
+}
+
+/// The pagination of `/next` and `/previous`: Blockfrost reads `count` and
+/// `page` there and ignores `order`, `from` and `to`, however malformed.
+fn count_and_page(params: PaginationParameters) -> Result<Pagination, Error> {
+    let params = PaginationParameters {
+        count: params.count,
+        page: params.page,
+        order: None,
+        from: None,
+        to: None,
+    };
+
+    Ok(Pagination::try_from(params)?)
 }
 
 fn tip_block<D: Domain>(domain: &Facade<D>) -> Result<BlockBody, StatusCode> {
@@ -390,7 +449,7 @@ mod testing {
     }
 
     /// A mainnet Byron main block from `testdata/`.
-    fn mainnet_byron_block(slot: u64) -> RawBlock {
+    pub fn mainnet_byron_block(slot: u64) -> RawBlock {
         include_str!("../../../testdata/mainnet-byron-blocks.txt")
             .lines()
             .filter(|line| !line.starts_with('#'))
@@ -490,5 +549,37 @@ mod testing {
             ebb_1: ArchivedBlock::new(&ebb_1),
             main,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{testing::*, *};
+
+    /// A block the archive no longer holds, as after a prune or a rollback
+    /// since the request read it, is refused at its slot, not searched for
+    /// across the rest of the chain.
+    #[tokio::test]
+    async fn walks_refuse_a_block_the_archive_lost() {
+        let chain = pruned_mainnet_byron_chain(21600);
+        let facade = chain.app.facade();
+
+        let pruned = mainnet_byron_block(1);
+        let pruned = MultiEraBlock::decode(&pruned).unwrap();
+
+        assert!(matches!(
+            blocks_after(&facade, &pruned),
+            Err(StatusCode::NOT_FOUND)
+        ));
+        assert!(matches!(
+            blocks_before(&facade, &pruned),
+            Err(StatusCode::NOT_FOUND)
+        ));
+
+        let held = mainnet_byron_block(21601);
+        let held = MultiEraBlock::decode(&held).unwrap();
+
+        assert!(blocks_after(&facade, &held).is_ok());
+        assert!(blocks_before(&facade, &held).is_ok());
     }
 }

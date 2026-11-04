@@ -1,6 +1,11 @@
 //! Blockfrost serves a synthetic genesis block per network. Dolos stores none,
 //! so it is built here from the genesis config.
 
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, OnceLock, PoisonError},
+};
+
 use axum::http::StatusCode;
 use base64::Engine as _;
 use blockfrost_openapi::models::block_content::BlockContent;
@@ -209,10 +214,60 @@ pub fn genesis_txs(genesis: &Genesis) -> Result<Vec<GenesisTx>, StatusCode> {
     byron.map(Ok).chain(shelley).collect()
 }
 
+/// The genesis outputs by transaction hash, built once per network: a block
+/// spending one is read against them on every `/blocks/{hash}/addresses`
+/// request with an input the archive no longer holds, and mainnet has 14,505
+/// of them to decode, hash and sort.
+pub fn genesis_outputs(genesis: &Genesis) -> Result<Arc<HashMap<Hash<32>, String>>, StatusCode> {
+    type Outputs = Arc<HashMap<Hash<32>, String>>;
+
+    static BUILT: OnceLock<Mutex<HashMap<(u32, Hash<32>), Outputs>>> = OnceLock::new();
+
+    // the magic and the Shelley genesis hash name the network's funds
+    let key = (genesis.network_magic(), genesis.shelley_hash);
+    let built = BUILT.get_or_init(Default::default);
+
+    if let Some(outputs) = built
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&key)
+    {
+        return Ok(outputs.clone());
+    }
+
+    let outputs: Outputs = Arc::new(
+        genesis_txs(genesis)?
+            .into_iter()
+            .map(|tx| (tx.hash, tx.address))
+            .collect(),
+    );
+
+    built
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(key, outputs.clone());
+
+    Ok(outputs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::mapping::blocks::touched_addresses_model;
+
+    #[test]
+    fn genesis_outputs_are_built_once_per_network() {
+        let genesis = dolos_cardano::include::preview::load();
+
+        let first = genesis_outputs(&genesis).unwrap();
+        let again = genesis_outputs(&genesis).unwrap();
+
+        assert!(Arc::ptr_eq(&first, &again));
+
+        let txs = genesis_txs(&genesis).unwrap();
+        assert_eq!(first.len(), txs.len());
+        assert_eq!(first.get(&txs[0].hash), Some(&txs[0].address));
+    }
 
     /// Blake2b-256 of the lines, to compare whole listings with Blockfrost's.
     fn fingerprint<'a>(lines: impl IntoIterator<Item = &'a str>) -> String {
