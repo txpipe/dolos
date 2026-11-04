@@ -53,6 +53,8 @@ retain_confirmed_blocks = 200
 
 [serve]
 max_concurrent_queries = 32   # 1..=64
+max_concurrent_heavy_scans = 8   # 1..=64
+heavy_scan_queue_seconds = 5     # 0..=60
 
 [serve.grpc]
 listen_address = "[::]:50051"
@@ -71,10 +73,12 @@ token_registry_url = "https://tokens.example.com"
 max_scan_items = 3000
 route_prefix = "/api/v0"
 ipfs_gateways = ["https://ipfs.io", "https://gateway.pinata.cloud"]
+request_timeout_seconds = 120   # 1..=3600
 
 [serve.minikupo]
 listen_address = "[::]:1442"
 permissive_cors = true
+request_timeout_seconds = 120   # 1..=3600
 
 [serve.ouroboros]
 listen_path = "./dolos.socket"

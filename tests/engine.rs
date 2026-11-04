@@ -43,10 +43,15 @@ fn public_builder_cleanly_initializes_configured_stores() {
 fn the_builder_sizes_the_query_limiter_from_the_configuration() {
     let (mut node, genesis, _) = fixture();
     node.config.serve.max_concurrent_queries = 4;
+    node.config.serve.max_concurrent_heavy_scans = 3;
+    node.config.serve.heavy_scan_queue_seconds = 7;
 
     let domain = DomainBuilder::new(&node.config, genesis).build().unwrap();
 
-    assert_eq!(domain.query_limiter().cap(), 4);
+    let limiter = domain.query_limiter();
+    assert_eq!(limiter.cap(), 4);
+    assert_eq!(limiter.heavy_limit(), 3);
+    assert_eq!(limiter.heavy_queue(), std::time::Duration::from_secs(7));
     domain.shutdown().unwrap();
 }
 

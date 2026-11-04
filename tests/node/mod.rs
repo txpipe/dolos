@@ -20,7 +20,7 @@ use dolos_core::{
     config::{CardanoConfig, ChainConfig, CustomUtxo, GenesisConfig, RootConfig},
     import::ImportExt as _,
     ArchiveStore as _, BootstrapExt as _, ChainLogic as _, ChainPoint, Domain as _, Genesis,
-    QueryLimiter, RawBlock, StateStore as _, WalStore as _, WorkUnit,
+    RawBlock, StateStore as _, WalStore as _, WorkUnit,
 };
 use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
 use pallas::ledger::traverse::MultiEraBlock;
@@ -164,7 +164,7 @@ impl Node {
         .unwrap();
 
         let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
-        let query_limiter = QueryLimiter::new(self.config.serve.max_concurrent_queries);
+        let query_limiter = self.config.serve.query_limiter();
         let cache = dolos::storage::open_cache_store(&self.config, query_limiter.clone()).unwrap();
 
         let domain = DomainAdapter {

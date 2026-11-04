@@ -74,6 +74,7 @@ The `serve.minibf` section controls the options for the MiniBF endpoint that can
 | max_scan_items     | integer          | `3000`                                                 |
 | route_prefix       | string           | none                                                   |
 | ipfs_gateways      | array of strings | `["https://ipfs.io", "https://gateway.pinata.cloud"]` |
+| request_timeout_seconds | integer      | `120`                                                  |
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming connections (`[::]` represents any IP address).
 - `permissive_cors`: allow cross-origin requests from any origin.
@@ -82,6 +83,7 @@ The `serve.minibf` section controls the options for the MiniBF endpoint that can
 - `max_scan_items`: caps page-based scans for heavy endpoints.
 - `route_prefix`: a URL path every endpoint is served under, `/health` and `/metrics` included; set `"/api/v0"` to match the Blockfrost server URL. It starts with `/` and names at least one segment, none of them empty; its segments use only letters, digits, `-`, `.`, `_` and `~`, and `.` and `..` segments are refused; a trailing `/` is dropped. A path outside the prefix answers like any unknown path. Unset, the endpoints are served at the root.
 - `ipfs_gateways`: the gateways that resolve `ipfs://` governance-anchor URLs, tried in order; an empty list turns IPFS resolution off.
+- `request_timeout_seconds`: the deadline of every request, the wait for a heavy-scan slot included; past it the request is answered `504 Gateway Timeout`, with a Blockfrost error body (`"error": "Gateway Timeout"`).
 
 This is an example of the `serve.minibf` fragment with a `dolos.toml` configuration file.
 
@@ -95,6 +97,28 @@ max_scan_items = 3000
 ```
 
 Check the [Configuration Schema](../configuration/schema) for detailed info on how to set this up.
+
+## Heavy scans
+
+These routes can read a large part of a store for one answer:
+
+- `/addresses/{address}/utxos`, `/addresses/{address}/utxos/{asset}`, `/accounts/{stake_address}/utxos` and `/scripts/{script_hash}/utxos`;
+- `/assets/{asset}/addresses`;
+- `/pools/extended`, `/pools/{pool_id}` and `/pools/{pool_id}/delegators`;
+- `/epochs/{number}/stakes/{pool_id}`;
+- `/governance/dreps/{drep_id}/delegators`.
+
+They share one limit with MiniKupo's heavy matches, `serve.max_concurrent_heavy_scans` requests at once (8 by default). A request that finds every slot taken waits up to `serve.heavy_scan_queue_seconds` (5 by default) and is then answered `503 Service Unavailable`, with `Retry-After: 1` and the body:
+
+```json
+{
+  "status_code": 503,
+  "error": "Service Unavailable",
+  "message": "The node is serving its limit of heavy requests. Retry later."
+}
+```
+
+No other route is refused by this limit. Every route, heavy or not, answers `504 Gateway Timeout` once it runs past `request_timeout_seconds` (120 by default). Clients should retry both after a pause. See the [configuration schema](../configuration/schema#serve) for the settings.
 
 ## Coverage
 
