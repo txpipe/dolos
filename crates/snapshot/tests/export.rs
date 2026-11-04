@@ -5048,6 +5048,54 @@ mod boundary_preparation {
         }
     }
 
+    /// One traversal has to serve every bundle of a batch, so they share a
+    /// source, and a batch of none has nothing to stage.
+    #[test]
+    fn a_batch_of_mixed_sources_is_refused() {
+        let (root, other_root, stage_root) = (tempdir(), tempdir(), tempdir());
+        let store = store(root.path());
+        let other = self::store(other_root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let delta = chain.boundary_delta.clone().unwrap();
+        let first = chain.prepare(&store, &[]).unwrap();
+
+        let foreign = prepare::prepare(
+            &other,
+            &chain.plan(&[]),
+            &chain.archive,
+            &chain.state,
+            &Request {
+                store_contract: "another".to_owned(),
+                mutable_slots: chain.mutable,
+                tail: IndexTail::Delta(&delta),
+            },
+            &Observer::silent(),
+        )
+        .unwrap();
+
+        chain.advance_to(3);
+
+        let stage = |bundles: &[Bundle]| {
+            prepare::stage_batch(
+                stage_root.path(),
+                &chain.archive,
+                &chain.state,
+                bundles,
+                &export::First,
+                Budget::new(u64::MAX),
+            )
+        };
+
+        assert!(matches!(
+            preparation_refusal(stage(&[first, foreign])),
+            Refusal::SourceMismatch { sequence: 2, .. }
+        ));
+        assert!(matches!(
+            preparation_refusal(stage(&[])),
+            Refusal::EmptyBatch
+        ));
+    }
+
     /// A window nothing staged and no predecessor carries fails loudly, rather
     /// than leaving its layer out of the document.
     #[test]
