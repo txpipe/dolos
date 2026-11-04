@@ -8,7 +8,7 @@ use crate::config::{Compatibility, MIGRATION_GUIDE_URL};
 /// The `compatibility` values a configuration may declare, the current one
 /// first. A persistent store records the current one when it is created, and
 /// this release opens only stores that record one of them.
-pub const SUPPORTED_CONTRACTS: &[&str] = &["v2-alpha.1"];
+pub const SUPPORTED_CONTRACTS: &[&str] = &["v2-alpha.2"];
 
 /// Whether this release opens a store that records `identity`.
 pub fn reads_store_identity(identity: &str) -> bool {
@@ -39,9 +39,10 @@ impl Display for IncompatibleStore {
 
         write!(
             f,
-            "; this dolos opens stores that record `{}`. Clear it and re-sync (`dolos bootstrap \
-             relay --force`), or restore it from a stele (`dolos bootstrap stelae --force`); see \
-             {MIGRATION_GUIDE_URL}",
+            "; this dolos opens stores that record `{}`. Restore it from a stele (`dolos \
+             bootstrap stelae --force`), replay a Cardano node database over it (`dolos \
+             bootstrap immutabledb --source <db> --force`), or clear it and sync from genesis \
+             (`dolos data reset --yes`, then `dolos daemon`); see {MIGRATION_GUIDE_URL}",
             Compatibility::current()
         )
     }
@@ -65,14 +66,13 @@ mod tests {
 
             assert!(message.contains("data/state"), "{message}");
             assert!(message.contains(SUPPORTED_CONTRACTS[0]), "{message}");
-            assert!(
-                message.contains("dolos bootstrap relay --force"),
-                "{message}"
-            );
-            assert!(
-                message.contains("dolos bootstrap stelae --force"),
-                "{message}"
-            );
+            for remedy in [
+                "dolos bootstrap stelae --force",
+                "dolos bootstrap immutabledb --source <db> --force",
+                "dolos data reset --yes",
+            ] {
+                assert!(message.contains(remedy), "{message}");
+            }
             assert!(message.contains(MIGRATION_GUIDE_URL), "{message}");
 
             match found {

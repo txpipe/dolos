@@ -1,0 +1,13 @@
+Commands over the configuration file
+
+Usage: dolos config [OPTIONS] <COMMAND>
+
+Commands:
+  check          validates the configuration and prints the network and stores it resolves to,
+                 without opening any of them
+  write-genesis  writes a known network's genesis files, without opening any store
+  help           Print this message or the help of the given subcommand(s)
+
+Options:
+  -c, --config <CONFIG>  
+  -h, --help             Print help

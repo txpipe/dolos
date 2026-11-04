@@ -7,36 +7,40 @@ sidebar:
 
 import { CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-In the context of Dolos, we use the term _bootstrap_ to refer to the process of updating Dolos with the current state of the chain. This is usually a long process that involves processing a lot of data. There are ways to speed up the process.
-
-The bootstrap command uses subcommands to select the method:
+In the context of Dolos, we use the term _bootstrap_ to refer to the process of filling Dolos's stores with the current state of the chain, rather than syncing it block by block from genesis. The bootstrap command uses a subcommand to select the source:
 
 ```sh
-dolos bootstrap <method>
+dolos bootstrap <source>
 ```
 
-If no method is specified, an interactive prompt will let you choose.
+| source | what it does |
+| ------ | ------------ |
+| `stelae` | restores a Stelae snapshot (a _stele_): minutes, from a stele you can verify |
+| `mithril` | downloads a Mithril-certified ImmutableDB and replays it: hours, trusting Mithril's signers |
+| `immutabledb --source <PATH>` | replays the ImmutableDB of a local Cardano node database: hours, from a database you hold |
 
-## Global Flags
+If no source is given, an interactive prompt lets you choose; without a terminal, the command exits 1 instead. Every flag of every source is listed in the [CLI reference](../reference/cli#dolos-bootstrap).
 
-These flags apply to all bootstrap methods:
+Bootstrapping is optional. A node with empty stores syncs from genesis with `dolos daemon` (or `dolos sync catchup`), which takes from a few hours to several days depending on the network.
 
-| flag | description | default |
-| ---- | ----------- | ------- |
-| `--force` | Clear existing data before bootstrapping | `false` |
-| `--skip-if-data` | Skip bootstrap if data already exists (exit 0); a store this release refuses is an error instead | `false` |
-| `--continue` | Continue bootstrap even if data exists, trusting the subcommand to handle resumption; a store this release refuses is an error instead | `false` |
-| `--verbose` | Enable verbose logging output | `false` |
+## Existing data
 
-By default, `dolos bootstrap` will error if it detects existing data in storage. Use one of the flags above to control this behavior.
+Every source refuses when any managed store already holds data, unless told otherwise:
 
-A state or archive store this release refuses (see [store identity](../architecture/data-layer#store-identity)) stops the bootstrap under every flag but `--force` on its own, which clears it. Given with `--skip-if-data` or `--continue`, which leave storage as it is, `--force` is refused too. And `--force` clears only the storage root, never a state store that fails to open for another reason, as a half-unpacked one does, or whose cursor fails to read. So beside a refused store it is refused, naming what to remove by hand, while such a state is there, or while a directory the configuration keeps outside the root holds data: a store with data, an archive that fails to open, or block segments. A directory holding no data, such as a fresh mount point or an empty store this release opens, doesn't stop it. Stop the node first: a running node holds its stores, so they fail to open, and `--force` stops at the store's own error.
+| flag | description |
+| ---- | ----------- |
+| `--force` | Replace the data: the source's inputs are resolved and checked first, then the storage root is cleared |
+| `--skip-if-data` | Exit 0 without bootstrapping when storage already holds a node |
+| `--continue` | `mithril` and `immutabledb` only: resume an interrupted replay from its committed position, over the data it left |
+| `--verbose` | Enable verbose logging output |
 
-## Bootstrap Methods
+The first three exclude one another. A stele restore has no `--continue`: run an interrupted one again with `--force`.
+
+A state or archive store this release refuses (see [store identity](../architecture/data-layer#store-identity)) stops the bootstrap under every flag but `--force`, which clears it. `--force` clears only the storage root, and never a state store that fails to open for another reason, as a half-unpacked one does, or whose cursor fails to read. So beside a refused store it is refused, naming what to remove by hand, while such a state is there, or while a directory the configuration keeps outside the root holds data: a store with data, an archive that fails to open, or block segments. A directory holding no data, such as a fresh mount point or an empty store this release opens, doesn't stop it. Stop the node first: a running node holds its stores, so they fail to open, and `--force` stops at the store's own error.
+
+## Bootstrap Sources
 
 <CardGrid>
     <LinkCard title="Mithril Snapshot" href="./bootstrap/mithril" />
-    <LinkCard title="Dolos Snapshot" href="./bootstrap/snapshot" />
-    <LinkCard title="Public Relay" href="./bootstrap/relay" />
-    <LinkCard title="Local Full Node" href="./bootstrap/local" />
+    <LinkCard title="Local ImmutableDB" href="./bootstrap/local" />
 </CardGrid>

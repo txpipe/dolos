@@ -1,0 +1,26 @@
+checks the consistency of the managed data
+
+Usage: dolos data check [OPTIONS]
+
+Options:
+      --check <CHECKS>
+          check to run; repeatable, runs all of them when omitted
+
+          Possible values:
+          - cursors:            WAL, archive and state tips tell one story
+          - archive-continuity: the archive's blocks form a chain
+          - account-epochs:     account epoch positions agree with the live epoch
+          - epoch-log:          the archive's epoch log is contiguous and complete
+          - totals:             pot totals and delegation referents (scans the whole UTxO set)
+
+      --format <FORMAT>
+          How to print the result: text for people, JSON for scripts
+          
+          [default: text]
+          [possible values: text, json]
+
+  -c, --config <CONFIG>
+          
+
+  -h, --help
+          Print help (see a summary with '-h')

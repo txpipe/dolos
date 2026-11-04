@@ -14,6 +14,7 @@ bincode.workspace = true
 xxhash-rust.workspace = true
 pallas.workspace = true
 tempfile = "3"
+same-file = "1.0.6"
 
 [dev-dependencies]
 dolos-testing = { path = "../testing" }

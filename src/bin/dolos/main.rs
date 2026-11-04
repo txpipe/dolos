@@ -1,21 +1,23 @@
 use clap::{Parser, Subcommand};
-use miette::{Context, Result};
+use miette::Result;
+
+use crate::output::ExitCode;
 
 #[cfg(all(feature = "jemalloc", target_os = "linux"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod banner;
+mod bootstrap;
 mod cache;
 mod common;
 mod config;
 mod daemon;
-mod doctor;
-mod eval;
 mod feedback;
+mod output;
 mod registry;
 mod serve;
-mod snapshot;
+mod service;
 mod sync;
 
 #[cfg(feature = "utils")]
@@ -23,15 +25,6 @@ mod init;
 
 #[cfg(feature = "utils")]
 mod data;
-
-#[cfg(feature = "mithril")]
-mod bootstrap;
-
-#[cfg(feature = "minibf")]
-mod minibf;
-
-#[cfg(feature = "minikupo")]
-mod minikupo;
 
 #[derive(Debug, Subcommand)]
 enum Command {
@@ -42,7 +35,8 @@ enum Command {
     /// Run the node in all its glory
     Daemon(daemon::Args),
 
-    /// Just sync from upstream peer
+    /// Sync from the upstream peer, and inspect, recover or roll back the WAL
+    #[command(arg_required_else_help = true)]
     Sync(sync::Args),
 
     /// Just serve data through apis
@@ -52,43 +46,18 @@ enum Command {
     #[cfg(feature = "utils")]
     Data(data::Args),
 
-    /// Evaluate txs using current ledger
-    Eval(eval::Args),
-
-    /// Commands to fix problems
-    Doctor(doctor::Args),
-
     /// Commands over the configuration file
     Config(config::Args),
-
-    /// Inspect and reproduce Stelae snapshots for this node
-    Snapshot(snapshot::Args),
 
     /// Fill, clear, inspect and check the cache, with the node stopped
     Cache(cache::Args),
 
-    /// Bootstrap the node using Mithril
-    #[cfg(feature = "mithril")]
+    /// Install the node as an OS service, or uninstall it
+    Service(service::Args),
+
+    /// Fill the node's stores from a Stelae snapshot, Mithril or a local
+    /// ImmutableDB
     Bootstrap(bootstrap::Args),
-
-    /// runs a minibf query in-process
-    #[cfg(feature = "minibf")]
-    Minibf(minibf::Args),
-
-    /// runs a minikupo query in-process
-    #[cfg(feature = "minikupo")]
-    Minikupo(minikupo::Args),
-}
-
-impl Command {
-    /// `doctor reset-genesis` writes a custom network's genesis files, so it
-    /// runs before those files exist.
-    fn writes_genesis(&self) -> bool {
-        match self {
-            Command::Doctor(args) => args.writes_genesis(),
-            _ => false,
-        }
-    }
 }
 
 #[derive(Debug, Parser)]
@@ -103,56 +72,49 @@ struct Cli {
     config: Option<std::path::PathBuf>,
 }
 
-fn main() -> Result<()> {
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => ExitCode::Ok.into(),
+        Err(report) => {
+            // What returning the error from `main` prints.
+            eprintln!("Error: {report:?}");
+            ExitCode::of(&report).into()
+        }
+    }
+}
+
+fn run() -> Result<()> {
     // reqwest 0.13 (via mithril-client) uses `rustls-no-provider`: it reads the
     // process-default provider and panics if none is installed.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let args = Cli::parse();
-    let config_file = crate::common::config_file(args.config.as_deref());
-
-    // A custom network's genesis is checked before any command that could
-    // touch a store, since several of them clear data before they need it.
-    let config = crate::common::load_config(Some(config_file))
-        .map_err(miette::Report::from_err)
-        .and_then(|config| {
-            if !args.command.writes_genesis() {
-                crate::common::check_network(&config)?;
-            }
-            Ok(config)
-        })
-        .context("loading configuration");
+    let explicit_config = args.config.as_deref();
+    let config_file = crate::common::config_file(explicit_config);
 
     let feedback = crate::feedback::Feedback::default();
 
-    match (config, args.command) {
-        (Ok(config), Command::Daemon(args)) => daemon::run(config, &args),
-        (Ok(config), Command::Sync(args)) => sync::run(&config, &args),
-        (Ok(config), Command::Serve(args)) => serve::run(config, &args),
-        (Ok(config), Command::Eval(args)) => eval::run(&config, &args),
-        (Ok(config), Command::Doctor(args)) => doctor::run(&config, &args, &feedback),
-        (Ok(config), Command::Snapshot(args)) => snapshot::run(&config, &args),
-        (Ok(config), Command::Cache(args)) => cache::run(&config, &args),
-        (Ok(config), Command::Config(args)) => config::run(&config, config_file, &args),
+    // Each command loads the configuration it runs on, so `config
+    // write-genesis --network` runs without one.
+    let load = || crate::common::load_and_check_config(config_file);
+
+    match args.command {
+        Command::Daemon(args) => daemon::run(load()?, &args),
+        Command::Sync(args) => sync::run(&load()?, &args, &feedback),
+        Command::Serve(args) => serve::run(load()?, &args),
+        Command::Cache(args) => cache::run(&load()?, &args),
+        Command::Config(args) => config::run(config_file, &args),
+        Command::Service(args) => service::run(explicit_config, &args),
 
         // the init command is special because it knows how to execute with or without a valid
         // configuration, that is why we pass the whole result and let the command logic decide what
         // to do with it.
         #[cfg(feature = "utils")]
-        (config, Command::Init(args)) => init::run(config, config_file, &args, &feedback),
+        Command::Init(args) => init::run(load(), config_file, &args),
 
         #[cfg(feature = "utils")]
-        (Ok(config), Command::Data(args)) => data::run(&config, &args, &feedback),
+        Command::Data(args) => data::run(&load()?, &args, &feedback),
 
-        #[cfg(feature = "mithril")]
-        (Ok(config), Command::Bootstrap(args)) => bootstrap::run(&config, &args, &feedback),
-
-        #[cfg(feature = "minibf")]
-        (Ok(config), Command::Minibf(x)) => minibf::run(&config, &x),
-
-        #[cfg(feature = "minikupo")]
-        (Ok(config), Command::Minikupo(x)) => minikupo::run(&config, &x),
-
-        (Err(x), _) => Err(x),
+        Command::Bootstrap(args) => bootstrap::run(&load()?, &args, &feedback),
     }
 }

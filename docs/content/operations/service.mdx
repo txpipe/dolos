@@ -1,0 +1,61 @@
+---
+title: Running as a Service
+sidebar:
+  label: Service
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+`dolos service install` registers `dolos daemon` with the operating system's service manager, so that it starts on its own and restarts when it fails. `dolos service uninstall` removes it again. Every flag is in the [CLI reference](../reference/cli#dolos-service).
+
+| platform | manager | scope | file |
+| -------- | ------- | ----- | ---- |
+| Linux | systemd | the user's units, started at login (the default) | `~/.config/systemd/user/dolos-<name>.service` |
+| Linux | systemd | system units, started at boot (`--system`, as root) | `/etc/systemd/system/dolos-<name>.service` |
+| macOS | launchd | the user's LaunchAgents, loaded at login | `~/Library/LaunchAgents/io.txpipe.dolos.<name>.plist` |
+
+macOS has no `--system`, and other platforms refuse `dolos service`. Nothing more is managed: no wrapper, remote administration or Windows service.
+
+## Installing
+
+```sh
+dolos --config /srv/dolos/preview/dolos.toml service install --start
+```
+
+The service runs `dolos daemon` with the binary and the configuration file by their absolute paths, in the configuration file's directory, so relative paths in the file resolve as they do when you run it by hand there. It restarts on failure. `--start` starts it now as well; without it, it starts at the next login or boot.
+
+The service reads the configuration file alone. `DOLOS_` environment variables set in the installing shell do not reach it, and `install` warns when it finds any.
+
+The command prints the commands to start, stop, restart and check the service and to follow its logs (`journalctl` on Linux, a file under `~/Library/Logs` on macOS), or the same as one JSON object with `--format json`.
+
+### Names
+
+Each installation is a named instance, so one machine can run several, such as one per network:
+
+- without `NAME`, the name is derived from the configuration as `{chain.protocol}-{chain.network}`, for example `cardano-preview`;
+- an explicit `NAME` is 1 to 48 of `a-z`, `0-9` and `-`.
+
+A name already installed in the same scope is refused. A name isolates neither files nor listeners, so `install` also refuses a configuration whose stores, ports or socket overlap an installed instance's, naming the key that clashes. Give each instance its own `storage.path` and listen addresses.
+
+To change an installation, such as after editing the configuration's paths or moving the binary, uninstall it and install it again; the files `install` writes say so in a comment. A unit or agent file `install` did not write is never replaced or removed.
+
+### System units
+
+`--system` installs a systemd unit that starts at boot and runs as root. It reads only a configuration named with `--config`, because under `sudo` the working directory and its `dolos.toml` belong to the invoking user. It never elevates itself: run as another user, it fails and prints the `sudo` command to run instead.
+
+<Aside type="caution">
+A system unit runs as root, so root owns what it writes under its storage directory, and `dolos` commands run as another user cannot change that data. A user unit stops when the user logs out unless lingering is enabled (`loginctl enable-linger`).
+</Aside>
+
+## Uninstalling
+
+```sh
+dolos service uninstall cardano-preview
+```
+
+Uninstalling stops the service and removes its unit or agent. The configuration, the data and other instances stay. With a `NAME` no configuration is read, so an instance can be removed after its configuration is gone; without one, the name is derived as `install` derives it.
+
+## Exit codes
+
+`0` done; `2` for a name that is invalid or cannot be derived, `--system` without `--config`, or `--system` on macOS; `1` for a refused installation (a name taken, a conflict, no root for a system unit), an instance that is not installed, an unsupported platform, or a failure of the service manager, after which an install is undone.

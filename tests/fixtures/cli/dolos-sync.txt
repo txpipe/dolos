@@ -1,0 +1,16 @@
+Sync from the upstream peer, and inspect, recover or roll back the WAL
+
+Usage: dolos sync [OPTIONS] <COMMAND>
+
+Commands:
+  catchup   Pull blocks from the upstream peer up to its tip, or on with `--follow`
+  status    Where the WAL, the state and the archive stand, and whether the WAL's blocks chain;
+            reads only
+  recover   Bring the state and the archive up to the WAL tip, as a crash left them
+  dump      Print the WAL's entries
+  rollback  Roll the WAL, the state and the archive back to a block the WAL holds
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+  -c, --config <CONFIG>  
+  -h, --help             Print help

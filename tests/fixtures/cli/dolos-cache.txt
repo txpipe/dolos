@@ -1,0 +1,14 @@
+Fill, clear, inspect and check the cache, with the node stopped
+
+Usage: dolos cache [OPTIONS] <COMMAND>
+
+Commands:
+  warm    builds a namespace's entries ahead of the reads that would miss them
+  clear   wipes a namespace, or all, recording its keys for `warm --previous`
+  stats   prints each namespace's entries, bytes on disk, format version and watermarks
+  verify  rebuilds a sample of entries without the cache and compares them
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -c, --config <CONFIG>  
+  -h, --help             Print help

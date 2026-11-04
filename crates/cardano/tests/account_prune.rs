@@ -1,6 +1,6 @@
 //! Dead accounts through the real ESTART: a shard deletes an account that is
 //! dead once rotated, and a pruned account that carried history adds it to
-//! the credential's `pruned-accounts` row in the same commit. The account
+//! the credential's `account-history` row in the same commit. The account
 //! rows are built by the roll's own deltas, the harness is `ToyDomain` on the
 //! devnet genesis, and every work unit runs through `execute_work_unit`, the
 //! executor the node runs.
@@ -11,8 +11,8 @@
 use std::sync::Arc;
 
 use dolos_cardano::{
-    estart::EstartWorkUnit, AccountKey, AccountState, AssignRewards, CardanoWorkUnit,
-    ControlledAmountDec, ControlledAmountInc, EpochState, PrunedAccountState, StakeDelegation,
+    estart::EstartWorkUnit, AccountHistoryState, AccountKey, AccountState, AssignRewards,
+    CardanoWorkUnit, ControlledAmountDec, ControlledAmountInc, EpochState, StakeDelegation,
     StakeDeregistration, StakeRegistration, WithdrawalInc,
 };
 use dolos_core::{
@@ -70,17 +70,17 @@ fn account(domain: &ToyDomain, credential: &StakeCredential) -> Option<AccountSt
         .unwrap()
 }
 
-fn remainder(domain: &ToyDomain, credential: &StakeCredential) -> Option<PrunedAccountState> {
+fn remainder(domain: &ToyDomain, credential: &StakeCredential) -> Option<AccountHistoryState> {
     domain
         .state()
-        .read_entity_typed::<PrunedAccountState>(&AccountKey::from(credential))
+        .read_entity_typed::<AccountHistoryState>(&AccountKey::from(credential))
         .unwrap()
 }
 
-fn remainders(domain: &ToyDomain) -> Vec<(AccountKey, PrunedAccountState)> {
+fn remainders(domain: &ToyDomain) -> Vec<(AccountKey, AccountHistoryState)> {
     domain
         .state()
-        .iter_entities_typed::<PrunedAccountState>(None)
+        .iter_entities_typed::<AccountHistoryState>(None)
         .unwrap()
         .map(|x| x.unwrap())
         .collect()
@@ -173,7 +173,7 @@ fn an_emptied_deregistered_account_leaves_a_remainder_a_boundary_later() {
     assert_eq!(account(&domain, &leaving), None);
     assert_eq!(
         remainder(&domain, &leaving),
-        Some(PrunedAccountState {
+        Some(AccountHistoryState {
             lifetime_rewards: 500_000,
             deregistered_at: Some(deregistered),
         })
@@ -218,7 +218,7 @@ fn a_recreated_account_pruned_again_keeps_one_remainder() {
         remainders(&domain),
         vec![(
             AccountKey::from(&leaving),
-            PrunedAccountState {
+            AccountHistoryState {
                 lifetime_rewards: 800_000,
                 deregistered_at: Some(deregistered),
             }
@@ -314,7 +314,7 @@ fn a_row_stays_until_every_snapshot_is_empty() {
     assert_eq!(account(&domain, &delegated), None);
     assert_eq!(
         remainder(&domain, &delegated),
-        Some(PrunedAccountState {
+        Some(AccountHistoryState {
             lifetime_rewards: 0,
             deregistered_at: Some(deregistered),
         })
@@ -398,7 +398,7 @@ fn a_resumed_boundary_prunes_the_same_rows() {
     let snapshot = |domain: &ToyDomain| {
         (
             rows(domain, AccountState::NS),
-            rows(domain, PrunedAccountState::NS),
+            rows(domain, AccountHistoryState::NS),
         )
     };
 
@@ -419,7 +419,7 @@ fn a_resumed_boundary_prunes_the_same_rows() {
 
         assert_eq!(
             remainder(&clean, &credential(*byte)),
-            Some(PrunedAccountState {
+            Some(AccountHistoryState {
                 lifetime_rewards,
                 deregistered_at: Some(deregistered[i]),
             })
@@ -481,7 +481,7 @@ fn a_rollback_before_genesis_reads_no_epoch() {
 mod rollback {
     use std::sync::Arc;
 
-    use dolos_cardano::{AccountKey, AccountState, EpochState, PrunedAccountState};
+    use dolos_cardano::{AccountHistoryState, AccountKey, AccountState, EpochState};
     use dolos_core::{
         config::CustomUtxo, sync::SyncExt as _, BootstrapExt as _, ChainPoint, Domain as _,
         Genesis, RawBlock, StateStore as _, StateWriter as _, TxoRef, WalStore as _,
@@ -657,16 +657,16 @@ mod rollback {
             .unwrap()
     }
 
-    fn remainder(domain: &ToyDomain) -> Option<PrunedAccountState> {
+    fn remainder(domain: &ToyDomain) -> Option<AccountHistoryState> {
         remainder_of(domain, C)
     }
 
-    fn remainder_of(domain: &ToyDomain, credential: [u8; 28]) -> Option<PrunedAccountState> {
+    fn remainder_of(domain: &ToyDomain, credential: [u8; 28]) -> Option<AccountHistoryState> {
         let credential = StakeCredential::AddrKeyhash(credential.into());
 
         domain
             .state()
-            .read_entity_typed::<PrunedAccountState>(&AccountKey::from(&credential))
+            .read_entity_typed::<AccountHistoryState>(&AccountKey::from(&credential))
             .unwrap()
     }
 
@@ -857,7 +857,7 @@ mod rollback {
     }
 
     /// The lifetime rewards `/accounts/{stake}` serves for `C`: its row's and
-    /// its remainder's ([`PrunedAccountState::restore`]).
+    /// its remainder's ([`AccountHistoryState::restore`]).
     fn served(domain: &ToyDomain) -> u64 {
         let row = sums(domain).map(|(_, rewards, _)| rewards).unwrap_or(0);
         let pruned = remainder(domain).map(|x| x.lifetime_rewards).unwrap_or(0);
@@ -913,7 +913,7 @@ mod rollback {
         assert_eq!(epoch(&domain), 2);
         assert_eq!(account(&domain), None, "pruned at the boundary");
 
-        let pruned = PrunedAccountState {
+        let pruned = AccountHistoryState {
             lifetime_rewards: REWARDS,
             deregistered_at: Some(300),
         };
@@ -943,8 +943,8 @@ mod rollback {
 
     /// Both lives, in the remainder after the prune, with the newest
     /// deregistration. Every rollback below leaves it so.
-    fn both_lives() -> Option<PrunedAccountState> {
-        Some(PrunedAccountState {
+    fn both_lives() -> Option<AccountHistoryState> {
+        Some(AccountHistoryState {
             lifetime_rewards: EARLIER + PRUNED,
             deregistered_at: Some(300),
         })
@@ -985,7 +985,7 @@ mod rollback {
         live.withdrawals_sum = PRUNED;
         row.deregistered_at = Some(300);
 
-        let earlier = PrunedAccountState {
+        let earlier = AccountHistoryState {
             lifetime_rewards: EARLIER,
             deregistered_at: Some(100),
         };
@@ -1175,8 +1175,8 @@ mod rollback {
     const PAID: u64 = 30_000;
 
     /// The earlier life of the registered row below, in its remainder.
-    fn earlier_life() -> Option<PrunedAccountState> {
-        Some(PrunedAccountState {
+    fn earlier_life() -> Option<AccountHistoryState> {
+        Some(AccountHistoryState {
             lifetime_rewards: EARLIER,
             deregistered_at: Some(300),
         })

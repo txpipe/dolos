@@ -1,5 +1,5 @@
 //! Node-level workloads: a `dolos` binary driven through the paths an
-//! operator's node takes — `data import-archive` over a node immutable
+//! operator's node takes — `bootstrap immutabledb` over a node immutable
 //! directory for ingestion, and `serve` with minibf for reads — so two
 //! revisions can be measured on the same host, corpus, durability and
 //! concurrency. The binaries are given as `LABEL=PATH[:STORAGE_VERSION]`,
@@ -15,14 +15,13 @@
 //! `FetchBlock` for one slot, a page is `DumpHistory` from a slot with
 //! `page_len` items, both measured by this process's own threads over one
 //! HTTP/2 connection each, with the server's counters sampled around every
-//! workload. An archive-only import writes neither the hash index nor the
-//! era summary the block mappers need, so before the server starts the
-//! state is seeded by `doctor rebuild-state --stop-epoch 1`: a replay of
-//! the first Byron epoch, which is why the immutable directory has to
-//! begin with chunk 00000. The scan is `dolos data
-//! dump-blocks` over the corpus's contiguous tail, the node's own iterator
-//! over every frame, run while the server is down because the store is
-//! exclusively locked.
+//! workload. The import is a ledger replay, which writes the hash index
+//! and the era summary the block mappers need along with the archive, and
+//! reads the chain from its first block, which is why the immutable
+//! directory has to be a contiguous chain from chunk 00000. The scan is
+//! `dolos data dump blocks` over the corpus's contiguous tail, the node's own
+//! iterator over every frame, run while the server is down because the store
+//! is exclusively locked.
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};
@@ -144,6 +143,9 @@ pub struct Bin {
     pub storage_version: String,
     /// The binary reads the configuration file of before v2.
     pub legacy_config: bool,
+    /// The binary predates the v2 `data` group, whatever configuration it
+    /// reads: assumed from the version until [`Bin::probe_cli`] asks it.
+    pub legacy_cli: bool,
 }
 
 impl Bin {
@@ -166,7 +168,31 @@ impl Bin {
             path: PathBuf::from(path),
             storage_version: version.to_string(),
             legacy_config,
+            legacy_cli: legacy_config,
         })
+    }
+
+    /// Ask the binary which `data` commands it has: one that lists no
+    /// `rebuild` under `data --help` predates the v2 `data` group, as
+    /// builds from v2 configuration up to it do.
+    pub fn probe_cli(&mut self) -> io::Result<()> {
+        // Uncoloured, so each subcommand starts its line as plain text.
+        let output = Command::new(&self.path)
+            .args(["data", "--help"])
+            .env("NO_COLOR", "1")
+            .env_remove("CLICOLOR_FORCE")
+            .output()?;
+
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "{} data --help exited with {}",
+                self.label, output.status
+            )));
+        }
+
+        self.legacy_cli = !lists_subcommand(&String::from_utf8_lossy(&output.stdout), "rebuild");
+
+        Ok(())
     }
 
     fn identity(&self) -> io::Result<Value> {
@@ -825,7 +851,7 @@ fn run_reads(
 ) -> io::Result<Value> {
     debug_assert!(
         !params.scan,
-        "the scan runs through dump-blocks, not the server"
+        "the scan runs through data dump blocks, not the server"
     );
     let threads = params.threads.max(1);
     let before = pid_counters(server_pid);
@@ -925,16 +951,75 @@ impl Selection {
     }
 }
 
-/// One measured `import-archive` over an immutable directory: its shape
+/// One measured `bootstrap immutabledb` over a staged database: its shape
 /// and what the corpus says about the blocks it covers.
 #[derive(Clone, Copy)]
 struct ImportJob<'a> {
-    immutable: &'a Path,
+    database: &'a Path,
     chunk: usize,
-    to: Option<u64>,
     blocks: u64,
     raw_bytes: u64,
     name: &'a str,
+}
+
+/// A Cardano node database over the corpus at `immutable`, as `bootstrap
+/// immutabledb` reads one: the corpus linked in as `immutable/`, beside the
+/// `magic` it is for.
+fn stage_database(dir: &Path, immutable: &Path, magic: u64) -> io::Result<()> {
+    if dir.exists() {
+        std::fs::remove_dir_all(dir)?;
+    }
+    std::fs::create_dir_all(dir)?;
+    link_dir(immutable, &dir.join("immutable"))?;
+    std::fs::write(dir.join("protocolMagicId"), magic.to_string())
+}
+
+/// [`stage_database`] over the corpus's blocks up to slot `to` alone,
+/// written out as one chunk.
+fn stage_prefix(dir: &Path, immutable: &Path, to: u64, magic: u64) -> io::Result<()> {
+    if dir.exists() {
+        std::fs::remove_dir_all(dir)?;
+    }
+    let chunks = dir.join("immutable");
+    std::fs::create_dir_all(&chunks)?;
+    let mut blocks = Vec::new();
+    for block in pallas::interop::hardano::storage::immutable::read_blocks(immutable)
+        .map_err(|e| invalid(format!("{}: {e:?}", immutable.display())))?
+    {
+        let block = block.map_err(|e| invalid(format!("{}: {e:?}", immutable.display())))?;
+        let slot = MultiEraBlock::decode(&block)
+            .map_err(|e| invalid(format!("decoding a corpus block: {e}")))?
+            .slot();
+        if slot > to {
+            break;
+        }
+        blocks.push(std::sync::Arc::new(block));
+    }
+    dolos_testing::blocks::write_immutable_fixture(&chunks, &blocks);
+    std::fs::write(dir.join("protocolMagicId"), magic.to_string())
+}
+
+#[cfg(unix)]
+fn link_dir(target: &Path, link: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+/// The corpus files hard-linked one by one, or copied where the volume can't
+/// link them: a directory symlink needs Developer Mode or admin rights here.
+#[cfg(windows)]
+fn link_dir(target: &Path, link: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(link)?;
+    for entry in std::fs::read_dir(target)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let to = link.join(entry.file_name());
+        if std::fs::hard_link(entry.path(), &to).is_err() {
+            std::fs::copy(entry.path(), &to)?;
+        }
+    }
+    Ok(())
 }
 
 struct Instance {
@@ -971,12 +1056,11 @@ impl Instance {
         cmd
     }
 
-    /// `dolos data import-archive`, measured.
+    /// `dolos bootstrap immutabledb`, measured.
     fn import(&self, bin: &Bin, job: &ImportJob) -> io::Result<Value> {
         let ImportJob {
-            immutable,
+            database,
             chunk,
-            to,
             blocks,
             raw_bytes,
             name,
@@ -984,20 +1068,17 @@ impl Instance {
         let mut cmd = self.command(bin);
         let metrics_path = self.dir.join("import-metrics.json");
         cmd.env("DOLOS_ARCHIVE_BENCH_METRICS", &metrics_path);
-        cmd.args(["data", "import-archive", "--source"])
-            .arg(immutable)
+        cmd.args(["bootstrap", "immutabledb", "--source"])
+            .arg(database)
             .arg("--chunk-size")
             .arg(chunk.to_string());
-        if let Some(to) = to {
-            cmd.arg("--to").arg(to.to_string());
-        }
         let started = Instant::now();
         let mut child = cmd.spawn()?;
         let usage = wait_child(&mut child)?;
         let wall = started.elapsed().as_secs_f64();
         if usage.status != 0 {
             return Err(io::Error::other(format!(
-                "{} import-archive exited with {}",
+                "{} bootstrap immutabledb exited with {}",
                 bin.label, usage.status
             )));
         }
@@ -1052,48 +1133,77 @@ fn read_import_metrics(path: &Path) -> io::Result<Option<Value>> {
     Ok(Some(metrics))
 }
 
-impl Instance {
-    /// Seed the state store with the era summary the block mappers need:
-    /// `doctor rebuild-state` into the instance's own state path, stopping
-    /// at epoch 1, so it replays exactly the first Byron epoch. Unmeasured.
-    fn seed_state(&self, bin: &Bin) -> io::Result<()> {
-        let state = self.dir.join("data").join("state");
-        if state.exists() {
-            std::fs::remove_dir_all(&state)?;
+/// Whether clap's `help` lists `name` among its subcommands, styled or not.
+fn lists_subcommand(help: &str, name: &str) -> bool {
+    strip_styles(help)
+        .lines()
+        .any(|line| line.split_whitespace().next() == Some(name))
+}
+
+/// `text` without its ANSI escape sequences.
+fn strip_styles(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut chars = text.chars();
+
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            plain.push(c);
+            continue;
         }
-        let mut cmd = self.command(bin);
-        cmd.args(["doctor", "rebuild-state", "--target"])
-            .arg(&state)
-            .args(["--stop-epoch", "1", "--chunk", "500"]);
-        let mut child = cmd.spawn()?;
-        let usage = wait_child(&mut child)?;
-        if usage.status != 0 {
-            return Err(io::Error::other(format!(
-                "{} rebuild-state exited with {}",
-                bin.label, usage.status
-            )));
+
+        if chars.next() == Some('[') {
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
         }
-        Ok(())
     }
 
-    /// `dolos data dump-blocks` over the whole corpus, measured: the node's
+    plain
+}
+
+/// `data dump blocks` over `first..=last`, every block, or `data
+/// dump-blocks` for a binary that predates the v2 `data` group, whose `--to`
+/// is exclusive.
+fn scan_args(bin: &Bin, first: u64, last: u64) -> Vec<String> {
+    let (first, last, past) = (first.to_string(), last.to_string(), (last + 1).to_string());
+
+    let args: Vec<&str> = if bin.legacy_cli {
+        vec!["data", "dump-blocks", "--from", &first, "--to", &past]
+    } else {
+        vec![
+            "data",
+            "dump",
+            "blocks",
+            "--limit",
+            "0",
+            "--from-slot",
+            &first,
+            "--to-slot",
+            &last,
+        ]
+    };
+
+    args.into_iter().map(String::from).collect()
+}
+
+impl Instance {
+    /// `dolos data dump blocks` over the whole corpus, measured: the node's
     /// own iterator over every frame, with its output discarded.
     fn scan(&self, bin: &Bin, keys: &Keys, params: &ReadParams) -> io::Result<Value> {
         let tail = &keys.keys[keys.contiguous_tail()..];
         let first = tail[0].slot;
         let last = tail[tail.len() - 1].slot;
         let mut cmd = self.command(bin);
-        cmd.args(["data", "dump-blocks", "--from"])
-            .arg(first.to_string())
-            .arg("--to")
-            .arg(last.to_string());
+        cmd.args(scan_args(bin, first, last));
         let started = Instant::now();
         let mut child = cmd.spawn()?;
         let usage = wait_child(&mut child)?;
         let wall = started.elapsed().as_secs_f64();
         if usage.status != 0 {
             return Err(io::Error::other(format!(
-                "{} dump-blocks exited with {}",
+                "{} data dump blocks exited with {}",
                 bin.label, usage.status
             )));
         }
@@ -1189,9 +1299,9 @@ fn summary(m: &Value) -> String {
     }
 }
 
-pub fn run(args: NodeArgs) -> anyhow::Result<()> {
-    let bins: Vec<Bin> = args
-        .bins
+/// The binaries under measurement, each asked which `data` commands it has.
+fn parse_bins(specs: &[String]) -> anyhow::Result<Vec<Bin>> {
+    specs
         .iter()
         .map(|b| {
             let mut bin = Bin::parse(b).map_err(anyhow::Error::msg)?;
@@ -1200,9 +1310,15 @@ pub fn run(args: NodeArgs) -> anyhow::Result<()> {
                 .path
                 .canonicalize()
                 .map_err(|e| anyhow::anyhow!("{}: {e}", bin.path.display()))?;
+            bin.probe_cli()
+                .map_err(|e| anyhow::anyhow!("{}: {e}", bin.path.display()))?;
             Ok(bin)
         })
-        .collect::<anyhow::Result<_>>()?;
+        .collect()
+}
+
+pub fn run(args: NodeArgs) -> anyhow::Result<()> {
+    let bins = parse_bins(&args.bins)?;
     let selection = Selection::parse(&args.workloads).map_err(anyhow::Error::msg)?;
     let threads: Vec<usize> = super::parse_list(&args.threads)?;
     let regimes: Vec<Regime> = args
@@ -1257,6 +1373,12 @@ pub fn run(args: NodeArgs) -> anyhow::Result<()> {
         .filter(|k| k.slot <= live_to)
         .map(|k| k.bytes as u64)
         .sum();
+    let database = args.work.join(".database");
+    stage_database(&database, &immutable, magic)?;
+    let live_database = args.work.join(".live-database");
+    if selection.live {
+        stage_prefix(&live_database, &immutable, live_to, magic)?;
+    }
 
     let identities: Vec<Value> = bins
         .iter()
@@ -1283,9 +1405,8 @@ pub fn run(args: NodeArgs) -> anyhow::Result<()> {
                 let metrics = instance.import(
                     bin,
                     &ImportJob {
-                        immutable: &immutable,
+                        database: &database,
                         chunk: args.chunk_size,
-                        to: None,
                         blocks: keys.keys.len() as u64,
                         raw_bytes: keys.raw_bytes(),
                         name: &format!("import-{}", args.chunk_size),
@@ -1318,7 +1439,6 @@ pub fn run(args: NodeArgs) -> anyhow::Result<()> {
                             rec.record(node, repeat, Some(&cache), metrics)?;
                         }
                     }
-                    instance.seed_state(bin)?;
                     let mut serve = instance.command(bin);
                     serve.arg("serve");
                     let mut server = serve.spawn()?;
@@ -1385,9 +1505,8 @@ pub fn run(args: NodeArgs) -> anyhow::Result<()> {
                 let metrics = instance.import(
                     bin,
                     &ImportJob {
-                        immutable: &immutable,
+                        database: &live_database,
                         chunk: 1,
-                        to: Some(live_to),
                         blocks: live_count,
                         raw_bytes: live_bytes,
                         name: "import-1",
@@ -1398,6 +1517,12 @@ pub fn run(args: NodeArgs) -> anyhow::Result<()> {
                     std::fs::remove_dir_all(&instance.dir)?;
                 }
             }
+        }
+    }
+    if !args.keep {
+        std::fs::remove_dir_all(&database)?;
+        if live_database.exists() {
+            std::fs::remove_dir_all(&live_database)?;
         }
     }
     eprintln!(
@@ -1452,6 +1577,108 @@ mod tests {
     }
 
     #[test]
+    fn a_binary_before_v2_takes_the_commands_it_knows() {
+        let legacy = Bin::parse("baseline=/tmp/dolos-old:v4").unwrap();
+        let current = Bin::parse("candidate=target/release/dolos").unwrap();
+
+        assert_eq!(
+            scan_args(&legacy, 3, 9),
+            ["data", "dump-blocks", "--from", "3", "--to", "10"]
+        );
+        assert_eq!(
+            scan_args(&current, 3, 9),
+            [
+                "data",
+                "dump",
+                "blocks",
+                "--limit",
+                "0",
+                "--from-slot",
+                "3",
+                "--to-slot",
+                "9"
+            ]
+        );
+    }
+
+    /// A binary is asked which `data` commands it has: a v2-configuration
+    /// build from before the v2 `data` group takes the older names too.
+    #[cfg(unix)]
+    #[test]
+    fn the_binary_says_which_data_commands_it_has() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+
+        let fake = |name: &str, listed: &str| fake_bin(dir.path(), name, listed);
+
+        let mut before =
+            Bin::parse(&format!("main={}", fake("before", "dump-blocks").display())).unwrap();
+        assert!(!before.legacy_cli);
+        before.probe_cli().unwrap();
+        assert!(before.legacy_cli);
+        assert_eq!(scan_args(&before, 3, 9)[..2], ["data", "dump-blocks"]);
+
+        let mut after =
+            Bin::parse(&format!("pr={}:v4", fake("after", "rebuild").display())).unwrap();
+        assert!(after.legacy_cli);
+        after.probe_cli().unwrap();
+        assert!(!after.legacy_cli && after.legacy_config);
+        assert_eq!(scan_args(&after, 3, 9)[..3], ["data", "dump", "blocks"]);
+
+        let bins = parse_bins(&[
+            format!("main={}", fake("parsed-before", "dump-blocks").display()),
+            format!("pr={}:v4", fake("parsed-after", "rebuild").display()),
+        ])
+        .unwrap();
+        assert!(bins[0].legacy_cli && !bins[1].legacy_cli);
+
+        let failing = dir.path().join("failing");
+        std::fs::write(&failing, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&failing, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(parse_bins(&[format!("broken={}", failing.display())]).is_err());
+    }
+
+    /// Help styled for a terminal, as `CLICOLOR_FORCE` asks of clap, lists
+    /// the same commands.
+    #[cfg(unix)]
+    #[test]
+    fn styled_help_lists_the_same_commands() {
+        let help = "\x1b[1m\x1b[4mCommands:\x1b[0m\n  \x1b[1mrebuild\x1b[0m  rebuilds\n";
+        assert!(lists_subcommand(help, "rebuild"));
+        assert!(!lists_subcommand(help, "dump-blocks"));
+
+        // Asked uncoloured: the stand-in refuses otherwise.
+        let dir = tempfile::tempdir().unwrap();
+        let path = fake_bin(dir.path(), "styled", "rebuild");
+        let script = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            &path,
+            script.replacen("\n", "\n[ -n \"$NO_COLOR\" ] || exit 3\n", 1),
+        )
+        .unwrap();
+
+        let mut bin = Bin::parse(&format!("pr={}", path.display())).unwrap();
+        bin.probe_cli().unwrap();
+        assert!(!bin.legacy_cli);
+    }
+
+    /// A stand-in binary whose `data --help` lists `listed`.
+    #[cfg(unix)]
+    fn fake_bin(dir: &Path, name: &str, listed: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let path = dir.join(name);
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\nprintf 'Commands:\\n  stats  Show\\n  {listed}  Do\\n'\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[test]
     fn the_read_plan_mirrors_the_store_level_one() {
         let plan = read_plan(&[1, 8], 200, 0, Regime::Warm, true, true, false);
         let names: Vec<&str> = plan.iter().map(|p| p.name.as_str()).collect();
@@ -1478,10 +1705,14 @@ mod tests {
     #[test]
     fn the_instance_config_selects_the_dialect_and_only_the_grpc_service() {
         let grpc = "127.0.0.1:3900".parse().unwrap();
-        let byron = Path::new("/g").join("byron.json");
+        // `/g` has no drive on Windows, so the loader would anchor it. The
+        // genesis lives apart from the config, so a relative path can't pass.
+        let genesis_dir = tempfile::tempdir().unwrap();
+        let genesis = genesis_dir.path();
+        let byron = genesis.join("byron.json");
 
         let legacy = Bin::parse("baseline=/tmp/dolos-old:v3").unwrap();
-        let toml = config_toml(&legacy, Path::new("/g"), 42, true, grpc);
+        let toml = config_toml(&legacy, genesis, 42, true, grpc);
         assert!(toml.contains("version = \"v3\""));
         assert!(toml.contains(&format!("byron_path = {:?}", byron.display().to_string())));
         assert!(toml.contains("[serve.grpc]\nlisten_address = \"127.0.0.1:3900\""));
@@ -1489,7 +1720,7 @@ mod tests {
         assert!(!toml.contains("minibf"));
 
         let current = Bin::parse("candidate=target/release/dolos").unwrap();
-        let toml = config_toml(&current, Path::new("/g"), 42, true, grpc);
+        let toml = config_toml(&current, genesis, 42, true, grpc);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dolos.toml");
         std::fs::write(&path, &toml).unwrap();

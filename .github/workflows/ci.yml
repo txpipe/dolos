@@ -169,7 +169,7 @@ jobs:
   # as reliable as the relay. Run them on merges to main; smoke stays on the
   # matrix everywhere and covers ports, socket and shutdown on every PR.
   e2e:
-    name: E2E (sync, snapshot)
+    name: E2E (sync)
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
@@ -181,4 +181,4 @@ jobs:
         with:
           shared-key: test-ubuntu-latest
           save-if: false
-      - run: cargo test --test sync --test snapshot -- --ignored
+      - run: cargo test --test sync -- --ignored

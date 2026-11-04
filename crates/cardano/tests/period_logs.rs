@@ -12,7 +12,7 @@ use dolos_cardano::{
         entities, AsyncCardanoQueryExt as _,
     },
     model::{
-        AccountAddressChunk, AccountAddressSet, AssetMintChunk, AssetMintSet, FirstMintChunk,
+        AccountAddressEpochs, AccountAddressSet, AssetMintChunk, AssetMintSet, FirstMintChunk,
         FirstMintSet, FirstScriptChunk, FirstScriptSet,
     },
     periods::{
@@ -717,9 +717,9 @@ fn the_seal_indexes_each_stake_address_at_its_first_tag() {
         );
     }
 
-    let sealed: Vec<(BlockSlot, AccountKey, AccountAddressChunk)> = domain
+    let sealed: Vec<(BlockSlot, (AccountKey, u32), AccountAddressEpochs)> = domain
         .archive()
-        .iter_logs_typed::<AccountAddressChunk>(None)
+        .iter_logs_typed::<AccountAddressEpochs>(None)
         .unwrap()
         .map(Result::unwrap)
         .collect();
@@ -727,8 +727,8 @@ fn the_seal_indexes_each_stake_address_at_its_first_tag() {
     assert!(!sealed.is_empty());
 
     for (_, _, chunk) in sealed {
-        for address in chunk.addresses {
-            let stake = stake_of(&address).unwrap();
+        for item in chunk.addresses {
+            let stake = stake_of(&item.address).unwrap();
             assert!(indexed.contains_key(&stake), "{}", hex::encode(stake));
         }
     }
@@ -864,7 +864,7 @@ fn assert_epochs_seal(genesis: Arc<Genesis>, blocks: usize, step: u64) {
 
         let addresses = domain
             .archive()
-            .read_log_typed::<AccountAddressChunk>(chain.epoch_start(epoch), &account)
+            .read_log_typed::<AccountAddressEpochs>(chain.epoch_start(epoch), &(account.clone(), 0))
             .unwrap();
 
         if is_sealable(&chain, mutable, epoch, tip_epoch) {
