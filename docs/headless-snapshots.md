@@ -19,8 +19,8 @@ revision `703cc34b`.
 
 `ReplayWorkspace::snapshot()` returns a read-only `SnapshotSource`. The host
 supplies the network magic, retained epochs and `facade::Selection`; the
-library applies epoch restriction, index banding and producer sizing in the
-same order for publication, digest and verification. The resulting plan can
+library applies epoch restriction and producer sizing in the same order for
+publication, digest and verification. The resulting plan can
 be passed to:
 
 - `publish_directory` with an explicit destination and progress observer;
@@ -28,6 +28,12 @@ be passed to:
   `SnapshotRepository::publishing()` policy;
 - `digest_document` with an explicit predecessor; or
 - `verify_reproduction` with the published inscription.
+
+A host that publishes several boundaries per replay prepares each one with
+`prepare_boundary`, stages the batch once with `stage_batch` and finishes each
+publication with `finalize_repository`; see
+[the export preparation contract](contracts/export-preparation.md). An export
+stages its index under `Plan::with_scratch`, or the system temporary directory.
 
 Every one of them requires stores standing on the first block of the plan's
 sequence epoch, with the archive ending there, as a sync stopped at that epoch

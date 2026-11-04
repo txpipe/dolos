@@ -545,6 +545,90 @@ fn a_resumed_registry_publish_rebuilds_an_account_window_the_manifest_lacks() {
     assert_eq!(reproduced.digest().unwrap(), published.identity);
 }
 
+/// A batch prepared and staged once, then published in sequence, is the chain
+/// the direct publishes write: same identities, same inheritance, and each
+/// chained onto the stele its predecessor left.
+#[test]
+#[ignore = "spawns a registry"]
+fn a_prepared_batch_publishes_what_direct_publishes_do() {
+    use dolos_snapshot::{
+        prepare::{self, Finalizing, IndexTail, Request},
+        staging::Budget,
+    };
+
+    let fixture = Fixture::spawn();
+    let direct = fixture.repository("dolos/direct");
+    let batched = fixture.repository("dolos/batched");
+    let node = Node::build();
+
+    let scratch = tempfile::tempdir().unwrap();
+    let store = prepare::Store::open(scratch.path().join("bundles"), "test").unwrap();
+    let silent = stelae::progress::Observer::silent();
+
+    let bundles: Vec<_> = [&node.first, &node.second]
+        .into_iter()
+        .map(|plan| {
+            let stores = node.stores(plan);
+
+            prepare::prepare(
+                &store,
+                plan,
+                stores.archive(),
+                stores.state(),
+                &Request {
+                    store_contract: dolos_core::compat::SUPPORTED_CONTRACTS[0].to_owned(),
+                    mutable_slots: dolos_cardano::mutable_slots(stores.genesis().as_ref()),
+                    tail: IndexTail::Traverse,
+                },
+                &silent,
+            )
+            .unwrap()
+        })
+        .collect();
+
+    let staged = prepare::stage_batch(
+        &scratch.path().join("runs"),
+        node.domain.archive(),
+        node.domain.state(),
+        &bundles,
+        &export::First,
+        Budget::new(u64::MAX),
+    )
+    .unwrap();
+
+    for (plan, bundle) in [&node.first, &node.second].into_iter().zip(&bundles) {
+        let expected = node.publish(&direct, plan, false);
+
+        let published = registry::publish_prepared(
+            Publishing::new(&batched),
+            &Finalizing {
+                store: &store,
+                bundle,
+                staged: &staged,
+                producers: export::Producers::DEFAULT,
+            },
+            node.domain.archive(),
+            None,
+            &silent,
+        )
+        .unwrap();
+
+        assert_eq!(published.identity, expected.identity);
+        assert_eq!(published.layers_reused, expected.layers_reused);
+    }
+
+    assert_eq!(
+        batched
+            .latest(&DolosProfile)
+            .unwrap()
+            .unwrap()
+            .read_inscription()
+            .unwrap()
+            .sequence,
+        node.second.sequence,
+    );
+}
+
 /// The registry, except that the seal fails: every layer is up and recorded,
 /// and the stele never becomes readable.
 struct SealFails<'a>(&'a stelae::oci::Registry);

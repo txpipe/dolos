@@ -77,6 +77,10 @@ pub struct Request {
     /// The archive's compatibility identity (`dolos_core::compat`).
     pub store_contract: String,
     pub epochs: BTreeMap<Family, BTreeSet<u64>>,
+    /// The one publication is the frontier itself, a batch of one: the view
+    /// is the boundary's, so the frontier's own window is stageable and what
+    /// the view holds is what the publication carries.
+    pub live: bool,
 }
 
 /// The resources one staging may use.
@@ -203,7 +207,11 @@ struct Marker {
 #[derive(Debug)]
 pub struct Staged {
     root: PathBuf,
+    network_magic: u64,
+    store_contract: String,
+    frontier: ChainPoint,
     frontier_epoch: u64,
+    live: bool,
     workers: NonZeroUsize,
     families: BTreeMap<Family, Marker>,
     report: Report,
@@ -247,7 +255,11 @@ pub fn stage<A: ArchiveStore>(
 
     let mut staged = Staged {
         root: root.to_owned(),
+        network_magic: request.network_magic,
+        store_contract: request.store_contract.clone(),
+        frontier: request.frontier.clone(),
         frontier_epoch,
+        live: request.live,
         workers: budget.workers,
         families: BTreeMap::new(),
         report: Report::default(),
@@ -261,12 +273,13 @@ pub fn stage<A: ArchiveStore>(
         for &epoch in epochs {
             let next = summary.epoch_start(epoch + 1);
 
-            if next > frontier_slot {
+            if next > frontier_slot && !(request.live && epoch == frontier_epoch) {
                 return Err(Refusal::OpenWindow { kind, epoch }.into());
             }
 
             let sealed_by = match family {
                 Family::Indexes => None,
+                Family::Entity(_) if request.live => Some(frontier_epoch),
                 Family::Entity(_) => Some(
                     sealed_by(summary, mutable_slots, epoch, frontier_epoch)
                         .ok_or(Refusal::Unsealed { kind, epoch })?,
@@ -276,7 +289,7 @@ pub fn stage<A: ArchiveStore>(
             windows.push(Window {
                 epoch,
                 start_slot: summary.epoch_start(epoch),
-                end_slot: next - 1,
+                end_slot: (next - 1).min(frontier_slot),
                 sealed_by,
             });
         }
@@ -398,6 +411,21 @@ impl Staged {
         self.frontier_epoch
     }
 
+    /// The point the runs were staged at.
+    pub fn frontier(&self) -> &ChainPoint {
+        &self.frontier
+    }
+
+    /// The chain the runs were staged from.
+    pub fn network_magic(&self) -> u64 {
+        self.network_magic
+    }
+
+    /// The compatibility identity the runs were staged from.
+    pub fn store_contract(&self) -> &str {
+        &self.store_contract
+    }
+
     /// Records staged for `family` in `epoch`, or `None` where it was not
     /// staged.
     pub fn records(&self, family: Family, epoch: u64) -> Option<u64> {
@@ -436,6 +464,18 @@ impl Staged {
         epoch: u64,
         sequence: u64,
     ) -> Result<Option<LayerDescriptor>, Error> {
+        self.write_layer_ticking(stele, family, epoch, sequence, &mut || {})
+    }
+
+    /// [`Staged::write_layer`], calling `tick` once per record.
+    pub(crate) fn write_layer_ticking<W: SteleWriter>(
+        &self,
+        stele: &W,
+        family: Family,
+        epoch: u64,
+        sequence: u64,
+        tick: &mut dyn FnMut(),
+    ) -> Result<Option<LayerDescriptor>, Error> {
         if !self.publishes(family, epoch, sequence)? {
             return Ok(None);
         }
@@ -454,7 +494,10 @@ impl Staged {
             stele.layer_sink(&DolosProfile, &scope.layer_spec(kind)?, COMPRESSION_LEVEL)?;
         let path = run_path(&self.root, kind, epoch);
 
-        replay(&path, run, |record| Ok(sink.write_record(record)?))?;
+        replay(&path, run, |record| {
+            tick();
+            Ok(sink.write_record(record)?)
+        })?;
 
         Ok(Some(sink.finish()?.descriptor))
     }
@@ -514,7 +557,9 @@ impl Staged {
             .into());
         }
 
-        if epoch >= sequence {
+        let own_tail = self.live && epoch == sequence && sequence == self.frontier_epoch;
+
+        if epoch >= sequence && !own_tail {
             return Err(Refusal::NotClosedAt { epoch, sequence }.into());
         }
 
@@ -786,7 +831,7 @@ impl Spool<'_> {
 
 /// Make a rename in `dir` durable. Windows cannot open a directory to sync
 /// it, so there a crash may lose the marker and the family is staged again.
-fn sync_dir(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn sync_dir(dir: &Path) -> std::io::Result<()> {
     if cfg!(unix) {
         File::open(dir)?.sync_all()
     } else {

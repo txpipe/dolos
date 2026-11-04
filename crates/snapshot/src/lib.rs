@@ -57,6 +57,8 @@
 //! - [`staging`] — one tag and one exact traversal for `indexes` and one shared
 //!   entity traversal, partitioned into durable per-epoch runs that finish as
 //!   layers for several publications.
+//! - [`prepare`] — durable capture of what a boundary alone holds, finished
+//!   into its publication once the sequence is committed.
 //! - [`node`] — what a node's own configuration says about reaching a registry:
 //!   which identity, and where it stages.
 //!
@@ -71,6 +73,7 @@ pub mod layers;
 pub mod namespaces;
 pub mod node;
 pub mod planning;
+pub mod prepare;
 pub mod registry;
 pub mod restore;
 pub mod source;
@@ -704,6 +707,9 @@ pub enum Error {
 
     #[error("index staging: {0}")]
     Staging(#[from] staging::Refusal),
+
+    #[error("boundary preparation: {0}")]
+    Preparation(#[from] prepare::Refusal),
 
     #[error("malformed {kind} record: {reason}")]
     MalformedRecord { kind: &'static str, reason: String },

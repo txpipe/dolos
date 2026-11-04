@@ -3,9 +3,11 @@
 //! A stele captures the state immediately after the first block of its
 //! sequence epoch: Ewrap has closed epoch E-1, Estart has opened epoch E, and
 //! E's first block has been applied (decision 0025). [`check`] is the one place
-//! that rule is decided, and every path that builds layers — directory and
-//! registry publication, dry runs, digest and reproduction — asks it before a
-//! layer is written.
+//! that rule is decided, and every path that builds layers from these stores —
+//! directory and registry publication, dry runs, digest, reproduction and
+//! boundary preparation — asks it before a layer is written. A prepared
+//! boundary is finished later from stores that have moved on, so it asked when
+//! it was captured.
 //!
 //! ## The evidence
 //!
