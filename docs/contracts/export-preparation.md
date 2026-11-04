@@ -99,7 +99,7 @@ traversal.
 | Field | Bounds |
 |---|---|
 | `run_buffer` | Bytes each run buffers before they are appended to its file. Memory is the staged windows times this. |
-| `scratch` | A hard limit on the run bytes one staging writes. Crossing it fails with `ScratchExceeded`, and the family being traversed is left unmarked. |
+| `scratch` | A hard limit on the run bytes one staging writes. Crossing it fails with `ScratchExceeded`, and the families the crossing traversal stages are left unmarked: `indexes`, or every pending entity kind. |
 | `workers` | Layers finished at once. Each holds one compression context (`IndexBand::SINK_BYTES`) and a 64 KiB read buffer. |
 
 While a staging runs, at most one run file is open at a time: each buffer

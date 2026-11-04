@@ -45,7 +45,8 @@ pub const SPOOL_FORMAT: u32 = 1;
 /// Largest record a run frames. Index and entity records are far smaller.
 const MAX_FRAME: usize = 64 * 1024;
 
-/// What one traversal stages: the `indexes` layers, or one entity kind's.
+/// The layers one completion marker covers: the `indexes` layers, or one
+/// entity kind's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Family {
     Indexes,

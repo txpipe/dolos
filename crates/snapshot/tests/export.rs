@@ -2968,8 +2968,9 @@ fn the_headless_facade_plans_encodes_and_reproduces_one_document() {
     assert_eq!(inscription.digest().unwrap(), document.identity);
 }
 
-/// The index staging engine: one traversal per family, partitioned into runs
-/// that finish as the layers a direct export writes.
+/// The index staging engine: one tag, one exact and one shared entity
+/// traversal, partitioned into runs that finish as the layers a direct export
+/// writes.
 mod index_staging {
     use std::{collections::BTreeSet, fs, num::NonZeroUsize, path::Path};
 
@@ -3783,6 +3784,62 @@ mod index_staging {
 
         let root = tempfile::tempdir().unwrap();
         stage(root.path(), &store, &request, Budget::new(needed)).unwrap();
+    }
+
+    /// The bytes on disk in `family`'s runs under `root`.
+    fn spooled(root: &Path, family: Family) -> u64 {
+        fs::read_dir(root.join(family.kind().unwrap()))
+            .unwrap()
+            .map(|entry| entry.unwrap().metadata().unwrap().len())
+            .sum()
+    }
+
+    /// A run appends its frames to its file once they fill `run_buffer`, so a
+    /// traversal's memory grows with its windows and the buffer, not with its
+    /// records. With a one-byte buffer, a traversal that fails part-way has
+    /// written out every frame it routed; with a buffer it never fills, none.
+    #[test]
+    fn runs_write_out_what_fills_their_buffer() {
+        let (store, frontier) = staging_archive(EPOCHS);
+        let entities: Vec<Family> = families().into_iter().skip(1).collect();
+        let entity_only = request(
+            &frontier,
+            entities
+                .iter()
+                .map(|family| (*family, vec![1, 2]))
+                .collect(),
+        );
+
+        for (request, traversal, faulted) in [
+            (
+                every_family(&frontier),
+                Traversal::Tags,
+                vec![Family::Indexes],
+            ),
+            (entity_only, Traversal::Entities, entities),
+        ] {
+            let failing = Counted::failing(store.clone(), traversal, 3);
+            let written = |run_buffer: usize| {
+                let root = tempfile::tempdir().unwrap();
+                let budget = Budget {
+                    run_buffer,
+                    ..unlimited()
+                };
+
+                assert!(matches!(
+                    stage(root.path(), &failing, &request, budget),
+                    Err(Error::Archive(_))
+                ));
+
+                faulted
+                    .iter()
+                    .map(|family| spooled(root.path(), *family))
+                    .sum::<u64>()
+            };
+
+            assert!(written(1) > 0, "{traversal:?}");
+            assert_eq!(written(usize::MAX), 0, "{traversal:?}");
+        }
     }
 
     /// Every layer `request` stages, in its order.
