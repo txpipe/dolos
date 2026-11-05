@@ -29,13 +29,11 @@ be passed to:
 - `digest_document` with an explicit predecessor; or
 - `verify_reproduction` with the published inscription.
 
-A host that publishes several boundaries per replay prepares each one with
-`prepare_boundary`, stages the batch once with `stage_batch` and finishes each
-publication with `finalize_repository`; see
-[the export preparation contract](contracts/export-preparation.md). An export
-stages its index under `Plan::with_scratch`, or the system temporary directory.
+An export of any kind, digests and reproductions included, stages its index under
+`Plan::with_scratch`, or the system temporary directory when unset. A mainnet
+first publish spools tens of gigabytes, so name a volume sized for it.
 
-Every one of them requires stores standing on the first block of the plan's
+Every one of the operations above requires stores standing on the first block of the plan's
 sequence epoch, with the archive ending there, as a sync stopped at that epoch
 (`dolos sync catchup --follow --stop-epoch`, or a headless replay's `stop_epoch`) leaves them;
 `Error::NotABoundary` is the boundary refusal, `Error::UnanchoredPoint` refuses
@@ -45,6 +43,13 @@ that already holds a stele, or a reproduction whose sequence or network does
 not match the published one. `boundary` asks the boundary question up front.
 See "Only the boundary cut is published" in
 [the profile](../crates/snapshot/PROFILE.md).
+
+A host that publishes several boundaries per replay prepares each one with
+`prepare_boundary`, stages the batch once with `stage_batch` and finishes each
+publication with `finalize_repository`. Only `prepare_boundary` needs stores on
+the boundary: the other two run on stores past it, where a boundary question
+would refuse a valid batch. See
+[the export preparation contract](contracts/export-preparation.md).
 
 These operations return plans, documents, inscriptions or typed errors. They
 do not print, exit, load configuration, or construct terminal components.

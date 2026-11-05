@@ -82,7 +82,7 @@ use crate::{
     namespaces::NAMESPACES,
     prepare::{Captured, Prepared},
     reporting::{Cursor, Records},
-    staging::{self, Family, Staged},
+    staging::{self, Family, Runs, Spooling},
     state_layer_count, DigestsScope, DolosProfile, EpochScope, Error, Network, RetainedEpochs,
     Scope, StateScope, BLOCKS, COMPRESSION_LEVEL, DENSE_EPOCH_KINDS, DIGESTS, ENTITY_INDEX_KINDS,
     ENTITY_KINDS, EPOCH_KINDS, INDEXES, LOG_KINDS, LOG_NAMESPACES, STATE_KINDS, UTXOS,
@@ -205,7 +205,8 @@ pub struct Plan {
     pub retained: RetainedEpochs,
     /// Where an export stages its `indexes` and entity runs. `None` is the
     /// system temporary directory; a mainnet first publish spools tens of
-    /// gigabytes, so a host names a volume sized for it.
+    /// gigabytes, so a host names a volume sized for it. Every export spools,
+    /// digests and reproductions included.
     ///
     /// Execution rather than geometry, like `producers`: it changes no byte.
     pub scratch: Option<PathBuf>,
@@ -334,17 +335,22 @@ impl Plan {
         self.retained.cuts(self.sequence)
     }
 
-    /// A fresh directory under this plan's scratch, removed when dropped.
-    fn staging_scratch(&self) -> Result<tempfile::TempDir, Error> {
-        let base = self.scratch.clone().unwrap_or_else(std::env::temp_dir);
+    /// A fresh spool under this plan's scratch, removed when dropped. Whatever
+    /// a killed run left there goes first, and a live peer's stays.
+    fn staging_scratch(&self) -> Result<Spooling, Error> {
+        let base = self.scratch.clone().unwrap_or_else(|| {
+            let base = std::env::temp_dir();
 
-        std::fs::create_dir_all(&base)
-            .and_then(|_| {
-                tempfile::Builder::new()
-                    .prefix("dolos-staging-")
-                    .tempdir_in(base)
-            })
-            .map_err(|e| staging::Refusal::Io(e).into())
+            tracing::warn!(
+                base = %base.display(),
+                "staging under the system temporary directory; `Plan::with_scratch` names a \
+                 volume sized for the windows"
+            );
+
+            base
+        });
+
+        Spooling::claim(&base)
     }
 
     /// Unbounded on disk: a batch of one has no admission to control.
@@ -741,13 +747,14 @@ where
     let scratch = plan.staging_scratch()?;
     let summary = dolos_cardano::eras::load_chain_summary_from_state(state)?;
 
-    let staged = staging::stage(
+    let staged = staging::stage_watched(
         scratch.path(),
         archive,
         &summary,
         0,
         &adopted.live_request(plan),
         plan.staging_budget(),
+        observer,
     )?;
 
     assemble(
@@ -755,7 +762,7 @@ where
         plan,
         archive,
         &Source::Stores(state),
-        &staged,
+        Runs::new(&staged, None),
         &adopted,
         digest_records,
         previous,
@@ -806,7 +813,7 @@ impl Adopted {
         Ok(adopted)
     }
 
-    fn get(&self, kind: &'static str, epoch: u64) -> Option<&LayerDescriptor> {
+    pub(crate) fn get(&self, kind: &'static str, epoch: u64) -> Option<&LayerDescriptor> {
         self.0.get(&(kind, epoch))
     }
 
@@ -846,7 +853,7 @@ pub(crate) fn assemble<W, A, S>(
     plan: &Plan,
     archive: &A,
     source: &Source<'_, S>,
-    staged: &Staged,
+    staged: Runs<'_>,
     adopted: &Adopted,
     digest_records: Option<&[digests::ImmutableDigests]>,
     previous: &dyn Predecessor,
@@ -1006,7 +1013,10 @@ where
     )
 }
 
-/// Reproduce a stele from `plan` and store nothing.
+/// Reproduce a stele from `plan` and keep nothing.
+///
+/// Its index runs spool under [`Plan::scratch`] on the way, like any export's,
+/// and are removed afterwards.
 ///
 /// The counterpart of [`publish`] for a caller that wants the identity and not
 /// the artifact: `dolos snapshot digest`, and the reproduction half of
@@ -1065,7 +1075,8 @@ pub struct Document {
     pub uncompressed_size: u64,
 }
 
-/// Reproduce a stele from local stores and canonicalize it, writing nothing.
+/// Reproduce a stele from local stores and canonicalize it, keeping nothing but
+/// the spool [`reproduce`] removes afterwards.
 ///
 /// What a publish costs, minus the I/O and the upload: every layer is
 /// compressed, because a reproduction that skipped compression would not be
@@ -1811,7 +1822,7 @@ fn entity_layers(
 fn staged_entity_layers(
     plan: &Plan,
     prepared: Option<&Prepared<'_>>,
-    staged: &Staged,
+    staged: Runs<'_>,
     adopted: &Adopted,
 ) -> Result<usize, Error> {
     let mut total = 0;
@@ -1835,7 +1846,7 @@ fn staged_entity_layers(
 fn entity_built(
     plan: &Plan,
     prepared: Option<&Prepared<'_>>,
-    staged: &Staged,
+    staged: Runs<'_>,
     window: &EpochWindow,
     entity: EntityKind,
 ) -> Result<bool, Error> {
@@ -1853,7 +1864,7 @@ fn write_entity_layer<W: SteleWriter>(
     stele: &W,
     plan: &Plan,
     prepared: Option<&Prepared<'_>>,
-    staged: &Staged,
+    staged: Runs<'_>,
     adopted: &Adopted,
     window: &EpochWindow,
     kind: &'static str,
@@ -1896,7 +1907,7 @@ fn write_index_layer<W: SteleWriter>(
     stele: &W,
     plan: &Plan,
     prepared: Option<&Prepared<'_>>,
-    staged: &Staged,
+    staged: Runs<'_>,
     adopted: &Adopted,
     window: &EpochWindow,
     cursor: &Cursor<'_>,

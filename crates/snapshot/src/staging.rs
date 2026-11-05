@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use stelae::{
     frame::CanonicalCbor,
     inscription::LayerDescriptor,
+    progress::{Event, Observer},
     transport::{RecordSink, SteleWriter},
     Profile as _,
 };
@@ -44,6 +45,18 @@ pub const SPOOL_FORMAT: u32 = 1;
 
 /// Largest record a run frames. Index and entity records are far smaller.
 const MAX_FRAME: usize = 64 * 1024;
+
+/// Traversed records between two liveness beats.
+const BEAT_RECORDS: u64 = 1 << 20;
+
+/// What names a spool under a shared scratch directory.
+const SPOOL_PREFIX: &str = "dolos-staging-";
+
+/// The file a live spool holds locked, inside it.
+const SPOOL_LOCK: &str = "lock";
+
+/// Fresh names one claim tries while a peer's sweep takes them from under it.
+const CLAIM_ATTEMPTS: usize = 8;
 
 /// The layers one completion marker covers: the `indexes` layers, or one
 /// entity kind's.
@@ -137,6 +150,19 @@ pub enum Refusal {
     PastFrontier { sequence: u64, frontier: u64 },
     #[error("{path} was staged from another source or coverage")]
     SourceMismatch { path: PathBuf },
+    #[error(
+        "{path} leaves out epochs {missing:?} this batch now wants; its runs are disposable, so \
+         delete the root and stage again"
+    )]
+    Uncovered { path: PathBuf, missing: Vec<u64> },
+    #[error(
+        "cannot spool under {path}: {source}; `Plan::with_scratch` names a volume sized for the \
+         windows"
+    )]
+    Scratch {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("staging would write more than its {limit}-byte scratch budget")]
     ScratchExceeded { limit: u64 },
     #[error("{path} is corrupt: {reason}")]
@@ -180,6 +206,18 @@ struct Identity {
     windows: Vec<Window>,
 }
 
+impl Identity {
+    /// Everything but the coverage.
+    fn same_source(&self, other: &Self) -> bool {
+        self.format == other.format
+            && self.profile == other.profile
+            && self.media_type == other.media_type
+            && self.network_magic == other.network_magic
+            && self.frontier == other.frontier
+            && self.store_contract == other.store_contract
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Window {
     epoch: u64,
@@ -212,7 +250,9 @@ pub struct Staged {
     frontier: ChainPoint,
     frontier_epoch: u64,
     live: bool,
-    workers: NonZeroUsize,
+    summary: ChainSummary,
+    mutable_slots: u64,
+    budget: Budget,
     families: BTreeMap<Family, Marker>,
     report: Report,
 }
@@ -230,6 +270,88 @@ pub fn stage<A: ArchiveStore>(
     mutable_slots: u64,
     request: &Request,
     budget: Budget,
+) -> Result<Staged, Error> {
+    stage_watched(
+        root,
+        archive,
+        summary,
+        mutable_slots,
+        request,
+        budget,
+        &Observer::silent(),
+    )
+}
+
+/// [`stage`], telling `observer` the traversals are alive.
+///
+/// A staging has no layer to announce, and its records are reported once, when
+/// their layer is finished. So what it emits is [`Event::Records`] with a delta
+/// of zero: before each traversal, and every [`BEAT_RECORDS`] records of one.
+/// Each traversal is also logged.
+pub fn stage_watched<A: ArchiveStore>(
+    root: &Path,
+    archive: &A,
+    summary: &ChainSummary,
+    mutable_slots: u64,
+    request: &Request,
+    budget: Budget,
+    observer: &Observer,
+) -> Result<Staged, Error> {
+    stage_runs(
+        root,
+        archive,
+        summary,
+        mutable_slots,
+        request,
+        budget,
+        observer,
+        Reuse::Exact,
+    )
+}
+
+/// [`stage_watched`] for a batch that may be restarting on its own `root`: runs
+/// of the same source are reused while they hold every window asked for, which
+/// shrinks as layers are recorded and steles commit.
+pub(crate) fn stage_restarting<A: ArchiveStore>(
+    root: &Path,
+    archive: &A,
+    summary: &ChainSummary,
+    mutable_slots: u64,
+    request: &Request,
+    budget: Budget,
+    observer: &Observer,
+) -> Result<Staged, Error> {
+    stage_runs(
+        root,
+        archive,
+        summary,
+        mutable_slots,
+        request,
+        budget,
+        observer,
+        Reuse::Covering,
+    )
+}
+
+/// Which earlier runs under a root a staging may take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reuse {
+    /// Only those of the same identity, coverage included.
+    Exact,
+    /// Those of the same source holding at least the windows asked for.
+    Covering,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stage_runs<A: ArchiveStore>(
+    root: &Path,
+    archive: &A,
+    summary: &ChainSummary,
+    mutable_slots: u64,
+    request: &Request,
+    budget: Budget,
+    observer: &Observer,
+    reuse: Reuse,
 ) -> Result<Staged, Error> {
     let hash = request
         .frontier
@@ -260,7 +382,9 @@ pub fn stage<A: ArchiveStore>(
         frontier: request.frontier.clone(),
         frontier_epoch,
         live: request.live,
-        workers: budget.workers,
+        summary: summary.clone(),
+        mutable_slots,
+        budget,
         families: BTreeMap::new(),
         report: Report::default(),
     };
@@ -306,11 +430,31 @@ pub fn stage<A: ArchiveStore>(
 
         let marker_path = root.join(format!("{kind}.json"));
 
+        let compatible = |marker: &Marker| match reuse {
+            Reuse::Exact => marker.identity == identity,
+            Reuse::Covering => marker.identity.same_source(&identity),
+        };
+
         match read_marker(&marker_path)? {
-            Some(marker) if marker.identity != identity => {
+            Some(marker) if !compatible(&marker) => {
                 return Err(Refusal::SourceMismatch { path: marker_path }.into())
             }
             Some(marker) if intact(&root.join(kind), &marker)? => {
+                let missing: Vec<u64> = identity
+                    .windows
+                    .iter()
+                    .filter(|window| !marker.identity.windows.contains(window))
+                    .map(|window| window.epoch)
+                    .collect();
+
+                if !missing.is_empty() {
+                    return Err(Refusal::Uncovered {
+                        path: marker_path,
+                        missing,
+                    }
+                    .into());
+                }
+
                 staged.families.insert(*family, marker);
                 staged.report.reused += 1;
             }
@@ -328,21 +472,27 @@ pub fn stage<A: ArchiveStore>(
         root,
         budget,
         written: 0,
+        observer,
+        traversed: 0,
     };
 
     if let Some(identity) = pending.remove(&Family::Indexes) {
         let mut runs = spool.open::<indexes::OrderCheck>(INDEXES, &identity)?;
 
         if let Some(span) = span(&identity.windows) {
+            spool.traversing("tag", &span);
             staged.report.tag_traversals += 1;
 
             for tag in archive.iter_archive_tags(&archive_dimensions::ALL, span.clone())? {
+                spool.beat();
                 spool.route_index(&mut runs, tag?.into())?;
             }
 
+            spool.traversing("exact", &span);
             staged.report.exact_traversals += 1;
 
             for exact in archive.iter_exact_records(span)? {
+                spool.beat();
                 spool.route_index(&mut runs, exact?.into())?;
             }
         }
@@ -369,10 +519,12 @@ pub fn stage<A: ArchiveStore>(
 
     if let Some(span) = spans.reduce(|a, b| a.start.min(b.start)..a.end.max(b.end)) {
         let entity_kinds: Vec<EntityKind> = kinds.keys().copied().collect();
+        spool.traversing("entity", &span);
         staged.report.entity_traversals += 1;
 
         for record in archive.iter_entity_records(&entity_kinds, span)? {
             let record = record?;
+            spool.beat();
 
             let Some((_, _, runs)) = kinds.get_mut(&record.kind) else {
                 continue;
@@ -398,12 +550,211 @@ pub fn stage<A: ArchiveStore>(
 
     staged.report.bytes = spool.written;
 
+    tracing::info!(root = %root.display(), report = ?staged.report, "index staging finished");
+
     Ok(staged)
+}
+
+/// A spool directory one run owns under a scratch directory that peers may
+/// share.
+///
+/// Its lock is what tells a live spool from a killed one, because the system
+/// releases a lock however its holder died. The lock goes first on drop, so the
+/// directory can be removed on every platform.
+#[derive(Debug)]
+pub(crate) struct Spooling {
+    _lock: File,
+    dir: tempfile::TempDir,
+}
+
+impl Spooling {
+    /// Clear what killed runs left under `base`, then claim a fresh spool.
+    pub(crate) fn claim(base: &Path) -> Result<Self, Error> {
+        let refused = |source| Refusal::Scratch {
+            path: base.to_owned(),
+            source,
+        };
+
+        fs::create_dir_all(base).map_err(refused)?;
+        sweep_killed_spools(base);
+
+        for _ in 0..CLAIM_ATTEMPTS {
+            let dir = tempfile::Builder::new()
+                .prefix(SPOOL_PREFIX)
+                .tempdir_in(base)
+                .map_err(refused)?;
+            let path = dir.path().join(SPOOL_LOCK);
+
+            // A peer's sweep can take a directory that is still empty, or hold
+            // this lock while it removes one: either way, start over. The error
+            // for a directory going away varies, and macOS gives `EINVAL`, so
+            // what decides is whether it is gone.
+            let lock = match File::create(&path) {
+                Ok(lock) => lock,
+                Err(_) if !dir.path().exists() => continue,
+                Err(e) => return Err(refused(e).into()),
+            };
+
+            match lock.try_lock() {
+                Ok(()) if path.exists() => return Ok(Self { _lock: lock, dir }),
+                Ok(()) | Err(fs::TryLockError::WouldBlock) => continue,
+                // Unable to lock here, a peer cannot lock it either, so nothing
+                // sweeps this spool. It just loses the sweep's protection.
+                Err(fs::TryLockError::Error(e)) => {
+                    tracing::warn!(path = %path.display(), error = %e, "a staging spool cannot be locked");
+
+                    return Ok(Self { _lock: lock, dir });
+                }
+            }
+        }
+
+        Err(refused(std::io::Error::other(
+            "a peer kept sweeping the spools claimed",
+        ))
+        .into())
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        self.dir.path()
+    }
+}
+
+/// Remove every spool under `base` whose lock nobody holds. Anything it cannot
+/// tell about is left alone, since the staging about to run does not need it
+/// gone.
+fn sweep_killed_spools(base: &Path) {
+    let Ok(entries) = fs::read_dir(base) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(SPOOL_PREFIX)
+        {
+            continue;
+        }
+
+        let path = entry.path();
+
+        match File::open(path.join(SPOOL_LOCK)) {
+            // Killed before it locked, or about to lock. Only an empty directory
+            // goes, and a peer that loses it starts over.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let _ = fs::remove_dir(&path);
+            }
+            Err(e) => {
+                tracing::debug!(path = %path.display(), error = %e, "left a staging spool in place");
+            }
+            Ok(lock) => {
+                if lock.try_lock().is_ok() {
+                    tracing::info!(path = %path.display(), "removing a killed run's staging spool");
+
+                    if let Err(e) = fs::remove_dir_all(&path) {
+                        tracing::warn!(path = %path.display(), error = %e, "could not remove a killed run's staging spool");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The runs of a batch, plus any windows one publication staged for itself
+/// because its predecessor forecast them and then declined them.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Runs<'a> {
+    batch: &'a Staged,
+    declined: Option<&'a Staged>,
+}
+
+impl<'a> Runs<'a> {
+    pub(crate) fn new(batch: &'a Staged, declined: Option<&'a Staged>) -> Self {
+        Self { batch, declined }
+    }
+
+    fn holding(&self, family: Family, epoch: u64) -> &'a Staged {
+        match self.declined {
+            Some(declined) if declined.records(family, epoch).is_some() => declined,
+            _ => self.batch,
+        }
+    }
+
+    pub(crate) fn publishes(
+        &self,
+        family: Family,
+        epoch: u64,
+        sequence: u64,
+    ) -> Result<bool, Error> {
+        self.holding(family, epoch)
+            .publishes(family, epoch, sequence)
+    }
+
+    pub(crate) fn write_layer_ticking<W: SteleWriter>(
+        &self,
+        stele: &W,
+        family: Family,
+        epoch: u64,
+        sequence: u64,
+        tick: &mut dyn FnMut(),
+    ) -> Result<Option<LayerDescriptor>, Error> {
+        self.holding(family, epoch)
+            .write_layer_ticking(stele, family, epoch, sequence, tick)
+    }
+}
+
+/// Windows staged beside a batch's runs, removed when dropped.
+#[derive(Debug)]
+pub(crate) struct Declined {
+    staged: Staged,
+    _dir: tempfile::TempDir,
+}
+
+impl Declined {
+    pub(crate) fn staged(&self) -> &Staged {
+        &self.staged
+    }
 }
 
 impl Staged {
     pub fn report(&self) -> Report {
         self.report
+    }
+
+    /// Stage `epochs` from the same view, under this root and on the same
+    /// terms.
+    ///
+    /// For the one case a batch cannot foresee: [`stelae_driver::Predecessor`]
+    /// may forecast a recorded layer that `adopt` then declines, because its
+    /// blob is gone, and only `adopt` finds that out.
+    pub(crate) fn stage_declined<A: ArchiveStore>(
+        &self,
+        archive: &A,
+        epochs: BTreeMap<Family, BTreeSet<u64>>,
+        observer: &Observer,
+    ) -> Result<Declined, Error> {
+        let dir = tempfile::Builder::new()
+            .prefix("declined-")
+            .tempdir_in(&self.root)
+            .map_err(io)?;
+
+        let staged = stage_watched(
+            dir.path(),
+            archive,
+            &self.summary,
+            self.mutable_slots,
+            &Request {
+                network_magic: self.network_magic,
+                frontier: self.frontier.clone(),
+                store_contract: self.store_contract.clone(),
+                epochs,
+                live: false,
+            },
+            self.budget,
+            observer,
+        )?;
+
+        Ok(Declined { staged, _dir: dir })
     }
 
     /// The epoch of the frontier the runs were staged at.
@@ -515,7 +866,7 @@ impl Staged {
         let outcomes = Mutex::new(Vec::from_iter(layers.iter().map(|_| None)));
 
         std::thread::scope(|scope| {
-            for _ in 0..self.workers.get().min(layers.len()) {
+            for _ in 0..self.budget.workers.get().min(layers.len()) {
                 scope.spawn(|| {
                     while !failed.load(Ordering::Relaxed) {
                         let at = next.fetch_add(1, Ordering::Relaxed);
@@ -705,9 +1056,30 @@ struct Spool<'a> {
     root: &'a Path,
     budget: Budget,
     written: u64,
+    observer: &'a Observer,
+    traversed: u64,
 }
 
 impl Spool<'_> {
+    fn traversing(&self, what: &str, span: &std::ops::Range<BlockSlot>) {
+        tracing::info!(
+            traversal = what,
+            from_slot = span.start,
+            to_slot = span.end,
+            "index staging traversal started"
+        );
+
+        self.observer.emit(Event::Records(0));
+    }
+
+    fn beat(&mut self) {
+        self.traversed += 1;
+
+        if self.traversed.is_multiple_of(BEAT_RECORDS) {
+            self.observer.emit(Event::Records(0));
+        }
+    }
+
     /// Fresh, empty runs for `identity`'s windows, discarding any incomplete
     /// ones a failed staging left.
     fn open<O: Default>(&self, kind: &str, identity: &Identity) -> Result<Vec<Run<O>>, Error> {

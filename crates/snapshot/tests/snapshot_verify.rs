@@ -593,6 +593,7 @@ fn a_prepared_batch_publishes_what_direct_publishes_do() {
         &bundles,
         &export::First,
         Budget::new(u64::MAX),
+        &silent,
     )
     .unwrap();
 

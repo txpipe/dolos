@@ -57,8 +57,10 @@ pub trait SnapshotSource {
 
     /// Establish that `plan` stands on the first block of its sequence epoch.
     ///
-    /// Every operation below asks this itself; a host asks it first to refuse
-    /// before doing anything slow.
+    /// Publication, digest, reproduction and `prepare_boundary` each ask this
+    /// themselves, and a host asks it first to refuse before doing anything
+    /// slow. `stage_batch` and the `finalize_*` operations run on stores past
+    /// the boundary and do not.
     fn boundary(&self, plan: &Plan) -> Result<Boundary, Error>;
 
     /// Write a directory stele through the same profile encoder publication
@@ -109,6 +111,7 @@ pub trait SnapshotSource {
         bundles: &[Bundle],
         previous: &dyn Predecessor,
         budget: Budget,
+        observer: &Observer,
     ) -> Result<Staged, Error>;
 
     /// Reproduce a prepared boundary's canonical inscription without writing
@@ -221,8 +224,17 @@ impl<A: ArchiveStore, S: StateStore> SnapshotSource for StoreSnapshot<'_, A, S> 
         bundles: &[Bundle],
         previous: &dyn Predecessor,
         budget: Budget,
+        observer: &Observer,
     ) -> Result<Staged, Error> {
-        prepare::stage_batch(root, self.archive, self.state, bundles, previous, budget)
+        prepare::stage_batch(
+            root,
+            self.archive,
+            self.state,
+            bundles,
+            previous,
+            budget,
+            observer,
+        )
     }
 
     fn finalize_document(

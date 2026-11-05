@@ -23,7 +23,7 @@ use dolos_core::{
 };
 use serde::{Deserialize, Serialize};
 use stelae::{
-    dir::{LayerSink, SteleDir, BLOBS_DIR},
+    dir::{SteleDir, BLOBS_DIR},
     frame::{CanonicalCbor, Limits},
     inscription::{Inscription, LayerDescriptor},
     profile::Profile,
@@ -39,7 +39,7 @@ use crate::{
     layers::indexes,
     reporting::Cursor,
     scope_key,
-    staging::{self, sync_dir, Budget, Family, Staged},
+    staging::{self, sync_dir, Budget, Family, Runs, Staged},
     state_layer_count, DolosProfile, Error, Network, RetainedEpochs, Scope as _, COMPRESSION_LEVEL,
     ENTITY_KINDS, INDEXES, LOG_KINDS, MAX_RECORD, MEDIA_TYPE_VERSION, PROFILE_NAME,
     PROFILE_VERSION, STATE_KINDS,
@@ -68,6 +68,12 @@ pub enum Refusal {
     },
     #[error("bundle {sequence} was prepared from another source: {what}")]
     SourceMismatch { sequence: u64, what: String },
+    #[error("bundle {sequence} was captured as {found}, and this build publishes {expected}")]
+    ForeignBuild {
+        sequence: u64,
+        found: String,
+        expected: String,
+    },
     #[error("bundle {sequence} is missing its {kind} payload {blob}")]
     MissingArtifact {
         sequence: u64,
@@ -122,8 +128,8 @@ pub struct Request<'a> {
     pub tail: IndexTail<'a>,
 }
 
-/// What a bundle was captured from. A complete bundle is reused only when this
-/// is equal.
+/// What a bundle says it was captured from. Stores with an equal identity may
+/// still hold other rows, so reuse also takes a walk of them: see [`prepare`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Identity {
     format: u32,
@@ -138,6 +144,38 @@ struct Identity {
     mutable_slots: u64,
 }
 
+impl Identity {
+    /// The first thing `other` differs in, for a refusal to name.
+    fn differing(&self, other: &Self) -> &'static str {
+        [
+            ("network", self.network_magic != other.network_magic),
+            ("boundary block", self.cursor != other.cursor),
+            (
+                "store contract",
+                self.store_contract != other.store_contract,
+            ),
+            ("retained list", self.retained != other.retained),
+            ("set of windows", self.windows != other.windows),
+            (
+                "mutable slot count",
+                self.mutable_slots != other.mutable_slots,
+            ),
+        ]
+        .into_iter()
+        .find_map(|(what, differs)| differs.then_some(what))
+        .unwrap_or("build")
+    }
+}
+
+/// What this build writes into a layer's records and labels.
+fn build_label(profile: &str, media_type_version: u64) -> String {
+    format!("{profile} with media type version {media_type_version}")
+}
+
+fn this_build() -> String {
+    format!("{PROFILE_NAME}/{PROFILE_VERSION}")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Manifest {
     identity: Identity,
@@ -148,8 +186,8 @@ struct Manifest {
     capture_from: u64,
     /// The first window the boundary could not seal.
     oldest_unsealed: u64,
-    /// The oldest slot finalization reads from the source archive; `None` when
-    /// every window was captured.
+    /// The start of the oldest closed window, which finalization reads from the
+    /// source archive; `None` when the plan covers no closed window.
     horizon: Option<BlockSlot>,
     layers: Vec<WrittenLayer>,
 }
@@ -235,7 +273,9 @@ impl Bundle {
         self.manifest.identity.mutable_slots
     }
 
-    /// The oldest slot finalization still reads from the source archive.
+    /// The oldest slot this bundle's batch reads from the source archive, for
+    /// staging and finalization both. `None` when the plan covers no closed
+    /// window, though finalization still looks up the boundary block itself.
     pub fn horizon(&self) -> Option<BlockSlot> {
         self.manifest.horizon
     }
@@ -365,8 +405,9 @@ impl Store {
         Ok(sealed.manifest)
     }
 
-    /// Read `sequence`'s bundle, checking that it is complete and this owner's.
-    /// Payload contents are checked as they are read.
+    /// Read `sequence`'s bundle, checking that it is complete, this owner's and
+    /// in the records this build publishes. Payload contents are checked as
+    /// they are read.
     pub fn load(&self, sequence: u64) -> Result<Bundle, Error> {
         let manifest = self.read_manifest(sequence)?;
 
@@ -375,6 +416,25 @@ impl Store {
                 sequence,
                 found: manifest.owner,
                 expected: self.owner.clone(),
+            }
+            .into());
+        }
+
+        // A layer's header compares only the profile's name and the kind, so
+        // nothing later stops old records landing under this build's labels.
+        let (found, expected) = (
+            build_label(
+                &manifest.identity.profile,
+                manifest.identity.media_type_version,
+            ),
+            build_label(&this_build(), MEDIA_TYPE_VERSION),
+        );
+
+        if found != expected {
+            return Err(Refusal::ForeignBuild {
+                sequence,
+                found,
+                expected,
             }
             .into());
         }
@@ -498,18 +558,19 @@ impl Store {
     }
 }
 
-/// A writer into a [`Store`]'s payloads that remembers what it wrote.
-struct Capturing<'a> {
-    blobs: &'a SteleDir,
+/// A writer at the capture level that remembers what went through it: into a
+/// [`Store`]'s payloads, or nowhere when a held bundle is checked.
+struct Capturing<'a, W> {
+    inner: &'a W,
     written: Arc<Mutex<Vec<WrittenLayer>>>,
 }
 
-struct CapturingSink {
-    inner: LayerSink,
+struct CapturingSink<S> {
+    inner: S,
     written: Arc<Mutex<Vec<WrittenLayer>>>,
 }
 
-impl RecordSink for CapturingSink {
+impl<S: RecordSink> RecordSink for CapturingSink<S> {
     fn write_record(&mut self, record: &CanonicalCbor) -> Result<(), stelae::Error> {
         self.inner.write_record(record)
     }
@@ -530,17 +591,17 @@ impl RecordSink for CapturingSink {
     }
 }
 
-impl SteleWriter for Capturing<'_> {
-    type Sink = CapturingSink;
+impl<W: SteleWriter> SteleWriter for Capturing<'_, W> {
+    type Sink = CapturingSink<W::Sink>;
 
     fn layer_sink(
         &self,
         profile: &dyn Profile,
         spec: &LayerSpec,
         _level: i32,
-    ) -> Result<CapturingSink, stelae::Error> {
+    ) -> Result<Self::Sink, stelae::Error> {
         Ok(CapturingSink {
-            inner: self.blobs.layer_sink(profile, spec, CAPTURE_LEVEL)?,
+            inner: self.inner.layer_sink(profile, spec, CAPTURE_LEVEL)?,
             written: Arc::clone(&self.written),
         })
     }
@@ -558,10 +619,14 @@ impl SteleWriter for Capturing<'_> {
 /// Capture what a later store cannot reproduce, while the stores stand at the
 /// boundary `plan` was made for.
 ///
-/// No index traversal runs unless `request.tail` asks for one. A complete
-/// bundle of the same identity is returned as it is; one of another is refused,
-/// and so is a damaged one, which takes an explicit [`Store::release`]. A
-/// failure leaves no completion marker.
+/// No index traversal runs unless `request.tail` asks for one. A bundle of
+/// another identity is refused, and so is a damaged one, which takes an
+/// explicit [`Store::release`]. A failure leaves no completion marker.
+///
+/// A complete bundle of the same identity is returned only if the stores still
+/// produce the same layers. Rebuilt stores can reach the same cursor with other
+/// rows, under a ledger fix or another genesis, and no label tells them apart.
+/// So the capture is walked again, as long as the first one, writing nothing.
 pub fn prepare<A: ArchiveStore, S: StateStore>(
     store: &Store,
     plan: &Plan,
@@ -574,18 +639,20 @@ pub fn prepare<A: ArchiveStore, S: StateStore>(
 
     let identity = identity_of(plan, request)?;
 
-    match store.load(plan.sequence) {
-        Ok(bundle) if bundle.manifest.identity == identity => return Ok(bundle),
-        Ok(_) => {
+    let held = match store.load(plan.sequence) {
+        Ok(bundle) if bundle.manifest.identity == identity => Some(bundle),
+        Ok(bundle) => {
+            let differing = bundle.manifest.identity.differing(&identity);
+
             return Err(Refusal::SourceMismatch {
                 sequence: plan.sequence,
-                what: "the store already holds this sequence from other stores or coverage".into(),
+                what: format!("the store already holds this sequence with another {differing}"),
             }
-            .into())
+            .into());
         }
-        Err(Error::Preparation(Refusal::NotPrepared { .. })) => {}
+        Err(Error::Preparation(Refusal::NotPrepared { .. })) => None,
         Err(other) => return Err(other),
-    }
+    };
 
     for window in &plan.epochs {
         export::refuse_uncovered_logs(archive, window)?;
@@ -611,51 +678,106 @@ pub fn prepare<A: ArchiveStore, S: StateStore>(
         ..plan.clone()
     };
 
-    let tail_window = capture
+    let has_tail = capture
         .epochs
         .iter()
-        .find(|window| window.epoch == plan.sequence);
+        .any(|window| window.epoch == plan.sequence);
 
-    if let (Some(_), IndexTail::Delta(delta)) = (tail_window, request.tail) {
+    if let (true, IndexTail::Delta(delta)) = (has_tail, request.tail) {
         check_delta(delta, plan)?;
     }
 
+    let Some(bundle) = held else {
+        let layers = capture_layers(
+            &store.blobs,
+            &capture,
+            archive,
+            state,
+            request.tail,
+            observer,
+        )?;
+
+        // Finalization reads every closed window it does not inherit, whatever
+        // was captured of it: closed blocks come from the archive and closed
+        // indexes from its runs.
+        let horizon = plan
+            .epochs
+            .iter()
+            .find(|window| window.epoch < plan.sequence)
+            .map(|window| window.start_slot);
+
+        return store.commit(Manifest {
+            identity,
+            owner: store.owner.clone(),
+            capture_from,
+            oldest_unsealed,
+            horizon,
+            layers,
+        });
+    };
+
+    tracing::info!(
+        sequence = plan.sequence,
+        "a bundle is held for this boundary; checking the stores still produce it"
+    );
+
+    let walked = capture_layers(
+        &stelae::Discarding,
+        &capture,
+        archive,
+        state,
+        request.tail,
+        observer,
+    )?;
+
+    check_held(&bundle, capture_from, oldest_unsealed, &walked)?;
+
+    Ok(bundle)
+}
+
+/// Run a capture of `capture`'s layers through `inner`, sorted the way a
+/// manifest lists them.
+fn capture_layers<W, A, S>(
+    inner: &W,
+    capture: &Plan,
+    archive: &A,
+    state: &S,
+    tail: IndexTail<'_>,
+    observer: &Observer,
+) -> Result<Vec<WrittenLayer>, Error>
+where
+    W: SteleWriter + Sync,
+    A: ArchiveStore,
+    S: StateStore,
+{
+    let tail_window = capture
+        .epochs
+        .iter()
+        .find(|window| window.epoch == capture.sequence);
+
     let writer = Capturing {
-        blobs: &store.blobs,
+        inner,
         written: Arc::default(),
     };
 
-    let total = export::log_layers(&capture, archive, None, &First)?
+    let total = export::log_layers(capture, archive, None, &First)?
         + state_layer_count()
         + 2 * usize::from(tail_window.is_some());
     let cursor = Cursor::new(observer, total);
 
-    let (writer_ref, capture_ref, cursor_ref) = (&writer, &capture, &cursor);
+    let (writer_ref, cursor_ref) = (&writer, &cursor);
     let mut jobs: Vec<Job<'_>> = Vec::new();
 
     if let Some(window) = tail_window {
         jobs.push(Box::new(move || {
             Ok(vec![export::write_blocks(
-                writer_ref,
-                capture_ref,
-                archive,
-                None,
-                window,
-                &First,
-                cursor_ref,
+                writer_ref, capture, archive, None, window, &First, cursor_ref,
             )?])
         }));
 
-        let tail = request.tail;
-
         jobs.push(Box::new(move || {
             Ok(vec![write_tail(
-                writer_ref,
-                capture_ref,
-                archive,
-                window,
-                tail,
-                cursor_ref,
+                writer_ref, capture, archive, window, tail, cursor_ref,
             )?])
         }));
     }
@@ -664,15 +786,7 @@ pub fn prepare<A: ArchiveStore, S: StateStore>(
         for window in &capture.epochs {
             jobs.push(Box::new(move || {
                 Ok(export::write_logs(
-                    writer_ref,
-                    capture_ref,
-                    archive,
-                    None,
-                    window,
-                    kind,
-                    ns,
-                    &First,
-                    cursor_ref,
+                    writer_ref, capture, archive, None, window, kind, ns, &First, cursor_ref,
                 )?
                 .into_iter()
                 .collect())
@@ -684,7 +798,7 @@ pub fn prepare<A: ArchiveStore, S: StateStore>(
         jobs.push(Box::new(move || {
             export::write_state_kind(
                 writer_ref,
-                capture_ref,
+                capture,
                 &Source::Stores(state),
                 kind,
                 ns,
@@ -696,7 +810,7 @@ pub fn prepare<A: ArchiveStore, S: StateStore>(
         }));
     }
 
-    export::produce(jobs, plan.producers)?;
+    export::produce(jobs, capture.producers)?;
 
     let mut layers = std::mem::take(
         &mut *writer
@@ -713,20 +827,53 @@ pub fn prepare<A: ArchiveStore, S: StateStore>(
         )
     });
 
-    let horizon = plan
-        .epochs
-        .iter()
-        .find(|window| window.epoch < capture_from)
-        .map(|window| window.start_slot);
+    Ok(layers)
+}
 
-    store.commit(Manifest {
-        identity,
-        owner: store.owner.clone(),
-        capture_from,
-        oldest_unsealed,
-        horizon,
-        layers,
-    })
+/// A held bundle stands only if the stores walked just now produce its layers,
+/// sealed as far. Descriptors rather than blobs, because identity is the
+/// uncompressed digest and a compressor upgrade changes only the blob.
+fn check_held(
+    bundle: &Bundle,
+    capture_from: u64,
+    oldest_unsealed: u64,
+    walked: &[WrittenLayer],
+) -> Result<(), Error> {
+    let manifest = &bundle.manifest;
+
+    let differing =
+        if (capture_from, oldest_unsealed) != (manifest.capture_from, manifest.oldest_unsealed) {
+            Some("how far the boundary sealed".to_owned())
+        } else if walked.len() != manifest.layers.len() {
+            Some(format!(
+                "{} layers, where the bundle holds {}",
+                walked.len(),
+                manifest.layers.len()
+            ))
+        } else {
+            walked
+                .iter()
+                .zip(&manifest.layers)
+                .find(|(walked, held)| walked.descriptor != held.descriptor)
+                .map(|(walked, _)| {
+                    format!(
+                        "the {} layer at {}",
+                        walked.descriptor.kind, walked.descriptor.scope
+                    )
+                })
+        };
+
+    match differing {
+        None => Ok(()),
+        Some(what) => Err(Refusal::SourceMismatch {
+            sequence: bundle.sequence(),
+            what: format!(
+                "the stores stand at this boundary and differ in {what}; rebuilt stores need the \
+                 bundle released"
+            ),
+        }
+        .into()),
+    }
 }
 
 fn identity_of(plan: &Plan, request: &Request<'_>) -> Result<Identity, Error> {
@@ -737,7 +884,7 @@ fn identity_of(plan: &Plan, request: &Request<'_>) -> Result<Identity, Error> {
 
     Ok(Identity {
         format: BUNDLE_FORMAT,
-        profile: format!("{PROFILE_NAME}/{PROFILE_VERSION}"),
+        profile: this_build(),
         media_type_version: MEDIA_TYPE_VERSION,
         network_magic: plan.network.magic(),
         sequence: plan.sequence,
@@ -883,6 +1030,24 @@ impl Prepared<'_> {
         epoch < self.bundle.manifest.oldest_unsealed
     }
 
+    /// What a failed payload read means. Only an operating system error is a
+    /// fault of the filesystem: a decoder's read error carries none, and a
+    /// payload cut short or that decodes badly is damage.
+    fn read_failure(&self, written: &WrittenLayer, error: stelae::Error) -> Error {
+        let sequence = self.bundle.sequence();
+
+        match error {
+            stelae::Error::LayerNotFound { .. } => Refusal::MissingArtifact {
+                sequence,
+                kind: written.descriptor.kind.clone(),
+                blob: written.digests.blob_digest.to_string(),
+            }
+            .into(),
+            stelae::Error::Io(e) if e.raw_os_error().is_some() => Refusal::Io(e).into(),
+            other => corrupt(sequence, other),
+        }
+    }
+
     /// Stream a payload into `spec`'s layer of `stele`. The payload is held to
     /// its descriptor before the sink is finished, so a damaged one produces no
     /// layer.
@@ -908,27 +1073,56 @@ impl Prepared<'_> {
                 &written.descriptor,
                 limits,
             )
-            .map_err(|e| corrupt(sequence, e))?;
+            .map_err(|e| self.read_failure(written, e))?;
 
         let mut sink = stele.layer_sink(&DolosProfile, spec, COMPRESSION_LEVEL)?;
 
         while let Some(record) = reader.next_record() {
-            let record = record.map_err(|e| corrupt(sequence, e))?;
+            let record = record.map_err(|e| self.read_failure(written, e))?;
 
             sink.write_record(&CanonicalCbor::new(record).map_err(|e| corrupt(sequence, e))?)?;
             tick();
         }
 
-        reader.finish().map_err(|e| corrupt(sequence, e))?;
+        reader.finish().map_err(|e| self.read_failure(written, e))?;
 
         Ok(sink.finish()?)
     }
+}
+
+/// The layer families a batch stages, with their kinds.
+fn staged_families() -> impl Iterator<Item = (Family, &'static str)> {
+    std::iter::once((Family::Indexes, INDEXES)).chain(
+        ENTITY_KINDS
+            .into_iter()
+            .map(|(kind, entity)| (Family::Entity(entity), kind)),
+    )
+}
+
+/// The windows of `bundle` that `family` reads from staged runs: closed ones
+/// for `indexes`, and for an entity kind only what the boundary sealed.
+fn staged_windows(bundle: &Bundle, family: Family) -> impl Iterator<Item = &EpochWindow> {
+    let last = match family {
+        Family::Indexes => bundle.sequence(),
+        Family::Entity(_) => bundle.manifest.oldest_unsealed,
+    };
+
+    bundle
+        .manifest
+        .identity
+        .windows
+        .iter()
+        .filter(move |window| window.epoch < last)
 }
 
 /// Stage the closed windows `bundles` need from the frozen stores, once.
 ///
 /// Inherited windows are left out, and so is every window a boundary could not
 /// seal for the entity kinds. `previous` is what the first bundle follows.
+///
+/// A batch restarted on the same `root` reuses its runs while they cover what
+/// it wants, which shrinks as layers are recorded and steles commit. Wanting
+/// more than they hold is [`staging::Refusal::Uncovered`].
 pub fn stage_batch<A: ArchiveStore, S: StateStore>(
     root: &Path,
     archive: &A,
@@ -936,25 +1130,40 @@ pub fn stage_batch<A: ArchiveStore, S: StateStore>(
     bundles: &[Bundle],
     previous: &dyn Predecessor,
     budget: Budget,
+    observer: &Observer,
 ) -> Result<Staged, Error> {
     let first = bundles.first().ok_or(Refusal::EmptyBatch)?;
 
+    // These are the stores staging is about to read, whatever contract the
+    // bundles were captured under. The traits expose no store's own record, and
+    // a store this build opened is on its current contract or an older one it
+    // reads, so an older one is refused here too: the safe direction.
+    let store_contract = dolos_core::compat::SUPPORTED_CONTRACTS[0];
+
     for bundle in bundles {
-        if (
-            bundle.network_magic(),
-            bundle.store_contract(),
-            bundle.mutable_slots(),
-        ) != (
-            first.network_magic(),
-            first.store_contract(),
-            first.mutable_slots(),
-        ) {
+        if bundle.store_contract() != store_contract {
+            return Err(Refusal::SourceMismatch {
+                sequence: bundle.sequence(),
+                what: format!(
+                    "it was captured under store contract {}, and these stores are on \
+                     {store_contract}",
+                    bundle.store_contract()
+                ),
+            }
+            .into());
+        }
+
+        if (bundle.network_magic(), bundle.mutable_slots())
+            != (first.network_magic(), first.mutable_slots())
+        {
             return Err(Refusal::SourceMismatch {
                 sequence: bundle.sequence(),
                 what: format!("it does not share bundle {}'s source", first.sequence()),
             }
             .into());
         }
+
+        check_horizon(bundle, archive)?;
     }
 
     let frontier = state
@@ -962,28 +1171,12 @@ pub fn stage_batch<A: ArchiveStore, S: StateStore>(
         .ok_or_else(|| Error::UnanchoredPoint("the state store has no cursor".to_owned()))?;
 
     let mut epochs: BTreeMap<Family, BTreeSet<u64>> = BTreeMap::new();
-    let families = std::iter::once((Family::Indexes, INDEXES)).chain(
-        ENTITY_KINDS
-            .into_iter()
-            .map(|(kind, entity)| (Family::Entity(entity), kind)),
-    );
 
-    for (family, kind) in families {
-        let wanted = epochs.entry(family).or_default();
+    for (family, kind) in staged_families() {
+        let mut wanted = BTreeSet::new();
 
         for bundle in bundles {
-            let oldest_unsealed = bundle.manifest.oldest_unsealed;
-
-            for window in &bundle.manifest.identity.windows {
-                let visible = match family {
-                    Family::Indexes => window.epoch < bundle.sequence(),
-                    Family::Entity(_) => window.epoch < oldest_unsealed,
-                };
-
-                if !visible {
-                    continue;
-                }
-
+            for window in staged_windows(bundle, family) {
                 let spec = window.scope(bundle.network_magic()).layer_spec(kind)?;
 
                 if !previous.carried_forward(kind, &spec.scope)? {
@@ -991,11 +1184,13 @@ pub fn stage_batch<A: ArchiveStore, S: StateStore>(
                 }
             }
         }
+
+        epochs.insert(family, wanted);
     }
 
     let summary = dolos_cardano::eras::load_chain_summary_from_state(state)?;
 
-    staging::stage(
+    staging::stage_restarting(
         root,
         archive,
         &summary,
@@ -1003,11 +1198,12 @@ pub fn stage_batch<A: ArchiveStore, S: StateStore>(
         &staging::Request {
             network_magic: first.network_magic(),
             frontier,
-            store_contract: first.store_contract().to_owned(),
+            store_contract: store_contract.to_owned(),
             epochs,
             live: false,
         },
         budget,
+        observer,
     )
 }
 
@@ -1052,17 +1248,50 @@ where
     let adopted = Adopted::ask(&plan, previous)?;
     let prepared = Prepared { store, bundle };
 
+    let declined = declined_windows(bundle, &adopted, staged, previous)?;
+    let declined = match declined.is_empty() {
+        true => None,
+        false => Some(staged.stage_declined(archive, declined, observer)?),
+    };
+
     export::assemble(
         stele,
         &plan,
         archive,
         &Source::<MemoryStateStore>::Prepared(&prepared),
-        staged,
+        Runs::new(staged, declined.as_ref().map(|declined| declined.staged())),
         &adopted,
         digest_records,
         previous,
         observer,
     )
+}
+
+/// The windows a batch left out on `previous`'s forecast and `previous` then
+/// declined. Only those: a window nothing forecast and nothing staged is the
+/// `NotStaged` a wrong batch has to hear about.
+fn declined_windows(
+    bundle: &Bundle,
+    adopted: &Adopted,
+    staged: &Staged,
+    previous: &dyn Predecessor,
+) -> Result<BTreeMap<Family, BTreeSet<u64>>, Error> {
+    let mut declined: BTreeMap<Family, BTreeSet<u64>> = BTreeMap::new();
+
+    for (family, kind) in staged_families() {
+        for window in staged_windows(bundle, family) {
+            let spec = window.scope(bundle.network_magic()).layer_spec(kind)?;
+
+            if adopted.get(kind, window.epoch).is_none()
+                && staged.records(family, window.epoch).is_none()
+                && previous.carried_forward(kind, &spec.scope)?
+            {
+                declined.entry(family).or_default().insert(window.epoch);
+            }
+        }
+    }
+
+    Ok(declined)
 }
 
 /// The staged runs and the archive have to stand on the chain the bundle was
@@ -1111,6 +1340,12 @@ fn check_source<A: ArchiveStore>(
         )));
     }
 
+    check_horizon(bundle, archive)
+}
+
+/// The archive still has to reach back as far as this bundle's batch reads it.
+/// Pruned shorter, closed windows read as empty rather than failing.
+fn check_horizon<A: ArchiveStore>(bundle: &Bundle, archive: &A) -> Result<(), Error> {
     let first = archive.get_range(None, None)?.next();
 
     if let (Some(horizon), Some((slot, body))) = (bundle.horizon(), first) {
@@ -1118,7 +1353,7 @@ fn check_source<A: ArchiveStore>(
 
         if slot > horizon && !chain_start {
             return Err(Refusal::HorizonLost {
-                sequence,
+                sequence: bundle.sequence(),
                 horizon,
                 first: slot,
             }
