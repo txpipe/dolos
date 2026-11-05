@@ -205,8 +205,10 @@ pub struct Plan {
     pub retained: RetainedEpochs,
     /// Where an export stages its `indexes` and entity runs. `None` is the
     /// system temporary directory; a mainnet first publish spools tens of
-    /// gigabytes, so a host names a volume sized for it. Every export spools,
-    /// digests and reproductions included.
+    /// gigabytes, so a host names a volume sized for it, and writable by no one
+    /// but the user running the export: another user's deep tree there can
+    /// abort the export (`docs/contracts/export-preparation.md`). Every
+    /// export spools, digests and reproductions included.
     ///
     /// Execution rather than geometry, like `producers`: it changes no byte.
     pub scratch: Option<PathBuf>,
@@ -263,7 +265,9 @@ impl Plan {
         })
     }
 
-    /// Stage under `scratch` rather than the system temporary directory.
+    /// Stage under `scratch` rather than the system temporary directory. It
+    /// must be writable by no one but the user running the export: see
+    /// [`Plan::scratch`].
     pub fn with_scratch(mut self, scratch: impl Into<PathBuf>) -> Self {
         self.scratch = Some(scratch.into());
 

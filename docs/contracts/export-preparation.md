@@ -184,10 +184,11 @@ can compare a bundle with stores rebuilt *past* it, and finalization would publi
 the old capture beside the new archive. A host that rebuilds its stores releases
 every unfinished bundle first, and deletes any staging root of that batch, whose
 runs came from the old archive. Should it forget the root, `stage_batch` refuses
-the boundaries it captures again (`staging::Refusal::SourceMismatch`), though
-`staging::stage` knows no captures and reuses the runs. A host that keeps its
-bundles, or a `Staged` it already holds, through a rebuild gets no refusal: they
-still agree with each other, and nothing can see the stores moved.
+the boundaries it captures again (`staging::Refusal::SourceMismatch`).
+`staging::stage` takes no captures: it refuses a root `stage_batch` wrote the same
+way, whose identity holds them, and reuses the runs under a root it wrote itself. A
+host that keeps its bundles, or a `Staged` it already holds, through a rebuild gets
+no refusal: they still agree with each other, and nothing can see the stores moved.
 
 **Loading** checks the checksum, the format, the sequence, the owner, that the
 bundle was captured as the records this build publishes (profile, profile version
@@ -281,9 +282,10 @@ A long gap is not by itself a wedge. The store scans a whole dimension and filte
 by slot, so a narrow window of a long chain yields records slowly: staging one
 mainnet epoch took 410 s over 2.4 million records, about one beat every three
 minutes (one exploratory pair, Apple M4 with an external SSD). A traversal yielding
-under a million records logs nothing between its start and the finish, however long
-its scan. Judge a silence against the gaps before it, and a first one against that
-rate. A killed traversal loses its spool.
+under a million records logs at most one running count between its start and the
+finish, and none if it is the staging's first, however long its scan. Judge a silence
+against the gaps before it, and a first one against that rate. A killed traversal
+loses its spool.
 
 This replaces the banded traversal, so hosts migrate:
 

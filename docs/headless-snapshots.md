@@ -31,7 +31,10 @@ be passed to:
 
 An export of any kind, digests and reproductions included, stages its index under
 `Plan::with_scratch`, or the system temporary directory when unset. A mainnet
-first publish spools tens of gigabytes, so name a volume sized for it.
+first publish spools tens of gigabytes, so name a volume sized for it, and writable
+by no one but the user running the export: a host sharing the system temporary
+directory with other users must set `Plan::with_scratch`, as
+[the export preparation contract](contracts/export-preparation.md) explains.
 
 Every one of the operations above requires stores standing on the first block of the plan's
 sequence epoch, with the archive ending there, as a sync stopped at that epoch
