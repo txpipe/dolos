@@ -1044,7 +1044,7 @@ where
     S: StateStore,
 {
     // Silent, and not for want of a caller to thread one through: a
-    // reproduction stores nothing and moves nothing, so the only thing it could
+    // reproduction keeps nothing and moves nothing, so the only thing it could
     // report is the store walk — which `dolos snapshot digest` and `verify`
     // already print around. The seam is for the two commands that wait on a
     // network.

@@ -31,6 +31,10 @@ thiserror.workspace = true
 tracing.workspace = true
 xxhash-rust.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# Flags for opening what a sweep finds in a shared scratch directory.
+libc = "0.2"
+
 [dev-dependencies]
 # `node`'s tests build a `[storage]` section the way an operator writes one.
 toml = "0.8.13"

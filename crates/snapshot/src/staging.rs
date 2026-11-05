@@ -148,7 +148,7 @@ pub enum Refusal {
     NotClosedAt { epoch: u64, sequence: u64 },
     #[error("a publication at sequence {sequence} is past the staged frontier epoch {frontier}")]
     PastFrontier { sequence: u64, frontier: u64 },
-    #[error("{path} was staged from another source or coverage")]
+    #[error("{path} was staged from another source, coverage or capture")]
     SourceMismatch { path: PathBuf },
     #[error(
         "{path} leaves out epochs {missing:?} this batch now wants; its runs are disposable, so \
@@ -194,7 +194,18 @@ pub fn sealed_by(
     (epoch + 1..=frontier).find(|boundary| is_sealable(summary, mutable_slots, epoch, *boundary))
 }
 
+/// One captured boundary a batch's runs were staged for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Capture {
+    pub(crate) sequence: u64,
+    pub(crate) id: u64,
+}
+
 /// What a family's runs were staged from; reuse requires equality.
+///
+/// None of it fingerprints the archive's rows, so stores rebuilt to the same
+/// frontier look the same. What moves under a rebuild is `captures`: the host
+/// captures its boundaries again, and old runs won't serve the new captures.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Identity {
     format: u32,
@@ -204,10 +215,12 @@ struct Identity {
     frontier: (BlockSlot, String),
     store_contract: String,
     windows: Vec<Window>,
+    /// The bundles of the batch; empty for a staging no bundle asked for.
+    captures: Vec<Capture>,
 }
 
 impl Identity {
-    /// Everything but the coverage.
+    /// Everything but the coverage and the captures.
     fn same_source(&self, other: &Self) -> bool {
         self.format == other.format
             && self.profile == other.profile
@@ -306,12 +319,15 @@ pub fn stage_watched<A: ArchiveStore>(
         budget,
         observer,
         Reuse::Exact,
+        Vec::new(),
     )
 }
 
 /// [`stage_watched`] for a batch that may be restarting on its own `root`: runs
 /// of the same source are reused while they hold every window asked for, which
-/// shrinks as layers are recorded and steles commit.
+/// shrinks as layers are recorded and steles commit, and were staged for every
+/// one of `captures`, which only shrinks as well.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn stage_restarting<A: ArchiveStore>(
     root: &Path,
     archive: &A,
@@ -320,6 +336,7 @@ pub(crate) fn stage_restarting<A: ArchiveStore>(
     request: &Request,
     budget: Budget,
     observer: &Observer,
+    captures: Vec<Capture>,
 ) -> Result<Staged, Error> {
     stage_runs(
         root,
@@ -330,6 +347,7 @@ pub(crate) fn stage_restarting<A: ArchiveStore>(
         budget,
         observer,
         Reuse::Covering,
+        captures,
     )
 }
 
@@ -352,6 +370,7 @@ fn stage_runs<A: ArchiveStore>(
     budget: Budget,
     observer: &Observer,
     reuse: Reuse,
+    captures: Vec<Capture>,
 ) -> Result<Staged, Error> {
     let hash = request
         .frontier
@@ -426,6 +445,7 @@ fn stage_runs<A: ArchiveStore>(
             frontier: (frontier_slot, hex::encode(hash)),
             store_contract: request.store_contract.clone(),
             windows,
+            captures: captures.clone(),
         };
 
         let marker_path = root.join(format!("{kind}.json"));
@@ -455,6 +475,15 @@ fn stage_runs<A: ArchiveStore>(
                     .into());
                 }
 
+                let staged_for_all = identity
+                    .captures
+                    .iter()
+                    .all(|capture| marker.identity.captures.contains(capture));
+
+                if !staged_for_all {
+                    return Err(Refusal::SourceMismatch { path: marker_path }.into());
+                }
+
                 staged.families.insert(*family, marker);
                 staged.report.reused += 1;
             }
@@ -473,6 +502,7 @@ fn stage_runs<A: ArchiveStore>(
         budget,
         written: 0,
         observer,
+        traversal: "none",
         traversed: 0,
     };
 
@@ -619,6 +649,22 @@ impl Spooling {
     }
 }
 
+/// Open what a sweep found at a spool's lock, without waiting on it. Anyone may
+/// have put it there, and opening a FIFO blocks until it has a writer.
+fn open_found_lock(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+    }
+
+    options.open(path)
+}
+
 /// Remove every spool under `base` whose lock nobody holds. Anything it cannot
 /// tell about is left alone, since the staging about to run does not need it
 /// gone.
@@ -638,7 +684,7 @@ fn sweep_killed_spools(base: &Path) {
 
         let path = entry.path();
 
-        match File::open(path.join(SPOOL_LOCK)) {
+        match open_found_lock(&path.join(SPOOL_LOCK)) {
             // Killed before it locked, or about to lock. Only an empty directory
             // goes, and a peer that loses it starts over.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -647,12 +693,16 @@ fn sweep_killed_spools(base: &Path) {
             Err(e) => {
                 tracing::debug!(path = %path.display(), error = %e, "left a staging spool in place");
             }
+            // No claim ever makes anything else, so this is no spool of ours.
+            Ok(lock) if !lock.metadata().is_ok_and(|meta| meta.is_file()) => {
+                tracing::warn!(path = %path.display(), "left a staging spool whose lock is not a file");
+            }
             Ok(lock) => {
                 if lock.try_lock().is_ok() {
-                    tracing::info!(path = %path.display(), "removing a killed run's staging spool");
+                    tracing::info!(path = %path.display(), "removing an unlocked staging spool");
 
                     if let Err(e) = fs::remove_dir_all(&path) {
-                        tracing::warn!(path = %path.display(), error = %e, "could not remove a killed run's staging spool");
+                        tracing::warn!(path = %path.display(), error = %e, "could not remove an unlocked staging spool");
                     }
                 }
             }
@@ -1057,11 +1107,14 @@ struct Spool<'a> {
     budget: Budget,
     written: u64,
     observer: &'a Observer,
+    traversal: &'static str,
     traversed: u64,
 }
 
 impl Spool<'_> {
-    fn traversing(&self, what: &str, span: &std::ops::Range<BlockSlot>) {
+    fn traversing(&mut self, what: &'static str, span: &std::ops::Range<BlockSlot>) {
+        self.traversal = what;
+
         tracing::info!(
             traversal = what,
             from_slot = span.start,
@@ -1076,6 +1129,14 @@ impl Spool<'_> {
         self.traversed += 1;
 
         if self.traversed.is_multiple_of(BEAT_RECORDS) {
+            // A console drops the beat, so this line is what tells an operator a
+            // traversal is still moving.
+            tracing::info!(
+                traversal = self.traversal,
+                records = self.traversed,
+                "index staging traversal running"
+            );
+
             self.observer.emit(Event::Records(0));
         }
     }

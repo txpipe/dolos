@@ -9,9 +9,11 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
+    hash::{BuildHasher, RandomState},
     io::Write,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    time::SystemTime,
 };
 
 use dolos_cardano::{
@@ -39,7 +41,7 @@ use crate::{
     layers::indexes,
     reporting::Cursor,
     scope_key,
-    staging::{self, sync_dir, Budget, Family, Runs, Staged},
+    staging::{self, sync_dir, Budget, Capture, Family, Runs, Staged},
     state_layer_count, DolosProfile, Error, Network, RetainedEpochs, Scope as _, COMPRESSION_LEVEL,
     ENTITY_KINDS, INDEXES, LOG_KINDS, MAX_RECORD, MEDIA_TYPE_VERSION, PROFILE_NAME,
     PROFILE_VERSION, STATE_KINDS,
@@ -181,13 +183,18 @@ struct Manifest {
     identity: Identity,
     /// The journal that holds this bundle and alone may release it.
     owner: String,
+    /// New on every capture, and kept while the bundle is held. Staged runs
+    /// name the captures they were staged for, so a recapture can't take
+    /// them.
+    capture_id: u64,
     /// The first window whose log layers were captured: older ones can no
     /// longer change, so they are read from the archive.
     capture_from: u64,
     /// The first window the boundary could not seal.
     oldest_unsealed: u64,
-    /// The start of the oldest closed window, which finalization reads from the
-    /// source archive; `None` when the plan covers no closed window.
+    /// The first block of the oldest closed window, or the next one if that
+    /// window held none: where finalization's reads of the source archive
+    /// begin. `None` when the plan covers no closed window.
     horizon: Option<BlockSlot>,
     layers: Vec<WrittenLayer>,
 }
@@ -273,9 +280,11 @@ impl Bundle {
         self.manifest.identity.mutable_slots
     }
 
-    /// The oldest slot this bundle's batch reads from the source archive, for
-    /// staging and finalization both. `None` when the plan covers no closed
-    /// window, though finalization still looks up the boundary block itself.
+    /// The slot of the oldest block this bundle's batch reads from the source
+    /// archive, for staging and finalization both: an archive starting there is
+    /// enough, and one starting later has lost it. `None` when the plan covers
+    /// no closed window, though finalization still looks up the boundary
+    /// block itself.
     pub fn horizon(&self) -> Option<BlockSlot> {
         self.manifest.horizon
     }
@@ -699,16 +708,20 @@ pub fn prepare<A: ArchiveStore, S: StateStore>(
 
         // Finalization reads every closed window it does not inherit, whatever
         // was captured of it: closed blocks come from the archive and closed
-        // indexes from its runs.
-        let horizon = plan
-            .epochs
-            .iter()
-            .find(|window| window.epoch < plan.sequence)
-            .map(|window| window.start_slot);
+        // indexes from its runs. An epoch's first slot usually holds no block,
+        // and a slot alone couldn't tell a prune to it from one past its blocks.
+        let horizon = match plan.epochs.iter().find(|w| w.epoch < plan.sequence) {
+            Some(window) => archive
+                .get_range(Some(window.start_slot), None)?
+                .next()
+                .map(|(slot, _)| slot),
+            None => None,
+        };
 
         return store.commit(Manifest {
             identity,
             owner: store.owner.clone(),
+            capture_id: fresh_capture_id(),
             capture_from,
             oldest_unsealed,
             horizon,
@@ -874,6 +887,12 @@ fn check_held(
         }
         .into()),
     }
+}
+
+/// What tells one capture of a boundary from another. Its layers can't: a
+/// rebuild may change only closed windows, which a bundle doesn't hold.
+fn fresh_capture_id() -> u64 {
+    RandomState::new().hash_one(SystemTime::now())
 }
 
 fn identity_of(plan: &Plan, request: &Request<'_>) -> Result<Identity, Error> {
@@ -1122,7 +1141,9 @@ fn staged_windows(bundle: &Bundle, family: Family) -> impl Iterator<Item = &Epoc
 ///
 /// A batch restarted on the same `root` reuses its runs while they cover what
 /// it wants, which shrinks as layers are recorded and steles commit. Wanting
-/// more than they hold is [`staging::Refusal::Uncovered`].
+/// more than they hold is [`staging::Refusal::Uncovered`], and a bundle they
+/// were not staged for, such as a boundary captured again after a rebuild, is
+/// [`staging::Refusal::SourceMismatch`].
 pub fn stage_batch<A: ArchiveStore, S: StateStore>(
     root: &Path,
     archive: &A,
@@ -1190,6 +1211,14 @@ pub fn stage_batch<A: ArchiveStore, S: StateStore>(
 
     let summary = dolos_cardano::eras::load_chain_summary_from_state(state)?;
 
+    let captures = bundles
+        .iter()
+        .map(|bundle| Capture {
+            sequence: bundle.sequence(),
+            id: bundle.manifest.capture_id,
+        })
+        .collect();
+
     staging::stage_restarting(
         root,
         archive,
@@ -1204,6 +1233,7 @@ pub fn stage_batch<A: ArchiveStore, S: StateStore>(
         },
         budget,
         observer,
+        captures,
     )
 }
 
@@ -1350,10 +1380,8 @@ fn check_source<A: ArchiveStore>(
 fn check_horizon<A: ArchiveStore>(bundle: &Bundle, archive: &A) -> Result<(), Error> {
     let first = archive.get_range(None, None)?.next();
 
-    if let (Some(horizon), Some((slot, body))) = (bundle.horizon(), first) {
-        let chain_start = MultiEraBlock::decode(&body).is_ok_and(|block| block.number() <= 1);
-
-        if slot > horizon && !chain_start {
+    if let (Some(horizon), Some((slot, _))) = (bundle.horizon(), first) {
+        if slot > horizon {
             return Err(Refusal::HorizonLost {
                 sequence: bundle.sequence(),
                 horizon,
