@@ -7642,6 +7642,33 @@ mod boundary_preparation {
         ));
     }
 
+    /// What the log cases below rest on: at boundary 5 no log layer of window 3
+    /// is captured.
+    #[test]
+    fn a_window_below_capture_from_leaves_its_logs_to_the_archive() {
+        let root = tempdir();
+        let store = store(root.path());
+        let chain = Chain::at(Shape::Shelley, 5);
+        let delta = chain.boundary_delta.clone().unwrap();
+        let plan = chain.plan(&[]).restrict_epochs(Some(3), None);
+
+        prepare::prepare(
+            &store,
+            &plan,
+            &chain.archive,
+            &chain.state,
+            &plain_request(&chain, &delta),
+            &Observer::silent(),
+        )
+        .unwrap();
+
+        let manifest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(root.path().join("bundles/5.json")).unwrap())
+                .unwrap();
+
+        assert_eq!(manifest["manifest"]["capture_from"], 4);
+    }
+
     /// At boundary 5 window 3 sits below `capture_from`, so its logs are read
     /// from the archive, where they key at the window's first slot, before
     /// its first block. A prune to the horizon has to leave them.
