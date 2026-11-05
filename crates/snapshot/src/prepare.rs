@@ -86,7 +86,9 @@ pub enum Refusal {
     Corrupt { sequence: u64, reason: String },
     #[error("the index delta is not the boundary block's: {reason}")]
     ForeignTail { reason: String },
-    #[error("bundle {sequence} reads the archive from slot {horizon}, which starts at {first}")]
+    #[error(
+        "bundle {sequence} needs the archive's block at slot {horizon}, and it starts at {first}"
+    )]
     HorizonLost {
         sequence: u64,
         horizon: BlockSlot,
@@ -192,9 +194,8 @@ struct Manifest {
     capture_from: u64,
     /// The first window the boundary could not seal.
     oldest_unsealed: u64,
-    /// The first block of the oldest closed window, or the next one if that
-    /// window held none: where finalization's reads of the source archive
-    /// begin. `None` when the plan covers no closed window.
+    /// The block a prune must leave, see [`Bundle::horizon`]. `None` when the
+    /// plan covers no closed window.
     horizon: Option<BlockSlot>,
     layers: Vec<WrittenLayer>,
 }
@@ -280,11 +281,13 @@ impl Bundle {
         self.manifest.identity.mutable_slots
     }
 
-    /// The slot of the oldest block this bundle's batch reads from the source
-    /// archive, for staging and finalization both: an archive starting there is
-    /// enough, and one starting later has lost it. `None` when the plan covers
-    /// no closed window, though finalization still looks up the boundary
-    /// block itself.
+    /// The slot of the block the source archive must keep for this bundle's
+    /// batch, for staging and finalization both: the last block at or before
+    /// the oldest closed window's first slot, or the chain's first block
+    /// when it has none that early. An archive starting there is enough,
+    /// and one starting later is refused. `None` when the plan covers no
+    /// closed window, though finalization still looks up the boundary block
+    /// itself.
     pub fn horizon(&self) -> Option<BlockSlot> {
         self.manifest.horizon
     }
@@ -708,13 +711,9 @@ pub fn prepare<A: ArchiveStore, S: StateStore>(
 
         // Finalization reads every closed window it does not inherit, whatever
         // was captured of it: closed blocks come from the archive and closed
-        // indexes from its runs. An epoch's first slot usually holds no block,
-        // and a slot alone couldn't tell a prune to it from one past its blocks.
+        // indexes from its runs.
         let horizon = match plan.epochs.iter().find(|w| w.epoch < plan.sequence) {
-            Some(window) => archive
-                .get_range(Some(window.start_slot), None)?
-                .next()
-                .map(|(slot, _)| slot),
+            Some(window) => block_to_keep(archive, window.start_slot)?,
             None => None,
         };
 
@@ -1375,8 +1374,28 @@ fn check_source<A: ArchiveStore>(
     check_horizon(bundle, archive)
 }
 
-/// The archive still has to reach back as far as this bundle's batch reads it.
-/// Pruned shorter, closed windows read as empty rather than failing.
+/// The block whose presence shows a prune left every slot from `start` on.
+///
+/// A prune cuts blocks and log rows by slot, and log rows key at an epoch's
+/// first slot, which usually holds no block. So a window's first block says
+/// nothing of its logs: a cut right at it keeps every block and drops them. A
+/// block at or before `start` means the cut did not pass `start`. With none
+/// that early it is the chain's first block, which a prune takes whenever it
+/// takes anything.
+fn block_to_keep<A: ArchiveStore>(
+    archive: &A,
+    start: BlockSlot,
+) -> Result<Option<BlockSlot>, Error> {
+    let block = match archive.get_range(None, Some(start + 1))?.next_back() {
+        Some(block) => Some(block),
+        None => archive.get_range(None, None)?.next(),
+    };
+
+    Ok(block.map(|(slot, _)| slot))
+}
+
+/// The archive still has to hold the horizon's block. Pruned shorter, closed
+/// windows and their logs read as empty rather than failing.
 fn check_horizon<A: ArchiveStore>(bundle: &Bundle, archive: &A) -> Result<(), Error> {
     let first = archive.get_range(None, None)?.next();
 

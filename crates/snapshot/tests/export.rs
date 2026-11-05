@@ -5979,6 +5979,15 @@ mod boundary_preparation {
         blocks_from(chain, from)[0].0.slot()
     }
 
+    fn last_block_to(chain: &Chain, to: u64) -> u64 {
+        blocks_from(chain, 0)
+            .iter()
+            .rev()
+            .map(|(point, _)| point.slot())
+            .find(|slot| *slot <= to)
+            .unwrap()
+    }
+
     fn archive_of(
         schema: dolos_core::StateSchema,
         blocks: Vec<(ChainPoint, Vec<u8>)>,
@@ -6071,7 +6080,7 @@ mod boundary_preparation {
     fn a_restricted_plan_is_refused_past_its_closed_window() {
         let chain = Chain::at(Shape::Shelley, 4);
         let plan = chain.plan(&[]).restrict_epochs(Some(3), None);
-        let horizon = first_block_from(&chain, chain.start(3));
+        let horizon = last_block_to(&chain, chain.start(3));
 
         assert_a_prune_is_refused(chain, plan, 4, horizon);
     }
@@ -7371,20 +7380,142 @@ mod boundary_preparation {
         );
     }
 
+    /// The index marker has gone stale, so the capture check that decides is an
+    /// entity marker's.
+    #[test]
+    fn an_entity_marker_refuses_another_capture() {
+        let (root, stage_root) = (tempdir(), tempdir());
+        let store = store(root.path());
+        let mut first = Chain::at(Shape::Shelley, 2);
+        let old = first.prepare(&store, &[]).unwrap();
+
+        first.advance_to(3);
+        first.stage(
+            stage_root.path(),
+            std::slice::from_ref(&old),
+            &export::First,
+        );
+
+        store.release(2).unwrap();
+
+        fs::remove_file(stage_root.path().join(INDEXES).join("0.run")).unwrap();
+
+        let mut rebuilt = Chain::at(Shape::Shelley, 2);
+        one_more_entity_row(&rebuilt);
+
+        let bundle = rebuilt.prepare(&store, &[]).unwrap();
+
+        rebuilt.advance_to(3);
+
+        let refused = prepare::stage_batch(
+            stage_root.path(),
+            &rebuilt.archive,
+            &rebuilt.state,
+            std::slice::from_ref(&bundle),
+            &export::First,
+            Budget::new(u64::MAX),
+            &Observer::silent(),
+        );
+
+        match refused {
+            Err(Error::Staging(staging::Refusal::SourceMismatch { path })) => {
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+
+                assert!(name.starts_with("entity-"), "{name}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
     // ---------- The horizon ----------
 
-    /// A plan restricted to 3.. at boundary 4, staged at 5 and finished on an
-    /// archive holding blocks from `keep_from` on.
-    fn finish_on_a_prune(
+    #[derive(Clone, Copy)]
+    struct PruneCase {
         shape: Shape,
-        keep_from: impl Fn(&Chain, u64) -> u64,
+        boundary: u64,
+        first_window: Option<u64>,
+        predecessor: Option<u64>,
+        before_staging: bool,
+        on_fjall: bool,
+    }
+
+    impl PruneCase {
+        /// A plan restricted to 3.. at `boundary`, following nothing, staged on
+        /// the unpruned in-memory archive.
+        fn at(shape: Shape, boundary: u64) -> Self {
+            Self {
+                shape,
+                boundary,
+                first_window: Some(3),
+                predecessor: None,
+                before_staging: false,
+                on_fjall: false,
+            }
+        }
+    }
+
+    /// A copy of `chain`'s blocks and logs, in the store a publisher prunes.
+    fn on_fjall(chain: &Chain) -> dolos_fjall::archive::ArchiveStore {
+        let schema = dolos_cardano::model::build_log_schema();
+        let archive = dolos_fjall::archive::ArchiveStore::for_tempdir(schema.clone()).unwrap();
+        let writer = archive.start_writer().unwrap();
+
+        for (point, body) in blocks_from(chain, 0) {
+            writer.apply(&point, &Arc::new(body)).unwrap();
+        }
+
+        for (&ns, _) in schema.iter() {
+            for entry in chain.archive.iter_logs(ns, KeyRange::all()).unwrap() {
+                let (key, value) = entry.unwrap();
+
+                writer.write_log(ns, &key, &value).unwrap();
+            }
+        }
+
+        writer.commit().unwrap();
+
+        archive
+    }
+
+    /// `case`'s plan prepared, the chain advanced an epoch, a real
+    /// `prune_history` cutting at what `cut_at` picks given the horizon,
+    /// and the batch finished on what is left. What it publishes has to
+    /// equal the frozen export.
+    fn finish_on_a_prune(
+        case: PruneCase,
+        cut_at: impl Fn(&Chain, u64) -> u64,
     ) -> Result<(), Error> {
-        let (root, stage_root, frozen_root, finished_root) =
-            (tempdir(), tempdir(), tempdir(), tempdir());
+        let (root, stage_root, frozen_root, finished_root, seed_root) =
+            (tempdir(), tempdir(), tempdir(), tempdir(), tempdir());
         let store = store(root.path());
-        let mut chain = Chain::at(shape, 4);
+        let mut chain = Chain::at(case.shape, case.boundary);
         let delta = chain.boundary_delta.clone().unwrap();
-        let plan = chain.plan(&[]).restrict_epochs(Some(3), None);
+        let plan = chain.plan(&[]).restrict_epochs(case.first_window, None);
+
+        let seed = case.predecessor.map(|sequence| {
+            let seed_chain = Chain::at(case.shape, sequence);
+            let seed_plan = seed_chain
+                .plan(&[])
+                .restrict_epochs(case.first_window, None);
+
+            export::export(
+                &SteleDir::create(seed_root.path()).unwrap(),
+                &seed_plan,
+                &seed_chain.archive,
+                &seed_chain.state,
+                None,
+                &export::First,
+                &Observer::silent(),
+            )
+            .unwrap()
+        });
+
+        let previous = || -> Box<dyn export::Predecessor> {
+            match &seed {
+                Some(seed) => Box::new(Lending::following(seed, &plan)),
+                None => Box::new(export::First),
+            }
+        };
 
         let frozen = export::export(
             &SteleDir::create(frozen_root.path()).unwrap(),
@@ -7392,7 +7523,7 @@ mod boundary_preparation {
             &chain.archive,
             &chain.state,
             None,
-            &export::First,
+            previous().as_ref(),
             &Observer::silent(),
         )
         .unwrap();
@@ -7408,23 +7539,63 @@ mod boundary_preparation {
         .unwrap();
         let horizon = bundle.horizon().unwrap();
 
-        assert_eq!(horizon, first_block_from(&chain, chain.start(3)));
+        chain.advance_to(case.boundary + 1);
 
-        chain.advance_to(5);
+        let tip = chain.tip.as_ref().unwrap().slot();
+        let max_slots = tip - cut_at(&chain, horizon);
+        let stele = SteleDir::create(finished_root.path()).unwrap();
 
-        let staged = chain.stage(
-            stage_root.path(),
-            std::slice::from_ref(&bundle),
-            &export::First,
-        );
+        let staged = (!case.before_staging).then(|| {
+            chain.stage(
+                stage_root.path(),
+                std::slice::from_ref(&bundle),
+                previous().as_ref(),
+            )
+        });
 
-        let finished = finalize_on(
-            finished_root.path(),
-            &store,
-            &bundle,
-            &staged,
-            &pruned_archive(blocks_from(&chain, keep_from(&chain, horizon))),
-        )?;
+        let finished = if case.on_fjall {
+            let fjall = on_fjall(&chain);
+
+            assert!(fjall.prune_history(max_slots, None, None).unwrap());
+
+            prepare::finalize(
+                &stele,
+                &Finalizing {
+                    store: &store,
+                    bundle: &bundle,
+                    staged: &staged.unwrap(),
+                    producers: export::Producers::DEFAULT,
+                },
+                &fjall,
+                None,
+                previous().as_ref(),
+                &Observer::silent(),
+            )?
+        } else {
+            assert!(chain.archive.prune_history(max_slots, None, None).unwrap());
+
+            let staged = staged.unwrap_or_else(|| {
+                chain.stage(
+                    stage_root.path(),
+                    std::slice::from_ref(&bundle),
+                    previous().as_ref(),
+                )
+            });
+
+            prepare::finalize(
+                &stele,
+                &Finalizing {
+                    store: &store,
+                    bundle: &bundle,
+                    staged: &staged,
+                    producers: export::Producers::DEFAULT,
+                },
+                &chain.archive,
+                None,
+                previous().as_ref(),
+                &Observer::silent(),
+            )?
+        };
 
         assert_same_stele(
             (frozen_root.path(), &frozen),
@@ -7439,32 +7610,187 @@ mod boundary_preparation {
     /// contract says pruning may do.
     #[test]
     fn an_archive_pruned_exactly_to_the_horizon_finishes() {
-        finish_on_a_prune(Shape::Shelley, |_, horizon| horizon).unwrap();
+        finish_on_a_prune(PruneCase::at(Shape::Shelley, 4), |_, horizon| horizon).unwrap();
     }
 
     /// Where a block does sit on the epoch's first slot, a Byron boundary
     /// block, the same prune finishes.
     #[test]
     fn a_prune_to_a_block_on_the_first_slot_finishes() {
-        finish_on_a_prune(Shape::Byron, |_, horizon| horizon).unwrap();
+        finish_on_a_prune(PruneCase::at(Shape::Byron, 4), |_, horizon| horizon).unwrap();
     }
 
     /// One block more than the horizon needs changes nothing.
     #[test]
     fn a_prune_short_of_the_horizon_finishes() {
-        finish_on_a_prune(Shape::Shelley, |chain, _| chain.start(2) + 50).unwrap();
+        finish_on_a_prune(PruneCase::at(Shape::Shelley, 4), |chain, _| {
+            first_block_from(chain, chain.start(2))
+        })
+        .unwrap();
     }
 
-    /// Only the horizon's own block separates this from the case above it, and
-    /// its window would read a block short.
+    /// Only the horizon's own block separates this from the case above it. The
+    /// window keeps all its blocks, but that block is what shows its logs
+    /// stayed.
     #[test]
     fn losing_only_the_horizons_block_is_refused() {
-        let refused = finish_on_a_prune(Shape::Shelley, |_, horizon| horizon + 1);
+        let refused = finish_on_a_prune(PruneCase::at(Shape::Shelley, 4), |_, horizon| horizon + 1);
 
         assert!(matches!(
             preparation_refusal(refused),
             Refusal::HorizonLost { sequence: 4, .. }
         ));
+    }
+
+    /// At boundary 5 window 3 sits below `capture_from`, so its logs are read
+    /// from the archive, where they key at the window's first slot, before
+    /// its first block. A prune to the horizon has to leave them.
+    #[test]
+    fn a_prune_to_the_horizon_keeps_the_logs_read_from_the_archive() {
+        finish_on_a_prune(PruneCase::at(Shape::Shelley, 5), |_, horizon| horizon).unwrap();
+    }
+
+    #[test]
+    fn a_prune_to_the_horizon_before_staging_keeps_those_logs() {
+        finish_on_a_prune(
+            PruneCase {
+                before_staging: true,
+                ..PruneCase::at(Shape::Shelley, 5)
+            },
+            |_, horizon| horizon,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_fjall_prune_to_the_horizon_keeps_those_logs() {
+        finish_on_a_prune(
+            PruneCase {
+                on_fjall: true,
+                ..PruneCase::at(Shape::Shelley, 5)
+            },
+            |_, horizon| horizon,
+        )
+        .unwrap();
+    }
+
+    /// A predecessor one boundary back has not settled window 3's account rows,
+    /// so that layer still comes from the archive.
+    #[test]
+    fn a_prune_to_the_horizon_keeps_a_window_settling_under_its_predecessor() {
+        finish_on_a_prune(
+            PruneCase {
+                predecessor: Some(4),
+                ..PruneCase::at(Shape::Shelley, 5)
+            },
+            |_, horizon| horizon,
+        )
+        .unwrap();
+    }
+
+    /// Every layer of window 2 comes from the predecessor.
+    #[test]
+    fn a_prune_to_the_horizon_finishes_on_a_window_its_predecessor_carries() {
+        finish_on_a_prune(
+            PruneCase {
+                first_window: Some(2),
+                predecessor: Some(4),
+                ..PruneCase::at(Shape::Shelley, 5)
+            },
+            |_, horizon| horizon,
+        )
+        .unwrap();
+    }
+
+    /// A whole plan's horizon is the chain's first block, and a prune takes
+    /// that block whenever it takes anything: to the horizon it does
+    /// nothing, though the logs of the first window key before that block.
+    #[test]
+    fn a_whole_plan_pruned_to_its_horizon_keeps_everything() {
+        finish_on_a_prune(
+            PruneCase {
+                first_window: None,
+                ..PruneCase::at(Shape::Shelley, 5)
+            },
+            |_, horizon| horizon,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_whole_plan_pruned_one_slot_past_its_horizon_is_refused() {
+        let refused = finish_on_a_prune(
+            PruneCase {
+                first_window: None,
+                ..PruneCase::at(Shape::Shelley, 5)
+            },
+            |_, horizon| horizon + 1,
+        );
+
+        assert!(matches!(
+            preparation_refusal(refused),
+            Refusal::HorizonLost { sequence: 5, .. }
+        ));
+    }
+
+    /// The cut that keeps every block of the window and loses its logs.
+    #[test]
+    fn a_cut_at_the_windows_first_block_is_refused() {
+        for on_fjall in [false, true] {
+            let refused = finish_on_a_prune(
+                PruneCase {
+                    on_fjall,
+                    ..PruneCase::at(Shape::Shelley, 5)
+                },
+                |chain, _| first_block_from(chain, chain.start(3)),
+            );
+
+            assert!(
+                matches!(
+                    preparation_refusal(refused),
+                    Refusal::HorizonLost { sequence: 5, .. }
+                ),
+                "on_fjall {on_fjall}"
+            );
+        }
+    }
+
+    /// The contract's price: this cut loses nothing, but with the horizon's
+    /// block gone nothing can tell it from the one above.
+    #[test]
+    fn a_cut_at_the_windows_first_slot_is_refused() {
+        let refused =
+            finish_on_a_prune(PruneCase::at(Shape::Shelley, 5), |chain, _| chain.start(3));
+
+        assert!(matches!(
+            preparation_refusal(refused),
+            Refusal::HorizonLost { sequence: 5, .. }
+        ));
+    }
+
+    #[test]
+    fn the_horizon_is_the_last_block_at_or_before_the_windows_first_slot() {
+        for (shape, on_first_slot) in [(Shape::Shelley, false), (Shape::Byron, true)] {
+            let root = tempdir();
+            let store = store(root.path());
+            let chain = Chain::at(shape, 5);
+            let delta = chain.boundary_delta.clone().unwrap();
+            let plan = chain.plan(&[]).restrict_epochs(Some(3), None);
+
+            let bundle = prepare::prepare(
+                &store,
+                &plan,
+                &chain.archive,
+                &chain.state,
+                &plain_request(&chain, &delta),
+                &Observer::silent(),
+            )
+            .unwrap();
+            let horizon = bundle.horizon().unwrap();
+
+            assert_eq!(horizon, last_block_to(&chain, chain.start(3)), "{shape:?}");
+            assert_eq!(horizon == chain.start(3), on_first_slot, "{shape:?}");
+        }
     }
 
     /// A chain's second block is no chain start once its first is gone.
@@ -7498,7 +7824,7 @@ mod boundary_preparation {
         ));
     }
 
-    /// The same archive must not be `HorizonLost` at staging.
+    /// The same archive has to stage, not merely avoid `HorizonLost`.
     #[test]
     fn a_batch_stages_on_an_archive_pruned_exactly_to_the_horizon() {
         let (root, stage_root) = (tempdir(), tempdir());
@@ -7520,7 +7846,7 @@ mod boundary_preparation {
 
         chain.advance_to(5);
 
-        let result = prepare::stage_batch(
+        prepare::stage_batch(
             stage_root.path(),
             &pruned_archive(blocks_from(&chain, horizon)),
             &chain.state,
@@ -7528,12 +7854,8 @@ mod boundary_preparation {
             &export::First,
             Budget::new(u64::MAX),
             &Observer::silent(),
-        );
-
-        assert!(
-            !matches!(result, Err(Error::Preparation(Refusal::HorizonLost { .. }))),
-            "{result:?}"
-        );
+        )
+        .unwrap();
     }
 
     // ---------- What a sweep finds ----------
@@ -7676,7 +7998,10 @@ mod boundary_preparation {
         fs::set_permissions(&base, fs::Permissions::from_mode(0o755)).unwrap();
 
         assert!(refusal.contains("Plan::with_scratch"), "{refusal}");
-        assert!(refusal.contains("cannot spool under"), "{refusal}");
+        assert!(
+            refusal.contains(&format!("cannot spool under {}:", base.display())),
+            "{refusal}"
+        );
     }
 
     /// A window the predecessor really adopted was left out of the batch and is
@@ -8378,6 +8703,21 @@ mod boundary_preparation {
         fn exit(&self, _: &tracing::span::Id) {}
     }
 
+    /// The `info` lines `run` writes on this thread.
+    fn logged_while(run: impl FnOnce()) -> Vec<String> {
+        // A callsite's interest is cached for the whole process. With one dispatcher
+        // alive, only the thread that reaches it first is asked, and a parallel test
+        // has no subscriber. With two alive, every registration asks them instead.
+        let _second = tracing::Dispatch::new(Logged::default());
+        let logged = Logged::default();
+
+        tracing::subscriber::with_default(logged.clone(), run);
+
+        let lines = logged.0.lock().unwrap().clone();
+
+        lines
+    }
+
     /// A console drops `Event::Records(0)`, so the log is where a wedged
     /// traversal can be told from a live one: a long traversal keeps saying
     /// how far it got.
@@ -8395,14 +8735,13 @@ mod boundary_preparation {
 
             chain.advance_to(3);
 
-            let logged = Logged::default();
             let padded = Padded {
                 inner: chain.archive.clone(),
                 traversal,
                 count: 1 << 20,
             };
 
-            tracing::subscriber::with_default(logged.clone(), || {
+            let lines = logged_while(|| {
                 prepare::stage_batch(
                     stage_root.path(),
                     &padded,
@@ -8415,7 +8754,6 @@ mod boundary_preparation {
                 .unwrap();
             });
 
-            let lines = logged.0.lock().unwrap();
             let running: Vec<&String> = lines
                 .iter()
                 .filter(|line| line.contains("traversal running"))
@@ -8426,6 +8764,47 @@ mod boundary_preparation {
                 running[0].contains(&format!("traversal={name:?}"))
                     && running[0].contains("records=1048576"),
                 "{name}: {running:?}"
+            );
+        }
+    }
+
+    /// The contract says such a lock stays and is logged, whichever way the
+    /// sweep finds out.
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_that_is_not_a_file_is_logged() {
+        let (scratch, outside) = (tempdir(), tempdir());
+        let target = outside.path().join("a file");
+
+        fs::write(&target, b"").unwrap();
+
+        let directory = scratch.path().join("dolos-staging-dir");
+        let fifo = scratch.path().join("dolos-staging-fifo");
+        let link = scratch.path().join("dolos-staging-link");
+
+        fs::create_dir_all(directory.join("lock")).unwrap();
+        fs::create_dir(&fifo).unwrap();
+        fs::create_dir(&link).unwrap();
+        std::os::unix::fs::symlink(&target, link.join("lock")).unwrap();
+
+        assert!(std::process::Command::new("mkfifo")
+            .arg(fifo.join("lock"))
+            .status()
+            .unwrap()
+            .success());
+
+        let chain = Chain::at(Shape::Shelley, 2);
+        let lines = logged_while(|| {
+            export_under(&chain, scratch.path(), &Observer::silent());
+        });
+
+        for planted in [&directory, &fifo, &link] {
+            let name = planted.file_name().unwrap().to_string_lossy().into_owned();
+
+            assert!(planted.join("lock").symlink_metadata().is_ok(), "{name}");
+            assert!(
+                lines.iter().any(|line| line.contains(&name)),
+                "{name}: {lines:?}"
             );
         }
     }

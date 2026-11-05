@@ -299,8 +299,8 @@ pub fn stage<A: ArchiveStore>(
 ///
 /// A staging has no layer to announce, and its records are reported once, when
 /// their layer is finished. So what it emits is [`Event::Records`] with a delta
-/// of zero: before each traversal, and every [`BEAT_RECORDS`] records of one.
-/// Each traversal is also logged.
+/// of zero: before each traversal, and every [`BEAT_RECORDS`] records across
+/// them. Each traversal is also logged.
 pub fn stage_watched<A: ArchiveStore>(
     root: &Path,
     archive: &A,
@@ -691,7 +691,7 @@ fn sweep_killed_spools(base: &Path) {
                 let _ = fs::remove_dir(&path);
             }
             Err(e) => {
-                tracing::debug!(path = %path.display(), error = %e, "left a staging spool in place");
+                tracing::warn!(path = %path.display(), error = %e, "left a staging spool in place");
             }
             // No claim ever makes anything else, so this is no spool of ours.
             Ok(lock) if !lock.metadata().is_ok_and(|meta| meta.is_file()) => {
