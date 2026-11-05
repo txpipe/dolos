@@ -215,7 +215,7 @@ releases a bundle only after the sequence is committed.
 | `ForeignTail` | The delta is not the boundary block's. |
 | `HorizonLost` | The archive no longer reaches the bundle's horizon. |
 | `EmptyBatch` | `stage_batch` had no bundles. |
-| `Io` | The filesystem failed, reading a payload included. The bundle may be intact. |
+| `Io` | The machine failed, while reading a payload included. The bundle may be intact. |
 
 ## Batch of one
 

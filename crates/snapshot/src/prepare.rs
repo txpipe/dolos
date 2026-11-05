@@ -1031,8 +1031,8 @@ impl Prepared<'_> {
     }
 
     /// What a failed payload read means. Stelae has already told the payload's
-    /// faults from the machine's: damage is a `LayerMismatch`, and only a failed
-    /// read or a decoder that could not allocate stays `Io`.
+    /// faults from the machine's: damage is a `LayerMismatch`, and only a
+    /// failed read or a decoder that could not allocate stays `Io`.
     fn read_failure(&self, written: &WrittenLayer, error: stelae::Error) -> Error {
         let sequence = self.bundle.sequence();
 

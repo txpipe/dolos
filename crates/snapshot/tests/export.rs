@@ -7012,10 +7012,10 @@ mod boundary_preparation {
         assert!(matches!(refusal, Refusal::Io(_)), "{refusal:?}");
     }
 
-    /// A decoder's read error is damage, though it arrives as an IO error: it
-    /// carries no operating system code, and a retry would never cure it. The
-    /// one record spans many compressed blocks, so the first decode fine and
-    /// the error comes up from the middle of the stream.
+    /// Damage the decoder finds is `Corrupt`, at the first block, in the middle
+    /// of the stream or where it is cut short. The one record spans many
+    /// compressed blocks, so the first of them decode fine. This pins the line
+    /// the protocol crate draws, which `Refusal::Io` relies on.
     #[test]
     fn a_payload_the_decoder_rejects_is_corrupt() {
         let (root, stage_root) = (tempdir(), tempdir());
