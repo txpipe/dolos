@@ -1030,9 +1030,9 @@ impl Prepared<'_> {
         epoch < self.bundle.manifest.oldest_unsealed
     }
 
-    /// What a failed payload read means. Only an operating system error is a
-    /// fault of the filesystem: a decoder's read error carries none, and a
-    /// payload cut short or that decodes badly is damage.
+    /// What a failed payload read means. Stelae has already told the payload's
+    /// faults from the machine's: damage is a `LayerMismatch`, and only a failed
+    /// read or a decoder that could not allocate stays `Io`.
     fn read_failure(&self, written: &WrittenLayer, error: stelae::Error) -> Error {
         let sequence = self.bundle.sequence();
 
@@ -1043,7 +1043,7 @@ impl Prepared<'_> {
                 blob: written.digests.blob_digest.to_string(),
             }
             .into(),
-            stelae::Error::Io(e) if e.raw_os_error().is_some() => Refusal::Io(e).into(),
+            stelae::Error::Io(e) => Refusal::Io(e).into(),
             other => corrupt(sequence, other),
         }
     }
