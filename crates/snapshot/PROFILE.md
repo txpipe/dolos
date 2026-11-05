@@ -290,7 +290,7 @@ EWRAP closing `e` therefore also writes rows at `epoch_start(e - 1)`: the full `
 
 #### Only the boundary cut is published
 
-**A stele captures the state immediately after the first block of its sequence epoch, and no other state.** The cut above is not one choice among several a publisher may make: every path that builds layers — directory and registry publication, a registry dry run, `stelae-publisher digest` and `verify --reproduce` — establishes it from the stores before a layer is written, and refuses otherwise. The check is `dolos_snapshot::boundary::check`, and the export itself runs it, so a library caller holding a hand-built `Plan` cannot reach the layers without it. There is no flag that skips it.
+**A stele captures the state immediately after the first block of its sequence epoch, and no other state.** The cut above is not one choice among several a publisher may make: every path that builds layers — directory and registry publication, a registry dry run, `stelae-publisher digest` and `verify --reproduce` — establishes it from the stores before a layer is written, and refuses otherwise. A batch does this when it prepares each boundary, and finalizes later on stores past it (`docs/contracts/export-preparation.md`). The check is `dolos_snapshot::boundary::check`, and the export itself runs it, so a library caller holding a hand-built `Plan` cannot reach the layers without it. There is no flag that skips it.
 
 The evidence is the stores' own, never configuration and never arithmetic on the cursor's slot — a node can be configured for one epoch and stand in another, and an epoch's first block rarely sits on its first slot:
 
@@ -312,7 +312,7 @@ An archive that cannot show step 3 is **insufficient evidence**, and is refused 
 
 **Epoch 0 is never published.** No boundary opens it, so a stele at sequence 0 would follow no transition; the first stele of any chain is `epoch-1`.
 
-**A node past the boundary cannot publish that epoch.** Its stores no longer hold the boundary state, and nothing reconstructs it. The refusal says so and points at the remedies: restore the `epoch-E` stele, or let the node run on to the next boundary and cut that one with `dolos sync catchup --follow --stop-epoch E+1`.
+**A node past the boundary cannot publish that epoch unless it prepared a bundle there.** Its stores no longer hold the boundary state, and nothing else reconstructs it. The refusal says so and points at the remedies: restore the `epoch-E` stele, or let the node run on to the next boundary and cut that one with `dolos sync catchup --follow --stop-epoch E+1`.
 
 **The stores must be still for the duration.** The check reads them once, before the walk; it does not freeze them, and no cursor check could make an export over stores something else is writing to consistent. Stillness comes from how the stores are opened: the storage backends lock their directories, so no second process — a daemon included — writes to stores a `stelae-publisher` command holds, and an in-process host reads through the headless replay API, whose snapshot is a borrow that no import can run beside.
 

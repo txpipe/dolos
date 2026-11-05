@@ -52,7 +52,7 @@ let bundle = session.snapshot().prepare_boundary(&store, &plan, &prepare::Reques
     store_contract, mutable_slots, tail,
 }, &observer)?;
 
-// Once, at the batch's frontier, with replay stopped:
+// Once, at the batch's frontier. Replay stays stopped until the last commit:
 let staged = source.stage_batch(&root, &bundles, &first_predecessor, budget, &observer)?;
 
 // In ascending sequence, each after the one before it committed:
@@ -129,13 +129,21 @@ The **manifest** (`BUNDLE_FORMAT`) holds:
   magic, sequence, cursor slot and hash, store contract, retained list, the plan's
   windows and `mutable_slots`;
 - its **owner**, the journal the host names when it opens the store;
+- its **capture id**: random, new on every capture, and kept by a bundle `prepare`
+  finds held. Staged runs name the captures they were staged for (see
+  [Restarting a batch](#on-disk-layout-and-lifecycle));
 - `capture_from` and `oldest_unsealed`;
-- its **horizon**: the start of the plan's oldest closed window, which pruning
-  must retain until the bundle is released. Staging and finalization both read
-  closed windows from the source archive, and a captured log window does not
-  change that: its blocks and index rows still come from there. `None` means the
-  plan covers no closed window, and then only the boundary block itself has to
-  stay, so that finalization can check the chain;
+- its **horizon**: the slot of the first block at or after the start of the plan's
+  oldest closed window. Pruning must retain that block and everything after it
+  until the bundle is released, and an archive that starts exactly there is enough.
+  A slot alone could not show that: an epoch's first slot usually holds no block.
+  Staging and finalization both read closed windows from the source archive, and a
+  captured log window does not change that: its blocks and index rows still come
+  from there. `None` means the plan covers no closed window, and then only the
+  boundary block itself has to stay, so that finalization can check the chain.
+  This bounds what a batch reads, not what a later `prepare` needs: that one still
+  takes a whole archive (`boundary::check`), so a host prunes only after the batch's
+  last `prepare`;
 - every **layer**: descriptor, `diffId`, blob digest and both sizes;
 - an xxh3-64 **checksum** over all of the above.
 
@@ -150,9 +158,9 @@ is required recovery data: nothing else holds that boundary.
 |---|---|
 | Nothing for this sequence | Capture. |
 | A complete bundle of the same identity, and the stores produce its layers | That bundle. Nothing is written. |
-| A complete bundle of the same identity, and the stores produce something else | `SourceMismatch` naming the layer; the marker stands. |
+| A complete bundle of the same identity, and the stores produce something else | `SourceMismatch` saying what differs: the first differing layer, the layer count, or how far the boundary sealed; the marker stands. |
 | A complete bundle of another identity | `SourceMismatch` naming what differs; the marker stands. |
-| A bundle of another build | `ForeignBuild`; the marker stands. |
+| A bundle of another build's records (profile, profile version or media type version) | `ForeignBuild`; the marker stands. |
 | A damaged or foreign bundle | Refused. `Store::release` is the explicit recovery from damage. |
 
 **Why a held bundle is walked.** Equal identity does not prove equal stores:
@@ -166,7 +174,11 @@ marker and advancing replay.
 **Rebuilding stores.** That walk needs stores standing at the boundary. Nothing
 can compare a bundle with stores rebuilt *past* it, and finalization would publish
 the old capture beside the new archive. A host that rebuilds its stores releases
-every unfinished bundle first.
+every unfinished bundle first, and deletes any staging root of that batch, whose
+runs came from the old archive. Should it forget the root, the boundaries it
+captures again are refused there (`staging::Refusal::SourceMismatch`). A host that
+keeps its bundles through a rebuild gets no refusal: the bundles and their root
+still agree with each other, and nothing can see the stores moved.
 
 **Loading** checks the checksum, the format, the sequence, the owner, that the
 bundle was captured as the records this build publishes (profile, profile version
@@ -210,10 +222,10 @@ releases a bundle only after the sequence is committed.
 | `ForeignOwner` | The bundle belongs to another journal. |
 | `SourceMismatch` | The bundle, stores or runs come from different sources. |
 | `ForeignBuild` | The bundle holds another build's records. `Store::release` drops it; it takes stores at that boundary to capture it again. |
-| `MissingArtifact` | A payload is gone or not its recorded size, at loading or when read. |
-| `Corrupt` | A manifest or payload failed its checks. Only this one calls for `Store::release`. |
+| `MissingArtifact` | A payload is gone, at loading or when read, or not its recorded size at loading. One cut short after loading reads as `Corrupt`. |
+| `Corrupt` | A manifest or payload failed its checks. `Store::release` is the recovery, as it is for `MissingArtifact` and, at `prepare`, `SourceMismatch`. `Io` never calls for it. A bundle of another `BUNDLE_FORMAT` is `Corrupt` too; releasing it drops what the build that wrote it could read. |
 | `ForeignTail` | The delta is not the boundary block's. |
-| `HorizonLost` | The archive no longer reaches the bundle's horizon. |
+| `HorizonLost` | The archive's first block is past the bundle's horizon. |
 | `EmptyBatch` | `stage_batch` had no bundles. |
 | `Io` | The machine failed, while reading a payload included. The bundle may be intact. |
 
@@ -229,21 +241,32 @@ ends at the cursor, so that window is exact.
 **Every export spools,** digests and reproductions included: they keep nothing,
 but their runs need somewhere to be while the walk lasts. Runs go under
 `Plan::scratch` (`Plan::with_scratch`), or the system temporary directory when
-unset, which logs a warning. Where the space cannot be used the refusal is
-`staging::Refusal::Scratch`, naming the place.
+unset, which logs a warning. Where the spool cannot be claimed the refusal is
+`staging::Refusal::Scratch`, naming the place. Running out of space later is
+`staging::Refusal::Io`.
 
 **The spool.** Each export claims a directory `dolos-staging-*` under that scratch
 and holds a lock on a file inside it, and removes it when it finishes. A killed
 export cannot, so the next one sweeps first: it removes every such directory whose
 lock nobody holds. The system releases a lock however its holder died, so a live
 peer's spool is never taken, and a digest and a publish can share a scratch
-directory. A filesystem that cannot lock gets no sweep.
+directory. A filesystem that cannot lock gets no sweep. A sweep never waits on what
+it finds, because anyone able to write to the scratch can plant something: a lock
+that is not a plain file is left in place, and logged.
 
 **Progress.** Staging has no layer to announce and its records are reported once,
 when their layer is finished. So it tells the observer it is alive with
-`Event::Records(0)`, before each traversal and every million records of one, and
-it logs each traversal and its final `Report` at `info`. An observer printing only
-`LayerStarted` sees nothing from it until the layers begin.
+`Event::Records(0)`, before each traversal and every million records of one. At
+`info` it logs each traversal, the running count at each of those million-record
+beats, and its final `Report`. An observer printing only `LayerStarted` sees nothing
+from it until the layers begin, so the log is where an operator tells a live
+traversal from a wedged one.
+
+A long gap is not by itself a wedge. The store scans a whole dimension and filters
+by slot, so a narrow window of a long chain yields records slowly: staging one
+mainnet epoch (`solution/dolos/kb/export-index-staging`) took 410 s over 2.4 million
+records, about one beat every three minutes. Judge a silence against the gaps before
+it. A killed traversal loses its spool.
 
 This replaces the banded traversal, so hosts migrate:
 
@@ -396,13 +419,14 @@ replaces them. Families completed before the failure keep their markers.
 The **identity** binds a family's runs to their source and coverage. It holds
 the spool format (`SPOOL_FORMAT`), the profile name and version, the layer
 kind's media type (which carries the codec version), the network magic, the
-frontier's slot and hash, the store contract, and every staged window with its
-slots and seal boundary. When a staging finds a marker under `root`:
+frontier's slot and hash, the store contract, every staged window with its
+slots and seal boundary, and, for a batch, the captures it was staged for. None of
+it fingerprints the archive's rows, so stores rebuilt to the same frontier look the
+same: what changes is the captures. When a staging finds a marker under `root`:
 
 - the same identity, with every run at its marked size: the family is reused
   and nothing is traversed;
-- a different identity: the staging is refused (`SourceMismatch`); runs are
-  never reused across sources or coverage;
+- a different identity: the staging is refused (`SourceMismatch`);
 - the same identity with a run missing or off its marked size: the marker is
   removed and the family is staged again;
 - a marker that does not parse, or names a different number of runs than
@@ -413,12 +437,16 @@ At the end it checks the record count, the byte count and the checksum, before
 the sink is finished. A damaged run therefore produces no descriptor.
 
 **Restarting a batch.** `stage_batch` wants fewer windows as layers are recorded
-and steles commit. Where a family's marker is of the same source and holds every
-window it wants, the runs are reused whole; the extra windows go unused, because a
-publication asks its predecessor first. Where the marker leaves out a wanted window
+and steles commit, and has fewer bundles as they are released. Where a family's
+marker is of the same source, holds every window it wants and was staged for every
+one of its bundles, the runs are reused whole; the extra windows go unused, because
+a publication asks its predecessor first. Where the marker leaves out a wanted window
 the refusal is `Uncovered`, so a host can tell a batch that wants more from runs of
-another chain, which stay `SourceMismatch`. Delete the root and stage again.
-`staging::stage` itself takes exact coverage, as above.
+another source, frontier or capture, which stay `SourceMismatch`. A boundary captured
+again, under a rebuild for example, is another capture even where it holds the same
+layers, because the rows a rebuild moved may be in closed windows no bundle holds. A
+bundle new to the batch is treated the same. Either way, delete the root and stage
+again. `staging::stage` itself takes exact coverage, as above.
 
 Runs are reproducible from the archive, so they are disposable. Their owner
 deletes `root` once the last publication that needs them has committed.
@@ -436,7 +464,7 @@ deletes `root` once the last publication that needs them has committed.
 | `NotStaged` | A layer was asked for a window that was not staged. |
 | `NotClosedAt` | A window that is not closed in that publication: its own tail, or later. |
 | `PastFrontier` | A publication past the frontier's epoch. |
-| `SourceMismatch` | `root` holds runs of another identity. |
+| `SourceMismatch` | `root` holds runs of another identity, or runs not staged for one of a batch's captures. Delete `root` once sure it is this batch's. |
 | `Uncovered` | `stage_batch` wants a window the runs under `root` leave out. Runs are disposable: delete `root`. |
 | `Scratch` | An export could not claim a spool under its scratch directory. |
 | `ScratchExceeded` | The scratch limit was crossed. |
