@@ -32,7 +32,8 @@
 
 use dolos_cardano::indexes::archive_dimensions;
 use dolos_core::{
-    BlockSlot, ExactKind, ExactRecord, IndexRecord, KeyHash, TagDimension, TagRecord,
+    key_hash, ArchiveIndexDelta, BlockSlot, ExactKind, ExactRecord, IndexRecord, KeyHash,
+    TagDimension, TagRecord,
 };
 use stelae::frame::{self, CanonicalCbor};
 
@@ -138,6 +139,47 @@ pub fn decode(bytes: &[u8]) -> Result<IndexRecord, Error> {
     close(INDEXES, &decoder, bytes)?;
 
     Ok(record)
+}
+
+/// The records one block's delta writes, in layer order: what a traversal of
+/// a store holding that block alone yields.
+///
+/// This hashes tag keys, through [`key_hash`], because a delta holds them
+/// logical. A store keeps one row per key, so repeats collapse.
+pub fn records_of(delta: &ArchiveIndexDelta) -> Result<Vec<IndexRecord>, Error> {
+    let mut tags: Vec<TagRecord> = delta
+        .tags
+        .iter()
+        .map(|tag| TagRecord::new(tag.dimension, key_hash(&tag.key), delta.slot))
+        .collect();
+
+    tags.sort();
+    tags.dedup();
+
+    let number = delta.block_number.map(u64::to_be_bytes);
+    let hash = (ExactKind::BlockHash, delta.block_hash.as_slice());
+    let txs = delta
+        .tx_hashes
+        .iter()
+        .map(|tx| (ExactKind::TxHash, tx.as_slice()));
+    let number = number
+        .iter()
+        .map(|number| (ExactKind::BlockNumber, number.as_slice()));
+
+    let mut exact = std::iter::once(hash)
+        .chain(number)
+        .chain(txs)
+        .map(|(kind, key)| ExactRecord::new(kind, key, delta.slot))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    exact.sort_by(|a, b| (a.kind, a.key()).cmp(&(b.kind, b.key())));
+    exact.dedup_by(|a, b| (a.kind, a.key()) == (b.kind, b.key()));
+
+    Ok(tags
+        .into_iter()
+        .map(IndexRecord::from)
+        .chain(exact.into_iter().map(IndexRecord::from))
+        .collect())
 }
 
 /// Every tag record, strictly ascending; then every exact record, likewise.

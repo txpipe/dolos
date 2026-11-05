@@ -820,23 +820,17 @@ fn same_inscription_from_both_backends(at: Option<(u64, RetainedEpochs)>) {
 /// One backend, one seeding, three walks: strictly serial (one producer, no
 /// threads at all), the default pool, and a pool wider than the job list is
 /// deep. Each runs over a plan that cuts a retained dump — so the tee through
-/// `carry_again` is in the mix — and with the band narrowed to one epoch, so
-/// more than one band job actually queues on the band lane. Byte-identical
-/// inscriptions and blobs, or the pool moved something it promised only to
-/// reschedule.
+/// `carry_again` is in the mix. Byte-identical inscriptions and blobs, or the
+/// pool moved something it promised only to reschedule.
 #[test]
 fn a_pooled_production_is_byte_identical_to_the_serial_walk() {
     let domain: ToyDomain = harness();
     let retained = RetainedEpochs::new(vec![1]).unwrap();
 
     let pool_of = |producers: usize| {
-        plan_at_boundary(&domain, 1, retained.clone())
-            .with_band(export::IndexBand::new(
-                std::num::NonZeroUsize::new(1).unwrap(),
-            ))
-            .with_producers(export::Producers::new(
-                std::num::NonZeroUsize::new(producers).unwrap(),
-            ))
+        plan_at_boundary(&domain, 1, retained.clone()).with_producers(export::Producers::new(
+            std::num::NonZeroUsize::new(producers).unwrap(),
+        ))
     };
 
     let serial_root = tempfile::tempdir().unwrap();
@@ -2288,11 +2282,11 @@ fn a_silent_publish_writes_exactly_what_a_watched_one_does() {
 
 /// An index store that counts how many traversals were *constructed* over it.
 ///
-/// The count is the property under test and inspection is not: banding is a
-/// claim about how many times the store is walked, and a reader satisfying
-/// themselves by looking at the loop is exactly what stops being true the next
-/// time someone edits it. Every other method delegates, so an export sees the
-/// store it would have seen.
+/// The count is the property under test and inspection is not: one traversal
+/// per family is a claim about how many times the store is walked, and a reader
+/// satisfying themselves by looking at the loop is exactly what stops being
+/// true the next time someone edits it. Every other method delegates, so an
+/// export sees the store it would have seen.
 #[derive(Clone)]
 struct Counted<S> {
     inner: S,
@@ -2303,12 +2297,13 @@ struct Counted<S> {
     fault: Option<(Traversal, usize)>,
 }
 
-/// One of the three index traversals a [`Counted`] store counts.
+/// One of the store reads a [`Counted`] store can fault.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Traversal {
     Tags,
     Exacts,
     Entities,
+    Logs,
 }
 
 /// An iterator that ends in a read error after `after` records, when set.
@@ -2353,7 +2348,7 @@ impl<S: ArchiveStore> Counted<S> {
     }
 
     /// Traversals built over the store: tag runs and exact runs separately,
-    /// because a band that fixed one and not the other would still be O(N²).
+    /// because they are two separate scans of it.
     fn traversals(&self) -> (usize, usize) {
         (
             self.tags.load(Ordering::Relaxed),
@@ -2365,7 +2360,7 @@ impl<S: ArchiveStore> Counted<S> {
 impl<S: ArchiveStore> ArchiveStore for Counted<S> {
     type BlockIter<'a> = S::BlockIter<'a>;
     type Writer = S::Writer;
-    type LogIter = S::LogIter;
+    type LogIter = Faulting<S::LogIter>;
     type EntityValueIter = S::EntityValueIter;
     type SlotIter = S::SlotIter;
     type TagIter = Faulting<S::TagIter>;
@@ -2389,7 +2384,10 @@ impl<S: ArchiveStore> ArchiveStore for Counted<S> {
         ns: Namespace,
         range: dolos_core::KeyRange,
     ) -> Result<Self::LogIter, ArchiveError> {
-        self.inner.iter_logs(ns, range)
+        Ok(faulting(
+            self.inner.iter_logs(ns, range)?,
+            self.fault_after(Traversal::Logs),
+        ))
     }
 
     fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ArchiveError> {
@@ -2499,12 +2497,12 @@ impl<S: ArchiveStore> ArchiveStore for Counted<S> {
     }
 }
 
-/// Index records spread across the skeleton's three epochs, so a band that
+/// Index records spread across the skeleton's three epochs, so a staging that
 /// misrouted one would produce a layer that is short and a layer that is long.
 ///
 /// Two blocks per epoch, each carrying tags in every dimension and the three
-/// exact kinds a block produces. Nothing here has to be a real ledger: what the
-/// banded pass does with a record is decided by its slot alone.
+/// exact kinds a block produces. Nothing here has to be a real ledger: what
+/// staging does with a record is decided by its slot alone.
 fn index_across_the_skeleton() -> MemoryArchiveStore {
     let store = MemoryArchiveStore::new(dolos_cardano::model::build_log_schema());
     let writer = store.start_writer().unwrap();
@@ -2534,96 +2532,44 @@ fn index_across_the_skeleton() -> MemoryArchiveStore {
     store
 }
 
-/// Export the seeded skeleton at `band`, and report what it cost and what it
-/// produced.
-fn export_banded(band: usize) -> (usize, usize, usize, Vec<u8>) {
-    let temp = tempfile::tempdir().unwrap();
-    let stele = SteleDir::create(temp.path()).unwrap();
-
-    let state = skeleton_state();
-    let archive = Counted::new(with_skeleton_blocks(index_across_the_skeleton()));
-
-    let plan = Plan::new(
-        &skeleton_summary(),
-        Network::for_magic(dolos_snapshot::MAINNET_MAGIC),
-        skeleton_point(),
-        Default::default(),
-    )
-    .unwrap()
-    .with_band(export::IndexBand::new(band.try_into().unwrap()));
-
-    let watcher = Arc::new(Watcher::default());
-
-    let inscription = export::export(
-        &stele,
-        &plan,
-        &archive,
-        &state,
-        None,
-        &export::First,
-        &watcher.observer(),
-    )
-    .unwrap();
-
-    watcher.assert_well_formed(inscription.layers.len());
-
-    let (tags, exacts) = archive.traversals();
-
-    (
-        tags,
-        exacts,
-        watcher.peak_open(INDEXES),
-        inscription.canonicalize().unwrap(),
-    )
-}
-
-/// Done criterion 1: N epochs cost ⌈N/K⌉ index traversals, counted rather than
-/// inspected.
-///
-/// Both runs are counted — tags and exact records — because they are two
-/// separate scans of the store and banding one without the other would leave
-/// the publish O(N²) with half the constant.
-///
-/// The peak is what an operator's progress display shows and what bounds the
-/// memory: K layers of `indexes` open across one walk, never more.
+/// One export of N epochs stages them from one tag and one exact traversal,
+/// counted rather than inspected, and a window the plan restricts away stays
+/// out of the document.
 #[test]
-fn a_band_costs_one_index_traversal_however_many_epochs_it_covers() {
-    for (band, traversals) in [(1usize, 3usize), (2, 2), (3, 1), (4, 1)] {
-        let (tags, exacts, peak, _) = export_banded(band);
+fn an_export_costs_one_index_traversal_however_many_epochs_it_covers() {
+    for (first, windows) in [(None, 3usize), (Some(2), 1)] {
+        let temp = tempfile::tempdir().unwrap();
+        let stele = SteleDir::create(temp.path()).unwrap();
 
-        assert_eq!(
-            (tags, exacts),
-            (traversals, traversals),
-            "a band of {band} over three epochs",
-        );
+        let state = skeleton_state();
+        let archive = Counted::new(with_skeleton_blocks(index_across_the_skeleton()));
 
-        assert_eq!(
-            peak,
-            band.min(3),
-            "a band of {band} held the wrong number of index layers open",
-        );
-    }
-}
+        let plan = Plan::new(
+            &skeleton_summary(),
+            Network::for_magic(dolos_snapshot::MAINNET_MAGIC),
+            skeleton_point(),
+            Default::default(),
+        )
+        .unwrap()
+        .restrict_epochs(first, None);
 
-/// Done criterion 3, from the side a golden cannot reach: the golden pins one
-/// band's bytes, and this pins that *every* band produces those bytes.
-///
-/// Banding reorders when records are read, never which layer they land in or in
-/// what order — so the canonical document is a function of the stores and not
-/// of the band. Compared as bytes rather than as digests, so a divergence says
-/// where.
-#[test]
-fn banding_moves_no_bytes() {
-    let (.., unbanded) = export_banded(1);
+        let watcher = Arc::new(Watcher::default());
 
-    for band in [2usize, 3, 4, 64] {
-        let (.., banded) = export_banded(band);
+        let inscription = export::export(
+            &stele,
+            &plan,
+            &archive,
+            &state,
+            None,
+            &export::First,
+            &watcher.observer(),
+        )
+        .unwrap();
 
-        assert_eq!(
-            String::from_utf8(banded).unwrap(),
-            String::from_utf8(unbanded.clone()).unwrap(),
-            "a band of {band} produced a different document",
-        );
+        watcher.assert_well_formed(inscription.layers.len());
+
+        assert_eq!(archive.traversals(), (1, 1), "{windows} windows");
+        assert_eq!(inscription.layers_of_kind(INDEXES).count(), windows);
     }
 }
 
@@ -2754,12 +2700,12 @@ fn entity_layers_exist_only_where_an_entity_was_first_seen() {
     );
 }
 
-/// Export the entity skeleton at `band` through `previous`, storing nothing,
-/// and report the entity index traversals it took and the document.
-fn export_entities(band: usize, previous: &dyn export::Predecessor) -> (usize, Vec<u8>) {
+/// Export the entity skeleton through `previous`, storing nothing, and report
+/// the entity index traversals it took and the document.
+fn export_entities(previous: &dyn export::Predecessor) -> (usize, Vec<u8>) {
     let archive = Counted::new(with_skeleton_blocks(entities_across_the_skeleton()));
     let state = skeleton_state();
-    let plan = skeleton_plan().with_band(export::IndexBand::new(band.try_into().unwrap()));
+    let plan = skeleton_plan();
 
     let watcher = Arc::new(Watcher::default());
 
@@ -2782,39 +2728,19 @@ fn export_entities(band: usize, previous: &dyn export::Predecessor) -> (usize, V
     )
 }
 
-/// An entity layer is a scan of its kind's index, so the export takes one
-/// presence scan for every window and kind, then one scan per kind per band
-/// that has a layer to build — never one per window.
+/// An entity layer is a scan of the index, so one traversal serves every window
+/// and kind, and it is also what says which windows hold an entry.
 #[test]
-fn an_entity_band_costs_one_traversal_however_many_epochs_it_covers() {
-    // Band 1: assets build windows 0 and 2 in two bands, the script window 1
-    // in one. Band 2: assets' windows 0 and 2 fall in two bands. Band 3 and
-    // up: one band per kind.
-    for (band, traversals) in [(1usize, 1 + 3), (2, 1 + 3), (3, 1 + 2), (64, 1 + 2)] {
-        let (counted, _) = export_entities(band, &export::First);
+fn every_entity_kind_shares_one_traversal_with_no_presence_scan() {
+    let (traversals, _) = export_entities(&export::First);
 
-        assert_eq!(counted, traversals, "a band of {band} over three epochs");
-    }
-}
-
-#[test]
-fn entity_banding_moves_no_bytes() {
-    let (_, unbanded) = export_entities(1, &export::First);
-
-    for band in [2usize, 3, 64] {
-        let (_, banded) = export_entities(band, &export::First);
-
-        assert_eq!(
-            String::from_utf8(banded).unwrap(),
-            String::from_utf8(unbanded.clone()).unwrap(),
-            "a band of {band} produced a different document",
-        );
-    }
+    assert_eq!(traversals, 1);
 }
 
 /// A closed window's entity layer is inherited per `(kind, scope)` like every
 /// immutable epoch layer: a publish whose predecessor carries every entity
-/// layer builds none and scans the index once, for the count.
+/// layer builds none. It still scans the index once, because no predecessor can
+/// say a window without a layer holds nothing.
 #[test]
 fn an_entity_layer_a_predecessor_carries_is_inherited_and_not_rebuilt() {
     let temp = tempfile::tempdir().unwrap();
@@ -2836,9 +2762,9 @@ fn an_entity_layer_a_predecessor_carries_is_inherited_and_not_rebuilt() {
     .unwrap();
 
     let lending = Lending::resuming(&first);
-    let (traversals, document) = export_entities(64, &lending);
+    let (traversals, document) = export_entities(&lending);
 
-    assert_eq!(traversals, 1, "an inherited entity layer was rebuilt");
+    assert_eq!(traversals, 1);
     assert_eq!(
         String::from_utf8(document).unwrap(),
         String::from_utf8(first.canonicalize().unwrap()).unwrap()
@@ -3057,6 +2983,7 @@ mod index_staging {
                 .into_iter()
                 .map(|(family, epochs)| (family, epochs.into_iter().collect::<BTreeSet<_>>()))
                 .collect(),
+            live: false,
         }
     }
 
@@ -4078,6 +4005,4933 @@ mod index_staging {
                 "{peak} sinks open with {workers} workers"
             );
             assert_eq!(sinks.live.load(Ordering::SeqCst), 0);
+        }
+    }
+}
+
+/// The durable capture of a boundary and its later finalization.
+mod boundary_preparation {
+    use std::{collections::BTreeSet, fs, path::Path};
+
+    use dolos_cardano::{
+        model::{AccountEpochLog, FirstScriptChunk, PoolEpochLog, PoolState},
+        periods::newly_sealable,
+    };
+    use dolos_core::{ArchiveIndexDelta, Tag};
+    use dolos_snapshot::{
+        prepare::{self, Bundle, Finalizing, IndexTail, Refusal, Request, Store},
+        staging::{self, Budget, Family, Staged},
+        Error, MAINNET_MAGIC,
+    };
+    use dolos_testing::blocks::{byron_ebb_slot, make_byron_block, make_byron_ebb};
+    use pallas::crypto::hash::Hash;
+    use stelae::inscription::Inscription;
+
+    use super::*;
+
+    const CONTRACT: &str = dolos_core::compat::SUPPORTED_CONTRACTS[0];
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Shape {
+        /// Hundred-slot epochs that seal at the second boundary after them.
+        Shelley,
+        /// Epochs opened by a boundary block whose slot the first main block
+        /// shares, sealing at the fourth boundary after them.
+        Byron,
+    }
+
+    /// A synthetic chain written the way a ledger writes its stores: a boundary
+    /// closes and settles earlier windows, seals what it can, then commits the
+    /// epoch's first block. Deterministic, so a second chain stopped at P is
+    /// the store frozen at P.
+    struct Chain {
+        shape: Shape,
+        era: EraState,
+        summary: ChainSummary,
+        mutable: u64,
+        archive: Counted<MemoryArchiveStore>,
+        state: MemoryStateStore,
+        tip: Option<ChainPoint>,
+        number: u64,
+        epoch: u64,
+        boundary_delta: Option<ArchiveIndexDelta>,
+    }
+
+    impl Chain {
+        fn new(shape: Shape) -> Self {
+            let epoch_length = match shape {
+                Shape::Shelley => 100,
+                Shape::Byron => dolos_testing::blocks::BYRON_EPOCH_LENGTH,
+            };
+
+            let era = EraState {
+                epoch_length,
+                ..skeleton_era()
+            };
+
+            let mut summary = ChainSummary::default();
+            summary.append_era(6, era.clone());
+
+            let mutable = match shape {
+                Shape::Shelley => 50,
+                Shape::Byron => 3 * epoch_length,
+            };
+
+            let mut chain = Self {
+                shape,
+                era,
+                summary,
+                mutable,
+                archive: Counted::new(MemoryArchiveStore::new(
+                    dolos_cardano::model::build_log_schema(),
+                )),
+                state: MemoryStateStore::new(),
+                tip: None,
+                number: 0,
+                epoch: 0,
+                boundary_delta: None,
+            };
+
+            chain.write_state(0);
+            chain.open_epoch(0);
+
+            chain
+        }
+
+        fn at(shape: Shape, epoch: u64) -> Self {
+            let mut chain = Self::new(shape);
+            chain.advance_to(epoch);
+            chain
+        }
+
+        fn start(&self, epoch: u64) -> u64 {
+            self.summary.epoch_start(epoch)
+        }
+
+        fn advance_to(&mut self, epoch: u64) {
+            while self.epoch < epoch {
+                self.finish_epoch();
+                self.epoch += 1;
+                self.open_epoch(self.epoch);
+            }
+        }
+
+        /// The state at this point: rows that change every time it moves, so a
+        /// later tip cannot pass for an earlier one.
+        fn write_state(&self, marker: u8) {
+            let writer = self.state.start_writer().unwrap();
+
+            writer
+                .write_entity_typed::<EraState>(&EraKey::from(6), &self.era)
+                .unwrap();
+
+            for (ns, byte) in [(PoolState::NS, 1), (AccountState::NS, 0x40)] {
+                let key = common::state_key(ns, byte);
+
+                writer
+                    .write_entity(
+                        ns,
+                        &EntityKey::from_raw(&key),
+                        &vec![0x82, marker, self.epoch as u8],
+                    )
+                    .unwrap();
+            }
+
+            if let Some(tip) = &self.tip {
+                writer.set_cursor(tip.clone()).unwrap();
+            }
+
+            writer.commit().unwrap();
+        }
+
+        fn log(
+            &self,
+            writer: &impl dolos_core::ArchiveWriter,
+            ns: Namespace,
+            epoch: u64,
+            byte: u8,
+            value: u8,
+        ) {
+            writer
+                .write_log(
+                    ns,
+                    &common::log_key(ns, self.start(epoch), byte),
+                    &vec![0x82, value, epoch as u8],
+                )
+                .unwrap();
+        }
+
+        /// One block's body and its index delta, its tags out of order and
+        /// repeated as a block's are.
+        fn commit_block(
+            &mut self,
+            point: ChainPoint,
+            body: dolos_core::RawBlock,
+            tagged: bool,
+            number: Option<u64>,
+        ) -> ArchiveIndexDelta {
+            let slot = point.slot();
+            let hash = point.hash().unwrap();
+
+            let tags = archive_dimensions::ALL
+                .into_iter()
+                .rev()
+                .flat_map(|dimension| {
+                    let key = |byte: u8| [[byte; 20].as_slice(), &slot.to_be_bytes()].concat();
+
+                    [
+                        Tag::new(dimension, key(2)),
+                        Tag::new(dimension, key(1)),
+                        Tag::new(dimension, key(2)),
+                    ]
+                })
+                .filter(|_| tagged)
+                .collect();
+
+            let delta = ArchiveIndexDelta {
+                slot,
+                block_hash: hash.to_vec(),
+                block_number: number,
+                tx_hashes: match tagged {
+                    true => [0xee, 0xdd]
+                        .map(|byte| [[byte; 24].as_slice(), &slot.to_be_bytes()].concat())
+                        .to_vec(),
+                    false => vec![],
+                },
+                tags,
+            };
+
+            let writer = self.archive.start_writer().unwrap();
+            writer.apply(&point, &body).unwrap();
+            writer.apply_index(std::slice::from_ref(&delta)).unwrap();
+            writer.commit().unwrap();
+
+            self.tip = Some(point);
+            self.number += 1;
+
+            delta
+        }
+
+        fn previous_hash(&self) -> Hash<32> {
+            self.tip
+                .as_ref()
+                .and_then(ChainPoint::hash)
+                .unwrap_or_else(|| Hash::new([0; 32]))
+        }
+
+        /// The boundary work into `epoch` and the epoch's first block.
+        fn open_epoch(&mut self, epoch: u64) {
+            let writer = self.archive.start_writer().unwrap();
+
+            if epoch > 0 {
+                // Ewrap closes the epoch before and settles the account rows
+                // estart wrote for the one before that.
+                self.log(&writer, EpochState::NS, epoch - 1, 1, 10);
+
+                if epoch >= 2 {
+                    for byte in [1, 2] {
+                        self.log(&writer, AccountEpochLog::NS, epoch - 2, byte, 22);
+                    }
+                }
+            }
+
+            // Estart's stake leg for the epoch it opens.
+            for byte in [1, 2] {
+                self.log(&writer, AccountEpochLog::NS, epoch, byte, 21);
+            }
+
+            for sealed in newly_sealable(&self.summary, self.mutable, epoch) {
+                self.log(&writer, FirstScriptChunk::NS, sealed, 1, 11);
+
+                if sealed.is_multiple_of(2) {
+                    for (_, kind) in ENTITY_KINDS {
+                        for (byte, offset) in [(0x30, 7), (0x10, 9)] {
+                            let id = vec![byte + sealed as u8; kind.key_len()];
+
+                            writer
+                                .write_entity(kind, &id, self.start(sealed) + offset)
+                                .unwrap();
+                        }
+                    }
+                }
+            }
+
+            writer.commit().unwrap();
+
+            let number = self.number;
+            let previous = self.previous_hash();
+
+            let (delta, marker) = match self.shape {
+                Shape::Shelley => {
+                    let (point, body) = make_conway_block_with_prev(
+                        self.start(epoch) + 10,
+                        self.tip.as_ref().and_then(ChainPoint::hash),
+                        number,
+                    );
+
+                    (self.commit_block(point, body, true, Some(number)), 1)
+                }
+                Shape::Byron => {
+                    let (point, body) = make_byron_ebb(epoch, previous);
+
+                    assert_eq!(point.slot(), byron_ebb_slot(epoch));
+
+                    (self.commit_block(point, body, false, None), 2)
+                }
+            };
+
+            self.boundary_delta = Some(delta);
+            self.write_state(marker);
+        }
+
+        /// What the rest of the epoch writes after its first block, all of it
+        /// inside windows a boundary here has already published.
+        fn finish_epoch(&mut self) {
+            let epoch = self.epoch;
+            let start = self.start(epoch);
+
+            // The reward update writes the epoch before, after its boundary.
+            let writer = self.archive.start_writer().unwrap();
+            self.log(&writer, PoolEpochLog::NS, epoch, 1, 12);
+
+            if epoch > 0 {
+                self.log(&writer, PoolEpochLog::NS, epoch - 1, 2, 13);
+            }
+
+            writer.commit().unwrap();
+
+            let number = self.number;
+            let previous = self.previous_hash();
+
+            match self.shape {
+                Shape::Shelley => {
+                    let (point, body) =
+                        make_conway_block_with_prev(start + 50, Some(previous), number);
+                    self.commit_block(point, body, true, Some(number));
+                }
+                Shape::Byron => {
+                    let (point, body) = make_byron_block(epoch, 0, number, previous);
+                    self.commit_block(point, body, true, Some(number));
+
+                    let number = self.number;
+                    let previous = self.previous_hash();
+                    let (point, body) = make_byron_block(epoch, 100, number, previous);
+                    self.commit_block(point, body, true, Some(number));
+                }
+            }
+
+            self.write_state(3);
+        }
+
+        fn plan(&self, retained: &[u64]) -> Plan {
+            Plan::new(
+                &self.summary,
+                Network::for_magic(MAINNET_MAGIC),
+                self.tip.clone().unwrap(),
+                RetainedEpochs::new(retained.to_vec()).unwrap(),
+            )
+            .unwrap()
+        }
+
+        fn prepare(&self, store: &Store, retained: &[u64]) -> Result<Bundle, Error> {
+            prepare::prepare(
+                store,
+                &self.plan(retained),
+                &self.archive,
+                &self.state,
+                &Request {
+                    store_contract: CONTRACT.to_owned(),
+                    mutable_slots: self.mutable,
+                    tail: IndexTail::Delta(self.boundary_delta.as_ref().unwrap()),
+                },
+                &Observer::silent(),
+            )
+        }
+
+        fn stage(
+            &self,
+            root: &Path,
+            bundles: &[Bundle],
+            previous: &dyn export::Predecessor,
+        ) -> Staged {
+            prepare::stage_batch(
+                root,
+                &self.archive,
+                &self.state,
+                bundles,
+                previous,
+                Budget::new(u64::MAX),
+                &Observer::silent(),
+            )
+            .unwrap()
+        }
+
+        /// The ordinary export of the stores as they stand.
+        fn export(
+            &self,
+            root: &Path,
+            retained: &[u64],
+            previous: &dyn export::Predecessor,
+        ) -> Inscription {
+            export::export(
+                &SteleDir::create(root).unwrap(),
+                &self.plan(retained),
+                &self.archive,
+                &self.state,
+                None,
+                previous,
+                &Observer::silent(),
+            )
+            .unwrap()
+        }
+
+        fn finalize(
+            &self,
+            root: &Path,
+            store: &Store,
+            bundle: &Bundle,
+            staged: &Staged,
+            previous: &dyn export::Predecessor,
+        ) -> Result<Inscription, Error> {
+            prepare::finalize(
+                &SteleDir::create(root).unwrap(),
+                &Finalizing {
+                    store,
+                    bundle,
+                    staged,
+                    producers: export::Producers::DEFAULT,
+                },
+                &self.archive,
+                None,
+                previous,
+                &Observer::silent(),
+            )
+        }
+    }
+
+    fn store(root: &Path) -> Store {
+        Store::open(root, "journal").unwrap()
+    }
+
+    fn tempdir() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
+    }
+
+    fn blobs(root: &Path) -> BTreeSet<String> {
+        fs::read_dir(root.join("blobs/sha256"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect()
+    }
+
+    /// The canonical document, layer by layer first so a failure names one,
+    /// and every compressed blob.
+    fn assert_same_stele(
+        frozen: (&Path, &Inscription),
+        finalized: (&Path, &Inscription),
+        at: &str,
+    ) {
+        let key = |layer: &stelae::inscription::LayerDescriptor| {
+            format!("{} {} {}", layer.kind, layer.scope, layer.diff_id)
+        };
+
+        assert_eq!(
+            frozen.1.layers.iter().map(key).collect::<Vec<_>>(),
+            finalized.1.layers.iter().map(key).collect::<Vec<_>>(),
+            "{at}"
+        );
+        assert_eq!(
+            frozen.1.canonicalize().unwrap(),
+            finalized.1.canonicalize().unwrap(),
+            "{at}"
+        );
+        assert_eq!(blobs(frozen.0), blobs(finalized.0), "{at}");
+    }
+
+    fn preparation_refusal<T: std::fmt::Debug>(result: Result<T, Error>) -> Refusal {
+        match result.unwrap_err() {
+            Error::Preparation(refusal) => refusal,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn layer_of<'a>(
+        inscription: &'a Inscription,
+        kind: &'a str,
+        epoch: u64,
+    ) -> Option<&'a stelae::inscription::LayerDescriptor> {
+        inscription
+            .layers_of_kind(kind)
+            .find(|layer| layer.scope["epoch"] == epoch)
+    }
+
+    /// Done-when 1: prepare, advance and stage once, then every publication is
+    /// byte-equal to the ordinary export of the store frozen at its boundary.
+    #[test]
+    fn a_prepared_boundary_finishes_as_the_store_frozen_there() {
+        for shape in [Shape::Shelley, Shape::Byron] {
+            let retained = [3];
+            let (root, stage_root) = (tempdir(), tempdir());
+            let store = store(root.path());
+            let mut chain = Chain::new(shape);
+            let mut bundles = Vec::new();
+
+            for boundary in [2, 3, 5] {
+                chain.advance_to(boundary);
+                bundles.push(chain.prepare(&store, &retained).unwrap());
+            }
+
+            assert_eq!(
+                (
+                    chain.archive.traversals(),
+                    chain.archive.entity_traversals()
+                ),
+                ((0, 0), 0),
+                "{shape:?}: preparing traversed the index",
+            );
+
+            chain.advance_to(7);
+
+            let staged = chain.stage(stage_root.path(), &bundles, &export::First);
+
+            assert_eq!(
+                (
+                    chain.archive.traversals(),
+                    chain.archive.entity_traversals()
+                ),
+                ((1, 1), 1),
+                "{shape:?}: one traversal per family for the whole batch",
+            );
+
+            for bundle in &bundles {
+                let frozen_root = tempdir();
+                let frozen_chain = Chain::at(shape, bundle.sequence());
+                let frozen = frozen_chain.export(frozen_root.path(), &retained, &export::First);
+
+                let finished_root = tempdir();
+                let finished = chain
+                    .finalize(
+                        finished_root.path(),
+                        &store,
+                        bundle,
+                        &staged,
+                        &export::First,
+                    )
+                    .unwrap();
+
+                assert_same_stele(
+                    (frozen_root.path(), &frozen),
+                    (finished_root.path(), &finished),
+                    &format!("{shape:?} at {}", bundle.sequence()),
+                );
+            }
+
+            assert_eq!(
+                (
+                    chain.archive.traversals(),
+                    chain.archive.entity_traversals()
+                ),
+                ((1, 1), 1),
+                "{shape:?}: finalizing traversed the index",
+            );
+        }
+    }
+
+    /// The same equality for a contiguous chain of publications, each following
+    /// the real document before it: history, inheritance and settlement land
+    /// only at finalization, and a window the first predecessor carries is
+    /// never staged.
+    #[test]
+    fn a_chained_batch_matches_the_chained_exports() {
+        for shape in [Shape::Shelley, Shape::Byron] {
+            let retained = [3];
+            let (root, stage_root, seed_root) = (tempdir(), tempdir(), tempdir());
+            let store = store(root.path());
+
+            let seed = Chain::at(shape, 1).export(seed_root.path(), &retained, &export::First);
+
+            let mut chain = Chain::at(shape, 2);
+            let mut bundles = Vec::new();
+
+            for boundary in [2, 3, 4] {
+                chain.advance_to(boundary);
+                bundles.push(chain.prepare(&store, &retained).unwrap());
+            }
+
+            let lending = Lending::following(&seed, &bundles[0].plan());
+            let staged = chain.stage(stage_root.path(), &bundles, &lending);
+
+            assert_eq!(
+                staged.records(Family::Indexes, 0),
+                None,
+                "{shape:?}: the first predecessor carries window 0",
+            );
+            assert!(staged.records(Family::Indexes, 1).is_some(), "{shape:?}");
+
+            let mut frozen_previous = seed.clone();
+            let mut finished_previous = seed.clone();
+
+            for bundle in &bundles {
+                let at = format!("{shape:?} at {}", bundle.sequence());
+                let plan = bundle.plan();
+
+                let frozen_root = tempdir();
+                let frozen = Chain::at(shape, bundle.sequence()).export(
+                    frozen_root.path(),
+                    &retained,
+                    &Lending::following(&frozen_previous, &plan),
+                );
+
+                let finished_root = tempdir();
+                let finished = chain
+                    .finalize(
+                        finished_root.path(),
+                        &store,
+                        bundle,
+                        &staged,
+                        &Lending::following(&finished_previous, &plan),
+                    )
+                    .unwrap();
+
+                assert_same_stele(
+                    (frozen_root.path(), &frozen),
+                    (finished_root.path(), &finished),
+                    &at,
+                );
+                assert_eq!(finished.history.len(), frozen_previous.history.len() + 1);
+
+                frozen_previous = frozen;
+                finished_previous = finished;
+            }
+        }
+    }
+
+    /// The fixture has to show what a later store would get wrong, or the
+    /// equalities above prove nothing: a Byron main block sharing the
+    /// boundary's slot, settled account rows, and logs and entities a later
+    /// seal writes.
+    #[test]
+    fn a_later_store_would_publish_something_else() {
+        let (at_two, at_six) = (tempdir(), tempdir());
+        let frozen = Chain::at(Shape::Byron, 2);
+        let later = Chain::at(Shape::Byron, 6);
+
+        assert_eq!(
+            frozen
+                .archive
+                .get_blocks_by_slot(&byron_ebb_slot(2))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            later
+                .archive
+                .get_blocks_by_slot(&byron_ebb_slot(2))
+                .unwrap()
+                .len(),
+            2
+        );
+
+        let before = frozen.export(at_two.path(), &[], &export::First);
+        let after = later.export(at_six.path(), &[], &export::First);
+
+        assert!(
+            layer_of(&before, "log-first-script-chunks", 1).is_none()
+                && layer_of(&after, "log-first-script-chunks", 1).is_some(),
+            "the seal lands after the boundary"
+        );
+        assert!(
+            layer_of(&before, "entity-asset", 0).is_none()
+                && layer_of(&after, "entity-asset", 0).is_some(),
+            "entries are visible from their seal, not their first-seen slot"
+        );
+        assert_ne!(
+            layer_of(&before, "log-account-epochs", 1).unwrap().diff_id,
+            layer_of(&after, "log-account-epochs", 1).unwrap().diff_id,
+            "the rows settle one boundary after their window closes"
+        );
+
+        // The header and the boundary block's own hash: the main block at its
+        // slot has not happened yet.
+        let tail = before.layers_of_kind(INDEXES).last().unwrap();
+
+        assert_eq!(tail.records, 2);
+    }
+
+    /// A retained dump at its boundary is the tip's blob under two descriptors,
+    /// whether cut from the stores or from a bundle.
+    #[test]
+    fn a_due_dump_is_the_captured_tip() {
+        let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 3);
+        let bundle = chain.prepare(&store, &[3]).unwrap();
+
+        chain.advance_to(4);
+
+        let staged = chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &export::First,
+        );
+        let finished = chain
+            .finalize(
+                finished_root.path(),
+                &store,
+                &bundle,
+                &staged,
+                &export::First,
+            )
+            .unwrap();
+
+        let dumps: Vec<_> = dumps_in(&finished, 3);
+
+        assert_eq!(dumps.len(), state_layer_count());
+        assert_eq!(
+            bundle
+                .layers()
+                .filter(|layer| state_ns_for(&layer.kind).is_some())
+                .count(),
+            state_layer_count(),
+            "the bundle holds one payload per shard, not two"
+        );
+    }
+
+    /// Done-when 2: nothing at the boundary is read from the final store. Its
+    /// tail comes from the delta, or from an explicit traversal, which is exact
+    /// while the stores stand there and is the same layer.
+    #[test]
+    fn a_tail_comes_from_the_delta_unless_a_traversal_is_asked_for() {
+        for shape in [Shape::Shelley, Shape::Byron] {
+            let chain = Chain::at(shape, 2);
+            let (delta_root, traversal_root) = (tempdir(), tempdir());
+
+            let from_delta = chain.prepare(&store(delta_root.path()), &[]).unwrap();
+
+            assert_eq!(chain.archive.traversals(), (0, 0), "{shape:?}");
+
+            let from_traversal = prepare::prepare(
+                &store(traversal_root.path()),
+                &chain.plan(&[]),
+                &chain.archive,
+                &chain.state,
+                &Request {
+                    store_contract: CONTRACT.to_owned(),
+                    mutable_slots: chain.mutable,
+                    tail: IndexTail::Traverse,
+                },
+                &Observer::silent(),
+            )
+            .unwrap();
+
+            assert_eq!(chain.archive.traversals(), (1, 1), "{shape:?}");
+
+            assert_eq!(
+                from_delta.layers().collect::<Vec<_>>(),
+                from_traversal.layers().collect::<Vec<_>>(),
+                "{shape:?}"
+            );
+        }
+    }
+
+    /// A delta from any other block would publish its rows as the boundary's.
+    #[test]
+    fn a_delta_for_another_block_is_refused() {
+        let root = tempdir();
+        let store = store(root.path());
+        let earlier = Chain::at(Shape::Shelley, 2).boundary_delta.unwrap();
+        let chain = Chain::at(Shape::Shelley, 3);
+
+        let refused = prepare::prepare(
+            &store,
+            &chain.plan(&[]),
+            &chain.archive,
+            &chain.state,
+            &Request {
+                store_contract: CONTRACT.to_owned(),
+                mutable_slots: chain.mutable,
+                tail: IndexTail::Delta(&earlier),
+            },
+            &Observer::silent(),
+        );
+
+        assert!(matches!(
+            preparation_refusal(refused),
+            Refusal::ForeignTail { .. }
+        ));
+        assert!(store.sequences().unwrap().is_empty());
+    }
+
+    /// Stores that have moved past the boundary are not a boundary.
+    #[test]
+    fn a_store_past_its_boundary_is_not_prepared() {
+        let root = tempdir();
+        let mut chain = Chain::at(Shape::Shelley, 2);
+
+        chain.finish_epoch();
+
+        let refused = chain.prepare(&store(root.path()), &[]).unwrap_err();
+
+        assert!(matches!(refused, Error::NotABoundary { .. }), "{refused:?}");
+    }
+
+    /// Done-when 3: a capture that dies leaves no completion marker, and a
+    /// retry converges on the same bundle.
+    #[test]
+    fn an_interrupted_capture_marks_nothing_and_a_retry_completes() {
+        let (root, clean_root) = (tempdir(), tempdir());
+        let store = store(root.path());
+        let chain = Chain::at(Shape::Shelley, 2);
+        let delta = chain.boundary_delta.clone().unwrap();
+
+        let refused = prepare::prepare(
+            &store,
+            &chain.plan(&[]),
+            &Counted::failing(chain.archive.inner.clone(), Traversal::Logs, 1),
+            &chain.state,
+            &Request {
+                store_contract: CONTRACT.to_owned(),
+                mutable_slots: chain.mutable,
+                tail: IndexTail::Delta(&delta),
+            },
+            &Observer::silent(),
+        );
+
+        assert!(matches!(refused, Err(Error::Archive(_))), "{refused:?}");
+        assert!(store.sequences().unwrap().is_empty());
+        assert!(matches!(
+            preparation_refusal(store.load(2)),
+            Refusal::NotPrepared { sequence: 2 }
+        ));
+
+        // A marker that never landed is not a marker either.
+        fs::write(root.path().join("bundles/2.json.partial"), b"{").unwrap();
+        assert!(store.sequences().unwrap().is_empty());
+
+        let retried = chain.prepare(&store, &[]).unwrap();
+        let clean = chain.prepare(&self::store(clean_root.path()), &[]).unwrap();
+
+        assert_eq!(
+            retried.layers().collect::<Vec<_>>(),
+            clean.layers().collect::<Vec<_>>()
+        );
+        assert_eq!(store.load(2).unwrap().bytes(), retried.bytes());
+    }
+
+    /// A payload gone or cut short stops the bundle loading; one damaged in
+    /// place stops its publication before a descriptor exists.
+    #[test]
+    fn a_damaged_bundle_is_never_finalized() {
+        let (root, stage_root) = (tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let bundle = chain.prepare(&store, &[]).unwrap();
+        let blob = root.path().join("blobs/sha256");
+
+        chain.advance_to(3);
+
+        let staged = chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &export::First,
+        );
+
+        let digest = bundle.references().into_iter().next().unwrap();
+        let name = digest.to_string();
+        let path = blob.join(name.strip_prefix("sha256:").unwrap());
+        let original = fs::read(&path).unwrap();
+
+        fs::remove_file(&path).unwrap();
+        assert!(matches!(
+            preparation_refusal(store.load(2)),
+            Refusal::MissingArtifact { sequence: 2, .. }
+        ));
+
+        fs::write(&path, &original[..original.len() - 1]).unwrap();
+        assert!(matches!(
+            preparation_refusal(store.load(2)),
+            Refusal::MissingArtifact { sequence: 2, .. }
+        ));
+
+        let mut flipped = original.clone();
+        let middle = flipped.len() / 2;
+        flipped[middle] ^= 0xff;
+        fs::write(&path, &flipped).unwrap();
+
+        // The size is right, so it loads; its digests are what refuse it.
+        let loaded = store.load(2).unwrap();
+        let finished_root = tempdir();
+        let refused = chain.finalize(
+            finished_root.path(),
+            &store,
+            &loaded,
+            &staged,
+            &export::First,
+        );
+
+        assert!(matches!(
+            preparation_refusal(refused),
+            Refusal::Corrupt { sequence: 2, .. }
+        ),);
+        assert!(!finished_root.path().join("inscription.json").exists());
+
+        fs::write(&path, &original).unwrap();
+        store.load(2).unwrap();
+    }
+
+    /// A manifest edited, cut short or from another build is never read as one.
+    #[test]
+    fn a_damaged_manifest_is_refused_and_released_explicitly() {
+        let root = tempdir();
+        let store = store(root.path());
+        let chain = Chain::at(Shape::Shelley, 2);
+
+        chain.prepare(&store, &[]).unwrap();
+
+        let path = root.path().join("bundles/2.json");
+        let original = fs::read_to_string(&path).unwrap();
+
+        for damaged in [
+            original[..original.len() / 2].to_owned(),
+            original.replace("\"capture_from\":1", "\"capture_from\":2"),
+        ] {
+            assert_ne!(damaged, original);
+            fs::write(&path, damaged).unwrap();
+
+            assert!(matches!(
+                preparation_refusal(store.load(2)),
+                Refusal::Corrupt { sequence: 2, .. }
+            ));
+            assert!(
+                chain.prepare(&store, &[]).is_err(),
+                "a damaged bundle is not silently captured over"
+            );
+            assert!(
+                store.sweep().is_err(),
+                "nothing is swept past what it cannot read"
+            );
+        }
+
+        store.release(2).unwrap();
+        assert!(blobs(root.path()).is_empty());
+
+        chain.prepare(&store, &[]).unwrap();
+        store.load(2).unwrap();
+    }
+
+    /// Rewrite a manifest in place under a checksum that matches it, as a build
+    /// of another format or a damaged claim would read.
+    fn rewrite_manifest(path: &Path, edit: impl Fn(&str) -> String) {
+        let raw = fs::read_to_string(path).unwrap();
+        let start = raw.find("\"manifest\":").unwrap() + "\"manifest\":".len();
+        let manifest = edit(&raw[start..raw.len() - 1]);
+
+        assert_ne!(manifest, raw[start..raw.len() - 1]);
+
+        let checksum = xxhash_rust::xxh3::xxh3_64(manifest.as_bytes());
+
+        fs::write(
+            path,
+            format!("{{\"checksum\":{checksum},\"manifest\":{manifest}}}"),
+        )
+        .unwrap();
+    }
+
+    /// Another build's format is refused on its own account.
+    #[test]
+    fn a_manifest_of_another_format_is_refused() {
+        let root = tempdir();
+        let store = store(root.path());
+
+        Chain::at(Shape::Shelley, 2).prepare(&store, &[]).unwrap();
+
+        store.load(2).unwrap();
+        rewrite_manifest(&root.path().join("bundles/2.json"), |manifest| {
+            manifest.replace("\"format\":1", "\"format\":2")
+        });
+
+        let reason = match preparation_refusal(store.load(2)) {
+            Refusal::Corrupt { reason, .. } => reason,
+            other => panic!("{other:?}"),
+        };
+
+        assert!(reason.contains("format 2"), "{reason}");
+    }
+
+    /// A manifest's claims about a payload are held against the payload as it
+    /// is read, so one that lies produces no layer.
+    #[test]
+    fn a_payload_is_held_to_what_its_manifest_claims() {
+        let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let bundle = chain.prepare(&store, &[]).unwrap();
+
+        chain.advance_to(3);
+
+        let staged = chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &export::First,
+        );
+
+        let tail = bundle
+            .layers()
+            .find(|layer| layer.kind == INDEXES)
+            .unwrap()
+            .records;
+
+        rewrite_manifest(&root.path().join("bundles/2.json"), |manifest| {
+            manifest.replacen(
+                &format!("\"records\":{tail}"),
+                &format!("\"records\":{}", tail + 1),
+                1,
+            )
+        });
+
+        let lying = store.load(2).unwrap();
+        let refused = chain.finalize(
+            finished_root.path(),
+            &store,
+            &lying,
+            &staged,
+            &export::First,
+        );
+
+        assert!(matches!(
+            preparation_refusal(refused),
+            Refusal::Corrupt { sequence: 2, .. }
+        ));
+        assert!(!finished_root.path().join("inscription.json").exists());
+    }
+
+    /// The window before the boundary is captured even under a seal that would
+    /// call it final: its rows still settle.
+    #[test]
+    fn the_window_before_the_boundary_is_always_captured() {
+        let root = tempdir();
+        let store = store(root.path());
+        let chain = Chain::at(Shape::Shelley, 2);
+        let delta = chain.boundary_delta.clone().unwrap();
+
+        let bundle = prepare::prepare(
+            &store,
+            &chain.plan(&[]),
+            &chain.archive,
+            &chain.state,
+            &Request {
+                store_contract: CONTRACT.to_owned(),
+                mutable_slots: 0,
+                tail: IndexTail::Delta(&delta),
+            },
+            &Observer::silent(),
+        )
+        .unwrap();
+
+        assert!(bundle
+            .layers()
+            .any(|layer| layer.kind == "log-account-epochs" && layer.scope["epoch"] == 1));
+    }
+
+    /// A manifest renamed to another sequence names the one it was written for.
+    #[test]
+    fn a_manifest_under_another_sequence_is_refused() {
+        let root = tempdir();
+        let store = store(root.path());
+
+        Chain::at(Shape::Shelley, 2).prepare(&store, &[]).unwrap();
+
+        fs::rename(
+            root.path().join("bundles/2.json"),
+            root.path().join("bundles/3.json"),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            preparation_refusal(store.load(3)),
+            Refusal::Corrupt { sequence: 3, .. }
+        ));
+    }
+
+    /// Done-when 3: changed source identity fails, and the marker stands.
+    #[test]
+    fn a_changed_source_is_refused() {
+        let root = tempdir();
+        let store = store(root.path());
+        let chain = Chain::at(Shape::Shelley, 2);
+        let bundle = chain.prepare(&store, &[]).unwrap();
+        let held = fs::read(root.path().join("bundles/2.json")).unwrap();
+
+        // The same request over the same stores is the same bundle, and the
+        // walk that establishes it writes nothing.
+        let same = chain.prepare(&store, &[]).unwrap();
+        assert_eq!(
+            same.layers().collect::<Vec<_>>(),
+            bundle.layers().collect::<Vec<_>>()
+        );
+
+        // Another retained list, another contract, another block at the boundary.
+        let contract = prepare::prepare(
+            &store,
+            &chain.plan(&[]),
+            &chain.archive,
+            &chain.state,
+            &Request {
+                store_contract: "another".to_owned(),
+                mutable_slots: chain.mutable,
+                tail: IndexTail::Traverse,
+            },
+            &Observer::silent(),
+        );
+
+        assert!(matches!(
+            preparation_refusal(chain.prepare(&store, &[1])),
+            Refusal::SourceMismatch { sequence: 2, .. }
+        ));
+        assert!(matches!(
+            preparation_refusal(contract),
+            Refusal::SourceMismatch { sequence: 2, .. }
+        ));
+
+        assert_eq!(fs::read(root.path().join("bundles/2.json")).unwrap(), held);
+    }
+
+    /// The stores and runs a bundle is finished from have to be its own
+    /// chain's.
+    #[test]
+    fn finalizing_from_another_source_is_refused() {
+        let (root, stage_root, other_stage_root) = (tempdir(), tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let bundle = chain.prepare(&store, &[]).unwrap();
+
+        chain.advance_to(3);
+
+        let staged = chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &export::First,
+        );
+
+        // An archive holding another block at the boundary's slot.
+        let other = Chain::at(Shape::Byron, 3);
+        let finished_root = tempdir();
+        let refused = prepare::finalize(
+            &SteleDir::create(finished_root.path()).unwrap(),
+            &Finalizing {
+                store: &store,
+                bundle: &bundle,
+                staged: &staged,
+                producers: export::Producers::DEFAULT,
+            },
+            &other.archive,
+            None,
+            &export::First,
+            &Observer::silent(),
+        );
+
+        assert!(matches!(
+            preparation_refusal(refused),
+            Refusal::SourceMismatch { sequence: 2, .. }
+        ));
+
+        // Runs of another network, and of another store contract.
+        let frontier = chain.tip.clone().unwrap();
+
+        for (network_magic, store_contract) in [(1, CONTRACT), (MAINNET_MAGIC, "another")] {
+            let mismatched = staging::stage(
+                other_stage_root.path().join(store_contract).as_path(),
+                &chain.archive,
+                &chain.summary,
+                chain.mutable,
+                &staging::Request {
+                    network_magic,
+                    frontier: frontier.clone(),
+                    store_contract: store_contract.to_owned(),
+                    epochs: Default::default(),
+                    live: false,
+                },
+                Budget::new(u64::MAX),
+            )
+            .unwrap();
+
+            let refused = chain.finalize(
+                tempdir().path(),
+                &store,
+                &bundle,
+                &mismatched,
+                &export::First,
+            );
+
+            assert!(matches!(
+                preparation_refusal(refused),
+                Refusal::SourceMismatch { sequence: 2, .. }
+            ));
+        }
+    }
+
+    /// One traversal has to serve every bundle of a batch, so they share a
+    /// source, and a batch of none has nothing to stage.
+    #[test]
+    fn a_batch_of_mixed_sources_is_refused() {
+        let (root, other_root, stage_root) = (tempdir(), tempdir(), tempdir());
+        let store = store(root.path());
+        let other = self::store(other_root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let delta = chain.boundary_delta.clone().unwrap();
+        let first = chain.prepare(&store, &[]).unwrap();
+
+        let foreign = prepare::prepare(
+            &other,
+            &chain.plan(&[]),
+            &chain.archive,
+            &chain.state,
+            &Request {
+                store_contract: "another".to_owned(),
+                mutable_slots: chain.mutable,
+                tail: IndexTail::Delta(&delta),
+            },
+            &Observer::silent(),
+        )
+        .unwrap();
+
+        chain.advance_to(3);
+
+        let stage = |bundles: &[Bundle]| {
+            prepare::stage_batch(
+                stage_root.path(),
+                &chain.archive,
+                &chain.state,
+                bundles,
+                &export::First,
+                Budget::new(u64::MAX),
+                &Observer::silent(),
+            )
+        };
+
+        assert!(matches!(
+            preparation_refusal(stage(&[first, foreign])),
+            Refusal::SourceMismatch { sequence: 2, .. }
+        ));
+        assert!(matches!(
+            preparation_refusal(stage(&[])),
+            Refusal::EmptyBatch
+        ));
+    }
+
+    /// A window nothing staged and no predecessor carries fails loudly, rather
+    /// than leaving its layer out of the document.
+    #[test]
+    fn a_window_neither_staged_nor_inherited_fails() {
+        let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let bundle = chain.prepare(&store, &[]).unwrap();
+
+        chain.advance_to(3);
+
+        let staged = staging::stage(
+            stage_root.path(),
+            &chain.archive,
+            &chain.summary,
+            chain.mutable,
+            &staging::Request {
+                network_magic: MAINNET_MAGIC,
+                frontier: chain.tip.clone().unwrap(),
+                store_contract: CONTRACT.to_owned(),
+                epochs: Default::default(),
+                live: false,
+            },
+            Budget::new(u64::MAX),
+        )
+        .unwrap();
+
+        let refused = chain.finalize(
+            finished_root.path(),
+            &store,
+            &bundle,
+            &staged,
+            &export::First,
+        );
+
+        assert!(
+            matches!(
+                refused,
+                Err(Error::Staging(staging::Refusal::NotStaged { .. }))
+            ),
+            "{refused:?}"
+        );
+        assert!(!finished_root.path().join("inscription.json").exists());
+    }
+
+    /// A batch needs its stages' frontier past every boundary it finishes.
+    #[test]
+    fn runs_from_before_the_boundary_are_refused() {
+        let (root, stage_root) = (tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let early = chain.prepare(&store, &[]).unwrap();
+        let staged = chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&early),
+            &export::First,
+        );
+
+        chain.advance_to(3);
+
+        let later = chain.prepare(&store, &[]).unwrap();
+        let refused = chain.finalize(tempdir().path(), &store, &later, &staged, &export::First);
+
+        assert!(matches!(
+            preparation_refusal(refused),
+            Refusal::SourceMismatch { sequence: 3, .. }
+        ));
+    }
+
+    /// The archive still has to reach back as far as finalization reads it.
+    #[test]
+    fn an_archive_pruned_past_the_horizon_is_refused() {
+        let (root, stage_root) = (tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 3);
+        let bundle = chain.prepare(&store, &[]).unwrap();
+
+        // Epoch 0's first block.
+        assert_eq!(bundle.horizon(), Some(10));
+
+        chain.advance_to(4);
+
+        let staged = chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &export::First,
+        );
+
+        // The same blocks, less the first epochs.
+        let pruned = MemoryArchiveStore::new(dolos_cardano::model::build_log_schema());
+        let writer = pruned.start_writer().unwrap();
+
+        for (slot, body) in chain.archive.get_range(Some(chain.start(2)), None).unwrap() {
+            let block = MultiEraBlock::decode(&body).unwrap();
+            writer
+                .apply(
+                    &ChainPoint::Specific(slot, block.hash()),
+                    &Arc::new(body.clone()),
+                )
+                .unwrap();
+        }
+
+        writer.commit().unwrap();
+
+        let refused = prepare::finalize(
+            &SteleDir::create(tempdir().path()).unwrap(),
+            &Finalizing {
+                store: &store,
+                bundle: &bundle,
+                staged: &staged,
+                producers: export::Producers::DEFAULT,
+            },
+            &pruned,
+            None,
+            &export::First,
+            &Observer::silent(),
+        );
+
+        assert!(matches!(
+            preparation_refusal(refused),
+            Refusal::HorizonLost {
+                sequence: 3,
+                horizon: 10,
+                ..
+            }
+        ));
+    }
+
+    /// A root holds one journal's bundles, and another's cannot use or drop
+    /// them.
+    #[test]
+    fn a_bundle_answers_only_to_its_owner() {
+        let root = tempdir();
+        let store = store(root.path());
+        let chain = Chain::at(Shape::Shelley, 2);
+
+        chain.prepare(&store, &[]).unwrap();
+
+        let foreign = Store::open(root.path(), "another").unwrap();
+
+        assert!(matches!(
+            preparation_refusal(foreign.load(2)),
+            Refusal::ForeignOwner { sequence: 2, .. }
+        ));
+        assert!(matches!(
+            preparation_refusal(foreign.release(2)),
+            Refusal::ForeignOwner { sequence: 2, .. }
+        ));
+        assert!(matches!(
+            preparation_refusal(chain.prepare(&foreign, &[])),
+            Refusal::ForeignOwner { sequence: 2, .. }
+        ));
+
+        store.load(2).unwrap();
+    }
+
+    /// Identical payloads are one file: a release keeps what another bundle
+    /// refers to, and the last one leaves nothing behind.
+    #[test]
+    fn bundles_share_payloads_until_the_last_is_released() {
+        let root = tempdir();
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Byron, 5);
+        let five = chain.prepare(&store, &[]).unwrap();
+
+        chain.advance_to(6);
+
+        let six = chain.prepare(&store, &[]).unwrap();
+
+        let shared: Vec<_> = five
+            .references()
+            .intersection(&six.references())
+            .copied()
+            .collect();
+
+        assert!(
+            !shared.is_empty(),
+            "the unsealed windows repeat between them"
+        );
+
+        let union = five.references().union(&six.references()).count();
+
+        assert_eq!(blobs(root.path()).len(), union);
+        assert_eq!(store.sequences().unwrap(), vec![5, 6]);
+
+        store.release(5).unwrap();
+
+        assert_eq!(store.sequences().unwrap(), vec![6]);
+        assert_eq!(blobs(root.path()).len(), six.references().len());
+        store.load(6).unwrap();
+
+        // Releasing it again, or one never prepared, is not a fault.
+        store.release(5).unwrap();
+        store.release(9).unwrap();
+
+        store.release(6).unwrap();
+        assert!(blobs(root.path()).is_empty());
+    }
+
+    /// A release that died after its marker left payloads nothing refers to,
+    /// and a crash mid-write left a staging file. Neither survives a reopen and
+    /// sweep; a live bundle's payloads do.
+    #[test]
+    fn a_sweep_finishes_what_a_crash_left() {
+        let root = tempdir();
+        let store = store(root.path());
+        let bundle = Chain::at(Shape::Shelley, 2).prepare(&store, &[]).unwrap();
+
+        fs::write(root.path().join("blobs/sha256/orphan"), b"x").unwrap();
+        fs::write(root.path().join("blobs/.staging-1-1"), b"x").unwrap();
+
+        let store = Store::open(root.path(), "journal").unwrap();
+
+        assert!(!root.path().join("blobs/.staging-1-1").exists());
+
+        store.sweep().unwrap();
+
+        assert_eq!(blobs(root.path()).len(), bundle.references().len());
+        store.load(2).unwrap();
+    }
+
+    /// A window restricted away gets no payload and no horizon; the state tip
+    /// is the tip whatever history travels with it.
+    #[test]
+    fn a_restricted_plan_captures_only_its_windows() {
+        let (root, stage_root, frozen_root, finished_root) =
+            (tempdir(), tempdir(), tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 4);
+        let delta = chain.boundary_delta.clone().unwrap();
+        let plan = chain.plan(&[]).restrict_epochs(Some(4), None);
+
+        let bundle = prepare::prepare(
+            &store,
+            &plan,
+            &chain.archive,
+            &chain.state,
+            &Request {
+                store_contract: CONTRACT.to_owned(),
+                mutable_slots: chain.mutable,
+                tail: IndexTail::Delta(&delta),
+            },
+            &Observer::silent(),
+        )
+        .unwrap();
+
+        assert_eq!(bundle.horizon(), None);
+
+        let frozen = export::export(
+            &SteleDir::create(frozen_root.path()).unwrap(),
+            &plan,
+            &chain.archive,
+            &chain.state,
+            None,
+            &export::First,
+            &Observer::silent(),
+        )
+        .unwrap();
+
+        chain.advance_to(5);
+
+        let staged = chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &export::First,
+        );
+
+        assert_eq!(staged.records(Family::Indexes, 3), None);
+
+        let finished = chain
+            .finalize(
+                finished_root.path(),
+                &store,
+                &bundle,
+                &staged,
+                &export::First,
+            )
+            .unwrap();
+
+        assert_same_stele(
+            (frozen_root.path(), &frozen),
+            (finished_root.path(), &finished),
+            "restricted",
+        );
+    }
+
+    /// The host surface: a boundary captured, a batch staged and a document
+    /// reproduced through the snapshot source alone, identical to the ordinary
+    /// digest of the stores frozen there.
+    #[test]
+    fn the_headless_facade_prepares_stages_and_finalizes() {
+        let (root, stage_root) = (tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 3);
+        let delta = chain.boundary_delta.clone().unwrap();
+        let plan = chain.plan(&[]);
+
+        let source = StoreSnapshot::new(&chain.archive, &chain.state);
+        let bundle = source
+            .prepare_boundary(
+                &store,
+                &plan,
+                &Request {
+                    store_contract: CONTRACT.to_owned(),
+                    mutable_slots: chain.mutable,
+                    tail: IndexTail::Delta(&delta),
+                },
+                &Observer::silent(),
+            )
+            .unwrap();
+        let frozen = source.digest_document(&plan, &export::First).unwrap();
+
+        chain.advance_to(4);
+
+        let source = StoreSnapshot::new(&chain.archive, &chain.state);
+        let staged = source
+            .stage_batch(
+                stage_root.path(),
+                std::slice::from_ref(&bundle),
+                &export::First,
+                Budget::new(u64::MAX),
+                &Observer::silent(),
+            )
+            .unwrap();
+
+        let finalizing = Finalizing {
+            store: &store,
+            bundle: &bundle,
+            staged: &staged,
+            producers: export::Producers::DEFAULT,
+        };
+
+        let document = source
+            .finalize_document(&finalizing, &export::First)
+            .unwrap();
+
+        assert_eq!(document.identity, frozen.identity);
+        assert_eq!(document.canonical, frozen.canonical);
+    }
+
+    /// A capture reports what it writes, like every other layer path.
+    #[test]
+    fn a_capture_reports_every_layer() {
+        let root = tempdir();
+        let store = store(root.path());
+        let chain = Chain::at(Shape::Shelley, 2);
+        let delta = chain.boundary_delta.clone().unwrap();
+        let watcher = Arc::new(Watcher::default());
+
+        // Retained epochs due at the boundary, one it would adopt and one it
+        // cuts, are not captured: its tip is what a publication describes twice.
+        let bundle = prepare::prepare(
+            &store,
+            &chain.plan(&[1, 2]),
+            &chain.archive,
+            &chain.state,
+            &Request {
+                store_contract: CONTRACT.to_owned(),
+                mutable_slots: chain.mutable,
+                tail: IndexTail::Delta(&delta),
+            },
+            &watcher.observer(),
+        )
+        .unwrap();
+
+        watcher.assert_well_formed(bundle.layers().count());
+    }
+
+    /// Finalizing reports what an export reports, against a real count.
+    #[test]
+    fn finalizing_reports_every_layer_and_record() {
+        let (root, stage_root) = (tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 3);
+        let bundle = chain.prepare(&store, &[3]).unwrap();
+
+        chain.advance_to(4);
+
+        let staged = chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &export::First,
+        );
+        let watcher = Arc::new(Watcher::default());
+
+        let finished = prepare::finalize(
+            &Discarding,
+            &Finalizing {
+                store: &store,
+                bundle: &bundle,
+                staged: &staged,
+                producers: export::Producers::DEFAULT,
+            },
+            &chain.archive,
+            None,
+            &export::First,
+            &watcher.observer(),
+        )
+        .unwrap();
+
+        watcher.assert_well_formed(finished.layers.len());
+
+        // A dump described from its tip is the same layer's records once.
+        let dumps = dumps_in(&finished, 3);
+        let content: u64 = finished
+            .layers
+            .iter()
+            .filter(|layer| !dumps.iter().any(|dump| std::ptr::eq(*dump, *layer)))
+            .map(|layer| layer.records - 1)
+            .sum();
+
+        assert_eq!(watcher.records(), content);
+    }
+
+    fn dumps_in(
+        inscription: &Inscription,
+        epoch: u64,
+    ) -> Vec<&stelae::inscription::LayerDescriptor> {
+        inscription
+            .layers
+            .iter()
+            .filter(|layer| state_ns_for(&layer.kind).is_some() && layer.scope["epoch"] == epoch)
+            .collect()
+    }
+
+    fn plain_request<'a>(chain: &Chain, delta: &'a ArchiveIndexDelta) -> Request<'a> {
+        Request {
+            store_contract: CONTRACT.to_owned(),
+            mutable_slots: chain.mutable,
+            tail: IndexTail::Delta(delta),
+        }
+    }
+
+    /// Prepare at 2, advance, read the manifest as another build's would, then
+    /// load it.
+    fn load_as_another_build(edit: impl Fn(&str) -> String) -> Refusal {
+        let root = tempdir();
+        let store = store(root.path());
+
+        Chain::at(Shape::Shelley, 2).prepare(&store, &[]).unwrap();
+        rewrite_manifest(&root.path().join("bundles/2.json"), edit);
+
+        let refusal = preparation_refusal(store.load(2));
+
+        // It is still this journal's to drop.
+        store.release(2).unwrap();
+        assert!(blobs(root.path()).is_empty());
+
+        refusal
+    }
+
+    /// Old records would land in a sealed stele under this build's labels, and
+    /// no layer header stops them.
+    #[test]
+    fn a_bundle_of_another_media_type_version_is_refused() {
+        let refusal = load_as_another_build(|manifest| {
+            manifest.replace("\"media_type_version\":1", "\"media_type_version\":2")
+        });
+
+        assert!(
+            matches!(refusal, Refusal::ForeignBuild { sequence: 2, .. }),
+            "{refusal:?}"
+        );
+    }
+
+    #[test]
+    fn a_bundle_of_another_profile_version_is_refused() {
+        let refusal = load_as_another_build(|manifest| {
+            manifest.replace("io.txpipe.dolos.cardano/1", "io.txpipe.dolos.cardano/2")
+        });
+
+        assert!(
+            matches!(refusal, Refusal::ForeignBuild { sequence: 2, .. }),
+            "{refusal:?}"
+        );
+    }
+
+    /// A batch is staged from these stores, so a bundle captured under another
+    /// contract is refused before anything is traversed.
+    #[test]
+    fn a_changed_contract_is_refused_through_the_batch() {
+        let (root, stage_root) = (tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let delta = chain.boundary_delta.clone().unwrap();
+
+        let bundle = prepare::prepare(
+            &store,
+            &chain.plan(&[]),
+            &chain.archive,
+            &chain.state,
+            &Request {
+                store_contract: "another".to_owned(),
+                ..plain_request(&chain, &delta)
+            },
+            &Observer::silent(),
+        )
+        .unwrap();
+
+        chain.advance_to(3);
+
+        let refused = prepare::stage_batch(
+            stage_root.path(),
+            &chain.archive,
+            &chain.state,
+            std::slice::from_ref(&bundle),
+            &export::First,
+            Budget::new(u64::MAX),
+            &Observer::silent(),
+        );
+
+        assert!(matches!(
+            preparation_refusal(refused),
+            Refusal::SourceMismatch { sequence: 2, .. }
+        ));
+        assert_eq!(chain.archive.traversals(), (0, 0));
+    }
+
+    /// Stores rebuilt to the same cursor with one row different: the held
+    /// bundle is refused, naming the layer, and once released the rebuilt
+    /// stores capture and finish as themselves.
+    #[test]
+    fn rebuilt_stores_do_not_reuse_a_bundle() {
+        let (root, stage_root, frozen_root, finished_root) =
+            (tempdir(), tempdir(), tempdir(), tempdir());
+        let store = store(root.path());
+        let first = Chain::at(Shape::Shelley, 2);
+
+        first.prepare(&store, &[]).unwrap();
+
+        let held_marker = fs::read(root.path().join("bundles/2.json")).unwrap();
+        let held_blobs = blobs(root.path());
+        let mut rebuilt = Chain::at(Shape::Shelley, 2);
+
+        assert_eq!(rebuilt.tip, first.tip);
+
+        let key = common::state_key(AccountState::NS, 0x40);
+        let writer = rebuilt.state.start_writer().unwrap();
+
+        writer
+            .write_entity(
+                AccountState::NS,
+                &EntityKey::from_raw(&key),
+                &vec![0x82, 0x09, 0x09],
+            )
+            .unwrap();
+        writer.commit().unwrap();
+
+        let what = match preparation_refusal(rebuilt.prepare(&store, &[])) {
+            Refusal::SourceMismatch { sequence: 2, what } => what,
+            other => panic!("{other:?}"),
+        };
+
+        assert!(what.contains("state-accounts"), "{what}");
+        assert_eq!(
+            fs::read(root.path().join("bundles/2.json")).unwrap(),
+            held_marker,
+            "the marker stands"
+        );
+        assert_eq!(blobs(root.path()), held_blobs, "the walk wrote nothing");
+
+        store.release(2).unwrap();
+
+        let frozen = rebuilt.export(frozen_root.path(), &[], &export::First);
+        let bundle = rebuilt.prepare(&store, &[]).unwrap();
+
+        rebuilt.advance_to(3);
+
+        let staged = rebuilt.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &export::First,
+        );
+        let finished = rebuilt
+            .finalize(
+                finished_root.path(),
+                &store,
+                &bundle,
+                &staged,
+                &export::First,
+            )
+            .unwrap();
+
+        assert_same_stele(
+            (frozen_root.path(), &frozen),
+            (finished_root.path(), &finished),
+            "rebuilt",
+        );
+    }
+
+    /// The check on a held bundle covers everything it captured: a log row and
+    /// a delta for the tail, as well as a state row.
+    #[test]
+    fn a_held_bundle_is_held_to_its_logs_and_its_tail() {
+        let root = tempdir();
+        let store = store(root.path());
+        let chain = Chain::at(Shape::Shelley, 2);
+        let mut delta = chain.boundary_delta.clone().unwrap();
+
+        chain.prepare(&store, &[]).unwrap();
+
+        delta.tx_hashes.pop();
+
+        let what = match preparation_refusal(prepare::prepare(
+            &store,
+            &chain.plan(&[]),
+            &chain.archive,
+            &chain.state,
+            &plain_request(&chain, &delta),
+            &Observer::silent(),
+        )) {
+            Refusal::SourceMismatch { what, .. } => what,
+            other => panic!("{other:?}"),
+        };
+
+        assert!(what.contains(INDEXES), "{what}");
+
+        let writer = chain.archive.start_writer().unwrap();
+        chain.log(&writer, PoolEpochLog::NS, 1, 9, 99);
+        writer.commit().unwrap();
+
+        let what = match preparation_refusal(chain.prepare(&store, &[])) {
+            Refusal::SourceMismatch { what, .. } => what,
+            other => panic!("{other:?}"),
+        };
+
+        assert!(what.contains("log-pool-epochs"), "{what}");
+    }
+
+    /// A restart at the boundary with no delta left: the explicit traversal
+    /// finds the same bundle, at the cost of one scan.
+    #[test]
+    fn a_restart_at_the_boundary_finds_its_bundle_by_traversal() {
+        let root = tempdir();
+        let store = store(root.path());
+        let chain = Chain::at(Shape::Shelley, 2);
+        let bundle = chain.prepare(&store, &[]).unwrap();
+
+        let again = prepare::prepare(
+            &store,
+            &chain.plan(&[]),
+            &chain.archive,
+            &chain.state,
+            &Request {
+                store_contract: CONTRACT.to_owned(),
+                mutable_slots: chain.mutable,
+                tail: IndexTail::Traverse,
+            },
+            &Observer::silent(),
+        )
+        .unwrap();
+
+        assert_eq!(chain.archive.traversals(), (1, 1));
+        assert_eq!(
+            again.layers().collect::<Vec<_>>(),
+            bundle.layers().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn another_block_at_the_boundary_is_refused() {
+        let root = tempdir();
+        let store = store(root.path());
+        let held = Chain::at(Shape::Shelley, 2);
+
+        held.prepare(&store, &[]).unwrap();
+
+        let mut fork = Chain::new(Shape::Shelley);
+        fork.number = 100;
+        fork.advance_to(2);
+
+        let (ours, theirs) = (held.tip.clone().unwrap(), fork.tip.clone().unwrap());
+
+        assert_eq!(ours.slot(), theirs.slot());
+        assert_ne!(ours.hash(), theirs.hash());
+
+        let what = match preparation_refusal(fork.prepare(&store, &[])) {
+            Refusal::SourceMismatch { sequence: 2, what } => what,
+            other => panic!("{other:?}"),
+        };
+
+        assert!(what.contains("boundary block"), "{what}");
+    }
+
+    #[test]
+    fn another_coverage_or_seal_is_refused() {
+        let root = tempdir();
+        let store = store(root.path());
+        let chain = Chain::at(Shape::Shelley, 4);
+        let delta = chain.boundary_delta.clone().unwrap();
+
+        chain.prepare(&store, &[]).unwrap();
+
+        let refused = |plan: Plan, request: Request<'_>| {
+            let what = match preparation_refusal(prepare::prepare(
+                &store,
+                &plan,
+                &chain.archive,
+                &chain.state,
+                &request,
+                &Observer::silent(),
+            )) {
+                Refusal::SourceMismatch { sequence: 4, what } => what,
+                other => panic!("{other:?}"),
+            };
+
+            what
+        };
+
+        let windows = refused(
+            chain.plan(&[]).restrict_epochs(Some(4), None),
+            plain_request(&chain, &delta),
+        );
+        assert!(windows.contains("windows"), "{windows}");
+
+        let sealing = refused(
+            chain.plan(&[]),
+            Request {
+                mutable_slots: chain.mutable + 1,
+                ..plain_request(&chain, &delta)
+            },
+        );
+        assert!(sealing.contains("mutable"), "{sealing}");
+    }
+
+    /// A changed retained list says so, rather than "other stores".
+    #[test]
+    fn the_refusal_names_what_differs() {
+        let root = tempdir();
+        let store = store(root.path());
+        let chain = Chain::at(Shape::Shelley, 2);
+
+        chain.prepare(&store, &[]).unwrap();
+
+        let what = match preparation_refusal(chain.prepare(&store, &[1])) {
+            Refusal::SourceMismatch { what, .. } => what,
+            other => panic!("{other:?}"),
+        };
+
+        assert!(what.contains("retained"), "{what}");
+    }
+
+    fn blocks_from(chain: &Chain, from: u64) -> Vec<(ChainPoint, Vec<u8>)> {
+        chain
+            .archive
+            .get_range(Some(from), None)
+            .unwrap()
+            .map(|(slot, body)| {
+                let hash = MultiEraBlock::decode(&body).unwrap().hash();
+
+                (ChainPoint::Specific(slot, hash), body.to_vec())
+            })
+            .collect()
+    }
+
+    fn first_block_from(chain: &Chain, from: u64) -> u64 {
+        blocks_from(chain, from)[0].0.slot()
+    }
+
+    fn last_block_to(chain: &Chain, to: u64) -> u64 {
+        blocks_from(chain, 0)
+            .iter()
+            .rev()
+            .map(|(point, _)| point.slot())
+            .find(|slot| *slot <= to)
+            .unwrap()
+    }
+
+    fn archive_of(
+        schema: dolos_core::StateSchema,
+        blocks: Vec<(ChainPoint, Vec<u8>)>,
+    ) -> MemoryArchiveStore {
+        let archive = MemoryArchiveStore::new(schema);
+        let writer = archive.start_writer().unwrap();
+
+        for (point, body) in blocks {
+            writer.apply(&point, &Arc::new(body)).unwrap();
+        }
+
+        writer.commit().unwrap();
+
+        archive
+    }
+
+    fn pruned_archive(blocks: Vec<(ChainPoint, Vec<u8>)>) -> MemoryArchiveStore {
+        archive_of(dolos_cardano::model::build_log_schema(), blocks)
+    }
+
+    fn finalize_on(
+        root: &Path,
+        store: &Store,
+        bundle: &Bundle,
+        staged: &Staged,
+        archive: &MemoryArchiveStore,
+    ) -> Result<Inscription, Error> {
+        prepare::finalize(
+            &SteleDir::create(root).unwrap(),
+            &Finalizing {
+                store,
+                bundle,
+                staged,
+                producers: export::Producers::DEFAULT,
+            },
+            archive,
+            None,
+            &export::First,
+            &Observer::silent(),
+        )
+    }
+
+    /// Prepare `plan`, advance, prune past a closed window and finish: closed
+    /// blocks are read from the archive, so that is `HorizonLost` and never a
+    /// stele whose closed blocks read as empty.
+    fn assert_a_prune_is_refused(mut chain: Chain, plan: Plan, prune_at_epoch: u64, horizon: u64) {
+        let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
+        let store = store(root.path());
+        let delta = chain.boundary_delta.clone().unwrap();
+
+        let bundle = prepare::prepare(
+            &store,
+            &plan,
+            &chain.archive,
+            &chain.state,
+            &plain_request(&chain, &delta),
+            &Observer::silent(),
+        )
+        .unwrap();
+
+        assert_eq!(bundle.horizon(), Some(horizon));
+
+        let advance = chain.epoch + 1;
+        chain.advance_to(advance);
+
+        let staged = chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &export::First,
+        );
+        let pruned = pruned_archive(blocks_from(&chain, chain.start(prune_at_epoch)));
+
+        let refused = finalize_on(finished_root.path(), &store, &bundle, &staged, &pruned);
+
+        assert!(
+            matches!(
+                preparation_refusal(refused),
+                Refusal::HorizonLost {
+                    sequence,
+                    horizon: lost,
+                    ..
+                } if sequence == bundle.sequence() && lost == horizon
+            ),
+            "at {}",
+            bundle.sequence()
+        );
+    }
+
+    #[test]
+    fn a_restricted_plan_is_refused_past_its_closed_window() {
+        let chain = Chain::at(Shape::Shelley, 4);
+        let plan = chain.plan(&[]).restrict_epochs(Some(3), None);
+        let horizon = last_block_to(&chain, chain.start(3));
+
+        assert_a_prune_is_refused(chain, plan, 4, horizon);
+    }
+
+    #[test]
+    fn the_first_boundary_is_refused_past_its_closed_window() {
+        let chain = Chain::at(Shape::Shelley, 1);
+        let plan = chain.plan(&[]);
+        let horizon = first_block_from(&chain, chain.start(0));
+
+        assert_a_prune_is_refused(chain, plan, 1, horizon);
+    }
+
+    #[test]
+    fn an_early_byron_boundary_is_refused_past_its_closed_windows() {
+        let chain = Chain::at(Shape::Byron, 3);
+        let plan = chain.plan(&[]);
+
+        assert_a_prune_is_refused(chain, plan, 3, 0);
+    }
+
+    /// Staging reads closed windows too: a pruned archive would give it empty
+    /// runs, so it is refused there, before a traversal.
+    #[test]
+    fn a_batch_is_not_staged_from_an_archive_past_its_horizon() {
+        let (root, stage_root) = (tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 4);
+        let delta = chain.boundary_delta.clone().unwrap();
+        let plan = chain.plan(&[]).restrict_epochs(Some(3), None);
+
+        let bundle = prepare::prepare(
+            &store,
+            &plan,
+            &chain.archive,
+            &chain.state,
+            &plain_request(&chain, &delta),
+            &Observer::silent(),
+        )
+        .unwrap();
+
+        chain.advance_to(5);
+
+        let refused = prepare::stage_batch(
+            stage_root.path(),
+            &pruned_archive(blocks_from(&chain, chain.start(4))),
+            &chain.state,
+            std::slice::from_ref(&bundle),
+            &export::First,
+            Budget::new(u64::MAX),
+            &Observer::silent(),
+        );
+
+        assert!(matches!(
+            preparation_refusal(refused),
+            Refusal::HorizonLost { sequence: 4, .. }
+        ));
+    }
+
+    /// With no closed window nothing needs retaining but the boundary block,
+    /// and the publication finishes on the pruned archive. Without that block
+    /// the chain cannot be checked, which is a refusal.
+    #[test]
+    fn no_horizon_needs_only_the_boundary_block() {
+        let (root, stage_root, frozen_root, finished_root, gone_root) =
+            (tempdir(), tempdir(), tempdir(), tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 4);
+        let delta = chain.boundary_delta.clone().unwrap();
+        let plan = chain.plan(&[]).restrict_epochs(Some(4), None);
+
+        let bundle = prepare::prepare(
+            &store,
+            &plan,
+            &chain.archive,
+            &chain.state,
+            &plain_request(&chain, &delta),
+            &Observer::silent(),
+        )
+        .unwrap();
+
+        assert_eq!(bundle.horizon(), None);
+
+        let frozen = export::export(
+            &SteleDir::create(frozen_root.path()).unwrap(),
+            &plan,
+            &chain.archive,
+            &chain.state,
+            None,
+            &export::First,
+            &Observer::silent(),
+        )
+        .unwrap();
+
+        let boundary = bundle.cursor().slot();
+
+        chain.advance_to(5);
+
+        let staged = chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &export::First,
+        );
+
+        let finished = finalize_on(
+            finished_root.path(),
+            &store,
+            &bundle,
+            &staged,
+            &pruned_archive(blocks_from(&chain, boundary)),
+        )
+        .unwrap();
+
+        assert_same_stele(
+            (frozen_root.path(), &frozen),
+            (finished_root.path(), &finished),
+            "no horizon",
+        );
+
+        let refused = finalize_on(
+            gone_root.path(),
+            &store,
+            &bundle,
+            &staged,
+            &pruned_archive(blocks_from(&chain, boundary + 1)),
+        );
+
+        assert!(matches!(
+            preparation_refusal(refused),
+            Refusal::SourceMismatch { sequence: 4, .. }
+        ));
+    }
+
+    /// A delta for the main block sharing the boundary block's slot.
+    #[test]
+    fn a_delta_for_the_main_block_at_the_boundary_slot_is_refused() {
+        let root = tempdir();
+        let store = store(root.path());
+        let chain = Chain::at(Shape::Byron, 3);
+        let (point, _) = make_byron_block(3, 0, chain.number, chain.previous_hash());
+        let boundary = chain.tip.clone().unwrap();
+
+        assert_eq!(point.slot(), boundary.slot());
+        assert_ne!(point.hash(), boundary.hash());
+
+        let foreign = ArchiveIndexDelta {
+            slot: point.slot(),
+            block_hash: point.hash().unwrap().to_vec(),
+            block_number: Some(chain.number),
+            tx_hashes: vec![[[0xeeu8; 24].as_slice(), &point.slot().to_be_bytes()].concat()],
+            tags: vec![],
+        };
+
+        let refused = prepare::prepare(
+            &store,
+            &chain.plan(&[]),
+            &chain.archive,
+            &chain.state,
+            &plain_request(&chain, &foreign),
+            &Observer::silent(),
+        );
+
+        assert!(matches!(
+            preparation_refusal(refused),
+            Refusal::ForeignTail { .. }
+        ));
+    }
+
+    /// An archive that really holds another block at the boundary's slot.
+    #[test]
+    fn a_fork_block_at_the_boundary_slot_is_refused() {
+        let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let bundle = chain.prepare(&store, &[]).unwrap();
+        let slot = bundle.cursor().slot();
+
+        chain.advance_to(3);
+
+        let staged = chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &export::First,
+        );
+
+        let (fork_point, fork_body) =
+            make_conway_block_with_prev(slot, Some(Hash::new([7; 32])), 2);
+
+        assert_eq!(fork_point.slot(), slot);
+        assert_ne!(fork_point.hash(), bundle.cursor().hash());
+
+        let blocks = blocks_from(&chain, 0)
+            .into_iter()
+            .map(|(point, body)| match point.slot() == slot {
+                true => (fork_point.clone(), fork_body.to_vec()),
+                false => (point, body),
+            })
+            .collect();
+
+        let refused = finalize_on(
+            finished_root.path(),
+            &store,
+            &bundle,
+            &staged,
+            &pruned_archive(blocks),
+        );
+
+        assert!(matches!(
+            preparation_refusal(refused),
+            Refusal::SourceMismatch { sequence: 2, .. }
+        ));
+    }
+
+    /// A log namespace the format has no layer for is refused here as an export
+    /// refuses it.
+    #[test]
+    fn prepare_refuses_an_uncovered_log_namespace() {
+        let root = tempdir();
+        let store = store(root.path());
+        let chain = Chain::at(Shape::Shelley, 2);
+
+        let stray = NAMESPACES
+            .into_iter()
+            .find(|ns| *ns != UTXOS && !LOG_NAMESPACES.contains(ns))
+            .unwrap();
+
+        let mut schema = dolos_cardano::model::build_log_schema();
+        schema.insert(stray, dolos_core::NamespaceType::KeyValue);
+
+        let archive = archive_of(schema, blocks_from(&chain, 0));
+        let writer = archive.start_writer().unwrap();
+
+        writer
+            .write_log(
+                stray,
+                &LogKey::from_raw(&chain.start(1).to_be_bytes()).unwrap(),
+                &vec![0xa0],
+            )
+            .unwrap();
+        writer.commit().unwrap();
+
+        let refused = prepare::prepare(
+            &store,
+            &chain.plan(&[]),
+            &archive,
+            &chain.state,
+            &plain_request(&chain, chain.boundary_delta.as_ref().unwrap()),
+            &Observer::silent(),
+        );
+
+        match refused {
+            Err(Error::UncoveredLogNamespace { epoch, ns, .. }) => {
+                assert_eq!(epoch, 1);
+                assert_eq!(ns, stray);
+            }
+            other => panic!("{:?}", other.map(|bundle| bundle.sequence())),
+        }
+    }
+
+    /// Records what the archive had been asked by the first event, and runs
+    /// `then` at that moment: dies as an OOM kill does, or lets a peer run.
+    struct AtFirstEvent {
+        tags: Arc<AtomicUsize>,
+        exacts: Arc<AtomicUsize>,
+        entities: Arc<AtomicUsize>,
+        seen: std::sync::Mutex<Option<(usize, usize, usize)>>,
+        then: Box<dyn Fn() + Send + Sync>,
+    }
+
+    impl AtFirstEvent {
+        fn over(chain: &Chain, then: impl Fn() + Send + Sync + 'static) -> Self {
+            Self {
+                tags: chain.archive.tags.clone(),
+                exacts: chain.archive.exacts.clone(),
+                entities: chain.archive.entities.clone(),
+                seen: Default::default(),
+                then: Box::new(then),
+            }
+        }
+    }
+
+    impl stelae::progress::Progress for AtFirstEvent {
+        fn on(&self, _event: stelae::progress::Event<'_>) {
+            let mut seen = self.seen.lock().unwrap();
+
+            if seen.is_none() {
+                *seen = Some((
+                    self.tags.load(Ordering::Relaxed),
+                    self.exacts.load(Ordering::Relaxed),
+                    self.entities.load(Ordering::Relaxed),
+                ));
+
+                (self.then)();
+            }
+        }
+    }
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+
+        names.sort();
+        names
+    }
+
+    fn size_of(dir: &Path) -> u64 {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                let meta = entry.metadata().unwrap();
+
+                match meta.is_dir() {
+                    true => size_of(&entry.path()),
+                    false => meta.len(),
+                }
+            })
+            .sum()
+    }
+
+    fn export_under(chain: &Chain, scratch: &Path, observer: &Observer) -> Inscription {
+        export::export(
+            &Discarding,
+            &chain.plan(&[]).with_scratch(scratch),
+            &chain.archive,
+            &chain.state,
+            None,
+            &export::First,
+            observer,
+        )
+        .unwrap()
+    }
+
+    /// Not a test by itself: dies without running destructors once its spool
+    /// holds runs.
+    #[cfg(unix)]
+    #[test]
+    fn child_killed_while_it_assembles() {
+        let Ok(scratch) = std::env::var("BOUNDARY_TEST_KILLED_SCRATCH") else {
+            return;
+        };
+
+        struct DieAtFirstLayer;
+
+        impl stelae::progress::Progress for DieAtFirstLayer {
+            fn on(&self, event: stelae::progress::Event<'_>) {
+                if matches!(event, stelae::progress::Event::LayerStarted { .. }) {
+                    std::process::abort();
+                }
+            }
+        }
+
+        export_under(
+            &Chain::at(Shape::Shelley, 4),
+            Path::new(&scratch),
+            &Observer::new(Arc::new(DieAtFirstLayer)),
+        );
+    }
+
+    /// A killed export leaves its whole spool, which the next one clears along
+    /// with a directory something died before locking.
+    #[cfg(unix)]
+    #[test]
+    fn a_retry_clears_what_a_killed_export_spooled() {
+        let scratch = tempdir();
+
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "boundary_preparation::child_killed_while_it_assembles",
+                "--test-threads=1",
+            ])
+            .env("BOUNDARY_TEST_KILLED_SCRATCH", scratch.path())
+            .status()
+            .unwrap();
+
+        assert!(!status.success(), "the child was meant to die: {status:?}");
+        assert_eq!(names_in(scratch.path()).len(), 1);
+        assert!(size_of(scratch.path()) > 0, "the spool holds runs");
+
+        fs::create_dir(scratch.path().join("dolos-staging-x")).unwrap();
+        fs::write(scratch.path().join("unrelated"), b"x").unwrap();
+
+        export_under(
+            &Chain::at(Shape::Shelley, 4),
+            scratch.path(),
+            &Observer::silent(),
+        );
+
+        assert_eq!(names_in(scratch.path()), ["unrelated"]);
+    }
+
+    /// A digest and a publish can share a scratch directory, so an export's
+    /// sweep leaves a running peer's spool alone.
+    #[test]
+    fn a_sweep_leaves_a_live_peers_spool() {
+        let scratch = tempdir();
+        let chain = Chain::at(Shape::Shelley, 4);
+        let path = scratch.path().to_owned();
+        let during = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let during_peer = during.clone();
+
+        let progress = AtFirstEvent::over(&chain, move || {
+            let before = names_in(&path);
+
+            assert_eq!(before.len(), 1, "{before:?}");
+
+            export_under(&Chain::at(Shape::Shelley, 3), &path, &Observer::silent());
+
+            *during_peer.lock().unwrap() = names_in(&path);
+
+            assert_eq!(names_in(&path), before, "the peer took a live spool");
+        });
+
+        let live = export_under(&chain, scratch.path(), &Observer::new(Arc::new(progress)));
+
+        assert!(!live.layers.is_empty());
+        assert_eq!(during.lock().unwrap().len(), 1);
+        assert!(names_in(scratch.path()).is_empty());
+    }
+
+    /// Exports sharing a scratch directory, each sweeping while the others
+    /// claim and work, all finish and leave nothing.
+    #[test]
+    fn peers_sharing_scratch_survive_each_others_sweeps() {
+        let scratch = tempdir();
+        let chain = Chain::at(Shape::Shelley, 2);
+        let digest = export_under(&chain, scratch.path(), &Observer::silent())
+            .digest()
+            .unwrap();
+
+        std::thread::scope(|threads| {
+            for _ in 0..8 {
+                threads.spawn(|| {
+                    for _ in 0..16 {
+                        let again = export_under(&chain, scratch.path(), &Observer::silent());
+
+                        assert_eq!(again.digest().unwrap(), digest);
+                    }
+                });
+            }
+        });
+
+        assert!(names_in(scratch.path()).is_empty());
+    }
+
+    /// The scratch a plan names holds the runs and is left empty.
+    #[test]
+    fn with_scratch_holds_the_runs_and_leaves_nothing() {
+        let scratch = tempdir();
+        let chain = Chain::at(Shape::Shelley, 4);
+        let path = scratch.path().to_owned();
+        let during = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let during_listing = during.clone();
+
+        let progress = AtFirstEvent::over(&chain, move || {
+            *during_listing.lock().unwrap() = names_in(&path);
+        });
+
+        export_under(&chain, scratch.path(), &Observer::new(Arc::new(progress)));
+
+        let during = during.lock().unwrap();
+
+        assert_eq!(during.len(), 1, "{during:?}");
+        assert!(during[0].starts_with("dolos-staging-"), "{during:?}");
+        assert!(names_in(scratch.path()).is_empty());
+    }
+
+    /// Not a test by itself: a digest under a `TMPDIR` nothing can be created
+    /// in, with no scratch and then with one.
+    #[cfg(unix)]
+    #[test]
+    fn child_digests_without_a_temporary_directory() {
+        let Ok(scratch) = std::env::var("BOUNDARY_TEST_DIGEST_SCRATCH") else {
+            return;
+        };
+
+        let chain = Chain::at(Shape::Shelley, 4);
+        let digest = |plan: &Plan| {
+            export::digest_document(plan, &chain.archive, &chain.state, &export::First)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        };
+
+        println!("unset: {:?}", digest(&chain.plan(&[])));
+        println!(
+            "named: {:?}",
+            digest(&chain.plan(&[]).with_scratch(&scratch))
+        );
+    }
+
+    /// A digest spools like any export. With nowhere to do it the refusal says
+    /// where and what to set, and the scratch a plan names is all it needs.
+    #[cfg(unix)]
+    #[test]
+    fn a_digest_spools_where_its_plan_says() {
+        let dir = tempdir();
+        let not_a_directory = dir.path().join("file");
+
+        fs::write(&not_a_directory, b"x").unwrap();
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "boundary_preparation::child_digests_without_a_temporary_directory",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("BOUNDARY_TEST_DIGEST_SCRATCH", dir.path().join("scratch"))
+            .env("TMPDIR", &not_a_directory)
+            .output()
+            .unwrap();
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        assert!(
+            stdout.contains("Plan::with_scratch"),
+            "the refusal names the fix: {stdout}"
+        );
+        assert!(
+            stdout.contains(not_a_directory.to_str().unwrap()),
+            "the refusal names the place: {stdout}"
+        );
+        assert!(stdout.contains("named: Ok(())"), "{stdout}");
+    }
+
+    /// An observer hears before a traversal starts, not after it ends, so a
+    /// hung one is not mistaken for a run with nothing to say.
+    #[test]
+    fn an_event_precedes_the_index_traversal() {
+        let chain = Chain::at(Shape::Shelley, 4);
+        let progress = Arc::new(AtFirstEvent::over(&chain, || {}));
+        let scratch = tempdir();
+
+        export_under(&chain, scratch.path(), &Observer::new(progress.clone()));
+
+        assert_eq!(progress.seen.lock().unwrap().unwrap(), (0, 0, 0));
+    }
+
+    #[test]
+    fn a_batch_tells_its_observer_before_it_traverses() {
+        let (root, stage_root) = (tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let bundle = chain.prepare(&store, &[]).unwrap();
+
+        chain.advance_to(3);
+
+        let progress = Arc::new(AtFirstEvent::over(&chain, || {}));
+
+        prepare::stage_batch(
+            stage_root.path(),
+            &chain.archive,
+            &chain.state,
+            std::slice::from_ref(&bundle),
+            &export::First,
+            Budget::new(u64::MAX),
+            &Observer::new(progress.clone()),
+        )
+        .unwrap();
+
+        assert_eq!(progress.seen.lock().unwrap().unwrap(), (0, 0, 0));
+    }
+
+    /// A resumption record naming `recorded`: `carried_forward` says yes, and
+    /// `adopt` says no unless the blob is still held, the one disagreement
+    /// `Predecessor::carried_forward` documents.
+    struct RecordedBlob {
+        inner: Lending,
+        recorded: stelae::inscription::LayerDescriptor,
+        blob_held: bool,
+    }
+
+    impl export::Predecessor for RecordedBlob {
+        fn history(&self) -> &[stelae::inscription::HistoryEntry] {
+            export::Predecessor::history(&self.inner)
+        }
+
+        fn adopt(
+            &self,
+            kind: &str,
+            scope: &serde_json::Value,
+        ) -> Result<Option<stelae::inscription::LayerDescriptor>, stelae_driver::Error> {
+            if self.blob_held && kind == self.recorded.kind && *scope == self.recorded.scope {
+                return Ok(Some(self.recorded.clone()));
+            }
+
+            export::Predecessor::adopt(&self.inner, kind, scope)
+        }
+
+        fn carried_forward(
+            &self,
+            kind: &str,
+            scope: &serde_json::Value,
+        ) -> Result<bool, stelae_driver::Error> {
+            Ok(
+                (kind == self.recorded.kind && *scope == self.recorded.scope)
+                    || export::Predecessor::carried_forward(&self.inner, kind, scope)?,
+            )
+        }
+
+        fn landed(
+            &self,
+            descriptor: &stelae::inscription::LayerDescriptor,
+        ) -> Result<(), stelae_driver::Error> {
+            export::Predecessor::landed(&self.inner, descriptor)
+        }
+    }
+
+    /// The seed at 1, and an interrupted publish at 2 whose layer of `kind` for
+    /// `epoch` is what the record names.
+    fn interrupted_at_two(
+        kind: &str,
+        epoch: u64,
+    ) -> (
+        Inscription,
+        Inscription,
+        stelae::inscription::LayerDescriptor,
+    ) {
+        let (seed_root, whole_root) = (tempdir(), tempdir());
+        let seed = Chain::at(Shape::Shelley, 1).export(seed_root.path(), &[], &export::First);
+        let at_two = Chain::at(Shape::Shelley, 2);
+        let plan = at_two.plan(&[]);
+        let whole = at_two.export(whole_root.path(), &[], &Lending::following(&seed, &plan));
+        let recorded = layer_of(&whole, kind, epoch).unwrap().clone();
+
+        (seed, whole, recorded)
+    }
+
+    /// The control: an export asks `adopt` first, so it rebuilds.
+    #[test]
+    fn an_export_rebuilds_a_dropped_recorded_blob() {
+        let (seed, whole, recorded) = interrupted_at_two(INDEXES, 1);
+        let chain = Chain::at(Shape::Shelley, 2);
+        let plan = chain.plan(&[]);
+        let root = tempdir();
+
+        let rebuilt = chain.export(
+            root.path(),
+            &[],
+            &RecordedBlob {
+                inner: Lending::following(&seed, &plan),
+                recorded,
+                blob_held: false,
+            },
+        );
+
+        assert!(rebuilt.canonicalize().unwrap() == whole.canonicalize().unwrap());
+    }
+
+    /// A batch leaves the window out on the forecast. Finalizing finds out, and
+    /// stages it, on every attempt and leaving nothing behind.
+    #[test]
+    fn a_batch_rebuilds_a_dropped_recorded_blob() {
+        let (seed, whole, recorded) = interrupted_at_two(INDEXES, 1);
+        let (root, stage_root) = (tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let bundle = chain.prepare(&store, &[]).unwrap();
+        let plan = bundle.plan();
+
+        chain.advance_to(3);
+
+        let previous = RecordedBlob {
+            inner: Lending::following(&seed, &plan),
+            recorded,
+            blob_held: false,
+        };
+
+        let staged = chain.stage(stage_root.path(), std::slice::from_ref(&bundle), &previous);
+
+        assert_eq!(staged.records(Family::Indexes, 1), None);
+
+        let staged_names = names_in(stage_root.path());
+
+        for attempt in 1..=2 {
+            let finished_root = tempdir();
+            let finished = chain
+                .finalize(finished_root.path(), &store, &bundle, &staged, &previous)
+                .unwrap();
+
+            assert!(
+                finished.canonicalize().unwrap() == whole.canonicalize().unwrap(),
+                "attempt {attempt}"
+            );
+            assert_eq!(
+                names_in(stage_root.path()),
+                staged_names,
+                "attempt {attempt}"
+            );
+        }
+    }
+
+    /// The same for an entity window, which would otherwise go missing.
+    #[test]
+    fn a_batch_rebuilds_a_dropped_recorded_entity_blob() {
+        let (seed_root, whole_root, root, stage_root, finished_root) =
+            (tempdir(), tempdir(), tempdir(), tempdir(), tempdir());
+        let seed = Chain::at(Shape::Shelley, 3).export(seed_root.path(), &[], &export::First);
+        let at_four = Chain::at(Shape::Shelley, 4);
+        let plan = at_four.plan(&[]);
+        let whole = at_four.export(whole_root.path(), &[], &Lending::following(&seed, &plan));
+        let recorded = layer_of(&whole, "entity-asset", 2).unwrap().clone();
+
+        assert!(layer_of(&seed, "entity-asset", 2).is_none());
+
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 4);
+        let bundle = chain.prepare(&store, &[]).unwrap();
+        let plan = bundle.plan();
+
+        chain.advance_to(5);
+
+        let previous = RecordedBlob {
+            inner: Lending::following(&seed, &plan),
+            recorded,
+            blob_held: false,
+        };
+
+        let staged = chain.stage(stage_root.path(), std::slice::from_ref(&bundle), &previous);
+        let finished = chain
+            .finalize(finished_root.path(), &store, &bundle, &staged, &previous)
+            .unwrap();
+
+        assert!(finished.canonicalize().unwrap() == whole.canonicalize().unwrap());
+    }
+
+    /// After the first commit and release, the rest of the batch reuses its
+    /// runs, because what it wants has only shrunk.
+    #[test]
+    fn the_rest_of_a_batch_reuses_its_runs_after_a_commit() {
+        let (root, stage_root, seed_root) = (tempdir(), tempdir(), tempdir());
+        let store = store(root.path());
+        let seed = Chain::at(Shape::Shelley, 1).export(seed_root.path(), &[], &export::First);
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let mut bundles = Vec::new();
+
+        for boundary in [2, 3, 4] {
+            chain.advance_to(boundary);
+            bundles.push(chain.prepare(&store, &[]).unwrap());
+        }
+
+        let lending = Lending::following(&seed, &bundles[0].plan());
+        let staged = chain.stage(stage_root.path(), &bundles, &lending);
+        let finished_root = tempdir();
+        let first = chain
+            .finalize(
+                finished_root.path(),
+                &store,
+                &bundles[0],
+                &staged,
+                &Lending::following(&seed, &bundles[0].plan()),
+            )
+            .unwrap();
+
+        store.release(bundles[0].sequence()).unwrap();
+
+        let traversed = chain.archive.traversals();
+        let following = Lending::following(&first, &bundles[1].plan());
+        let restarted = chain.stage(stage_root.path(), &bundles[1..], &following);
+
+        assert_eq!(chain.archive.traversals(), traversed);
+        assert_eq!(restarted.report().bytes, 0);
+
+        let (frozen_root, finished_root) = (tempdir(), tempdir());
+        let plan = bundles[1].plan();
+        let frozen = Chain::at(Shape::Shelley, bundles[1].sequence()).export(
+            frozen_root.path(),
+            &[],
+            &Lending::following(&first, &plan),
+        );
+        let finished = chain
+            .finalize(
+                finished_root.path(),
+                &store,
+                &bundles[1],
+                &restarted,
+                &Lending::following(&first, &plan),
+            )
+            .unwrap();
+
+        assert_same_stele(
+            (frozen_root.path(), &frozen),
+            (finished_root.path(), &finished),
+            "after a restart",
+        );
+    }
+
+    /// No commit needed: a recorded layer alone shrinks what a restart wants.
+    #[test]
+    fn a_restart_before_any_commit_reuses_its_runs() {
+        let (seed, _, recorded) = interrupted_at_two(INDEXES, 1);
+        let (root, stage_root) = (tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let bundle = chain.prepare(&store, &[]).unwrap();
+        let plan = bundle.plan();
+
+        chain.advance_to(3);
+
+        chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &Lending::following(&seed, &plan),
+        );
+
+        let restarted = chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &RecordedBlob {
+                inner: Lending::following(&seed, &plan),
+                recorded,
+                blob_held: true,
+            },
+        );
+
+        assert_eq!(restarted.report().bytes, 0);
+    }
+
+    /// A restart wanting more than the root holds says so, in its own refusal,
+    /// and the documented recovery gives the same stele.
+    #[test]
+    fn a_restart_wanting_more_is_refused_and_a_new_root_recovers() {
+        let (seed, whole, recorded) = interrupted_at_two(INDEXES, 1);
+        let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let bundle = chain.prepare(&store, &[]).unwrap();
+        let plan = bundle.plan();
+
+        chain.advance_to(3);
+
+        let previous = RecordedBlob {
+            inner: Lending::following(&seed, &plan),
+            recorded,
+            blob_held: true,
+        };
+
+        chain.stage(stage_root.path(), std::slice::from_ref(&bundle), &previous);
+
+        let refused = prepare::stage_batch(
+            stage_root.path(),
+            &chain.archive,
+            &chain.state,
+            std::slice::from_ref(&bundle),
+            &Lending::following(&seed, &plan),
+            Budget::new(u64::MAX),
+            &Observer::silent(),
+        );
+
+        assert!(
+            matches!(
+                &refused,
+                Err(Error::Staging(staging::Refusal::Uncovered { missing, .. })) if *missing == [1]
+            ),
+            "{refused:?}"
+        );
+
+        fs::remove_dir_all(stage_root.path()).unwrap();
+
+        let staged = chain.stage(stage_root.path(), std::slice::from_ref(&bundle), &previous);
+        let finished = chain
+            .finalize(finished_root.path(), &store, &bundle, &staged, &previous)
+            .unwrap();
+
+        assert!(finished.canonicalize().unwrap() == whole.canonicalize().unwrap());
+    }
+
+    /// Runs of another frontier are another source however much they cover, and
+    /// are not reported as wanting more.
+    #[test]
+    fn a_restart_at_another_frontier_is_another_source() {
+        let (root, stage_root) = (tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let bundle = chain.prepare(&store, &[]).unwrap();
+
+        chain.advance_to(3);
+        chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &export::First,
+        );
+        chain.advance_to(4);
+
+        let refused = prepare::stage_batch(
+            stage_root.path(),
+            &chain.archive,
+            &chain.state,
+            std::slice::from_ref(&bundle),
+            &export::First,
+            Budget::new(u64::MAX),
+            &Observer::silent(),
+        );
+
+        assert!(
+            matches!(
+                &refused,
+                Err(Error::Staging(staging::Refusal::SourceMismatch { .. }))
+            ),
+            "{refused:?}"
+        );
+    }
+
+    /// A payload unreadable after the bundle loaded is the filesystem's fault,
+    /// and the variant must not send a host to `release`.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_payload_is_io() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let bundle = chain.prepare(&store, &[]).unwrap();
+
+        chain.advance_to(3);
+
+        let staged = chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &export::First,
+        );
+        let loaded = store.load(2).unwrap();
+
+        for name in blobs(root.path()) {
+            let path = root.path().join("blobs/sha256").join(name);
+
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+
+            // Whoever ignores permissions, as root does, reads it anyway.
+            if fs::read(&path).is_ok() {
+                return;
+            }
+        }
+
+        let refused = chain.finalize(
+            finished_root.path(),
+            &store,
+            &loaded,
+            &staged,
+            &export::First,
+        );
+
+        let refusal = preparation_refusal(refused);
+
+        assert!(matches!(refusal, Refusal::Io(_)), "{refusal:?}");
+    }
+
+    /// Damage the decoder finds is `Corrupt`, at the first block, in the middle
+    /// of the stream or where it is cut short. The one record spans many
+    /// compressed blocks, so the first of them decode fine. This pins the line
+    /// the protocol crate draws, which `Refusal::Io` relies on.
+    #[test]
+    fn a_payload_the_decoder_rejects_is_corrupt() {
+        let (root, stage_root) = (tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+
+        let mut noise: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut value = vec![0x5a, 0x00, 0x10, 0x00, 0x00];
+
+        value.extend((0..1 << 20).map(|_| {
+            noise = noise.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (noise >> 56) as u8
+        }));
+
+        let writer = chain.state.start_writer().unwrap();
+
+        writer
+            .write_entity(
+                AccountState::NS,
+                &EntityKey::from_raw(&common::state_key(AccountState::NS, 0x40)),
+                &value,
+            )
+            .unwrap();
+        writer.commit().unwrap();
+
+        let bundle = chain.prepare(&store, &[]).unwrap();
+
+        chain.advance_to(3);
+
+        let staged = chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &export::First,
+        );
+
+        let loaded = store.load(2).unwrap();
+        let path = blobs(root.path())
+            .into_iter()
+            .map(|name| root.path().join("blobs/sha256").join(name))
+            .max_by_key(|path| fs::metadata(path).unwrap().len())
+            .unwrap();
+        let original = fs::read(&path).unwrap();
+
+        assert!(original.len() > 1 << 20, "the noise did not compress");
+
+        let at_the_start = {
+            let mut damaged = original.clone();
+            damaged[0] ^= 0xff;
+            damaged
+        };
+        let past_the_first_blocks = {
+            let mut damaged = original.clone();
+            let from = damaged.len() / 2;
+            damaged[from..].fill(0xff);
+            damaged
+        };
+        let cut_short = original[..original.len() / 2].to_vec();
+
+        for damaged in [at_the_start, past_the_first_blocks, cut_short] {
+            fs::write(&path, damaged).unwrap();
+
+            let refused =
+                chain.finalize(tempdir().path(), &store, &loaded, &staged, &export::First);
+            let refusal = preparation_refusal(refused);
+
+            assert!(
+                matches!(refusal, Refusal::Corrupt { sequence: 2, .. }),
+                "{refusal:?}"
+            );
+        }
+
+        fs::write(&path, &original).unwrap();
+
+        chain
+            .finalize(tempdir().path(), &store, &loaded, &staged, &export::First)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_vanished_payload_is_a_missing_artifact() {
+        let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let bundle = chain.prepare(&store, &[]).unwrap();
+
+        chain.advance_to(3);
+
+        let staged = chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &export::First,
+        );
+        let loaded = store.load(2).unwrap();
+
+        for name in blobs(root.path()) {
+            fs::remove_file(root.path().join("blobs/sha256").join(name)).unwrap();
+        }
+
+        let refused = chain.finalize(
+            finished_root.path(),
+            &store,
+            &loaded,
+            &staged,
+            &export::First,
+        );
+
+        let refusal = preparation_refusal(refused);
+
+        assert!(
+            matches!(refusal, Refusal::MissingArtifact { sequence: 2, .. }),
+            "{refusal:?}"
+        );
+    }
+
+    /// A fault inside a capture job, after another job wrote its payload: no
+    /// marker, and a retry converges. The tail's tag traversal runs only there.
+    #[test]
+    fn a_capture_dying_mid_write_marks_nothing_and_a_retry_completes() {
+        let (root, clean_root) = (tempdir(), tempdir());
+        let store = store(root.path());
+        let chain = Chain::at(Shape::Shelley, 2);
+
+        let refused = prepare::prepare(
+            &store,
+            &chain.plan(&[]).with_producers(export::Producers::new(
+                std::num::NonZeroUsize::new(1).unwrap(),
+            )),
+            &Counted::failing(chain.archive.inner.clone(), Traversal::Tags, 1),
+            &chain.state,
+            &Request {
+                store_contract: CONTRACT.to_owned(),
+                mutable_slots: chain.mutable,
+                tail: IndexTail::Traverse,
+            },
+            &Observer::silent(),
+        );
+
+        assert!(matches!(refused, Err(Error::Archive(_))), "{refused:?}");
+        assert!(
+            !blobs(root.path()).is_empty(),
+            "the blocks job finished before the tail job died"
+        );
+        assert!(store.sequences().unwrap().is_empty());
+
+        let retried = chain.prepare(&store, &[]).unwrap();
+        let clean = chain.prepare(&self::store(clean_root.path()), &[]).unwrap();
+
+        assert_eq!(
+            retried.layers().collect::<Vec<_>>(),
+            clean.layers().collect::<Vec<_>>()
+        );
+        assert_eq!(blobs(root.path()), blobs(clean_root.path()));
+    }
+
+    // ---------- A restart over rebuilt stores ----------
+
+    /// The rows a fix to the seal changes: one more entity entry in a closed,
+    /// sealed window.
+    fn one_more_entity_row(chain: &Chain) {
+        let writer = chain.archive.start_writer().unwrap();
+
+        for (_, kind) in ENTITY_KINDS {
+            writer
+                .write_entity(kind, &vec![0x20; kind.key_len()], chain.start(0) + 8)
+                .unwrap();
+        }
+
+        writer.commit().unwrap();
+    }
+
+    /// The rows a fix to the index changes: one more tx hash on a block of a
+    /// closed window.
+    fn one_more_index_row(chain: &Chain) {
+        let (point, _) = blocks_from(chain, 0).remove(0);
+        let slot = point.slot();
+        let delta = ArchiveIndexDelta {
+            slot,
+            block_hash: point.hash().unwrap().to_vec(),
+            block_number: Some(0),
+            tx_hashes: vec![[[0xcc_u8; 24].as_slice(), &slot.to_be_bytes()].concat()],
+            tags: vec![],
+        };
+        let writer = chain.archive.start_writer().unwrap();
+
+        writer.apply_index(std::slice::from_ref(&delta)).unwrap();
+        writer.commit().unwrap();
+    }
+
+    /// A batch dies staged at F on a root. The stores are rebuilt to the same
+    /// F, and the host does what the contract says: it releases every
+    /// unfinished bundle and prepares each boundary again. The old root is
+    /// refused, and with it deleted the batch finishes as the rebuilt
+    /// stores.
+    fn assert_a_rebuild_refuses_the_old_runs(edit: fn(&Chain), what: &str) {
+        let (root, stage_root, frozen_root, finished_root) =
+            (tempdir(), tempdir(), tempdir(), tempdir());
+        let store = store(root.path());
+        let mut first = Chain::at(Shape::Shelley, 2);
+        let bundle = first.prepare(&store, &[]).unwrap();
+
+        first.advance_to(3);
+
+        let staged = first.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &export::First,
+        );
+
+        assert!(staged.report().bytes > 0);
+
+        store.release(2).unwrap();
+
+        let mut rebuilt = Chain::at(Shape::Shelley, 2);
+        edit(&rebuilt);
+
+        let frozen = rebuilt.export(frozen_root.path(), &[], &export::First);
+        let bundle = rebuilt.prepare(&store, &[]).unwrap();
+
+        rebuilt.advance_to(3);
+
+        assert_eq!(rebuilt.tip, first.tip, "the same frontier");
+
+        let refused = prepare::stage_batch(
+            stage_root.path(),
+            &rebuilt.archive,
+            &rebuilt.state,
+            std::slice::from_ref(&bundle),
+            &export::First,
+            Budget::new(u64::MAX),
+            &Observer::silent(),
+        );
+
+        assert!(
+            matches!(
+                &refused,
+                Err(Error::Staging(staging::Refusal::SourceMismatch { .. }))
+            ),
+            "{what}: {refused:?}"
+        );
+
+        fs::remove_dir_all(stage_root.path()).unwrap();
+
+        let staged = rebuilt.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &export::First,
+        );
+        let finished = rebuilt
+            .finalize(
+                finished_root.path(),
+                &store,
+                &bundle,
+                &staged,
+                &export::First,
+            )
+            .unwrap();
+
+        assert_same_stele(
+            (frozen_root.path(), &frozen),
+            (finished_root.path(), &finished),
+            what,
+        );
+    }
+
+    #[test]
+    fn a_rebuild_changing_entity_rows_refuses_the_old_runs() {
+        assert_a_rebuild_refuses_the_old_runs(one_more_entity_row, "entity");
+    }
+
+    #[test]
+    fn a_rebuild_changing_index_rows_refuses_the_old_runs() {
+        assert_a_rebuild_refuses_the_old_runs(one_more_index_row, "indexes");
+    }
+
+    /// The refusal takes no difference to look at: bundles can't show the rows
+    /// that moved, so every recapture is treated as if some had.
+    #[test]
+    fn a_recapture_of_the_same_rows_refuses_the_old_runs() {
+        assert_a_rebuild_refuses_the_old_runs(|_| {}, "the same rows");
+    }
+
+    /// A held bundle is the same capture, so a process restarted at the
+    /// boundary keeps its runs.
+    #[test]
+    fn a_held_bundle_keeps_its_runs() {
+        let (root, stage_root) = (tempdir(), tempdir());
+        let store = store(root.path());
+        let chain = Chain::at(Shape::Shelley, 2);
+        let bundle = chain.prepare(&store, &[]).unwrap();
+
+        chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &export::First,
+        );
+
+        let held = chain.prepare(&store, &[]).unwrap();
+        let restarted = chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&held),
+            &export::First,
+        );
+
+        assert_eq!(restarted.report().bytes, 0);
+    }
+
+    /// A bundle new to the batch is refused even where the runs hold all it
+    /// wants: a rebuild could have brought it, at the same frontier.
+    #[test]
+    fn a_bundle_the_runs_were_not_staged_for_is_refused() {
+        let (root, stage_root) = (tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let two = chain.prepare(&store, &[]).unwrap();
+
+        chain.advance_to(3);
+
+        let three = chain.prepare(&store, &[]).unwrap();
+
+        chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&three),
+            &export::First,
+        );
+
+        let refused = prepare::stage_batch(
+            stage_root.path(),
+            &chain.archive,
+            &chain.state,
+            &[two, three],
+            &export::First,
+            Budget::new(u64::MAX),
+            &Observer::silent(),
+        );
+
+        assert!(
+            matches!(
+                &refused,
+                Err(Error::Staging(staging::Refusal::SourceMismatch { .. }))
+            ),
+            "{refused:?}"
+        );
+    }
+
+    /// The index marker has gone stale, so the capture check that decides is an
+    /// entity marker's.
+    #[test]
+    fn an_entity_marker_refuses_another_capture() {
+        let (root, stage_root) = (tempdir(), tempdir());
+        let store = store(root.path());
+        let mut first = Chain::at(Shape::Shelley, 2);
+        let old = first.prepare(&store, &[]).unwrap();
+
+        first.advance_to(3);
+        first.stage(
+            stage_root.path(),
+            std::slice::from_ref(&old),
+            &export::First,
+        );
+
+        store.release(2).unwrap();
+
+        fs::remove_file(stage_root.path().join(INDEXES).join("0.run")).unwrap();
+
+        let mut rebuilt = Chain::at(Shape::Shelley, 2);
+        one_more_entity_row(&rebuilt);
+
+        let bundle = rebuilt.prepare(&store, &[]).unwrap();
+
+        rebuilt.advance_to(3);
+
+        let refused = prepare::stage_batch(
+            stage_root.path(),
+            &rebuilt.archive,
+            &rebuilt.state,
+            std::slice::from_ref(&bundle),
+            &export::First,
+            Budget::new(u64::MAX),
+            &Observer::silent(),
+        );
+
+        match refused {
+            Err(Error::Staging(staging::Refusal::SourceMismatch { path })) => {
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+
+                assert!(name.starts_with("entity-"), "{name}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // ---------- The horizon ----------
+
+    #[derive(Clone, Copy)]
+    struct PruneCase {
+        shape: Shape,
+        boundary: u64,
+        first_window: Option<u64>,
+        predecessor: Option<u64>,
+        before_staging: bool,
+        on_fjall: bool,
+        /// One more block, a slot into window 3: the nearest any can sit after
+        /// the window's first slot.
+        block_after_first_slot: bool,
+    }
+
+    impl PruneCase {
+        /// A plan restricted to 3.. at `boundary`, following nothing, staged on
+        /// the unpruned in-memory archive.
+        fn at(shape: Shape, boundary: u64) -> Self {
+            Self {
+                shape,
+                boundary,
+                first_window: Some(3),
+                predecessor: None,
+                before_staging: false,
+                on_fjall: false,
+                block_after_first_slot: false,
+            }
+        }
+    }
+
+    /// A copy of `chain`'s blocks and logs, in the store a publisher prunes.
+    fn on_fjall(chain: &Chain) -> dolos_fjall::archive::ArchiveStore {
+        let schema = dolos_cardano::model::build_log_schema();
+        let archive = dolos_fjall::archive::ArchiveStore::for_tempdir(schema.clone()).unwrap();
+        let writer = archive.start_writer().unwrap();
+
+        for (point, body) in blocks_from(chain, 0) {
+            writer.apply(&point, &Arc::new(body)).unwrap();
+        }
+
+        for (&ns, _) in schema.iter() {
+            for entry in chain.archive.iter_logs(ns, KeyRange::all()).unwrap() {
+                let (key, value) = entry.unwrap();
+
+                writer.write_log(ns, &key, &value).unwrap();
+            }
+        }
+
+        writer.commit().unwrap();
+
+        archive
+    }
+
+    /// `case`'s plan prepared, the chain advanced an epoch, a real
+    /// `prune_history` cutting at what `cut_at` picks given the horizon,
+    /// and the batch finished on what is left. What it publishes has to
+    /// equal the frozen export.
+    fn finish_on_a_prune(
+        case: PruneCase,
+        cut_at: impl Fn(&Chain, u64) -> u64,
+    ) -> Result<(), Error> {
+        let (root, stage_root, frozen_root, finished_root, seed_root) =
+            (tempdir(), tempdir(), tempdir(), tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(case.shape, case.boundary);
+
+        if case.block_after_first_slot {
+            let (tip, number) = (chain.tip.clone(), chain.number);
+            let (point, body) = make_conway_block_with_prev(chain.start(3) + 1, None, number);
+
+            chain.commit_block(point, body, true, Some(number));
+            chain.tip = tip;
+        }
+
+        let delta = chain.boundary_delta.clone().unwrap();
+        let plan = chain.plan(&[]).restrict_epochs(case.first_window, None);
+
+        let seed = case.predecessor.map(|sequence| {
+            let seed_chain = Chain::at(case.shape, sequence);
+            let seed_plan = seed_chain
+                .plan(&[])
+                .restrict_epochs(case.first_window, None);
+
+            export::export(
+                &SteleDir::create(seed_root.path()).unwrap(),
+                &seed_plan,
+                &seed_chain.archive,
+                &seed_chain.state,
+                None,
+                &export::First,
+                &Observer::silent(),
+            )
+            .unwrap()
+        });
+
+        let previous = || -> Box<dyn export::Predecessor> {
+            match &seed {
+                Some(seed) => Box::new(Lending::following(seed, &plan)),
+                None => Box::new(export::First),
+            }
+        };
+
+        let frozen = export::export(
+            &SteleDir::create(frozen_root.path()).unwrap(),
+            &plan,
+            &chain.archive,
+            &chain.state,
+            None,
+            previous().as_ref(),
+            &Observer::silent(),
+        )
+        .unwrap();
+
+        let bundle = prepare::prepare(
+            &store,
+            &plan,
+            &chain.archive,
+            &chain.state,
+            &plain_request(&chain, &delta),
+            &Observer::silent(),
+        )
+        .unwrap();
+        let horizon = bundle.horizon().unwrap();
+
+        chain.advance_to(case.boundary + 1);
+
+        let tip = chain.tip.as_ref().unwrap().slot();
+        let max_slots = tip - cut_at(&chain, horizon);
+        let stele = SteleDir::create(finished_root.path()).unwrap();
+
+        let staged = (!case.before_staging).then(|| {
+            chain.stage(
+                stage_root.path(),
+                std::slice::from_ref(&bundle),
+                previous().as_ref(),
+            )
+        });
+
+        let finished = if case.on_fjall {
+            let fjall = on_fjall(&chain);
+
+            assert!(fjall.prune_history(max_slots, None, None).unwrap());
+
+            prepare::finalize(
+                &stele,
+                &Finalizing {
+                    store: &store,
+                    bundle: &bundle,
+                    staged: &staged.unwrap(),
+                    producers: export::Producers::DEFAULT,
+                },
+                &fjall,
+                None,
+                previous().as_ref(),
+                &Observer::silent(),
+            )?
+        } else {
+            assert!(chain.archive.prune_history(max_slots, None, None).unwrap());
+
+            let staged = staged.unwrap_or_else(|| {
+                chain.stage(
+                    stage_root.path(),
+                    std::slice::from_ref(&bundle),
+                    previous().as_ref(),
+                )
+            });
+
+            prepare::finalize(
+                &stele,
+                &Finalizing {
+                    store: &store,
+                    bundle: &bundle,
+                    staged: &staged,
+                    producers: export::Producers::DEFAULT,
+                },
+                &chain.archive,
+                None,
+                previous().as_ref(),
+                &Observer::silent(),
+            )?
+        };
+
+        assert_same_stele(
+            (frozen_root.path(), &frozen),
+            (finished_root.path(), &finished),
+            "pruned",
+        );
+
+        Ok(())
+    }
+
+    /// Everything strictly before the horizon is gone, which is what the
+    /// contract says pruning may do.
+    #[test]
+    fn an_archive_pruned_exactly_to_the_horizon_finishes() {
+        finish_on_a_prune(PruneCase::at(Shape::Shelley, 4), |_, horizon| horizon).unwrap();
+    }
+
+    /// Where a block does sit on the epoch's first slot, a Byron boundary
+    /// block, the same prune finishes.
+    #[test]
+    fn a_prune_to_a_block_on_the_first_slot_finishes() {
+        finish_on_a_prune(PruneCase::at(Shape::Byron, 4), |_, horizon| horizon).unwrap();
+    }
+
+    /// One block more than the horizon needs changes nothing.
+    #[test]
+    fn a_prune_short_of_the_horizon_finishes() {
+        finish_on_a_prune(PruneCase::at(Shape::Shelley, 4), |chain, _| {
+            first_block_from(chain, chain.start(2))
+        })
+        .unwrap();
+    }
+
+    /// Only the horizon's own block separates this from the case above it. The
+    /// window keeps all its blocks, but that block is what shows its logs
+    /// stayed.
+    #[test]
+    fn losing_only_the_horizons_block_is_refused() {
+        let refused = finish_on_a_prune(PruneCase::at(Shape::Shelley, 4), |_, horizon| horizon + 1);
+
+        assert!(matches!(
+            preparation_refusal(refused),
+            Refusal::HorizonLost { sequence: 4, .. }
+        ));
+    }
+
+    /// What the log cases below rest on: at boundary 5 no log layer of window 3
+    /// is captured.
+    #[test]
+    fn a_window_below_capture_from_leaves_its_logs_to_the_archive() {
+        let root = tempdir();
+        let store = store(root.path());
+        let chain = Chain::at(Shape::Shelley, 5);
+        let delta = chain.boundary_delta.clone().unwrap();
+        let plan = chain.plan(&[]).restrict_epochs(Some(3), None);
+
+        prepare::prepare(
+            &store,
+            &plan,
+            &chain.archive,
+            &chain.state,
+            &plain_request(&chain, &delta),
+            &Observer::silent(),
+        )
+        .unwrap();
+
+        let manifest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(root.path().join("bundles/5.json")).unwrap())
+                .unwrap();
+
+        assert_eq!(manifest["manifest"]["capture_from"], 4);
+    }
+
+    /// At boundary 5 window 3 sits below `capture_from`, so its logs are read
+    /// from the archive, where they key at the window's first slot, before
+    /// its first block. A prune to the horizon has to leave them.
+    #[test]
+    fn a_prune_to_the_horizon_keeps_the_logs_read_from_the_archive() {
+        finish_on_a_prune(PruneCase::at(Shape::Shelley, 5), |_, horizon| horizon).unwrap();
+    }
+
+    #[test]
+    fn a_prune_to_the_horizon_before_staging_keeps_those_logs() {
+        finish_on_a_prune(
+            PruneCase {
+                before_staging: true,
+                ..PruneCase::at(Shape::Shelley, 5)
+            },
+            |_, horizon| horizon,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_fjall_prune_to_the_horizon_keeps_those_logs() {
+        finish_on_a_prune(
+            PruneCase {
+                on_fjall: true,
+                ..PruneCase::at(Shape::Shelley, 5)
+            },
+            |_, horizon| horizon,
+        )
+        .unwrap();
+    }
+
+    /// A predecessor one boundary back has not settled window 3's account rows,
+    /// so that layer still comes from the archive.
+    #[test]
+    fn a_prune_to_the_horizon_keeps_a_window_settling_under_its_predecessor() {
+        finish_on_a_prune(
+            PruneCase {
+                predecessor: Some(4),
+                ..PruneCase::at(Shape::Shelley, 5)
+            },
+            |_, horizon| horizon,
+        )
+        .unwrap();
+    }
+
+    /// Every layer of window 2 comes from the predecessor.
+    #[test]
+    fn a_prune_to_the_horizon_finishes_on_a_window_its_predecessor_carries() {
+        finish_on_a_prune(
+            PruneCase {
+                first_window: Some(2),
+                predecessor: Some(4),
+                ..PruneCase::at(Shape::Shelley, 5)
+            },
+            |_, horizon| horizon,
+        )
+        .unwrap();
+    }
+
+    /// A whole plan's horizon is the chain's first block, and a prune takes
+    /// that block whenever it takes anything: to the horizon it does
+    /// nothing, though the logs of the first window key before that block.
+    #[test]
+    fn a_whole_plan_pruned_to_its_horizon_keeps_everything() {
+        for on_fjall in [false, true] {
+            finish_on_a_prune(
+                PruneCase {
+                    first_window: None,
+                    on_fjall,
+                    ..PruneCase::at(Shape::Shelley, 5)
+                },
+                |_, horizon| horizon,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn a_whole_plan_pruned_one_slot_past_its_horizon_is_refused() {
+        for on_fjall in [false, true] {
+            let refused = finish_on_a_prune(
+                PruneCase {
+                    first_window: None,
+                    on_fjall,
+                    ..PruneCase::at(Shape::Shelley, 5)
+                },
+                |_, horizon| horizon + 1,
+            );
+
+            assert!(matches!(
+                preparation_refusal(refused),
+                Refusal::HorizonLost { sequence: 5, .. }
+            ));
+        }
+    }
+
+    /// The cut that keeps every block of the window and loses its logs.
+    #[test]
+    fn a_cut_at_the_windows_first_block_is_refused() {
+        for on_fjall in [false, true] {
+            let refused = finish_on_a_prune(
+                PruneCase {
+                    on_fjall,
+                    ..PruneCase::at(Shape::Shelley, 5)
+                },
+                |chain, _| first_block_from(chain, chain.start(3)),
+            );
+
+            assert!(
+                matches!(
+                    preparation_refusal(refused),
+                    Refusal::HorizonLost { sequence: 5, .. }
+                ),
+                "on_fjall {on_fjall}"
+            );
+        }
+    }
+
+    /// The contract's price: this cut loses nothing, but with the horizon's
+    /// block gone nothing can tell it from the one above.
+    #[test]
+    fn a_cut_at_the_windows_first_slot_is_refused() {
+        let refused =
+            finish_on_a_prune(PruneCase::at(Shape::Shelley, 5), |chain, _| chain.start(3));
+
+        assert!(matches!(
+            preparation_refusal(refused),
+            Refusal::HorizonLost { sequence: 5, .. }
+        ));
+    }
+
+    #[test]
+    fn the_horizon_is_the_last_block_at_or_before_the_windows_first_slot() {
+        for (shape, on_first_slot) in [(Shape::Shelley, false), (Shape::Byron, true)] {
+            let root = tempdir();
+            let store = store(root.path());
+            let chain = Chain::at(shape, 5);
+            let delta = chain.boundary_delta.clone().unwrap();
+            let plan = chain.plan(&[]).restrict_epochs(Some(3), None);
+
+            let bundle = prepare::prepare(
+                &store,
+                &plan,
+                &chain.archive,
+                &chain.state,
+                &plain_request(&chain, &delta),
+                &Observer::silent(),
+            )
+            .unwrap();
+            let horizon = bundle.horizon().unwrap();
+
+            assert_eq!(horizon, last_block_to(&chain, chain.start(3)), "{shape:?}");
+            assert_eq!(horizon == chain.start(3), on_first_slot, "{shape:?}");
+        }
+    }
+
+    /// A block after the window's first slot says nothing of the logs keyed at
+    /// that slot, however close it sits, so the horizon stays before it.
+    #[test]
+    fn a_prune_to_the_horizon_keeps_the_logs_with_a_block_just_after_the_first_slot() {
+        finish_on_a_prune(
+            PruneCase {
+                block_after_first_slot: true,
+                ..PruneCase::at(Shape::Shelley, 5)
+            },
+            |chain, horizon| {
+                assert_eq!(horizon, chain.start(2) + 50);
+
+                horizon
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_cut_at_a_block_just_after_the_first_slot_is_refused() {
+        let refused = finish_on_a_prune(
+            PruneCase {
+                block_after_first_slot: true,
+                ..PruneCase::at(Shape::Shelley, 5)
+            },
+            |chain, _| chain.start(3) + 1,
+        );
+
+        assert!(matches!(
+            preparation_refusal(refused),
+            Refusal::HorizonLost { sequence: 5, .. }
+        ));
+    }
+
+    /// A chain's second block is no chain start once its first is gone.
+    #[test]
+    fn losing_only_the_chains_first_block_is_refused() {
+        let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let bundle = chain.prepare(&store, &[]).unwrap();
+        let horizon = bundle.horizon().unwrap();
+
+        chain.advance_to(3);
+
+        let staged = chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &export::First,
+        );
+
+        let refused = finalize_on(
+            finished_root.path(),
+            &store,
+            &bundle,
+            &staged,
+            &pruned_archive(blocks_from(&chain, horizon + 1)),
+        );
+
+        assert!(matches!(
+            preparation_refusal(refused),
+            Refusal::HorizonLost { sequence: 2, .. }
+        ));
+    }
+
+    /// The same archive has to stage, not merely avoid `HorizonLost`.
+    #[test]
+    fn a_batch_stages_on_an_archive_pruned_exactly_to_the_horizon() {
+        let (root, stage_root) = (tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 4);
+        let delta = chain.boundary_delta.clone().unwrap();
+        let plan = chain.plan(&[]).restrict_epochs(Some(3), None);
+
+        let bundle = prepare::prepare(
+            &store,
+            &plan,
+            &chain.archive,
+            &chain.state,
+            &plain_request(&chain, &delta),
+            &Observer::silent(),
+        )
+        .unwrap();
+        let horizon = bundle.horizon().unwrap();
+
+        chain.advance_to(5);
+
+        prepare::stage_batch(
+            stage_root.path(),
+            &pruned_archive(blocks_from(&chain, horizon)),
+            &chain.state,
+            std::slice::from_ref(&bundle),
+            &export::First,
+            Budget::new(u64::MAX),
+            &Observer::silent(),
+        )
+        .unwrap();
+    }
+
+    // ---------- What a sweep finds ----------
+
+    /// A FIFO named `lock` under a spool-shaped directory must not hang an
+    /// export: anyone able to write to the scratch can plant one.
+    #[cfg(unix)]
+    #[test]
+    fn a_planted_fifo_does_not_hang_an_export() {
+        let scratch = tempdir();
+        let planted = scratch.path().join("dolos-staging-m");
+
+        fs::create_dir(&planted).unwrap();
+
+        let fifo = planted.join("lock");
+
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+
+        let (ready_tx, ready) = std::sync::mpsc::channel();
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let path = scratch.path().to_owned();
+        let worker = std::thread::spawn(move || {
+            let chain = Chain::at(Shape::Shelley, 2);
+
+            ready_tx.send(()).unwrap();
+            export_under(&chain, &path, &Observer::silent());
+            done_tx.send(()).unwrap();
+        });
+
+        ready.recv().unwrap();
+
+        let returned = done
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .is_ok();
+
+        if !returned {
+            // Give the blocked open its writer, so the run can end.
+            let fifo = fifo.clone();
+
+            std::thread::spawn(move || {
+                let _ = fs::OpenOptions::new().write(true).open(&fifo);
+            });
+        }
+
+        worker.join().unwrap();
+
+        assert!(returned, "the export hung on the FIFO");
+        assert!(fifo.exists(), "no claim makes a FIFO, so it is left alone");
+    }
+
+    /// A claim only ever makes a plain file, so anything else named `lock` says
+    /// nothing about who holds the spool, and the spool stays.
+    #[cfg(unix)]
+    #[test]
+    fn a_spool_whose_lock_is_not_a_file_stays() {
+        let (scratch, outside) = (tempdir(), tempdir());
+        let target = outside.path().join("a file");
+
+        fs::write(&target, b"").unwrap();
+
+        let linked = scratch.path().join("dolos-staging-link");
+        let directory = scratch.path().join("dolos-staging-dir");
+
+        fs::create_dir(&linked).unwrap();
+        std::os::unix::fs::symlink(&target, linked.join("lock")).unwrap();
+        fs::create_dir_all(directory.join("lock")).unwrap();
+
+        export_under(
+            &Chain::at(Shape::Shelley, 2),
+            scratch.path(),
+            &Observer::silent(),
+        );
+
+        assert!(linked.join("lock").is_symlink());
+        assert!(directory.join("lock").is_dir());
+    }
+
+    /// The negative control of the sweep's destructive arms: directories
+    /// without the prefix stay, whatever they hold.
+    #[test]
+    fn a_sweep_leaves_directories_that_are_not_spools() {
+        let scratch = tempdir();
+        let empty = scratch.path().join("someone-elses-empty");
+        let held = scratch.path().join("someone-elses-data");
+
+        fs::create_dir(&empty).unwrap();
+        fs::create_dir(&held).unwrap();
+        fs::write(held.join("lock"), b"").unwrap();
+        fs::write(held.join("precious"), b"x").unwrap();
+
+        export_under(
+            &Chain::at(Shape::Shelley, 2),
+            scratch.path(),
+            &Observer::silent(),
+        );
+
+        assert_eq!(
+            names_in(scratch.path()),
+            ["someone-elses-data", "someone-elses-empty"]
+        );
+        assert!(held.join("precious").exists());
+    }
+
+    /// An existing base where the spool cannot be created is refused by name,
+    /// as a base that cannot be created is.
+    #[cfg(unix)]
+    #[test]
+    fn a_base_that_refuses_a_spool_is_refused_by_name() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = tempdir();
+        let base = scratch.path().join("readonly");
+
+        fs::create_dir(&base).unwrap();
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o555)).unwrap();
+
+        // Whoever ignores permissions, as root does, can spool here anyway.
+        if tempfile::tempdir_in(&base).is_ok() {
+            return;
+        }
+
+        let chain = Chain::at(Shape::Shelley, 2);
+        let refusal = export::export(
+            &Discarding,
+            &chain.plan(&[]).with_scratch(&base),
+            &chain.archive,
+            &chain.state,
+            None,
+            &export::First,
+            &Observer::silent(),
+        )
+        .err()
+        .unwrap()
+        .to_string();
+
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(refusal.contains("Plan::with_scratch"), "{refusal}");
+        assert!(
+            refusal.contains(&format!("cannot spool under {}:", base.display())),
+            "{refusal}"
+        );
+    }
+
+    /// A window the predecessor really adopted was left out of the batch and is
+    /// not staged again: a chained finalize traverses nothing.
+    #[test]
+    fn a_chained_finalize_traverses_nothing() {
+        let (root, stage_root, seed_root, finished_root) =
+            (tempdir(), tempdir(), tempdir(), tempdir());
+        let store = store(root.path());
+        let seed = Chain::at(Shape::Shelley, 3).export(seed_root.path(), &[], &export::First);
+        let mut chain = Chain::at(Shape::Shelley, 4);
+        let bundle = chain.prepare(&store, &[]).unwrap();
+        let plan = bundle.plan();
+
+        chain.advance_to(5);
+
+        let staged = chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &Lending::following(&seed, &plan),
+        );
+
+        assert_eq!(
+            staged.records(Family::Indexes, 0),
+            None,
+            "window 0 is inherited"
+        );
+
+        let traversed = (
+            chain.archive.traversals(),
+            chain.archive.entity_traversals(),
+        );
+
+        chain
+            .finalize(
+                finished_root.path(),
+                &store,
+                &bundle,
+                &staged,
+                &Lending::following(&seed, &plan),
+            )
+            .unwrap();
+
+        assert_eq!(
+            (
+                chain.archive.traversals(),
+                chain.archive.entity_traversals()
+            ),
+            traversed,
+            "finalizing stages nothing the predecessor adopted"
+        );
+    }
+
+    /// A window the predecessor records and then declines is not staged
+    /// again while the batch's own runs hold it: same bytes, no traversal.
+    #[test]
+    fn a_declined_window_the_runs_hold_is_not_staged_again() {
+        let (seed, whole, recorded) = interrupted_at_two(INDEXES, 1);
+        let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let bundle = chain.prepare(&store, &[]).unwrap();
+        let plan = bundle.plan();
+
+        chain.advance_to(3);
+
+        // The batch stages window 1, and only then does the record name it.
+        let staged = chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &Lending::following(&seed, &plan),
+        );
+
+        assert!(staged.records(Family::Indexes, 1).is_some());
+
+        let traversed = chain.archive.traversals();
+        let finished = chain
+            .finalize(
+                finished_root.path(),
+                &store,
+                &bundle,
+                &staged,
+                &RecordedBlob {
+                    inner: Lending::following(&seed, &plan),
+                    recorded,
+                    blob_held: false,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(chain.archive.traversals(), traversed);
+        assert!(finished.canonicalize().unwrap() == whole.canonicalize().unwrap());
+    }
+
+    /// Bundle 5 prepared under 150 mutable slots and bundle 6 under the chain's
+    /// 50, on hundred-slot epochs, with the stores advanced to `frontier`.
+    fn mixed_seal_rules(store: &Store, frontier: u64) -> (Chain, Bundle, Bundle) {
+        let mut chain = Chain::at(Shape::Shelley, 5);
+        let delta = chain.boundary_delta.clone().unwrap();
+
+        let first = prepare::prepare(
+            store,
+            &chain.plan(&[]),
+            &chain.archive,
+            &chain.state,
+            &Request {
+                mutable_slots: 150,
+                ..plain_request(&chain, &delta)
+            },
+            &Observer::silent(),
+        )
+        .unwrap();
+
+        chain.advance_to(6);
+
+        let second = chain.prepare(store, &[]).unwrap();
+
+        chain.advance_to(frontier);
+
+        (chain, first, second)
+    }
+
+    /// Finalization compares no `mutable_slots`, so this is the only stop
+    /// for a batch whose runs would carry the first bundle's `sealed_by`.
+    #[test]
+    fn a_batch_of_mixed_seal_rules_is_refused() {
+        let (root, stage_root) = (tempdir(), tempdir());
+        let store = store(root.path());
+        let (chain, first, second) = mixed_seal_rules(&store, 8);
+
+        let refused = prepare::stage_batch(
+            stage_root.path(),
+            &chain.archive,
+            &chain.state,
+            &[first, second],
+            &export::First,
+            Budget::new(u64::MAX),
+            &Observer::silent(),
+        );
+
+        assert!(matches!(
+            preparation_refusal(refused),
+            Refusal::SourceMismatch { sequence: 6, .. }
+        ));
+        assert_eq!(chain.archive.traversals(), (0, 0));
+    }
+
+    /// The other half of the tuple: differing only in network, on this
+    /// build's contract, so the contract check above it does not fire.
+    #[test]
+    fn a_batch_of_mixed_networks_is_refused() {
+        let (root, other_root, stage_root) = (tempdir(), tempdir(), tempdir());
+        let store = store(root.path());
+        let other = self::store(other_root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let delta = chain.boundary_delta.clone().unwrap();
+        let first = chain.prepare(&store, &[]).unwrap();
+
+        let plan = Plan::new(
+            &chain.summary,
+            Network::for_magic(1),
+            chain.tip.clone().unwrap(),
+            RetainedEpochs::default(),
+        )
+        .unwrap();
+
+        let foreign = prepare::prepare(
+            &other,
+            &plan,
+            &chain.archive,
+            &chain.state,
+            &plain_request(&chain, &delta),
+            &Observer::silent(),
+        )
+        .unwrap();
+
+        chain.advance_to(3);
+
+        let refused = prepare::stage_batch(
+            stage_root.path(),
+            &chain.archive,
+            &chain.state,
+            &[first, foreign],
+            &export::First,
+            Budget::new(u64::MAX),
+            &Observer::silent(),
+        );
+
+        assert!(matches!(
+            preparation_refusal(refused),
+            Refusal::SourceMismatch { sequence: 2, .. }
+        ));
+        assert_eq!(chain.archive.traversals(), (0, 0));
+    }
+
+    /// A restart on the same root and frontier after `edit` changed what the
+    /// marker says about its identity, as another build's marker would.
+    fn restart_over_an_edited_marker(
+        marker: &str,
+        edit: impl Fn(&mut serde_json::Value),
+    ) -> Result<Staged, Error> {
+        let (root, stage_root) = (tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let bundle = chain.prepare(&store, &[]).unwrap();
+
+        chain.advance_to(3);
+        chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &export::First,
+        );
+
+        let path = stage_root.path().join(marker);
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+
+        edit(&mut json["identity"]);
+        fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+
+        prepare::stage_batch(
+            stage_root.path(),
+            &chain.archive,
+            &chain.state,
+            std::slice::from_ref(&bundle),
+            &export::First,
+            Budget::new(u64::MAX),
+            &Observer::silent(),
+        )
+    }
+
+    /// Each clause of `Identity::same_source` on its own, through the path
+    /// that uses it. `stage()` compares whole identities and never gets here.
+    #[test]
+    fn another_builds_marker_is_another_source() {
+        let control = restart_over_an_edited_marker("indexes.json", |_| {}).unwrap();
+
+        assert_eq!(control.report().bytes, 0, "an untouched marker is reused");
+
+        let reused: Vec<&str> = [
+            ("format", serde_json::json!(2)),
+            ("profile", serde_json::json!("io.txpipe.dolos.cardano/2")),
+            ("media_type", serde_json::json!("another")),
+            ("network_magic", serde_json::json!(1)),
+            ("store_contract", serde_json::json!("another")),
+        ]
+        .into_iter()
+        .filter(|(field, value)| {
+            let restarted = restart_over_an_edited_marker("indexes.json", |identity| {
+                identity[*field] = value.clone();
+            });
+
+            !matches!(
+                restarted,
+                Err(Error::Staging(staging::Refusal::SourceMismatch { .. }))
+            )
+        })
+        .map(|(field, _)| field)
+        .collect();
+
+        assert!(reused.is_empty(), "taken as the same source: {reused:?}");
+    }
+
+    /// Coverage is the whole window, not its epoch: a run
+    /// sealed by another boundary answers `publishes` wrongly.
+    #[test]
+    fn a_window_held_differently_is_not_covered() {
+        let reused: Vec<&str> = [
+            ("indexes.json", "end_slot", serde_json::json!(1)),
+            ("indexes.json", "start_slot", serde_json::json!(1)),
+            ("entity-asset.json", "sealed_by", serde_json::json!(99)),
+        ]
+        .into_iter()
+        .filter(|(marker, field, value)| {
+            let restarted = restart_over_an_edited_marker(marker, |identity| {
+                identity["windows"][0][*field] = value.clone();
+            });
+
+            !matches!(
+                &restarted,
+                Err(Error::Staging(staging::Refusal::Uncovered { missing, .. }))
+                    if *missing == [0]
+            )
+        })
+        .map(|(_, field, _)| field)
+        .collect();
+
+        assert!(reused.is_empty(), "taken as covered: {reused:?}");
+    }
+
+    /// A held bundle's recorded seal is compared with the one the stores
+    /// give now, even where the layers come out the same.
+    #[test]
+    fn a_held_bundle_sealed_differently_is_refused() {
+        let kept: Vec<&str> = ["capture_from", "oldest_unsealed"]
+            .into_iter()
+            .filter(|field| {
+                let root = tempdir();
+                let store = store(root.path());
+                let chain = Chain::at(Shape::Shelley, 4);
+
+                chain.prepare(&store, &[]).unwrap();
+
+                rewrite_manifest(&root.path().join("bundles/4.json"), |manifest| {
+                    let key = format!("\"{field}\":");
+                    let at = manifest.find(&key).unwrap() + key.len();
+                    let end = at + manifest[at..].find(|c: char| !c.is_ascii_digit()).unwrap();
+                    let value: u64 = manifest[at..end].parse().unwrap();
+
+                    format!("{}{}{}", &manifest[..at], value + 1, &manifest[end..])
+                });
+
+                !matches!(
+                    chain.prepare(&store, &[]),
+                    Err(Error::Preparation(Refusal::SourceMismatch { sequence: 4, what }))
+                        if what.contains("how far the boundary sealed")
+                )
+            })
+            .collect();
+
+        assert!(kept.is_empty(), "a stale seal kept: {kept:?}");
+    }
+
+    /// A `Records` delta, and the tag, exact and entity traversals started by
+    /// then.
+    type HeardEvent = (u64, (usize, usize, usize));
+
+    /// Every `Records` event, with the traversals started when it was heard.
+    struct Heard {
+        tags: Arc<AtomicUsize>,
+        exacts: Arc<AtomicUsize>,
+        entities: Arc<AtomicUsize>,
+        events: std::sync::Mutex<Vec<HeardEvent>>,
+    }
+
+    impl Heard {
+        fn over(chain: &Chain) -> Arc<Self> {
+            Arc::new(Self {
+                tags: chain.archive.tags.clone(),
+                exacts: chain.archive.exacts.clone(),
+                entities: chain.archive.entities.clone(),
+                events: Default::default(),
+            })
+        }
+
+        fn events(&self) -> Vec<HeardEvent> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    impl stelae::progress::Progress for Heard {
+        fn on(&self, event: stelae::progress::Event<'_>) {
+            if let stelae::progress::Event::Records(delta) = event {
+                self.events.lock().unwrap().push((
+                    delta,
+                    (
+                        self.tags.load(Ordering::Relaxed),
+                        self.exacts.load(Ordering::Relaxed),
+                        self.entities.load(Ordering::Relaxed),
+                    ),
+                ));
+            }
+        }
+    }
+
+    /// Each traversal is announced before it starts, with no count.
+    #[test]
+    fn each_traversal_is_announced_before_it_starts() {
+        let (root, stage_root) = (tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let bundle = chain.prepare(&store, &[]).unwrap();
+
+        chain.advance_to(3);
+
+        let heard = Heard::over(&chain);
+
+        prepare::stage_batch(
+            stage_root.path(),
+            &chain.archive,
+            &chain.state,
+            std::slice::from_ref(&bundle),
+            &export::First,
+            Budget::new(u64::MAX),
+            &Observer::new(heard.clone()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            heard.events(),
+            [(0, (0, 0, 0)), (0, (1, 0, 0)), (0, (1, 1, 0))]
+        );
+    }
+
+    /// `StoreSnapshot::stage_batch` hands its observer on: this is the
+    /// surface a headless host stages through.
+    #[test]
+    fn the_facade_tells_its_observer() {
+        let (root, stage_root) = (tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let bundle = chain.prepare(&store, &[]).unwrap();
+
+        chain.advance_to(3);
+
+        let heard = Heard::over(&chain);
+
+        StoreSnapshot::new(&chain.archive, &chain.state)
+            .stage_batch(
+                stage_root.path(),
+                std::slice::from_ref(&bundle),
+                &export::First,
+                Budget::new(u64::MAX),
+                &Observer::new(heard.clone()),
+            )
+            .unwrap();
+
+        assert!(!heard.events().is_empty());
+    }
+
+    /// Records past the end of the chain, which a staging traverses and drops.
+    type Pad<T> = std::iter::Take<std::iter::RepeatWith<fn() -> Result<T, ArchiveError>>>;
+
+    fn pad<T>(count: usize, record: fn() -> Result<T, ArchiveError>) -> Pad<T> {
+        std::iter::repeat_with(record).take(count)
+    }
+
+    fn outside_tag() -> Result<TagRecord, ArchiveError> {
+        Ok(TagRecord::new(
+            archive_dimensions::ALL[0],
+            Default::default(),
+            BlockSlot::MAX,
+        ))
+    }
+
+    fn outside_exact() -> Result<ExactRecord, ArchiveError> {
+        Ok(ExactRecord::new(dolos_core::ExactKind::BlockNumber, &[0; 8], BlockSlot::MAX).unwrap())
+    }
+
+    fn outside_entity() -> Result<EntityRecord, ArchiveError> {
+        let kind = ENTITY_KINDS[0].1;
+
+        Ok(EntityRecord::new(kind, &vec![0; kind.key_len()], BlockSlot::MAX).unwrap())
+    }
+
+    /// An archive whose `traversal` runs `count` records longer, so a test can
+    /// cross a beat without writing a million rows.
+    #[derive(Clone)]
+    struct Padded<S> {
+        inner: S,
+        traversal: Traversal,
+        count: usize,
+    }
+
+    impl<S> Padded<S> {
+        fn count_for(&self, traversal: Traversal) -> usize {
+            match self.traversal == traversal {
+                true => self.count,
+                false => 0,
+            }
+        }
+    }
+
+    impl<S: ArchiveStore> ArchiveStore for Padded<S> {
+        type BlockIter<'a> = S::BlockIter<'a>;
+        type Writer = S::Writer;
+        type LogIter = S::LogIter;
+        type EntityValueIter = S::EntityValueIter;
+        type SlotIter = S::SlotIter;
+        type TagIter = std::iter::Chain<S::TagIter, Pad<TagRecord>>;
+        type ExactIter = std::iter::Chain<S::ExactIter, Pad<ExactRecord>>;
+        type EntityRecordIter = std::iter::Chain<S::EntityRecordIter, Pad<EntityRecord>>;
+
+        fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
+            self.inner.start_writer()
+        }
+
+        fn read_logs(
+            &self,
+            ns: Namespace,
+            keys: &[&LogKey],
+        ) -> Result<Vec<Option<dolos_core::EntityValue>>, ArchiveError> {
+            self.inner.read_logs(ns, keys)
+        }
+
+        fn iter_logs(&self, ns: Namespace, range: KeyRange) -> Result<Self::LogIter, ArchiveError> {
+            self.inner.iter_logs(ns, range)
+        }
+
+        fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ArchiveError> {
+            self.inner.get_block_by_slot(slot)
+        }
+
+        fn get_blocks_by_slot(&self, slot: &BlockSlot) -> Result<Vec<BlockBody>, ArchiveError> {
+            self.inner.get_blocks_by_slot(slot)
+        }
+
+        fn get_range<'a>(
+            &self,
+            from: Option<BlockSlot>,
+            to: Option<BlockSlot>,
+        ) -> Result<Self::BlockIter<'a>, ArchiveError> {
+            self.inner.get_range(from, to)
+        }
+
+        fn find_intersect(
+            &self,
+            intersect: &[ChainPoint],
+        ) -> Result<Option<ChainPoint>, ArchiveError> {
+            self.inner.find_intersect(intersect)
+        }
+
+        fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError> {
+            self.inner.get_tip()
+        }
+
+        fn prune_history(
+            &self,
+            max_slots: u64,
+            max_prune_slots: Option<u64>,
+            max_prune_index_rows: Option<u64>,
+        ) -> Result<bool, ArchiveError> {
+            self.inner
+                .prune_history(max_slots, max_prune_slots, max_prune_index_rows)
+        }
+
+        fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError> {
+            self.inner.truncate_front(after)
+        }
+
+        fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
+            self.inner.slot_by_block_hash(hash)
+        }
+
+        fn slot_by_block_number(&self, number: u64) -> Result<Option<BlockSlot>, ArchiveError> {
+            self.inner.slot_by_block_number(number)
+        }
+
+        fn slot_by_tx_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
+            self.inner.slot_by_tx_hash(hash)
+        }
+
+        fn entity_slots(
+            &self,
+            kind: dolos_core::EntityKind,
+            keys: &[&[u8]],
+        ) -> Result<Vec<Option<BlockSlot>>, ArchiveError> {
+            self.inner.entity_slots(kind, keys)
+        }
+
+        fn slots_by_tag(
+            &self,
+            dimension: dolos_core::TagDimension,
+            key: &[u8],
+            start: BlockSlot,
+            end: BlockSlot,
+        ) -> Result<Self::SlotIter, ArchiveError> {
+            self.inner.slots_by_tag(dimension, key, start, end)
+        }
+
+        fn iter_archive_tags(
+            &self,
+            dimensions: &[dolos_core::TagDimension],
+            slots: std::ops::Range<BlockSlot>,
+        ) -> Result<Self::TagIter, ArchiveError> {
+            Ok(self
+                .inner
+                .iter_archive_tags(dimensions, slots)?
+                .chain(pad(self.count_for(Traversal::Tags), outside_tag)))
+        }
+
+        fn iter_exact_records(
+            &self,
+            slots: std::ops::Range<BlockSlot>,
+        ) -> Result<Self::ExactIter, ArchiveError> {
+            Ok(self
+                .inner
+                .iter_exact_records(slots)?
+                .chain(pad(self.count_for(Traversal::Exacts), outside_exact)))
+        }
+
+        fn iter_entity_records(
+            &self,
+            kinds: &[dolos_core::EntityKind],
+            slots: std::ops::Range<BlockSlot>,
+        ) -> Result<Self::EntityRecordIter, ArchiveError> {
+            Ok(self
+                .inner
+                .iter_entity_records(kinds, slots)?
+                .chain(pad(self.count_for(Traversal::Entities), outside_entity)))
+        }
+    }
+
+    /// The events of a batch whose `traversal` crosses one beat.
+    fn heard_crossing_a_beat(traversal: Traversal) -> Vec<HeardEvent> {
+        let (root, stage_root) = (tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let bundle = chain.prepare(&store, &[]).unwrap();
+
+        chain.advance_to(3);
+
+        let heard = Heard::over(&chain);
+        let padded = Padded {
+            inner: chain.archive.clone(),
+            traversal,
+            count: 1 << 20,
+        };
+
+        prepare::stage_batch(
+            stage_root.path(),
+            &padded,
+            &chain.state,
+            std::slice::from_ref(&bundle),
+            &export::First,
+            Budget::new(u64::MAX),
+            &Observer::new(heard.clone()),
+        )
+        .unwrap();
+
+        heard.events()
+    }
+
+    /// A long traversal stays audible, with no count: a real one would be
+    /// reported again when its layer is finished.
+    #[test]
+    fn a_long_tag_traversal_beats() {
+        assert_eq!(
+            heard_crossing_a_beat(Traversal::Tags),
+            [
+                (0, (0, 0, 0)),
+                (0, (1, 0, 0)),
+                (0, (1, 0, 0)),
+                (0, (1, 1, 0))
+            ]
+        );
+    }
+
+    #[test]
+    fn a_long_exact_traversal_beats() {
+        assert_eq!(
+            heard_crossing_a_beat(Traversal::Exacts),
+            [
+                (0, (0, 0, 0)),
+                (0, (1, 0, 0)),
+                (0, (1, 1, 0)),
+                (0, (1, 1, 0))
+            ]
+        );
+    }
+
+    #[test]
+    fn a_long_entity_traversal_beats() {
+        assert_eq!(
+            heard_crossing_a_beat(Traversal::Entities),
+            [
+                (0, (0, 0, 0)),
+                (0, (1, 0, 0)),
+                (0, (1, 1, 0)),
+                (0, (1, 1, 1))
+            ]
+        );
+    }
+
+    /// What a console shows of a staging: its `info` lines, as written.
+    #[derive(Clone, Default)]
+    struct Logged(Arc<std::sync::Mutex<Vec<String>>>);
+
+    struct LogLine(String);
+
+    impl tracing::field::Visit for LogLine {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.push_str(&format!("{}={value:?} ", field.name()));
+        }
+    }
+
+    impl tracing::Subscriber for Logged {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() <= tracing::Level::INFO
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut line = LogLine(String::new());
+
+            event.record(&mut line);
+            self.0.lock().unwrap().push(line.0);
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// The `info` lines `run` writes on this thread.
+    fn logged_while(run: impl FnOnce()) -> Vec<String> {
+        // A callsite's interest is cached for the whole process. With one dispatcher
+        // alive, only the thread that reaches it first is asked, and a parallel test
+        // has no subscriber. With two alive, every registration asks them instead.
+        let _second = tracing::Dispatch::new(Logged::default());
+        let logged = Logged::default();
+
+        tracing::subscriber::with_default(logged.clone(), run);
+
+        let lines = logged.0.lock().unwrap().clone();
+
+        lines
+    }
+
+    /// A console drops `Event::Records(0)`, so the log is where a wedged
+    /// traversal can be told from a live one: a long traversal keeps saying
+    /// how far it got.
+    #[test]
+    fn a_long_traversal_logs_its_running_count() {
+        for (traversal, name) in [
+            (Traversal::Tags, "tag"),
+            (Traversal::Exacts, "exact"),
+            (Traversal::Entities, "entity"),
+        ] {
+            let (root, stage_root) = (tempdir(), tempdir());
+            let store = store(root.path());
+            let mut chain = Chain::at(Shape::Shelley, 2);
+            let bundle = chain.prepare(&store, &[]).unwrap();
+
+            chain.advance_to(3);
+
+            let padded = Padded {
+                inner: chain.archive.clone(),
+                traversal,
+                count: 1 << 20,
+            };
+
+            let lines = logged_while(|| {
+                prepare::stage_batch(
+                    stage_root.path(),
+                    &padded,
+                    &chain.state,
+                    std::slice::from_ref(&bundle),
+                    &export::First,
+                    Budget::new(u64::MAX),
+                    &Observer::silent(),
+                )
+                .unwrap();
+            });
+
+            let running: Vec<&String> = lines
+                .iter()
+                .filter(|line| line.contains("traversal running"))
+                .collect();
+
+            assert_eq!(running.len(), 1, "{name}: {lines:?}");
+            assert!(
+                running[0].contains(&format!("traversal={name:?}"))
+                    && running[0].contains("records=1048576"),
+                "{name}: {running:?}"
+            );
+        }
+    }
+
+    /// The count runs across a staging's traversals: half a beat in each of two
+    /// is one beat, in the second.
+    #[test]
+    fn the_running_count_runs_across_the_traversals() {
+        let (root, stage_root) = (tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let bundle = chain.prepare(&store, &[]).unwrap();
+
+        chain.advance_to(3);
+
+        let padded = Padded {
+            inner: Padded {
+                inner: chain.archive.clone(),
+                traversal: Traversal::Tags,
+                count: 1 << 19,
+            },
+            traversal: Traversal::Exacts,
+            count: 1 << 19,
+        };
+
+        let lines = logged_while(|| {
+            prepare::stage_batch(
+                stage_root.path(),
+                &padded,
+                &chain.state,
+                std::slice::from_ref(&bundle),
+                &export::First,
+                Budget::new(u64::MAX),
+                &Observer::silent(),
+            )
+            .unwrap();
+        });
+
+        let running: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.contains("traversal running"))
+            .collect();
+
+        assert_eq!(running.len(), 1, "{lines:?}");
+        assert!(
+            running[0].contains("traversal=\"exact\"") && running[0].contains("records=1048576"),
+            "{running:?}"
+        );
+    }
+
+    /// The contract says such a lock stays and is logged, whichever way the
+    /// sweep finds out.
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_that_is_not_a_file_is_logged() {
+        let (scratch, outside) = (tempdir(), tempdir());
+        let target = outside.path().join("a file");
+
+        fs::write(&target, b"").unwrap();
+
+        let directory = scratch.path().join("dolos-staging-dir");
+        let fifo = scratch.path().join("dolos-staging-fifo");
+        let link = scratch.path().join("dolos-staging-link");
+
+        fs::create_dir_all(directory.join("lock")).unwrap();
+        fs::create_dir(&fifo).unwrap();
+        fs::create_dir(&link).unwrap();
+        std::os::unix::fs::symlink(&target, link.join("lock")).unwrap();
+
+        assert!(std::process::Command::new("mkfifo")
+            .arg(fifo.join("lock"))
+            .status()
+            .unwrap()
+            .success());
+
+        let chain = Chain::at(Shape::Shelley, 2);
+        let lines = logged_while(|| {
+            export_under(&chain, scratch.path(), &Observer::silent());
+        });
+
+        for planted in [&directory, &fifo, &link] {
+            let name = planted.file_name().unwrap().to_string_lossy().into_owned();
+
+            assert!(planted.join("lock").symlink_metadata().is_ok(), "{name}");
+            assert!(
+                lines.iter().any(|line| line.contains(&name)),
+                "{name}: {lines:?}"
+            );
         }
     }
 }

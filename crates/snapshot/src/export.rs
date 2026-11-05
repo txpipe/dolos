@@ -61,27 +61,28 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     num::NonZeroUsize,
     ops::Range,
+    path::PathBuf,
     sync::{atomic::AtomicBool, Mutex},
 };
 
-use dolos_cardano::{
-    eras::ChainSummary, indexes::archive_dimensions, pallas::ledger::traverse::MultiEraBlock,
-};
+use dolos_cardano::{eras::ChainSummary, pallas::ledger::traverse::MultiEraBlock};
 use dolos_core::{
-    ArchiveError, ArchiveStore, BlockSlot, ChainPoint, EntityKind, IndexRecord, KeyRange,
-    Namespace, StateStore,
+    ArchiveError, ArchiveStore, BlockSlot, ChainPoint, EntityKind, KeyRange, Namespace, StateStore,
 };
+use serde::{Deserialize, Serialize};
 use stelae::{
     inscription::{HistoryEntry, Inscription, LayerDescriptor},
     progress::{Observer, Outcome},
-    transport::{LayerSpec, RecordSink, SteleWriter},
+    transport::{LayerSpec, RecordSink, SteleWriter, WrittenLayer},
 };
 use stelae_driver::digests;
 
 use crate::{
-    layers::{blocks, entities, indexes, logs, state},
+    layers::{blocks, logs, state},
     namespaces::NAMESPACES,
+    prepare::{Captured, Prepared},
     reporting::{Cursor, Records},
+    staging::{self, Family, Runs, Spooling},
     state_layer_count, DigestsScope, DolosProfile, EpochScope, Error, Network, RetainedEpochs,
     Scope, StateScope, BLOCKS, COMPRESSION_LEVEL, DENSE_EPOCH_KINDS, DIGESTS, ENTITY_INDEX_KINDS,
     ENTITY_KINDS, EPOCH_KINDS, INDEXES, LOG_KINDS, LOG_NAMESPACES, STATE_KINDS, UTXOS,
@@ -92,7 +93,7 @@ use crate::{
 /// `end_slot` is inclusive, because that is what the scope publishes and what a
 /// reader prints. Every store iterator takes a half-open range, which is
 /// [`EpochWindow::slots`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EpochWindow {
     pub epoch: u64,
     pub start_slot: BlockSlot,
@@ -115,86 +116,14 @@ impl EpochWindow {
     }
 }
 
-/// How many `indexes` layers one traversal of the archive store fills.
+/// The resident cost of one open layer sink.
 ///
-/// ## Why a publish needs a band at all
-///
-/// Neither index traversal can seek to a slot — a tag's slot is the last
-/// component of its key and an exact record's slot is its stored *value* — so
-/// reading one epoch out of the store costs a pass over the whole of it. One
-/// pass per epoch makes a first publish of N epochs O(N²): measured at 800 ms
-/// per epoch against an eight-epoch store and 3.0 s against a thirty-two-epoch
-/// one, which extrapolates to hours of nothing but index traversal on mainnet.
-///
-/// A band routes one pass into K sinks at once — the move the state pass makes
-/// with its shard sinks — so N epochs cost ⌈N/K⌉ passes rather than N.
-///
-/// ## Why K is not simply N
-///
-/// Every open sink holds a zstd compression context at
-/// [`COMPRESSION_LEVEL`](crate::COMPRESSION_LEVEL), and those contexts are the
-/// resident cost of holding layers open: measured at 10.3 MiB apiece, so K = N
-/// on mainnet would be a multi-gigabyte resident set — exactly what
-/// streaming-writes exists to prevent. K is therefore a memory budget divided
-/// by that figure and not a taste: [`IndexBand::DEFAULT`] is the largest band
-/// that keeps the index pass inside a **1 GiB** ceiling, and an operator with
-/// less to spend narrows it with `--index-band`.
-///
-/// Banding reorders *when* records are read and never which layer they land in
-/// or in what order, so K is invisible in the bytes: the export golden and the
-/// two-backend determinism test hold across every value of it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IndexBand(NonZeroUsize);
-
-impl IndexBand {
-    /// The resident cost of one open layer sink.
-    ///
-    /// A zstd compression context at level 9 and the framing around it.
-    /// Measured at **10.3 MiB** by `measure_layer_sink_residency` in the root
-    /// package's `tests/archive_index_roundtrip.rs` — thirty-two sinks opened
-    /// against a real stele and each given records to compress, since a
-    /// context that has never compressed anything has not yet allocated its
-    /// window. Pinned above the measurement rather than at it, so a zstd
-    /// whose level-9 parameters grow does not silently overrun the ceiling.
-    ///
-    /// A constant because [`DEFAULT`](IndexBand::DEFAULT) is arithmetic over it
-    /// rather than a number someone liked.
-    pub const SINK_BYTES: usize = 12 * 1024 * 1024;
-
-    /// What the index pass may hold resident.
-    ///
-    /// A publish is a batch job an operator starts on a node that is already
-    /// holding a ledger, so this is a budget for one *phase* of it rather than
-    /// for the process. A gigabyte buys 85 epochs per traversal, which takes
-    /// mainnet's ~580 epochs from 580 passes to seven; the next gigabyte buys
-    /// the difference between seven passes and four, which is the wrong trade.
-    pub const CEILING_BYTES: usize = 1024 * 1024 * 1024;
-
-    /// The band a publish takes unless an operator narrows it.
-    pub const DEFAULT: Self = match NonZeroUsize::new(Self::CEILING_BYTES / Self::SINK_BYTES) {
-        Some(epochs) => Self(epochs),
-        // Unreachable: the ceiling is larger than one sink. A `const` panic
-        // rather than a fallback, so a ceiling edited below one sink's cost
-        // fails to compile instead of silently banding by one.
-        None => panic!("the index band ceiling has to hold at least one sink"),
-    };
-
-    /// A band of `epochs` layers. Zero is not representable, which is the
-    /// refusal: a band of no epochs would traverse and write nothing.
-    pub fn new(epochs: NonZeroUsize) -> Self {
-        Self(epochs)
-    }
-
-    pub fn epochs(&self) -> usize {
-        self.0.get()
-    }
-}
-
-impl Default for IndexBand {
-    fn default() -> Self {
-        Self::DEFAULT
-    }
-}
+/// A zstd compression context at level 9 and the framing around it. Measured at
+/// **10.3 MiB** by `measure_layer_sink_residency` in the root package's
+/// `tests/archive_index_roundtrip.rs` and pinned above the measurement, so a
+/// zstd whose level-9 parameters grow does not silently overrun what the pool
+/// was sized on.
+pub const LAYER_SINK_BYTES: usize = 12 * 1024 * 1024;
 
 /// How many layer producers one publish runs at once.
 ///
@@ -206,8 +135,7 @@ impl Default for IndexBand {
 /// publish is the *sum* of every traversal — measured on the live backfill at
 /// one thread's worth of CPU against an idle link, with the per-layer cost flat
 /// against layer size. So the producers run on a pool of threads and the
-/// serial sum becomes a maximum: the index pass runs beside the state walks,
-/// which run beside each other.
+/// serial sum becomes a maximum: the state walks run beside each other.
 ///
 /// ## What the pool must not change
 ///
@@ -221,17 +149,11 @@ impl Default for IndexBand {
 ///
 /// ## Why the count is what it is
 ///
-/// One worker is reserved for the index bands, which run in band order on that
-/// worker alone: a band holds [`IndexBand`]'s whole budget open at once, so two
-/// concurrent bands would be two copies of a budget that was sized as a
-/// ceiling, not as a share. Every other producer holds at most one state
-/// kind's shard sinks — sixteen, ~200 MiB by [`IndexBand::SINK_BYTES`] — so the
-/// pool's worst case beside the band's gigabyte is
-/// `(workers - 1) × 16 × 12 MiB`. The default of four keeps that under
-/// 600 MiB: a publish-wide resident peak around 1.6 GiB where the serial walk
-/// peaked at 1 GiB, on publishers measured well clear of either. An operator
-/// with less to spend narrows it with `--producers`, and `1` is the strictly
-/// serial walk this module always did.
+/// Index staging runs before the pool and holds run buffers rather than sinks,
+/// so a producer holds at most one state kind's shard sinks: sixteen, ~200 MiB
+/// by [`LAYER_SINK_BYTES`]. The default of four keeps the pool's worst case
+/// under 800 MiB. An operator with less to spend narrows it with `--producers`,
+/// and `1` is the strictly serial walk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Producers(NonZeroUsize);
 
@@ -281,20 +203,20 @@ pub struct Plan {
     /// derived from `summary` — which epochs are worth a dump is operational
     /// (decision 0026).
     pub retained: RetainedEpochs,
-    /// How many `indexes` layers one traversal of the archive store fills.
+    /// Where an export stages its `indexes` and entity runs. `None` is the
+    /// system temporary directory; a mainnet first publish spools tens of
+    /// gigabytes, so a host names a volume sized for it, and writable by no one
+    /// but the user running the export: another user's deep tree there can
+    /// abort the export (`docs/contracts/export-preparation.md`). Every
+    /// export spools, digests and reproductions included.
     ///
-    /// Execution rather than geometry: it changes neither which layers this
-    /// publish writes nor a byte of what is in them, only how many passes over
-    /// the archive store it takes to fill them. It rides on the plan because
-    /// every driver that walks these stores — [`export`], [`reproduce`],
-    /// [`verify_reproduction`] — pays the same cost and should take the same
-    /// band without each call site spelling it. See [`IndexBand`].
-    pub band: IndexBand,
+    /// Execution rather than geometry, like `producers`: it changes no byte.
+    pub scratch: Option<PathBuf>,
     /// How many layer producers run at once.
     ///
-    /// Execution rather than geometry, exactly as `band` is, and riding on the
-    /// plan for the same reason: every driver that walks these stores pays the
-    /// same serial cost without it. See [`Producers`].
+    /// Execution rather than geometry, riding on the plan because every driver
+    /// that walks these stores pays the same serial cost without it. See
+    /// [`Producers`].
     pub producers: Producers,
 }
 
@@ -338,26 +260,25 @@ impl Plan {
             sequence: tip_epoch,
             epochs,
             retained,
-            band: IndexBand::DEFAULT,
+            scratch: None,
             producers: Producers::DEFAULT,
         })
     }
 
-    /// Take a band other than [`IndexBand::DEFAULT`].
-    ///
-    /// The same builder shape as [`restrict_epochs`](Plan::restrict_epochs),
-    /// and for the same reason: the CLI is where an operator's choice is
-    /// spelled, and it applies it to a plan the rules already built.
-    pub fn with_band(mut self, band: IndexBand) -> Self {
-        self.band = band;
+    /// Stage under `scratch` rather than the system temporary directory. It
+    /// must be writable by no one but the user running the export: see
+    /// [`Plan::scratch`].
+    pub fn with_scratch(mut self, scratch: impl Into<PathBuf>) -> Self {
+        self.scratch = Some(scratch.into());
 
         self
     }
 
     /// Take a producer pool other than [`Producers::DEFAULT`].
     ///
-    /// The same builder shape as [`with_band`](Plan::with_band), for the same
-    /// operator.
+    /// The same builder shape as [`restrict_epochs`](Plan::restrict_epochs),
+    /// and for the same reason: the CLI is where an operator's choice is
+    /// spelled, and it applies it to a plan the rules already built.
     pub fn with_producers(mut self, producers: Producers) -> Self {
         self.producers = producers;
 
@@ -416,6 +337,32 @@ impl Plan {
     /// Whether this publish's own sequence is a retained epoch.
     fn cuts_a_dump(&self) -> bool {
         self.retained.cuts(self.sequence)
+    }
+
+    /// A fresh spool under this plan's scratch, removed when dropped. Whatever
+    /// a killed run left there goes first, and a live peer's stays.
+    fn staging_scratch(&self) -> Result<Spooling, Error> {
+        let base = self.scratch.clone().unwrap_or_else(|| {
+            let base = std::env::temp_dir();
+
+            tracing::warn!(
+                base = %base.display(),
+                "staging under the system temporary directory; `Plan::with_scratch` names a \
+                 volume sized for the windows"
+            );
+
+            base
+        });
+
+        Spooling::claim(&base)
+    }
+
+    /// Unbounded on disk: a batch of one has no admission to control.
+    fn staging_budget(&self) -> staging::Budget {
+        staging::Budget {
+            workers: self.producers.0,
+            ..staging::Budget::new(u64::MAX)
+        }
     }
 }
 
@@ -797,48 +744,162 @@ where
         refuse_uncovered_logs(archive, window)?;
     }
 
-    // One scan of the entity index, read by the count below and by the jobs
-    // that build the entity layers, so the two cannot disagree.
-    let presence = entity_presence(plan, archive)?;
-    let presence = &presence;
+    // A batch of one. The stores stand at the boundary and nothing advances
+    // them, so no capture is needed, and the frontier's own window comes from
+    // the same traversal as the closed ones.
+    let adopted = Adopted::ask(plan, previous)?;
+    let scratch = plan.staging_scratch()?;
+    let summary = dolos_cardano::eras::load_chain_summary_from_state(state)?;
+
+    let staged = staging::stage_watched(
+        scratch.path(),
+        archive,
+        &summary,
+        0,
+        &adopted.live_request(plan),
+        plan.staging_budget(),
+        observer,
+    )?;
+
+    assemble(
+        stele,
+        plan,
+        archive,
+        &Source::Stores(state),
+        Runs::new(&staged, None),
+        &adopted,
+        digest_records,
+        previous,
+        observer,
+    )
+}
+
+/// Where a publication's boundary-sensitive layers come from.
+pub(crate) enum Source<'a, S> {
+    /// The stores, which stand at the boundary.
+    Stores(&'a S),
+    /// A bundle captured at the boundary, read after the stores moved on.
+    Prepared(&'a Prepared<'a>),
+}
+
+impl<S> Source<'_, S> {
+    fn prepared(&self) -> Option<&Prepared<'_>> {
+        match self {
+            Source::Stores(_) => None,
+            Source::Prepared(prepared) => Some(prepared),
+        }
+    }
+}
+
+/// What the predecessor carries of the kinds staging would otherwise build.
+///
+/// Asked once and before staging: [`Predecessor::adopt`] acts, and it alone
+/// knows a recorded blob the repository has since dropped, so this is the set
+/// a traversal has to cover.
+#[derive(Debug, Default)]
+pub(crate) struct Adopted(BTreeMap<(&'static str, u64), LayerDescriptor>);
+
+impl Adopted {
+    pub(crate) fn ask(plan: &Plan, previous: &dyn Predecessor) -> Result<Self, Error> {
+        let mut adopted = Self::default();
+        let kinds = std::iter::once(INDEXES).chain(ENTITY_KINDS.map(|(kind, _)| kind));
+
+        for kind in kinds {
+            for window in &plan.epochs {
+                let scope = window.scope(plan.network.magic());
+
+                if let (_, Some(descriptor)) = inherit(&scope, kind, previous)? {
+                    adopted.0.insert((kind, window.epoch), descriptor);
+                }
+            }
+        }
+
+        Ok(adopted)
+    }
+
+    pub(crate) fn get(&self, kind: &'static str, epoch: u64) -> Option<&LayerDescriptor> {
+        self.0.get(&(kind, epoch))
+    }
+
+    /// The staging a batch of one needs: every window this plan builds.
+    fn live_request(&self, plan: &Plan) -> staging::Request {
+        let building = |kind| {
+            plan.epochs
+                .iter()
+                .map(|window| window.epoch)
+                .filter(|epoch| self.get(kind, *epoch).is_none())
+                .collect()
+        };
+
+        let entities = ENTITY_KINDS.map(|(kind, entity)| (Family::Entity(entity), building(kind)));
+
+        staging::Request {
+            network_magic: plan.network.magic(),
+            frontier: plan.cursor.clone(),
+            store_contract: dolos_core::compat::SUPPORTED_CONTRACTS[0].to_owned(),
+            epochs: std::iter::once((Family::Indexes, building(INDEXES)))
+                .chain(entities)
+                .collect(),
+            live: true,
+        }
+    }
+}
+
+/// Write every layer of `plan`, then the inscription.
+///
+/// Layers are listed in [`crate::KINDS`] order, and within a kind in ascending
+/// epoch or shard order. The queue order is what [`produce`] reassembles
+/// descriptors by, so the pool can run these however it likes without the
+/// document noticing.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn assemble<W, A, S>(
+    stele: &W,
+    plan: &Plan,
+    archive: &A,
+    source: &Source<'_, S>,
+    staged: Runs<'_>,
+    adopted: &Adopted,
+    digest_records: Option<&[digests::ImmutableDigests]>,
+    previous: &dyn Predecessor,
+    observer: &Observer,
+) -> Result<Inscription, Error>
+where
+    W: SteleWriter + Sync,
+    A: ArchiveStore,
+    S: StateStore,
+{
+    let prepared = source.prepared();
 
     // The same arithmetic `crate::registry::preview` reports a dry run with, so
-    // "layer 12 of 52" and "build: 52 layers" cannot disagree — `log_layers`
-    // and `entity_layers` on both sides, since an empty log or entity kind
-    // produces no layer to multiply.
+    // "layer 12 of 52" and "build: 52 layers" cannot disagree.
     let total = plan.epochs.len() * DENSE_EPOCH_KINDS.len()
-        + log_layers(plan, archive, previous)?
-        + entity_layers(plan, presence, previous)?
+        + log_layers(plan, archive, prepared, previous)?
+        + staged_entity_layers(plan, prepared, staged, adopted)?
         + state_layers(plan, previous)?
         + usize::from(digest_records.is_some());
 
     let cursor = Cursor::new(observer, total);
     let cursor = &cursor;
 
-    // One job per independent slice of the document, queued in the order the
-    // inscription lists layers. The queue order is what [`produce`] reassembles
-    // descriptors by, so the pool can run these however it likes without the
-    // document noticing.
     let mut jobs: Vec<Job<'_>> = Vec::new();
 
     for window in &plan.epochs {
-        jobs.push(Job::light(move || {
-            let descriptor = write_blocks(stele, plan, archive, window, previous, cursor)?;
+        jobs.push(Box::new(move || {
+            let descriptor =
+                write_blocks(stele, plan, archive, prepared, window, previous, cursor)?;
             previous.landed(&descriptor)?;
 
             Ok(vec![descriptor])
         }));
     }
 
-    // Banded rather than one window at a time: an index layer costs a pass over
-    // the whole store, so these jobs are where a first publish's O(N²) lives.
-    // They run on the band lane — in band order, one at a time, beside the
-    // light jobs rather than after them. See [`IndexBand`] and [`Producers`],
-    // and [`write_indexes`] for why no `landed` call sits here as it does in
-    // the jobs around it.
-    for band in plan.epochs.chunks(plan.band.epochs()) {
-        jobs.push(Job::band(move || {
-            write_indexes(stele, plan, archive, band, previous, cursor)
+    for window in &plan.epochs {
+        jobs.push(Box::new(move || {
+            let descriptor =
+                write_index_layer(stele, plan, prepared, staged, adopted, window, cursor)?;
+            previous.landed(&descriptor)?;
+
+            Ok(vec![descriptor])
         }));
     }
 
@@ -846,28 +907,24 @@ where
     // order and within a kind by ascending epoch.
     for (kind, ns) in LOG_KINDS {
         for window in &plan.epochs {
-            jobs.push(Job::light(move || {
-                match write_logs(stele, plan, archive, window, kind, ns, previous, cursor)? {
-                    Some(descriptor) => {
-                        previous.landed(&descriptor)?;
+            jobs.push(Box::new(move || {
+                let layer = write_logs(
+                    stele, plan, archive, prepared, window, kind, ns, previous, cursor,
+                )?;
 
-                        Ok(vec![descriptor])
-                    }
-                    None => Ok(Vec::new()),
-                }
+                landed(layer, previous)
             }));
         }
     }
 
-    // Kind-major again, after the logs. An entity layer is a scan of its kind's
-    // whole index, as an index layer is a scan of the whole store, so these are
-    // banded and run on the band lane. See [`write_entities`].
     for (kind, entity) in ENTITY_KINDS {
-        for band in plan.epochs.chunks(plan.band.epochs()) {
-            jobs.push(Job::band(move || {
-                write_entities(
-                    stele, plan, archive, band, kind, entity, presence, previous, cursor,
-                )
+        for window in &plan.epochs {
+            jobs.push(Box::new(move || {
+                let layer = write_entity_layer(
+                    stele, plan, prepared, staged, adopted, window, kind, entity, cursor,
+                )?;
+
+                landed(layer, previous)
             }));
         }
     }
@@ -877,15 +934,15 @@ where
     // not offered to the predecessor; the dumps among them are. See
     // [`Predecessor::landed`].
     for (kind, ns, shards, shard_byte) in STATE_KINDS {
-        jobs.push(Job::light(move || {
+        jobs.push(Box::new(move || {
             write_state_kind(
-                stele, plan, state, kind, ns, shards, shard_byte, previous, cursor,
+                stele, plan, source, kind, ns, shards, shard_byte, previous, cursor,
             )
         }));
     }
 
     if let Some(records) = digest_records {
-        jobs.push(Job::light(move || {
+        jobs.push(Box::new(move || {
             Ok(vec![write_digests(stele, plan, records, cursor)?])
         }));
     }
@@ -914,6 +971,18 @@ where
     stele.seal(&DolosProfile, &inscription)?;
 
     Ok(inscription)
+}
+
+/// Note a sparse layer as landed, where there is one.
+fn landed(
+    layer: Option<LayerDescriptor>,
+    previous: &dyn Predecessor,
+) -> Result<Vec<LayerDescriptor>, Error> {
+    if let Some(descriptor) = &layer {
+        previous.landed(descriptor)?;
+    }
+
+    Ok(layer.into_iter().collect())
 }
 
 /// Create a stele directory at `root` and export into it.
@@ -948,7 +1017,10 @@ where
     )
 }
 
-/// Reproduce a stele from `plan` and store nothing.
+/// Reproduce a stele from `plan` and keep nothing.
+///
+/// Its index runs spool under [`Plan::scratch`] on the way, like any export's,
+/// and are removed afterwards.
 ///
 /// The counterpart of [`publish`] for a caller that wants the identity and not
 /// the artifact: `dolos snapshot digest`, and the reproduction half of
@@ -976,7 +1048,7 @@ where
     S: StateStore,
 {
     // Silent, and not for want of a caller to thread one through: a
-    // reproduction stores nothing and moves nothing, so the only thing it could
+    // reproduction keeps nothing and moves nothing, so the only thing it could
     // report is the store walk — which `dolos snapshot digest` and `verify`
     // already print around. The seam is for the two commands that wait on a
     // network.
@@ -1007,7 +1079,8 @@ pub struct Document {
     pub uncompressed_size: u64,
 }
 
-/// Reproduce a stele from local stores and canonicalize it, writing nothing.
+/// Reproduce a stele from local stores and canonicalize it, keeping nothing but
+/// the spool [`reproduce`] removes afterwards.
 ///
 /// What a publish costs, minus the I/O and the upload: every layer is
 /// compressed, because a reproduction that skipped compression would not be
@@ -1026,14 +1099,18 @@ where
     A: ArchiveStore,
     S: StateStore,
 {
-    let inscription = reproduce(plan, archive, state, None, previous)?;
+    Document::of(reproduce(plan, archive, state, None, previous)?)
+}
 
-    Ok(Document {
-        canonical: inscription.canonicalize()?,
-        identity: inscription.digest()?,
-        layers: inscription.layers.len(),
-        uncompressed_size: inscription.uncompressed_size(),
-    })
+impl Document {
+    pub(crate) fn of(inscription: Inscription) -> Result<Self, Error> {
+        Ok(Self {
+            canonical: inscription.canonicalize()?,
+            identity: inscription.digest()?,
+            layers: inscription.layers.len(),
+            uncompressed_size: inscription.uncompressed_size(),
+        })
+    }
 }
 
 /// Reproduce `published` from local stores and hold the two documents against
@@ -1222,53 +1299,20 @@ fn sink<W: SteleWriter>(stele: &W, spec: &LayerSpec) -> Result<W::Sink, Error> {
     Ok(stele.layer_sink(&DolosProfile, spec, COMPRESSION_LEVEL)?)
 }
 
-/// What one production job returns: the descriptors for its slice of the
-/// document, in the order that slice lists them.
-type JobRun<'run> = Box<dyn FnOnce() -> Result<Vec<LayerDescriptor>, Error> + Send + 'run>;
-
 /// One independent slice of a publish's production: a traversal, the sinks it
-/// fills, and the `landed` notes for the layers it lands.
+/// fills, and the `landed` notes for the layers it lands. It returns the
+/// descriptors for its slice of the document, in the order that slice lists
+/// them.
 ///
 /// Jobs borrow the stores and the transport for the length of one [`produce`]
 /// call, which is why the lifetime is a run and not `'static`: the pool is
 /// scoped threads, not tasks.
-struct Job<'run> {
-    lane: Lane,
-    run: JobRun<'run>,
-}
+pub(crate) type Job<'run> = Box<dyn FnOnce() -> Result<Vec<LayerDescriptor>, Error> + Send + 'run>;
 
-/// Which worker a job may run on. See [`Producers`] for why the bands have a
-/// lane of their own.
-enum Lane {
-    /// The index bands: one at a time, in band order, on the reserved worker —
-    /// each holds the whole of [`IndexBand`]'s budget open, so two at once
-    /// would be two copies of a ceiling.
-    Band,
-    /// Everything else: at most one state kind's shard sinks apiece, safe to
-    /// run as many at once as the pool has workers.
-    Light,
-}
-
-impl<'run> Job<'run> {
-    fn light(run: impl FnOnce() -> Result<Vec<LayerDescriptor>, Error> + Send + 'run) -> Self {
-        Self {
-            lane: Lane::Light,
-            run: Box::new(run),
-        }
-    }
-
-    fn band(run: impl FnOnce() -> Result<Vec<LayerDescriptor>, Error> + Send + 'run) -> Self {
-        Self {
-            lane: Lane::Band,
-            run: Box::new(run),
-        }
-    }
-}
-
-/// The shared side of one [`produce`] call: the queue the light workers pull
-/// from, the slots the results land in, and the first failure.
+/// The shared side of one [`produce`] call: the queue the workers pull from,
+/// the slots the results land in, and the first failure.
 struct Pool<'run> {
-    lights: Mutex<VecDeque<(usize, JobRun<'run>)>>,
+    jobs: Mutex<VecDeque<(usize, Job<'run>)>>,
     slots: Mutex<Vec<Option<Vec<LayerDescriptor>>>>,
     failed: AtomicBool,
     error: Mutex<Option<Error>>,
@@ -1304,14 +1348,14 @@ impl<'run> Pool<'run> {
         }
     }
 
-    /// Run light jobs until the queue is empty or the export has failed.
+    /// Run jobs until the queue is empty or the export has failed.
     fn drain(&self) {
         loop {
             if self.failed() {
                 return;
             }
 
-            let Some((position, run)) = unpoisoned(&self.lights).pop_front() else {
+            let Some((position, run)) = unpoisoned(&self.jobs).pop_front() else {
                 return;
             };
 
@@ -1322,45 +1366,33 @@ impl<'run> Pool<'run> {
 
 /// Run every job and hand back the document's layers, in document order.
 ///
-/// A pool of [`Producers::workers`] threads: one reserved for the band lane,
-/// which runs the index bands in order and then helps with the light queue;
-/// the rest on the light queue from the start. One worker is the strictly
-/// serial walk — every job inline, in document order, no threads at all —
-/// which is both the escape hatch and the baseline the concurrent path is
+/// A pool of [`Producers::workers`] threads over one queue. One worker is the
+/// strictly serial walk — every job inline, in document order, no threads at
+/// all — which is both the escape hatch and the baseline the concurrent path is
 /// tested against.
 ///
-/// The first failure stops both queues and is the error the caller gets. Jobs
+/// The first failure stops the queue and is the error the caller gets. Jobs
 /// already running finish first — a store iterator cannot be cancelled
 /// mid-record, and a sink dropped without [`RecordSink::finish`] cleans up
 /// after itself — so a failed export returns once the pool is quiet, with
 /// nothing staged left behind.
-fn produce(jobs: Vec<Job<'_>>, producers: Producers) -> Result<Vec<LayerDescriptor>, Error> {
+pub(crate) fn produce(
+    jobs: Vec<Job<'_>>,
+    producers: Producers,
+) -> Result<Vec<LayerDescriptor>, Error> {
     if producers.workers() == 1 {
         let mut layers = Vec::new();
 
         for job in jobs {
-            layers.extend((job.run)()?);
+            layers.extend(job()?);
         }
 
         return Ok(layers);
     }
 
-    let mut bands = VecDeque::new();
-    let mut lights = VecDeque::new();
-    let mut slots = Vec::with_capacity(jobs.len());
-
-    for (position, job) in jobs.into_iter().enumerate() {
-        slots.push(None);
-
-        match job.lane {
-            Lane::Band => bands.push_back((position, job.run)),
-            Lane::Light => lights.push_back((position, job.run)),
-        }
-    }
-
     let pool = Pool {
-        lights: Mutex::new(lights),
-        slots: Mutex::new(slots),
+        slots: Mutex::new(jobs.iter().map(|_| None).collect()),
+        jobs: Mutex::new(jobs.into_iter().enumerate().collect()),
         failed: AtomicBool::new(false),
         error: Mutex::new(None),
     };
@@ -1368,22 +1400,7 @@ fn produce(jobs: Vec<Job<'_>>, producers: Producers) -> Result<Vec<LayerDescript
     std::thread::scope(|scope| {
         let pool = &pool;
 
-        std::thread::Builder::new()
-            .name("stele-produce-bands".to_owned())
-            .spawn_scoped(scope, move || {
-                for (position, run) in bands {
-                    if pool.failed() {
-                        return;
-                    }
-
-                    pool.finish(position, run());
-                }
-
-                pool.drain();
-            })
-            .expect("spawning the band producer");
-
-        for worker in 1..producers.workers() {
+        for worker in 0..producers.workers() {
             std::thread::Builder::new()
                 .name(format!("stele-produce-{worker}"))
                 .spawn_scoped(scope, move || pool.drain())
@@ -1408,7 +1425,7 @@ fn produce(jobs: Vec<Job<'_>>, producers: Producers) -> Result<Vec<LayerDescript
 /// The lookup happens **before the store is touched**, which is the entire
 /// point: the cost this saves is the traversal, not the compression. A hit
 /// short-circuits the caller's whole function.
-fn inherit(
+pub(crate) fn inherit(
     scope: &EpochScope,
     kind: &'static str,
     previous: &dyn Predecessor,
@@ -1424,10 +1441,11 @@ fn inherit(
 /// The hash is not stored beside the block, so it is derived here by decoding
 /// the header — the codec takes it as an input and neither derives nor checks
 /// it, which makes this the one site that has to be right.
-fn write_blocks<W: SteleWriter, A: ArchiveStore>(
+pub(crate) fn write_blocks<W: SteleWriter, A: ArchiveStore>(
     stele: &W,
     plan: &Plan,
     archive: &A,
+    prepared: Option<&Prepared<'_>>,
     window: &EpochWindow,
     previous: &dyn Predecessor,
     cursor: &Cursor<'_>,
@@ -1439,6 +1457,13 @@ fn write_blocks<W: SteleWriter, A: ArchiveStore>(
 
     if let Some(descriptor) = adopted {
         cursor.close(at, BLOCKS, Outcome::Inherited);
+
+        return Ok(descriptor);
+    }
+
+    if let Some(written) = captured_layer(prepared, BLOCKS, window, &spec)? {
+        let descriptor = replay_layer(stele, prepared, &spec, written, cursor)?.descriptor;
+        cursor.close(at, BLOCKS, Outcome::Transferred);
 
         return Ok(descriptor);
     }
@@ -1483,10 +1508,11 @@ fn write_blocks<W: SteleWriter, A: ArchiveStore>(
 /// for a window a namespace wrote nothing in, and a restore reads the absence
 /// as normal.
 #[allow(clippy::too_many_arguments)]
-fn write_logs<W: SteleWriter, A: ArchiveStore>(
+pub(crate) fn write_logs<W: SteleWriter, A: ArchiveStore>(
     stele: &W,
     plan: &Plan,
     archive: &A,
+    prepared: Option<&Prepared<'_>>,
     window: &EpochWindow,
     kind: &'static str,
     ns: Namespace,
@@ -1507,6 +1533,22 @@ fn write_logs<W: SteleWriter, A: ArchiveStore>(
         cursor.close(at, kind, Outcome::Inherited);
 
         return Ok(Some(descriptor));
+    }
+
+    let captured = prepared
+        .map(|prepared| prepared.captured(kind, window, &spec.scope))
+        .transpose()?;
+
+    match captured {
+        Some(Captured::Layer(written)) => {
+            let at = cursor.open(kind, &spec.scope);
+            let descriptor = replay_layer(stele, prepared, &spec, written, cursor)?.descriptor;
+            cursor.close(at, kind, Outcome::Transferred);
+
+            return Ok(Some(descriptor));
+        }
+        Some(Captured::Absent) => return Ok(None),
+        Some(Captured::Source) | None => {}
     }
 
     let mut order = logs::OrderCheck::default();
@@ -1624,7 +1666,7 @@ pub fn forecast<A: ArchiveStore>(
     let presence = entity_presence(plan, archive)?;
 
     let total = plan.epochs.len() * DENSE_EPOCH_KINDS.len()
-        + log_layers(plan, archive, previous)?
+        + log_layers(plan, archive, None, previous)?
         + entity_layers(plan, &presence, previous)?
         + state_layers(plan, previous)?
         + usize::from(digest_records.is_some());
@@ -1660,9 +1702,10 @@ pub fn forecast<A: ArchiveStore>(
     })
 }
 
-fn log_layers<A: ArchiveStore>(
+pub(crate) fn log_layers<A: ArchiveStore>(
     plan: &Plan,
     archive: &A,
+    prepared: Option<&Prepared<'_>>,
     previous: &dyn Predecessor,
 ) -> Result<usize, Error> {
     let mut total = 0;
@@ -1677,12 +1720,20 @@ fn log_layers<A: ArchiveStore>(
             let carried = crate::is_settled(kind, window.epoch, previous.history())
                 && previous.carried_forward(kind, &spec.scope)?;
 
+            let captured = prepared
+                .map(|prepared| prepared.captured(kind, window, &spec.scope))
+                .transpose()?;
+
             let present = carried
-                || archive
-                    .iter_logs(ns, range.clone())?
-                    .next()
-                    .transpose()?
-                    .is_some();
+                || match captured {
+                    Some(Captured::Layer(_)) => true,
+                    Some(Captured::Absent) => false,
+                    Some(Captured::Source) | None => archive
+                        .iter_logs(ns, range.clone())?
+                        .next()
+                        .transpose()?
+                        .is_some(),
+                };
 
             total += usize::from(present);
         }
@@ -1691,7 +1742,8 @@ fn log_layers<A: ArchiveStore>(
     Ok(total)
 }
 
-/// The windows of a plan each entity kind holds an entry in.
+/// The windows of a plan each entity kind holds an entry in, for a forecast,
+/// which stages nothing.
 #[derive(Debug, Default)]
 struct EntityPresence(BTreeMap<EntityKind, BTreeSet<u64>>);
 
@@ -1746,8 +1798,7 @@ fn window_of(windows: &[EpochWindow], slot: BlockSlot) -> Option<&EpochWindow> {
 }
 
 /// How many entity layers a publish of `plan` will produce: one per (window,
-/// kind) pair the predecessor carries forward or the index holds an entry
-/// in, the two questions [`write_entities`] asks.
+/// kind) pair the predecessor carries forward or the index holds an entry in.
 fn entity_layers(
     plan: &Plan,
     presence: &EntityPresence,
@@ -1771,103 +1822,165 @@ fn entity_layers(
     Ok(total)
 }
 
-/// One band of epochs' entity layers for one kind, ascending id within each,
-/// from one scan of the kind's index.
+/// How many entity layers a publication carries, read from what was staged.
+fn staged_entity_layers(
+    plan: &Plan,
+    prepared: Option<&Prepared<'_>>,
+    staged: Runs<'_>,
+    adopted: &Adopted,
+) -> Result<usize, Error> {
+    let mut total = 0;
+
+    for window in &plan.epochs {
+        for (kind, entity) in ENTITY_KINDS {
+            let carried = adopted.get(kind, window.epoch).is_some();
+
+            total += usize::from(carried || entity_built(plan, prepared, staged, window, entity)?);
+        }
+    }
+
+    Ok(total)
+}
+
+/// Whether this publication builds `entity`'s layer for `window`.
 ///
-/// Banded for the reason [`write_indexes`] is: the slot is an entry's value,
-/// so filling one window costs a scan of the whole kind, and one scan per
-/// window would make a first publish quadratic. A routine publish builds one
-/// window per kind, the one whose epoch the boundary just sealed (`E - 2`),
-/// and inherits the rest.
-///
-/// A window gets a layer only where its kind has an entry first seen in it
-/// ([`entity_presence`]): an entity layer, like a log layer, exists if and
-/// only if it holds a record. The scan yields a kind's records in id order,
-/// and routing one ascending run into windows by slot keeps that order in
-/// each, so a window's layer is the one a scan of its epoch alone would
-/// write.
-///
-/// Each layer is recorded through [`Predecessor::landed`] as it exists, as
-/// [`write_indexes`] records its own.
+/// Presence comes from the staged run, never another scan. A window the
+/// boundary could not seal has no entries in that publication whatever a later
+/// view shows.
+fn entity_built(
+    plan: &Plan,
+    prepared: Option<&Prepared<'_>>,
+    staged: Runs<'_>,
+    window: &EpochWindow,
+    entity: EntityKind,
+) -> Result<bool, Error> {
+    if prepared.is_some_and(|prepared| !prepared.sealed(window.epoch)) {
+        return Ok(false);
+    }
+
+    staged.publishes(Family::Entity(entity), window.epoch, plan.sequence)
+}
+
+/// One window's entity layer for one kind, or `None` where it has none: an
+/// entity layer exists if and only if it holds a record.
 #[allow(clippy::too_many_arguments)]
-fn write_entities<W: SteleWriter, A: ArchiveStore>(
+fn write_entity_layer<W: SteleWriter>(
     stele: &W,
     plan: &Plan,
-    archive: &A,
-    band: &[EpochWindow],
+    prepared: Option<&Prepared<'_>>,
+    staged: Runs<'_>,
+    adopted: &Adopted,
+    window: &EpochWindow,
     kind: &'static str,
     entity: EntityKind,
-    presence: &EntityPresence,
-    previous: &dyn Predecessor,
     cursor: &Cursor<'_>,
-) -> Result<Vec<LayerDescriptor>, Error> {
-    let mut descriptors: Vec<Option<LayerDescriptor>> = Vec::with_capacity(band.len());
-    let mut building = Vec::new();
+) -> Result<Option<LayerDescriptor>, Error> {
+    let spec = window.scope(plan.network.magic()).layer_spec(kind)?;
 
-    for window in band {
-        let scope = window.scope(plan.network.magic());
-
-        let (spec, adopted) = if crate::is_settled(kind, window.epoch, previous.history()) {
-            inherit(&scope, kind, previous)?
-        } else {
-            (scope.layer_spec(kind)?, None)
-        };
-
-        if let Some(descriptor) = adopted {
-            let at = cursor.open(kind, &spec.scope);
-            cursor.close(at, kind, Outcome::Inherited);
-
-            previous.landed(&descriptor)?;
-            descriptors.push(Some(descriptor));
-
-            continue;
-        }
-
-        if !presence.holds(entity, window.epoch) {
-            continue;
-        }
-
+    if let Some(descriptor) = adopted.get(kind, window.epoch) {
         let at = cursor.open(kind, &spec.scope);
+        cursor.close(at, kind, Outcome::Inherited);
 
-        building.push(Building {
-            slots: window.slots(),
-            at,
-            position: descriptors.len(),
-            sink: sink(stele, &spec)?,
-            order: entities::OrderCheck::default(),
-        });
-
-        descriptors.push(None);
+        return Ok(Some(descriptor.clone()));
     }
 
-    if let (Some(first), Some(last)) = (building.first(), building.last()) {
-        let slots = first.slots.start..last.slots.end;
-        let mut records = cursor.records();
+    if !entity_built(plan, prepared, staged, window, entity)? {
+        return Ok(None);
+    }
 
-        for record in archive.iter_entity_records(&[entity], slots)? {
-            let record = record?;
+    let at = cursor.open(kind, &spec.scope);
+    let mut records = cursor.records();
 
-            let Some(layer) = layer_for(&mut building, record.slot) else {
-                continue;
-            };
+    let descriptor = staged.write_layer_ticking(
+        stele,
+        Family::Entity(entity),
+        window.epoch,
+        plan.sequence,
+        &mut || records.tick(),
+    )?;
 
-            layer.order.check(&record)?;
-            layer.sink.write_record(&entities::encode(&record)?)?;
-            records.tick();
+    records.flush();
+    cursor.close(at, kind, Outcome::Transferred);
+
+    Ok(descriptor)
+}
+
+/// One window's `indexes` layer: inherited, the tail captured at the boundary,
+/// or a staged window.
+fn write_index_layer<W: SteleWriter>(
+    stele: &W,
+    plan: &Plan,
+    prepared: Option<&Prepared<'_>>,
+    staged: Runs<'_>,
+    adopted: &Adopted,
+    window: &EpochWindow,
+    cursor: &Cursor<'_>,
+) -> Result<LayerDescriptor, Error> {
+    let spec = window.scope(plan.network.magic()).layer_spec(INDEXES)?;
+    let at = cursor.open(INDEXES, &spec.scope);
+
+    if let Some(descriptor) = adopted.get(INDEXES, window.epoch) {
+        cursor.close(at, INDEXES, Outcome::Inherited);
+
+        return Ok(descriptor.clone());
+    }
+
+    let descriptor = match captured_layer(prepared, INDEXES, window, &spec)? {
+        Some(written) => replay_layer(stele, prepared, &spec, written, cursor)?.descriptor,
+        None => {
+            let mut records = cursor.records();
+
+            let layer = staged.write_layer_ticking(
+                stele,
+                Family::Indexes,
+                window.epoch,
+                plan.sequence,
+                &mut || records.tick(),
+            )?;
+
+            records.flush();
+
+            layer.expect("a staged `indexes` window always publishes")
         }
+    };
 
-        records.flush();
-    }
+    cursor.close(at, INDEXES, Outcome::Transferred);
 
-    for layer in building {
-        let descriptor = layer.sink.finish()?.descriptor;
-        cursor.close(layer.at, kind, Outcome::Transferred);
+    Ok(descriptor)
+}
 
-        previous.landed(&descriptor)?;
-        descriptors[layer.position] = Some(descriptor);
-    }
+/// The captured payload of a dense kind's window, where the bundle holds it.
+fn captured_layer<'p>(
+    prepared: Option<&'p Prepared<'_>>,
+    kind: &str,
+    window: &EpochWindow,
+    spec: &LayerSpec,
+) -> Result<Option<&'p WrittenLayer>, Error> {
+    let captured = prepared
+        .map(|prepared| prepared.captured(kind, window, &spec.scope))
+        .transpose()?;
 
-    Ok(descriptors.into_iter().flatten().collect())
+    Ok(match captured {
+        Some(Captured::Layer(written)) => Some(written),
+        _ => None,
+    })
+}
+
+/// Stream a captured payload into `spec`'s layer, reporting its records.
+fn replay_layer<W: SteleWriter>(
+    stele: &W,
+    prepared: Option<&Prepared<'_>>,
+    spec: &LayerSpec,
+    written: &WrittenLayer,
+    cursor: &Cursor<'_>,
+) -> Result<WrittenLayer, Error> {
+    let prepared = prepared.expect("a captured layer has a bundle to come from");
+    let mut records = cursor.records();
+    let replayed = prepared.replay(stele, spec, written, &mut || records.tick())?;
+
+    records.flush();
+
+    Ok(replayed)
 }
 
 /// Refuse a window holding logs under a namespace no `log-{ns}` kind carries.
@@ -1882,7 +1995,10 @@ fn write_entities<W: SteleWriter, A: ArchiveStore>(
 /// `utxos` is excluded because the walk this replaced excluded it: the UTxO set
 /// is state, and no writer puts a log under it. A namespace the archive was not
 /// opened with holds no logs, so it is passed over rather than refused.
-fn refuse_uncovered_logs<A: ArchiveStore>(archive: &A, window: &EpochWindow) -> Result<(), Error> {
+pub(crate) fn refuse_uncovered_logs<A: ArchiveStore>(
+    archive: &A,
+    window: &EpochWindow,
+) -> Result<(), Error> {
     let range = log_key_range(&window.slots());
 
     for ns in NAMESPACES {
@@ -1910,192 +2026,6 @@ fn refuse_uncovered_logs<A: ArchiveStore>(archive: &A, window: &EpochWindow) -> 
 /// A log key range covering every log whose slot falls in `slots`.
 fn log_key_range(slots: &Range<BlockSlot>) -> KeyRange {
     KeyRange::slots(slots.clone())
-}
-
-/// One band of epochs' index records: every tag, then every exact record,
-/// each routed to the layer whose epoch its slot falls in.
-///
-/// Both runs come out of the store in the order the layer requires, which the
-/// trait promises and the per-layer `OrderCheck` holds it to. Restricting one
-/// ascending run to a sub-range of it is still that run, so a layer receives
-/// exactly the records — and exactly the order — a pass over its own epoch
-/// alone would have handed it. That is why banding is invisible in the bytes.
-///
-/// ## This is a scan, not a seek, which is why it is banded
-///
-/// Neither traversal can seek to a slot, so a pass here costs a walk of the
-/// whole archive store however few epochs it fills, and one epoch per pass
-/// makes a first publish O(N²). [`IndexBand`] states why the store cannot seek,
-/// what turns that into ⌈N/K⌉ passes, and the measurement K is sized on.
-///
-/// ## Positions are handed out before anything is written
-///
-/// K layers are announced, then one traversal fills them, then they close —
-/// the shape [`write_state`] already needs for its shard sinks and the
-/// [`Cursor`] already supports. An observer therefore sees the band in flight,
-/// through the same seam and not a second one.
-///
-/// A window in the band whose layer is **inherited** opens and closes with
-/// nothing between: it costs no sink, and the records that fall in its slots
-/// are routed to no one. Same for a window an operator's `--epochs` left out
-/// between two that stayed — the traversal spans the band in one range and
-/// cannot exclude either, so the routing does.
-///
-/// ## Each layer is recorded when it exists, not when the band ends
-///
-/// [`Predecessor::landed`] is what an interrupted publish resumes from, so this
-/// calls it per layer — an inherited one before the traversal starts, a built
-/// one the moment its sink finishes — instead of once for the band on the way
-/// out. The difference is only visible when a publish dies mid-band, which is
-/// exactly when the record is worth having: an inherited layer the transport is
-/// already carrying stays recorded even though the band it sat in never
-/// finished. That is also why this function, alone among the layer writers,
-/// does its own recording rather than leaving it to [`landed`].
-///
-/// What banding does cost is resume *granularity* for the layers it builds: K
-/// sinks finish together, so a death inside a traversal loses that band's built
-/// index layers rather than the ones before the dying epoch. There is nothing
-/// to save there — resuming into the middle of a band would have to re-traverse
-/// the store for the rest of it anyway.
-fn write_indexes<W: SteleWriter, A: ArchiveStore>(
-    stele: &W,
-    plan: &Plan,
-    store: &A,
-    band: &[EpochWindow],
-    previous: &dyn Predecessor,
-    cursor: &Cursor<'_>,
-) -> Result<Vec<LayerDescriptor>, Error> {
-    let mut descriptors: Vec<Option<LayerDescriptor>> = Vec::with_capacity(band.len());
-    let mut building = Vec::with_capacity(band.len());
-
-    for window in band {
-        let scope = window.scope(plan.network.magic());
-
-        // The layer this saves the most: a publish that inherits a closed
-        // epoch's index layer costs no sink and no share of a pass.
-        let (spec, adopted) = inherit(&scope, INDEXES, previous)?;
-        let at = cursor.open(INDEXES, &spec.scope);
-
-        let position = descriptors.len();
-
-        match adopted {
-            Some(descriptor) => {
-                cursor.close(at, INDEXES, Outcome::Inherited);
-
-                previous.landed(&descriptor)?;
-                descriptors.push(Some(descriptor));
-            }
-            None => {
-                descriptors.push(None);
-                building.push(Building {
-                    slots: window.slots(),
-                    at,
-                    position,
-                    sink: sink(stele, &spec)?,
-                    order: indexes::OrderCheck::default(),
-                });
-            }
-        }
-    }
-
-    // Every layer in the band was inherited: the store is not touched at all,
-    // which is the whole point of asking the predecessor first.
-    if building.is_empty() {
-        return Ok(descriptors.into_iter().flatten().collect());
-    }
-
-    // One span over the band. `building` is ascending and its windows are
-    // disjoint, so the first one's start and the last one's end bound
-    // everything any of them wants.
-    let slots = building[0].slots.start
-        ..building
-            .last()
-            .expect("the band has at least one layer to build")
-            .slots
-            .end;
-
-    let mut records = cursor.records();
-
-    for tag in store.iter_archive_tags(&archive_dimensions::ALL, slots.clone())? {
-        route_index(&mut building, tag?.into(), &mut records)?;
-    }
-
-    for exact in store.iter_exact_records(slots)? {
-        route_index(&mut building, exact?.into(), &mut records)?;
-    }
-
-    records.flush();
-
-    for layer in building {
-        let descriptor = layer.sink.finish()?.descriptor;
-        cursor.close(layer.at, INDEXES, Outcome::Transferred);
-
-        previous.landed(&descriptor)?;
-        descriptors[layer.position] = Some(descriptor);
-    }
-
-    debug_assert!(
-        descriptors.iter().all(Option::is_some),
-        "every layer the band announced has to have been filled or inherited",
-    );
-
-    Ok(descriptors.into_iter().flatten().collect())
-}
-
-/// One layer being filled by a band's traversal: an `indexes` layer, or an
-/// entity layer with the entity codec's order check.
-struct Building<K, O = indexes::OrderCheck> {
-    /// The half-open slot range this layer's epoch covers — what a record is
-    /// routed by.
-    slots: Range<BlockSlot>,
-    /// The position [`Cursor::open`] handed out for it.
-    at: usize,
-    /// Where its descriptor belongs among the band's, so the inscription still
-    /// lists a kind's layers by ascending epoch whatever mix of inherited and
-    /// built the band held.
-    position: usize,
-    sink: K,
-    order: O,
-}
-
-/// The layer in a band whose epoch `slot` falls in, if any.
-///
-/// A binary search rather than a walk of the band: this runs once per record,
-/// and a mainnet archive store holds hundreds of millions of them.
-fn layer_for<K, O>(
-    building: &mut [Building<K, O>],
-    slot: BlockSlot,
-) -> Option<&mut Building<K, O>> {
-    let above = building.partition_point(|layer| layer.slots.start <= slot);
-
-    above
-        .checked_sub(1)
-        .map(|at| &mut building[at])
-        .filter(|layer| layer.slots.contains(&slot))
-}
-
-/// Send one index record to the layer whose epoch its slot falls in
-/// ([`layer_for`]).
-///
-/// A record that lands in no layer is **dropped on purpose** — see
-/// [`write_indexes`] for the two ways the band's span can cover a slot no layer
-/// in it wants. The layer's own `OrderCheck` is what catches a routing mistake
-/// in the other direction: a record sent to the wrong layer arrives out of
-/// order there, or breaks the order of the layer it was taken from.
-fn route_index<K: RecordSink>(
-    building: &mut [Building<K>],
-    record: IndexRecord,
-    records: &mut Records<'_>,
-) -> Result<(), Error> {
-    let Some(layer) = layer_for(building, indexes::slot_of(&record)) else {
-        return Ok(());
-    };
-
-    layer.order.check(&record)?;
-    layer.sink.write_record(&indexes::encode(&record)?)?;
-    records.tick();
-
-    Ok(())
 }
 
 /// One state kind: its namespace, walked once into its shard layers.
@@ -2152,10 +2082,10 @@ fn route_index<K: RecordSink>(
 /// about and left out, which is a publish that carries less history rather
 /// than a failure. Producing a missing one is a backfill run's job.
 #[allow(clippy::too_many_arguments)]
-fn write_state_kind<W: SteleWriter, S: StateStore>(
+pub(crate) fn write_state_kind<W: SteleWriter, S: StateStore>(
     stele: &W,
     plan: &Plan,
-    store: &S,
+    source: &Source<'_, S>,
     kind: &'static str,
     ns: Namespace,
     shards: u8,
@@ -2171,10 +2101,6 @@ fn write_state_kind<W: SteleWriter, S: StateStore>(
         dumps.extend(adopt_dump(plan, kind, shards, epoch, previous, cursor)?);
     }
 
-    let mut sinks = Vec::with_capacity(shards as usize);
-    let mut orders = Vec::with_capacity(shards as usize);
-    let mut positions = Vec::with_capacity(shards as usize);
-
     // Announced before the tip's, because that is where they sit in the
     // document; they are closed after it, because that is when the bytes
     // they name exist.
@@ -2189,6 +2115,56 @@ fn write_state_kind<W: SteleWriter, S: StateStore>(
         .iter()
         .map(|spec| cursor.open(kind, &spec.scope))
         .collect();
+
+    let tip = match source {
+        Source::Stores(store) => {
+            walk_state_kind(stele, plan, *store, kind, ns, shards, shard_byte, cursor)?
+        }
+        Source::Prepared(prepared) => {
+            let mut tip = Vec::with_capacity(shards as usize);
+
+            for shard in 0..shards {
+                let spec = plan.state_scope(shard).layer_spec(kind)?;
+                let at = cursor.open(kind, &spec.scope);
+                let written = prepared.state_layer(kind, &spec.scope)?;
+
+                tip.push(replay_layer(stele, Some(prepared), &spec, written, cursor)?);
+                cursor.close(at, kind, Outcome::Transferred);
+            }
+
+            tip
+        }
+    };
+
+    for ((spec, at), written) in cut.iter().zip(cut_positions).zip(&tip) {
+        let again = stele.carry_again(written, spec.scope.clone())?;
+        cursor.close(at, kind, Outcome::Transferred);
+
+        previous.landed(&again.descriptor)?;
+        dumps.push(again.descriptor);
+    }
+
+    let mut layers = dumps;
+    layers.extend(tip.into_iter().map(|written| written.descriptor));
+
+    Ok(layers)
+}
+
+/// Walk one state kind's namespace once, routing each record to its shard.
+#[allow(clippy::too_many_arguments)]
+fn walk_state_kind<W: SteleWriter, S: StateStore>(
+    stele: &W,
+    plan: &Plan,
+    store: &S,
+    kind: &'static str,
+    ns: Namespace,
+    shards: u8,
+    shard_byte: usize,
+    cursor: &Cursor<'_>,
+) -> Result<Vec<WrittenLayer>, Error> {
+    let mut sinks = Vec::with_capacity(shards as usize);
+    let mut orders = Vec::with_capacity(shards as usize);
+    let mut positions = Vec::with_capacity(shards as usize);
 
     for shard in 0..shards {
         let spec = plan.state_scope(shard).layer_spec(kind)?;
@@ -2241,18 +2217,7 @@ fn write_state_kind<W: SteleWriter, S: StateStore>(
         tip.push(written);
     }
 
-    for ((spec, at), written) in cut.iter().zip(cut_positions).zip(&tip) {
-        let again = stele.carry_again(written, spec.scope.clone())?;
-        cursor.close(at, kind, Outcome::Transferred);
-
-        previous.landed(&again.descriptor)?;
-        dumps.push(again.descriptor);
-    }
-
-    let mut layers = dumps;
-    layers.extend(tip.into_iter().map(|written| written.descriptor));
-
-    Ok(layers)
+    Ok(tip)
 }
 
 /// One kind's retained dump at a closed `epoch`, carried forward from the
@@ -2599,7 +2564,7 @@ mod chain_tests {
             sequence: 3,
             epochs: vec![],
             retained: RetainedEpochs::default(),
-            band: IndexBand::DEFAULT,
+            scratch: None,
             producers: Producers::DEFAULT,
         }
     }

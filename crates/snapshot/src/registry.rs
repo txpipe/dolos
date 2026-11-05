@@ -169,6 +169,7 @@ use stelae_driver::{digests, publish::Chained};
 
 use crate::{
     export::{self, Plan, Predecessor as _, Settling, Standing},
+    prepare,
     restore::{Outlook, Restoring, Summary, Target},
     DolosProfile, Error,
 };
@@ -690,6 +691,52 @@ where
     // without touching the network. `export` asks again, for its other callers.
     crate::boundary::check(plan, archive, state)?;
 
+    publish_chained(publishing, plan, |settling| {
+        export::export(
+            stele,
+            plan,
+            archive,
+            state,
+            digest_records,
+            settling,
+            observer,
+        )
+    })
+}
+
+/// Publish a prepared boundary into the repository `publishing` names, chained
+/// to whatever is already there.
+///
+/// The same chain rule as [`publish`], read when the sequence is really being
+/// committed, so a batch's predecessor is the stele its last publish left.
+pub fn publish_prepared<A: ArchiveStore>(
+    publishing: Publishing<'_>,
+    finalizing: &prepare::Finalizing<'_>,
+    archive: &A,
+    digest_records: Option<&[digests::ImmutableDigests]>,
+    observer: &Observer,
+) -> Result<Published, Error> {
+    let registry = publishing.registry;
+
+    publish_chained(publishing, &finalizing.bundle.plan(), |settling| {
+        prepare::finalize(
+            registry,
+            finalizing,
+            archive,
+            digest_records,
+            settling,
+            observer,
+        )
+    })
+}
+
+/// Chain `plan` onto the repository's latest stele, build the inscription and
+/// report what it cost.
+fn publish_chained(
+    publishing: Publishing<'_>,
+    plan: &Plan,
+    build: impl FnOnce(&Settling<Chained<'_>>) -> Result<stelae::inscription::Inscription, Error>,
+) -> Result<Published, Error> {
     let registry = publishing.registry;
     let latest = registry.latest(&DolosProfile)?;
     let settling = chained(publishing, latest.as_ref(), plan)?;
@@ -699,15 +746,7 @@ where
     // not a total carried over from an earlier one through the same transport.
     registry.take_transfer();
 
-    let inscription = export::export(
-        stele,
-        plan,
-        archive,
-        state,
-        digest_records,
-        &settling,
-        observer,
-    )?;
+    let inscription = build(&settling)?;
 
     // Only here: the stele is sealed, so the note about what was uploaded on the
     // way to it has nothing left to say. Before the seal it would be a record

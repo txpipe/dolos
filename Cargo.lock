@@ -1760,6 +1760,7 @@ dependencies = [
  "dolos-fjall",
  "dolos-testing",
  "hex",
+ "libc",
  "minicbor 0.26.4",
  "pallas",
  "rustls",
