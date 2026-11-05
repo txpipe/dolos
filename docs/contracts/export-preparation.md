@@ -133,14 +133,22 @@ The **manifest** (`BUNDLE_FORMAT`) holds:
   finds held. Staged runs name the captures they were staged for (see
   [Restarting a batch](#on-disk-layout-and-lifecycle));
 - `capture_from` and `oldest_unsealed`;
-- its **horizon**: the slot of the first block at or after the start of the plan's
-  oldest closed window. Pruning must retain that block and everything after it
-  until the bundle is released, and an archive that starts exactly there is enough.
-  A slot alone could not show that: an epoch's first slot usually holds no block.
-  Staging and finalization both read closed windows from the source archive, and a
-  captured log window does not change that: its blocks and index rows still come
-  from there. `None` means the plan covers no closed window, and then only the
-  boundary block itself has to stay, so that finalization can check the chain.
+- its **horizon**: the slot of the last block at or before the first slot of the
+  plan's oldest closed window, or of the chain's first block when it has none that
+  early. Pruning must retain that block and everything after it until the bundle is
+  released, and an archive that starts exactly there is enough. Staging and
+  finalization both read closed windows from the source archive, and a captured log
+  window does not change that: its blocks and index rows still come from there, and
+  a window below `capture_from` reads its logs from there too. Those log rows key at
+  the epoch's first slot, which usually holds no block, and `prune_history` cuts them
+  by slot like the blocks. So the window's first block would not do: a cut right at
+  it keeps every block and loses the logs, and the layers would just be missing. A
+  block at or before the first slot shows the cut did not pass it. Where the horizon
+  is the chain's first block, `prune_history` takes it whenever it takes anything.
+  The price is that a cut after the horizon is refused even where it lost nothing,
+  because a block cannot show that; pruning to the recorded value never makes one.
+  `None` means the plan covers no closed window, and then only the boundary block
+  itself has to stay, so that finalization can check the chain.
   This bounds what a batch reads, not what a later `prepare` needs: that one still
   takes a whole archive (`boundary::check`), so a host prunes only after the batch's
   last `prepare`;
@@ -175,9 +183,10 @@ marker and advancing replay.
 can compare a bundle with stores rebuilt *past* it, and finalization would publish
 the old capture beside the new archive. A host that rebuilds its stores releases
 every unfinished bundle first, and deletes any staging root of that batch, whose
-runs came from the old archive. Should it forget the root, the boundaries it
-captures again are refused there (`staging::Refusal::SourceMismatch`). A host that
-keeps its bundles through a rebuild gets no refusal: the bundles and their root
+runs came from the old archive. Should it forget the root, `stage_batch` refuses
+the boundaries it captures again (`staging::Refusal::SourceMismatch`), though
+`staging::stage` knows no captures and reuses the runs. A host that keeps its
+bundles, or a `Staged` it already holds, through a rebuild gets no refusal: they
 still agree with each other, and nothing can see the stores moved.
 
 **Loading** checks the checksum, the format, the sequence, the owner, that the
@@ -251,22 +260,30 @@ export cannot, so the next one sweeps first: it removes every such directory who
 lock nobody holds. The system releases a lock however its holder died, so a live
 peer's spool is never taken, and a digest and a publish can share a scratch
 directory. A filesystem that cannot lock gets no sweep. A sweep never waits on what
-it finds, because anyone able to write to the scratch can plant something: a lock
-that is not a plain file is left in place, and logged.
+it finds, so a stray file cannot hang an export: a lock that is not a plain file is
+left in place, and logged.
+
+**The scratch must not be writable by anyone but the user running the export.** A
+sweep checks no owner and removes what it finds without bounding the walk, so another
+user planting a deep tree there can abort the export. A host sharing the system
+temporary directory with other users must set `Plan::with_scratch`.
 
 **Progress.** Staging has no layer to announce and its records are reported once,
 when their layer is finished. So it tells the observer it is alive with
-`Event::Records(0)`, before each traversal and every million records of one. At
-`info` it logs each traversal, the running count at each of those million-record
-beats, and its final `Report`. An observer printing only `LayerStarted` sees nothing
-from it until the layers begin, so the log is where an operator tells a live
-traversal from a wedged one.
+`Event::Records(0)`, before each traversal and every million records across them.
+At `info` it logs each traversal, the running count at each of those million-record
+beats, and its final `Report`. The count runs across the traversals, so it can
+include records of those before the one it names. An observer printing only
+`LayerStarted` sees nothing from it until the layers begin, so the log is where an
+operator tells a live traversal from a wedged one.
 
 A long gap is not by itself a wedge. The store scans a whole dimension and filters
 by slot, so a narrow window of a long chain yields records slowly: staging one
-mainnet epoch (`solution/dolos/kb/export-index-staging`) took 410 s over 2.4 million
-records, about one beat every three minutes. Judge a silence against the gaps before
-it. A killed traversal loses its spool.
+mainnet epoch took 410 s over 2.4 million records, about one beat every three
+minutes (one exploratory pair, Apple M4 with an external SSD). A traversal yielding
+under a million records logs nothing between its start and the finish, however long
+its scan. Judge a silence against the gaps before it, and a first one against that
+rate. A killed traversal loses its spool.
 
 This replaces the banded traversal, so hosts migrate:
 
