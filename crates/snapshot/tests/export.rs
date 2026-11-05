@@ -7437,6 +7437,9 @@ mod boundary_preparation {
         predecessor: Option<u64>,
         before_staging: bool,
         on_fjall: bool,
+        /// One more block, a slot into window 3: the nearest any can sit after
+        /// the window's first slot.
+        block_after_first_slot: bool,
     }
 
     impl PruneCase {
@@ -7450,6 +7453,7 @@ mod boundary_preparation {
                 predecessor: None,
                 before_staging: false,
                 on_fjall: false,
+                block_after_first_slot: false,
             }
         }
     }
@@ -7489,6 +7493,15 @@ mod boundary_preparation {
             (tempdir(), tempdir(), tempdir(), tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(case.shape, case.boundary);
+
+        if case.block_after_first_slot {
+            let (tip, number) = (chain.tip.clone(), chain.number);
+            let (point, body) = make_conway_block_with_prev(chain.start(3) + 1, None, number);
+
+            chain.commit_block(point, body, true, Some(number));
+            chain.tip = tip;
+        }
+
         let delta = chain.boundary_delta.clone().unwrap();
         let plan = chain.plan(&[]).restrict_epochs(case.first_window, None);
 
@@ -7734,30 +7747,36 @@ mod boundary_preparation {
     /// nothing, though the logs of the first window key before that block.
     #[test]
     fn a_whole_plan_pruned_to_its_horizon_keeps_everything() {
-        finish_on_a_prune(
-            PruneCase {
-                first_window: None,
-                ..PruneCase::at(Shape::Shelley, 5)
-            },
-            |_, horizon| horizon,
-        )
-        .unwrap();
+        for on_fjall in [false, true] {
+            finish_on_a_prune(
+                PruneCase {
+                    first_window: None,
+                    on_fjall,
+                    ..PruneCase::at(Shape::Shelley, 5)
+                },
+                |_, horizon| horizon,
+            )
+            .unwrap();
+        }
     }
 
     #[test]
     fn a_whole_plan_pruned_one_slot_past_its_horizon_is_refused() {
-        let refused = finish_on_a_prune(
-            PruneCase {
-                first_window: None,
-                ..PruneCase::at(Shape::Shelley, 5)
-            },
-            |_, horizon| horizon + 1,
-        );
+        for on_fjall in [false, true] {
+            let refused = finish_on_a_prune(
+                PruneCase {
+                    first_window: None,
+                    on_fjall,
+                    ..PruneCase::at(Shape::Shelley, 5)
+                },
+                |_, horizon| horizon + 1,
+            );
 
-        assert!(matches!(
-            preparation_refusal(refused),
-            Refusal::HorizonLost { sequence: 5, .. }
-        ));
+            assert!(matches!(
+                preparation_refusal(refused),
+                Refusal::HorizonLost { sequence: 5, .. }
+            ));
+        }
     }
 
     /// The cut that keeps every block of the window and loses its logs.
@@ -7818,6 +7837,40 @@ mod boundary_preparation {
             assert_eq!(horizon, last_block_to(&chain, chain.start(3)), "{shape:?}");
             assert_eq!(horizon == chain.start(3), on_first_slot, "{shape:?}");
         }
+    }
+
+    /// A block after the window's first slot says nothing of the logs keyed at
+    /// that slot, however close it sits, so the horizon stays before it.
+    #[test]
+    fn a_prune_to_the_horizon_keeps_the_logs_with_a_block_just_after_the_first_slot() {
+        finish_on_a_prune(
+            PruneCase {
+                block_after_first_slot: true,
+                ..PruneCase::at(Shape::Shelley, 5)
+            },
+            |chain, horizon| {
+                assert_eq!(horizon, chain.start(2) + 50);
+
+                horizon
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_cut_at_a_block_just_after_the_first_slot_is_refused() {
+        let refused = finish_on_a_prune(
+            PruneCase {
+                block_after_first_slot: true,
+                ..PruneCase::at(Shape::Shelley, 5)
+            },
+            |chain, _| chain.start(3) + 1,
+        );
+
+        assert!(matches!(
+            preparation_refusal(refused),
+            Refusal::HorizonLost { sequence: 5, .. }
+        ));
     }
 
     /// A chain's second block is no chain start once its first is gone.
@@ -8793,6 +8846,52 @@ mod boundary_preparation {
                 "{name}: {running:?}"
             );
         }
+    }
+
+    /// The count runs across a staging's traversals: half a beat in each of two
+    /// is one beat, in the second.
+    #[test]
+    fn the_running_count_runs_across_the_traversals() {
+        let (root, stage_root) = (tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let bundle = chain.prepare(&store, &[]).unwrap();
+
+        chain.advance_to(3);
+
+        let padded = Padded {
+            inner: Padded {
+                inner: chain.archive.clone(),
+                traversal: Traversal::Tags,
+                count: 1 << 19,
+            },
+            traversal: Traversal::Exacts,
+            count: 1 << 19,
+        };
+
+        let lines = logged_while(|| {
+            prepare::stage_batch(
+                stage_root.path(),
+                &padded,
+                &chain.state,
+                std::slice::from_ref(&bundle),
+                &export::First,
+                Budget::new(u64::MAX),
+                &Observer::silent(),
+            )
+            .unwrap();
+        });
+
+        let running: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.contains("traversal running"))
+            .collect();
+
+        assert_eq!(running.len(), 1, "{lines:?}");
+        assert!(
+            running[0].contains("traversal=\"exact\"") && running[0].contains("records=1048576"),
+            "{running:?}"
+        );
     }
 
     /// The contract says such a lock stays and is logged, whichever way the
