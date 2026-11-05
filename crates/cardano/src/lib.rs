@@ -6,9 +6,9 @@ use tracing::info;
 pub use pallas;
 
 use dolos_core::{
-    config::CustomUtxo, BlockSlot, ChainError, ChainPoint, Domain, DomainError, Genesis,
-    MempoolAwareUtxoStore, MempoolTx, MempoolUpdate, RawBlock, StateStore, TipEvent, UtxoValue,
-    WorkUnit,
+    config::CustomUtxo, BlockSlot, ChainError, ChainPoint, Domain, DomainError, EntityMap, Genesis,
+    MempoolAwareUtxoStore, MempoolTx, MempoolUpdate, NsKey, RawBlock, StateError, StateStore,
+    TipEvent, UtxoValue, WorkUnit,
 };
 
 use crate::{
@@ -243,6 +243,13 @@ where
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::finalize(w, domain),
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::finalize(w, domain),
             Self::ForcedStop => Ok(()),
+        }
+    }
+
+    fn archive_index_deltas(&self) -> &[dolos_core::ArchiveIndexDelta] {
+        match self {
+            Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::archive_index_deltas(w),
+            _ => &[],
         }
     }
 
@@ -563,6 +570,20 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
     fn rolling_back<D: Domain>(domain: &D, to: &ChainPoint) {
         estart::stake::warn_on_dropped_rows(domain, to);
+    }
+
+    fn restore_for_undo<S: StateStore>(
+        state: &S,
+        key: &NsKey,
+    ) -> Result<Option<CardanoEntity>, StateError> {
+        estart::prune::restore_for_undo(state, key)
+    }
+
+    fn settle_undo<S: StateStore>(
+        state: &S,
+        entities: &mut EntityMap<CardanoEntity>,
+    ) -> Result<(), StateError> {
+        estart::prune::settle_undo(state, entities)
     }
 
     fn decode_utxo(&self, utxo: Arc<UtxoValue>) -> Result<Self::Utxo, ChainError> {

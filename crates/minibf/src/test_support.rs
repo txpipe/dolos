@@ -1,5 +1,9 @@
 use std::{
-    sync::Arc,
+    future::Future,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -12,7 +16,7 @@ use dolos_cardano::periods::stats::TOTALS;
 use dolos_core::{
     config::{CacheConfig, HistoryConfig, HistoryWindow, MinibfConfig, RoutePrefix},
     import::ImportExt as _,
-    CacheStore as _, Domain, StateStore,
+    CacheStore as _, Domain, QueryLimiter, StateStore,
 };
 use dolos_testing::{
     synthetic::{
@@ -535,6 +539,8 @@ impl TestApp {
                 ..Default::default()
             },
             force_protocol: None,
+            fault: None,
+            setup: None,
             genesis_pools: Vec::new(),
         }
     }
@@ -596,7 +602,8 @@ impl TestApp {
         Self::from_domain(domain, vectors, None, minibf)
     }
 
-    fn from_domain(
+    /// App over `domain`, its chain described by `vectors`.
+    pub fn from_domain(
         domain: ToyDomain,
         vectors: SyntheticVectors,
         fault: Option<TestFault>,
@@ -731,6 +738,48 @@ impl TestApp {
 
         summary.epoch_start(epoch)
     }
+}
+
+/// App whose address holds `assets` assets of one policy, minted in its first
+/// block, on a query limiter of `permits`.
+pub fn many_assets_app(assets: usize, permits: usize) -> TestApp {
+    let mints = (0..assets)
+        .map(|i| ([0x5a; 28], format!("M{i:02}"), 1))
+        .collect();
+
+    let cfg = SyntheticBlockConfig {
+        block_count: 5,
+        txs_per_block: 1,
+        mints_by_block: vec![vec![mints]],
+        ..Default::default()
+    };
+
+    TestApp::new_with_cfg_and_domain(cfg, |domain| {
+        domain.with_query_limiter(QueryLimiter::new(permits))
+    })
+}
+
+/// The most archive entity-index reads `app` runs at once while `f` runs, with
+/// `f`'s output. Each read is held a few milliseconds, so that reads that may
+/// overlap do: an asset read starts with one, under a query permit.
+pub async fn readers_at_once<T>(app: &TestApp, f: impl Future<Output = T>) -> (usize, T) {
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+
+    app.facade.inner.during_entity_slots({
+        let (in_flight, peak) = (in_flight.clone(), peak.clone());
+
+        move || {
+            let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(5));
+            in_flight.fetch_sub(1, Ordering::SeqCst);
+        }
+    });
+
+    let out = f.await;
+
+    (peak.load(Ordering::SeqCst), out)
 }
 
 /// The delay of a slow-read fault in a stall test.
@@ -905,9 +954,13 @@ fn genesis_staking(pools: &[[u8; 28]]) -> pallas::interop::hardano::configs::she
         .expect("a valid staking section")
 }
 
+type TestAppSetup = Box<dyn FnOnce(&ToyDomain, &SyntheticVectors)>;
+
 pub struct TestAppBuilder {
     cfg: SyntheticBlockConfig,
     force_protocol: Option<usize>,
+    fault: Option<TestFault>,
+    setup: Option<TestAppSetup>,
     genesis_pools: Vec<[u8; 28]>,
 }
 
@@ -919,6 +972,20 @@ impl TestAppBuilder {
 
     pub fn with_protocol(mut self, protocol: usize) -> Self {
         self.force_protocol = Some(protocol);
+        self
+    }
+
+    pub fn with_fault(mut self, fault: TestFault) -> Self {
+        self.fault = Some(fault);
+        self
+    }
+
+    /// Runs `setup` over the built chain before the app wraps it.
+    pub fn with_setup(
+        mut self,
+        setup: impl FnOnce(&ToyDomain, &SyntheticVectors) + 'static,
+    ) -> Self {
+        self.setup = Some(Box::new(setup));
         self
     }
 
@@ -945,7 +1012,11 @@ impl TestAppBuilder {
             })
             .finish();
 
+        if let Some(setup) = self.setup {
+            setup(&domain, &vectors);
+        }
+
         let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
-        TestApp::from_domain(domain, vectors, None, minibf)
+        TestApp::from_domain(domain, vectors, self.fault, minibf)
     }
 }

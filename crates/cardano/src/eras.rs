@@ -110,6 +110,12 @@ impl ChainSummary {
         self.edge = Some(era);
     }
 
+    /// Whether the summary holds no era, as one loaded from a state with no
+    /// era rows does. [`Self::edge`] panics on it.
+    pub fn is_empty(&self) -> bool {
+        self.edge.is_none()
+    }
+
     pub fn first(&self) -> &EraState {
         if let Some(era) = self.past.first() {
             era

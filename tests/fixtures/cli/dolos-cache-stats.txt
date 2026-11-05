@@ -1,0 +1,9 @@
+prints each namespace's entries, bytes on disk, format version and watermarks
+
+Usage: dolos cache stats [OPTIONS]
+
+Options:
+      --format <FORMAT>  How to print the result: text for people, JSON for scripts [default: text]
+                         [possible values: text, json]
+  -c, --config <CONFIG>  
+  -h, --help             Print help

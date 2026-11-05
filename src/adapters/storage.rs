@@ -61,9 +61,9 @@ pub fn ensure_storage_path(config: &RootConfig) -> Result<PathBuf, Error> {
 /// A `remove_dir_all` of the whole path and not a per-store wipe, which matters
 /// for one thing that is not a store: a stele restore's progress file lives
 /// inside `storage.path`, and a progress file that outlived the stores it
-/// describes would tell the next `--continue` to skip layers whose data is
-/// gone. Anything that clears storage has to clear that too, and taking the
-/// directory is how this does it without having to remember.
+/// describes would tell a resumed restore to skip layers whose data is gone.
+/// Anything that clears storage has to clear that too, and taking the directory
+/// is how this does it without having to remember.
 pub fn clear_storage(storage_path: &Path) -> Result<(), Error> {
     std::fs::remove_dir_all(storage_path)
         .map_err(|e| Error::StorageError(format!("removing existing storage: {e}")))?;
@@ -92,9 +92,259 @@ pub fn outside_storage_root(
     Ok(outside)
 }
 
+/// What removing a directory takes, as [`std::fs::remove_dir_all`] removes
+/// it: the directory, and every directory and link under it, links not
+/// followed. Known by file identity, so that a second name for one of them,
+/// a bind mount, a macOS firmlink or another case on a case-insensitive
+/// volume, is the same directory.
+///
+/// Taken when the directory exists. Of one that doesn't, only its path is
+/// known, and a path reaches into it as written.
+pub struct Removal {
+    taken: std::collections::HashSet<FileId>,
+    pending: Option<PathBuf>,
+}
+
+/// How many links a path may pass through, as the OS limits them.
+const MAX_LINKS: usize = 40;
+
+impl Removal {
+    /// What removing `dir` takes, every directory under it read: one that
+    /// can't be listed is an error that names it, as it stops the removal.
+    pub fn of(dir: &Path) -> std::io::Result<Self> {
+        Self::walk(dir, false)
+    }
+
+    /// [`Removal::of`] as far as `dir` can be read: a directory under it that
+    /// can't be listed is taken without what it holds, which the OS reaches
+    /// only through it.
+    pub fn of_readable(dir: &Path) -> std::io::Result<Self> {
+        Self::walk(dir, true)
+    }
+
+    fn walk(dir: &Path, skip_unlisted: bool) -> std::io::Result<Self> {
+        let mut taken = std::collections::HashSet::new();
+
+        let meta = match std::fs::symlink_metadata(dir) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self {
+                    taken,
+                    pending: Some(settled(dir)?),
+                });
+            }
+            Err(error) => return Err(at(dir, error)),
+        };
+
+        collect(dir, &meta, &mut taken, skip_unlisted)?;
+
+        Ok(Self {
+            taken,
+            pending: None,
+        })
+    }
+
+    /// Whether the removal takes `path`, or a directory or link the OS passes
+    /// on its way to it: links and `..` are followed as the OS follows them,
+    /// and the part of `path` that doesn't exist yet is made under the last
+    /// directory that does.
+    pub fn takes(&self, path: &Path) -> std::io::Result<bool> {
+        if let Some(pending) = &self.pending {
+            return Ok(settled(path)?.starts_with(pending));
+        }
+
+        self.takes_on_the_way(path, MAX_LINKS)
+    }
+
+    fn takes_on_the_way(&self, path: &Path, links: usize) -> std::io::Result<bool> {
+        let mut reached = PathBuf::new();
+
+        // The components past the last one that exists, which the OS makes
+        // as new directories: none of them is taken, and a `..` among them
+        // steps back out of one.
+        let mut made = 0usize;
+
+        for component in std::path::absolute(path)?.components() {
+            if made > 0 {
+                match component {
+                    Component::ParentDir => made -= 1,
+                    Component::CurDir => {}
+                    _ => made += 1,
+                }
+
+                continue;
+            }
+
+            reached.push(component);
+
+            if let Component::Prefix(_) = component {
+                continue;
+            }
+
+            let meta = match std::fs::symlink_metadata(&reached) {
+                Ok(meta) => meta,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    reached.pop();
+                    made = 1;
+                    continue;
+                }
+                Err(error) => return Err(at(&reached, error)),
+            };
+
+            if self
+                .taken
+                .contains(&file_id(&reached, &meta).map_err(|error| at(&reached, error))?)
+            {
+                return Ok(true);
+            }
+
+            if meta.is_symlink() {
+                let links = links.checked_sub(1).ok_or_else(|| {
+                    std::io::Error::other(format!(
+                        "{} passes through too many links",
+                        path.display()
+                    ))
+                })?;
+
+                let target = std::fs::read_link(&reached).map_err(|error| at(&reached, error))?;
+                let target = reached.parent().unwrap_or(&reached).join(target);
+
+                if self.takes_on_the_way(&target, links)? {
+                    return Ok(true);
+                }
+            }
+        }
+
+        Ok(false)
+    }
+}
+
+/// Whether removing `dir` takes `path`; see [`Removal::takes`].
+pub fn reaches_into(path: &Path, dir: &Path) -> std::io::Result<bool> {
+    Removal::of(dir)?.takes(path)
+}
+
+/// Add `path`, whose metadata is `meta`, to `taken`, with what is under it
+/// when it is a directory and not a link. What is gone by the time it is
+/// read is not there to take, and, when `skip_unlisted`, nor is what is in a
+/// directory that can't be listed.
+fn collect(
+    path: &Path,
+    meta: &std::fs::Metadata,
+    taken: &mut std::collections::HashSet<FileId>,
+    skip_unlisted: bool,
+) -> std::io::Result<()> {
+    use std::io::ErrorKind;
+
+    taken.insert(file_id(path, meta).map_err(|error| at(path, error))?);
+
+    if !meta.is_dir() {
+        return Ok(());
+    }
+
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) if skip_unlisted && error.kind() == ErrorKind::PermissionDenied => return Ok(()),
+        Err(error) => return Err(at(path, error)),
+    };
+
+    for entry in entries {
+        let entry = entry.map_err(|error| at(path, error))?;
+        let path = entry.path();
+        let kind = entry.file_type().map_err(|error| at(&path, error))?;
+
+        if kind.is_dir() || kind.is_symlink() {
+            match std::fs::symlink_metadata(&path) {
+                Ok(meta) => collect(&path, &meta, taken, skip_unlisted)?,
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(at(&path, error)),
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// `error`, naming the path it happened at.
+fn at(path: &Path, error: std::io::Error) -> std::io::Error {
+    std::io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+}
+
+#[cfg(unix)]
+type FileId = (u64, u64);
+
+#[cfg(not(unix))]
+type FileId = PathBuf;
+
+/// What a file is, whatever it is called: its device and inode.
+#[cfg(unix)]
+fn file_id(_: &Path, meta: &std::fs::Metadata) -> std::io::Result<FileId> {
+    use std::os::unix::fs::MetadataExt;
+
+    Ok((meta.dev(), meta.ino()))
+}
+
+/// What a file is, whatever it is called: its final path, which Windows
+/// spells with the case the volume records. A link is its entry in its
+/// directory's final path.
+#[cfg(not(unix))]
+fn file_id(path: &Path, meta: &std::fs::Metadata) -> std::io::Result<FileId> {
+    if !meta.is_symlink() {
+        return std::fs::canonicalize(path);
+    }
+
+    let parent = path.parent().unwrap_or(path);
+    let name = path.file_name().unwrap_or_default();
+
+    Ok(std::fs::canonicalize(parent)?.join(name))
+}
+
+/// `path` made absolute, with each part that exists resolved as the OS
+/// resolves it and the rest as written.
+fn settled(path: &Path) -> std::io::Result<PathBuf> {
+    let mut reached = PathBuf::new();
+
+    for component in std::path::absolute(path)?.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                reached.pop();
+            }
+            Component::Prefix(_) => reached.push(component),
+            Component::RootDir | Component::Normal(_) => {
+                reached.push(component);
+                reached = std::fs::canonicalize(&reached).unwrap_or(reached);
+            }
+        }
+    }
+
+    Ok(reached)
+}
+
+/// `path` made absolute, with each `..` taken as the OS takes it: out of the
+/// directory reached, through a link's target. Any other link is kept as
+/// written, so the path still names what it named.
+pub fn resolve_parent_dirs(path: &Path) -> std::io::Result<PathBuf> {
+    let mut reached = PathBuf::new();
+
+    for component in std::path::absolute(path)?.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                reached = std::fs::canonicalize(&reached).unwrap_or(reached);
+                reached.pop();
+            }
+            other => reached.push(other),
+        }
+    }
+
+    Ok(reached)
+}
+
 /// `path` made absolute with `..` resolved lexically. Only a relative path
 /// reads the working directory, so absolute ones survive a deleted one.
-fn normalize(path: &Path) -> std::io::Result<PathBuf> {
+pub fn normalize(path: &Path) -> std::io::Result<PathBuf> {
     let mut normalized = PathBuf::new();
 
     for component in std::path::absolute(path)?.components() {
@@ -133,10 +383,10 @@ pub enum Existing {
 pub struct ExistingDataPolicy {
     /// `--force`: clear storage and re-bootstrap.
     pub force: bool,
-    /// `--skip-if-data`: leave a node alone and exit zero. A store this
-    /// release refuses is not skipped.
+    /// `--skip-if-data`: leave a node alone and exit zero. Data without a
+    /// node, and a store this release refuses, are not skipped.
     pub skip_if_data: bool,
-    /// `--continue`: go ahead, trusting the run to resume.
+    /// `--continue`: go ahead, resuming a replay from its committed position.
     pub r#continue: bool,
 }
 
@@ -148,17 +398,20 @@ struct Found {
     /// The state failed to open for a reason other than its identity, or its
     /// cursor failed to read.
     unreadable: Option<Error>,
+    /// The WAL, when another process holds it open.
+    wal_in_use: Option<PathBuf>,
     /// The first identity refusal.
     refused: Option<Error>,
-    /// The state, archive and segment directories holding data: a store with
-    /// data or one this release refuses, an archive that fails to open, or
-    /// block segments.
+    /// The WAL, state, archive and segment directories holding data: a store
+    /// with data or one this release refuses, a WAL or an archive that fails
+    /// to open, or block segments.
     held: Vec<PathBuf>,
 }
 
 /// Open the stores whose directories exist, creating no store directory: a
 /// state cursor is a node, and failures to open or to read the cursor are
-/// reported rather than raised.
+/// reported rather than raised. The WAL is read without opening it as a
+/// store, which would stamp or wipe one of another version.
 fn found_in_storage(config: &RootConfig) -> Result<Found, Error> {
     let mut found = Found::default();
 
@@ -182,6 +435,17 @@ fn found_in_storage(config: &RootConfig) -> Result<Found, Error> {
                 found.held.push(path);
             }
             Err(error) => found.unreadable = Some(error),
+        }
+    }
+
+    if let Some(path) = config.wal_path().filter(|path| path.exists()) {
+        use dolos_redb3::wal::WalProbe;
+
+        match dolos_redb3::wal::probe(&path) {
+            Ok(WalProbe::Empty) => {}
+            Ok(WalProbe::InUse) => found.wal_in_use = Some(path),
+            // A WAL that fails to read counts as data, as the archive does.
+            Ok(WalProbe::Entries) | Err(_) => found.held.push(path),
         }
     }
 
@@ -263,14 +527,21 @@ pub fn has_existing_data(config: &RootConfig) -> Result<bool, Error> {
 ///
 /// The refusals happen here — a skip, and the refusal for existing data with no
 /// flag saying what to do about it — so neither is a question asked of an
-/// operator whose answer is then thrown away.
+/// operator whose answer is then thrown away. Any managed store holding data
+/// is existing data, a state without a cursor included: a bootstrap
+/// interrupted before it commits a cursor leaves one, a Stelae restore,
+/// which commits it last, or a replay stopped before its first commit.
+/// `--skip-if-data` skips only a node, that of a replay interrupted after it
+/// committed included, and refuses data without one, which a daemon would
+/// sync from the origin on top of; the refusal with no flag offers it only
+/// over a node.
 ///
 /// A store this release refuses to open is data in the way that only `--force`
 /// on its own clears; every other flag, `--continue` included, gets its
 /// refusal. A state that fails to open for another reason, or whose cursor
-/// fails to read, is left to `--continue`, and stops every other flag,
-/// `--force` included: whether it holds a node can't be told, and a running
-/// node holds its stores that way.
+/// fails to read, and a WAL another process holds, are left to `--continue`,
+/// and stop every other flag, `--force` included: whether they hold a node
+/// can't be told, and a running node holds its stores that way.
 pub fn inspect_existing_data(
     config: &RootConfig,
     policy: ExistingDataPolicy,
@@ -289,30 +560,54 @@ pub fn inspect_existing_data(
         return Err(error);
     }
 
-    if !found.node {
+    if let Some(wal) = found.wal_in_use {
+        return Err(Error::message(format!(
+            "the WAL at {} is in use by another process. Stop it, then run the bootstrap again",
+            wal.display()
+        )));
+    }
+
+    if found.held.is_empty() {
         return Ok(Existing::Proceed);
     }
 
-    if policy.skip_if_data {
+    if policy.skip_if_data && found.node {
         return Ok(Existing::Skip);
     }
 
-    if policy.force {
-        return Ok(Existing::Clear);
+    let held: Vec<_> = found
+        .held
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+
+    let detected = format!("existing data detected in storage ({})", held.join(", "));
+
+    if policy.skip_if_data {
+        return Err(Error::message(format!(
+            "{detected}, but no node: there is no state cursor, as a bootstrap interrupted \
+             before it commits one leaves none, and `--skip-if-data` leaves only a node. Use \
+             --force to replace it"
+        )));
     }
 
-    Err(Error::message(
-        "existing data detected in storage. Use --force to clear and re-bootstrap, \
-         --skip-if-data to skip, or --continue to resume",
-    ))
+    if policy.force {
+        return clear(config, &detected, found);
+    }
+
+    if !found.node {
+        return Err(Error::message(format!(
+            "{detected}. Use --force to replace it"
+        )));
+    }
+
+    Err(Error::message(format!(
+        "{detected}. Use --force to replace it, or --skip-if-data to leave it and exit 0"
+    )))
 }
 
-/// The decision on storage holding a store this release refuses. `--force` on
-/// its own clears it, unless storage also holds a state that fails to open
-/// for another reason or whose cursor fails to read, which `--force` never
-/// clears, or a directory outside the root that holds data, which clearing
-/// the root doesn't reach. Those are named for removal by hand, after the
-/// refusal, each with the reason `--force` leaves it.
+/// The decision on storage holding a store this release refuses: `--force`
+/// on its own clears it, as it clears any other data.
 fn clear_refused(
     config: &RootConfig,
     policy: ExistingDataPolicy,
@@ -330,6 +625,16 @@ fn clear_refused(
         )));
     }
 
+    clear(config, &refusal.to_string(), found)
+}
+
+/// `--force`'s decision: clear the storage root, unless storage also holds
+/// what clearing the root doesn't reach — a state that fails to open for
+/// another reason or whose cursor fails to read, which `--force` never
+/// clears, a WAL another process holds, or a directory outside the root that
+/// holds data. Those are named for removal by hand, after `detected`, each
+/// with the reason `--force` leaves it.
+fn clear(config: &RootConfig, detected: &str, found: Found) -> Result<Existing, Error> {
     let mut left = Vec::new();
 
     if let Some(error) = found.unreadable {
@@ -338,6 +643,13 @@ fn clear_refused(
             "  {}: a state store that fails to open or to read its cursor, which `--force` \
              never clears: {error}",
             state.display()
+        ));
+    }
+
+    if let Some(wal) = found.wal_in_use {
+        left.push(format!(
+            "  {}: a WAL another process holds open, which `--force` never clears",
+            wal.display()
         ));
     }
 
@@ -354,14 +666,11 @@ fn clear_refused(
     }
 
     Err(Error::message(format!(
-        "{refusal}\n`--force` would leave:\n{}\nStop anything using them, remove them by \
+        "{detected}\n`--force` would leave:\n{}\nStop anything using them, remove them by \
          hand, then run the bootstrap again",
         left.join("\n"),
     )))
 }
-
-/// The data format this binary reads, as snapshot download URLs name it.
-pub const CURRENT_STORAGE_VERSION: &str = "v4";
 
 /// Ensure directory exists for a store path.
 fn ensure_store_path(path: &Path) -> Result<(), Error> {
@@ -379,10 +688,10 @@ where
     match config.wal_path() {
         Some(path) => {
             ensure_store_path(&path)?;
-            Ok(WalStoreBackend::open_redb(
+            redb_opened(
                 &path,
-                &RedbWalConfig::default(),
-            )?)
+                WalStoreBackend::open_redb(&path, &RedbWalConfig::default()),
+            )
         }
         None => Ok(WalStoreBackend::in_memory()?),
     }
@@ -396,22 +705,100 @@ pub fn open_archive_store(config: &RootConfig) -> Result<ArchiveStoreBackend, Er
 
     let path = config.storage.archive_path().unwrap_or_default();
     ensure_store_path(&path)?;
-    Ok(ArchiveStoreBackend::open(
-        &path,
-        config.storage.blocks_path(),
-        dolos_cardano::model::build_log_schema(),
-        config.storage.archive.kind,
-    )?)
+    open_archive_at(config, &path, Access::Mutate)
 }
 
 pub fn open_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error> {
     let path = config.storage.state_path().unwrap_or_default();
     ensure_store_path(&path)?;
-    Ok(StateStoreBackend::open(
-        &path,
-        dolos_cardano::model::build_schema(),
-        &config.storage.state,
-    )?)
+    open_state_at(config, &path, Access::Mutate)
+}
+
+/// [`ArchiveStoreBackend::open`], read-only over a view under
+/// [`Access::Observe`], with a lock another handle holds reported as
+/// [`Error::InUse`].
+fn open_archive_at(
+    config: &RootConfig,
+    path: &Path,
+    access: Access,
+) -> Result<ArchiveStoreBackend, Error> {
+    let schema = dolos_cardano::model::build_log_schema();
+
+    match config.storage.archive.kind {
+        StoreType::Fjall { preset } => {
+            let blocks = config.storage.blocks_path();
+            let blocks = blocks.as_deref();
+
+            let store = match access {
+                Access::Observe => dolos_fjall::archive::ArchiveStore::open_view(
+                    schema,
+                    path,
+                    blocks,
+                    preset.into(),
+                ),
+                Access::Mutate => {
+                    dolos_fjall::archive::ArchiveStore::open(schema, path, blocks, preset.into())
+                }
+            }
+            .map_err(|error| fjall_failure(path, error, ArchiveError::from))?;
+
+            Ok(ArchiveStoreBackend::admitted_fjall(store, path, access)?)
+        }
+        StoreType::Ephemeral => Ok(ArchiveStoreBackend::in_memory(schema)?),
+    }
+}
+
+/// [`StateStoreBackend::open`], read-only over a view under
+/// [`Access::Observe`], with a lock another handle holds reported as
+/// [`Error::InUse`].
+fn open_state_at(
+    config: &RootConfig,
+    path: &Path,
+    access: Access,
+) -> Result<StateStoreBackend, Error> {
+    match config.storage.state.kind {
+        StoreType::Fjall { preset } => {
+            let store = match access {
+                Access::Observe => dolos_fjall::StateStore::open_view(path, preset.into()),
+                Access::Mutate => dolos_fjall::StateStore::open(path, preset.into()),
+            }
+            .map_err(|error| fjall_failure(path, error, StateError::from))?;
+
+            Ok(StateStoreBackend::admitted_fjall(store, path, access)?)
+        }
+        StoreType::Ephemeral => Ok(StateStoreBackend::in_memory()?),
+    }
+}
+
+fn fjall_failure<E: Into<Error>>(
+    path: &Path,
+    error: dolos_fjall::Error,
+    wrap: impl FnOnce(dolos_fjall::Error) -> E,
+) -> Error {
+    match error {
+        error if error.is_locked() => Error::InUse {
+            path: path.to_path_buf(),
+        },
+        dolos_fjall::Error::View { path, reason } => Error::Unviewable { path, reason },
+        error => wrap(error).into(),
+    }
+}
+
+/// A redb open, with a file another handle holds reported as
+/// [`Error::InUse`].
+fn redb_opened<T, E>(path: &Path, opened: Result<T, E>) -> Result<T, Error>
+where
+    E: std::error::Error + Into<Error> + 'static,
+{
+    opened.map_err(|error| {
+        if dolos_redb3::handle::is_already_open(&error) {
+            Error::InUse {
+                path: path.to_path_buf(),
+            }
+        } else {
+            error.into()
+        }
+    })
 }
 
 pub fn open_mempool_store(config: &RootConfig) -> Result<MempoolBackend, Error> {
@@ -421,9 +808,11 @@ pub fn open_mempool_store(config: &RootConfig) -> Result<MempoolBackend, Error> 
         )),
         Some(path) => {
             ensure_store_path(&path)?;
-            Ok(MempoolBackend::Redb(
-                dolos_redb3::mempool::RedbMempool::open(path, &RedbMempoolConfig::default())?,
-            ))
+            let mempool = redb_opened(
+                &path,
+                dolos_redb3::mempool::RedbMempool::open(&path, &RedbMempoolConfig::default()),
+            )?;
+            Ok(MempoolBackend::Redb(mempool))
         }
     }
 }
@@ -454,13 +843,231 @@ where
     })
 }
 
-/// Open the state and archive stores through their identity check, then
-/// close them, for a writer that filled storage without opening them.
-pub fn check_store_identities(config: &RootConfig) -> Result<(), Error> {
-    open_state_store(config)?.shutdown()?;
-    open_archive_store(config)?.shutdown()?;
+/// What a command does with the stores it opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    /// Reads only: the WAL and the mempool open read-only, the fjall stores
+    /// over a view of their files beside them, refusing writers, and no
+    /// identity is recorded on a store.
+    Observe,
+    /// Reads and writes, as the node does.
+    Mutate,
+}
 
-    Ok(())
+/// Why [`open_existing_stores`] did not open a dataset.
+#[derive(Debug, thiserror::Error)]
+pub enum OpenError {
+    /// The store at `path`, a file or a database directory, is not there.
+    #[error("no store at {}", .path.display())]
+    Missing { path: PathBuf },
+
+    #[error("{} is locked by another process", .path.display())]
+    InUse { path: PathBuf },
+
+    /// A redb file a crash left behind: only a writable open repairs it.
+    #[error("{} was not shut down cleanly", .path.display())]
+    Unclean { path: PathBuf },
+
+    /// A fjall store an observing open could not mirror beside it.
+    #[error("cannot mirror {} for a read-only open: {reason}", .path.display())]
+    Unviewable { path: PathBuf, reason: String },
+
+    #[error(transparent)]
+    Storage(Error),
+}
+
+impl miette::Diagnostic for OpenError {
+    fn help<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
+        match self {
+            Self::Missing { path } => Some(Box::new(format!(
+                "no dataset at {} (run `dolos bootstrap`)",
+                path.display()
+            ))),
+            Self::InUse { .. } => Some(Box::new(
+                "dataset in use by another dolos process (stop it, or query its APIs)",
+            )),
+            Self::Unclean { .. } => Some(Box::new(
+                "a reading command cannot open it until a writing one repairs it: run `dolos sync recover` once",
+            )),
+            Self::Unviewable { .. } => Some(Box::new(
+                "a reading command mirrors a store in the folder beside it, linking its tables: it needs write access there, on a filesystem with hard or symbolic links",
+            )),
+            Self::Storage(_) => None,
+        }
+    }
+}
+
+impl From<Error> for OpenError {
+    fn from(error: Error) -> Self {
+        match error {
+            Error::InUse { path } => Self::InUse { path },
+            Error::Unviewable { path, reason } => Self::Unviewable { path, reason },
+            other => Self::Storage(other),
+        }
+    }
+}
+
+/// Open the stores of a dataset that is already there, as `access` says,
+/// without changing what is on disk to do it.
+///
+/// Unlike [`open_data_stores`], a store that is not there is
+/// [`OpenError::Missing`], never created; a missing mempool file is the one
+/// exception, opened empty in memory, since it holds no chain data. Nothing
+/// is caught up or bootstrapped: the stores are as the last writer left them.
+/// A store another process holds is [`OpenError::InUse`]. Observing writes
+/// no file of the dataset, and a redb file a crash left unrepaired, or empty,
+/// is [`OpenError::Unclean`]; it mirrors each fjall store in a folder beside
+/// it while the store lives, [`OpenError::Unviewable`] where it cannot. While
+/// the observed stores live, a writer cannot open them.
+pub fn open_existing_stores<D>(config: &RootConfig, access: Access) -> Result<Stores<D>, OpenError>
+where
+    D: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
+{
+    existing(&config.storage.path)?;
+
+    // The redb files first: an observing open refused for a crash-left one
+    // has then opened no fjall store.
+    let wal = match config.wal_path() {
+        Some(path) => {
+            existing(&path)?;
+
+            let opened = match access {
+                Access::Observe => {
+                    dolos_redb3::wal::RedbWalStore::open_read_only(&path, &RedbWalConfig::default())
+                }
+                Access::Mutate => {
+                    dolos_redb3::wal::RedbWalStore::open(&path, &RedbWalConfig::default())
+                }
+            };
+
+            WalStoreBackend::Redb(redb_existing(&path, access, opened)?)
+        }
+        None => WalStoreBackend::in_memory().map_err(Error::from)?,
+    };
+
+    let mempool = match config.mempool_path().filter(|path| path.exists()) {
+        Some(path) => {
+            let opened = match access {
+                Access::Observe => dolos_redb3::mempool::RedbMempool::open_read_only(
+                    &path,
+                    &RedbMempoolConfig::default(),
+                ),
+                Access::Mutate => {
+                    dolos_redb3::mempool::RedbMempool::open(&path, &RedbMempoolConfig::default())
+                }
+            };
+
+            MempoolBackend::Redb(redb_existing(&path, access, opened)?)
+        }
+        None => MempoolBackend::Ephemeral(dolos_core::builtin::EphemeralMempool::new()),
+    };
+
+    let state = existing_state(config, access)?;
+
+    let archive = existing_archive(config, access)?;
+
+    Ok(Stores {
+        wal,
+        state,
+        archive,
+        mempool,
+    })
+}
+
+/// The archive alone, opened as [`open_existing_stores`] opens it: never
+/// created, a no-op one when `history.mode` is `none`.
+pub fn open_existing_archive(
+    config: &RootConfig,
+    access: Access,
+) -> Result<ArchiveStoreBackend, OpenError> {
+    existing(&config.storage.path)?;
+    existing_archive(config, access)
+}
+
+/// The state alone, opened as [`open_existing_stores`] opens it: never
+/// created. A command that touches only the state leaves the WAL, the
+/// archive and the mempool closed, so a writable open cannot migrate or wipe
+/// them.
+pub fn open_existing_state(
+    config: &RootConfig,
+    access: Access,
+) -> Result<StateStoreBackend, OpenError> {
+    existing(&config.storage.path)?;
+    existing_state(config, access)
+}
+
+fn existing_state(config: &RootConfig, access: Access) -> Result<StateStoreBackend, OpenError> {
+    let path = config.storage.state_path().unwrap_or_default();
+
+    if matches!(config.storage.state.kind, StoreType::Fjall { .. }) {
+        fjall_existing(&path)?;
+    }
+
+    Ok(open_state_at(config, &path, access)?)
+}
+
+fn existing_archive(config: &RootConfig, access: Access) -> Result<ArchiveStoreBackend, OpenError> {
+    if !config.keeps_archive() {
+        return Ok(ArchiveStoreBackend::noop());
+    }
+
+    let path = config.storage.archive_path().unwrap_or_default();
+
+    if matches!(config.storage.archive.kind, StoreType::Fjall { .. }) {
+        fjall_existing(&path.join("index"))?;
+        existing(&config.storage.blocks_path().unwrap_or_else(|| path.clone()))?;
+    }
+
+    Ok(open_archive_at(config, &path, access)?)
+}
+
+/// [`redb_opened`], with an observing open refused for want of a repair,
+/// or of an initialised file, reported as [`OpenError::Unclean`].
+fn redb_existing<T, E>(path: &Path, access: Access, opened: Result<T, E>) -> Result<T, OpenError>
+where
+    E: std::error::Error + Into<Error> + 'static,
+{
+    use dolos_redb3::handle::{is_uninitialised, needs_repair};
+
+    match opened {
+        Err(error)
+            if access == Access::Observe
+                && (needs_repair(&error) || is_uninitialised(&error) && is_empty(path)) =>
+        {
+            Err(OpenError::Unclean {
+                path: path.to_path_buf(),
+            })
+        }
+        opened => Ok(redb_opened(path, opened)?),
+    }
+}
+
+/// Whether the file at `path` is empty, as a crash during its creation
+/// leaves it: a writable open initialises it, a read-only one cannot.
+fn is_empty(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.len() == 0)
+}
+
+/// [`existing`] for a fjall database, which a directory without its marker
+/// is not.
+fn fjall_existing(path: &Path) -> Result<(), OpenError> {
+    if dolos_fjall::database_exists(path) {
+        Ok(())
+    } else {
+        Err(OpenError::Missing {
+            path: path.to_path_buf(),
+        })
+    }
+}
+
+fn existing(path: &Path) -> Result<(), OpenError> {
+    if path.exists() {
+        Ok(())
+    } else {
+        Err(OpenError::Missing {
+            path: path.to_path_buf(),
+        })
+    }
 }
 
 /// Admit a persistent store only if it records an identity this release
@@ -790,12 +1397,26 @@ impl StateStoreBackend {
         let path = path.as_ref();
         let store = dolos_fjall::StateStore::open(path, preset)?;
 
+        Self::admitted_fjall(store, path, Access::Mutate)
+    }
+
+    /// The fjall store opened at `path`, through [`admit`]. Under
+    /// [`Access::Observe`] a new store is admitted without recording its
+    /// identity.
+    fn admitted_fjall(
+        store: dolos_fjall::StateStore,
+        path: &Path,
+        access: Access,
+    ) -> Result<Self, StateError> {
         admit::<StateError>(
             "state",
             path,
             store.identity()?,
             || store.holds_data(),
-            |identity| store.record_identity(identity),
+            |identity| match access {
+                Access::Observe => Ok(()),
+                Access::Mutate => store.record_identity(identity),
+            },
         )?;
 
         Ok(Self::Fjall(store))
@@ -1111,7 +1732,7 @@ pub enum ArchiveStoreBackend {
     /// appends and undos are discarded.
     ///
     /// This exists for replays over an archive that already holds the chain
-    /// (`dolos doctor rebuild-state --rewrite-logs`): block appends are not
+    /// (`dolos data rebuild --rewrite-logs`): block appends are not
     /// idempotent — replaying them would double every shared segment file,
     /// whichever backend owns the index — while boundary log keys are
     /// slot-derived and identical under replay, so re-written log rows
@@ -1129,7 +1750,7 @@ pub enum ArchiveStoreBackend {
     /// as in [`Self::NoOp`].
     ///
     /// This exists for replays into a fresh state over an archive that holds
-    /// the chain (`dolos doctor rebuild-state` without `--rewrite-logs`): the
+    /// the chain (`dolos data rebuild` without `--rewrite-logs`): the
     /// roll tells a script's first sighting from a repeat by the entity index
     /// below its batch, which only the source archive holds, while the seal
     /// must not read the logs the source sealed.
@@ -1153,12 +1774,26 @@ impl ArchiveStoreBackend {
         let path = path.as_ref();
         let store = dolos_fjall::archive::ArchiveStore::open(schema, path, blocks_path, preset)?;
 
+        Self::admitted_fjall(store, path, Access::Mutate)
+    }
+
+    /// The fjall store opened at `path`, through [`admit`]. Under
+    /// [`Access::Observe`] a new store is admitted without recording its
+    /// identity.
+    fn admitted_fjall(
+        store: dolos_fjall::archive::ArchiveStore,
+        path: &Path,
+        access: Access,
+    ) -> Result<Self, ArchiveError> {
         admit::<ArchiveError>(
             "archive",
             path,
             store.identity()?,
             || store.holds_data(),
-            |identity| store.record_identity(identity),
+            |identity| match access {
+                Access::Observe => Ok(()),
+                Access::Mutate => store.record_identity(identity),
+            },
         )?;
 
         Ok(Self::Fjall(store))
@@ -1258,8 +1893,8 @@ impl ArchiveStoreBackend {
 
 pub enum ArchiveWriterBackend {
     Memory(Box<<MemoryArchiveStore as CoreArchiveStore>::Writer>),
-    /// Delegates `write_log`, `apply_index`, `write_entity` and `commit`;
-    /// discards `apply`,
+    /// Delegates `write_log`, `delete_log`, `apply_index`, `write_entity`
+    /// and `commit`; discards `apply`,
     /// `undo`, `undo_index` and `append_prehashed`. See
     /// [`ArchiveStoreBackend::LogsOnly`].
     LogsOnly(Box<ArchiveWriterBackend>),
@@ -1288,6 +1923,15 @@ impl CoreArchiveWriter for ArchiveWriterBackend {
             Self::LogsOnly(w) => w.write_log(ns, key, value),
             Self::Fjall(w) => w.write_log(ns, key, value),
             Self::NoOp(w) => w.write_log(ns, key, value),
+        }
+    }
+
+    fn delete_log(&self, ns: Namespace, key: &LogKey) -> Result<(), ArchiveError> {
+        match self {
+            Self::Memory(w) => w.delete_log(ns, key),
+            Self::LogsOnly(w) => w.delete_log(ns, key),
+            Self::Fjall(w) => w.delete_log(ns, key),
+            Self::NoOp(w) => w.delete_log(ns, key),
         }
     }
 
@@ -2191,8 +2835,9 @@ mod tests {
             .expect("the stores opened")
             .to_string();
         for remedy in [
-            "dolos bootstrap relay --force",
             "dolos bootstrap stelae --force",
+            "dolos bootstrap immutabledb --source <db> --force",
+            "dolos data reset --yes",
         ] {
             assert!(message.contains(remedy), "{message}");
         }
@@ -2202,21 +2847,24 @@ mod tests {
         assert!(refusal(open_archive_store(&config)).is_some());
     }
 
+    /// `v2-alpha.1` stores predate the freeze-hardening record layouts.
     #[test]
     fn an_unsupported_identity_is_refused() {
-        let temp = tempfile::tempdir().unwrap();
-        let config = config_over(&temp.path().join("data"));
-        written_state(&config, Some("v1"));
-        written_archive(&config, Some("v1"));
+        for identity in ["v1", "v2-alpha.1"] {
+            let temp = tempfile::tempdir().unwrap();
+            let config = config_over(&temp.path().join("data"));
+            written_state(&config, Some(identity));
+            written_archive(&config, Some(identity));
 
-        let message = open_state_store(&config).err().unwrap().to_string();
-        assert!(message.contains("`v1`"), "{message}");
+            let message = open_state_store(&config).err().unwrap().to_string();
+            assert!(message.contains(&format!("`{identity}`")), "{message}");
 
-        for refused in [
-            refusal(open_state_store(&config)),
-            refusal(open_archive_store(&config)),
-        ] {
-            assert_eq!(refused.unwrap().found.as_deref(), Some("v1"));
+            for refused in [
+                refusal(open_state_store(&config)),
+                refusal(open_archive_store(&config)),
+            ] {
+                assert_eq!(refused.unwrap().found.as_deref(), Some(identity));
+            }
         }
     }
 
@@ -2233,7 +2881,7 @@ mod tests {
             |config| config.sync.wal_path = Some("journal".into()),
         ];
 
-        for recorded in [None, Some("v1"), current().as_deref()] {
+        for recorded in [None, Some("v1"), Some("v2-alpha.1"), current().as_deref()] {
             let expected = match recorded {
                 Some(identity) if reads_store_identity(identity) => None,
                 _ => Some(recorded.map(str::to_string)),
@@ -2299,19 +2947,52 @@ mod tests {
         state
     }
 
+    /// A WAL holding an entry and nothing else in storage.
+    fn written_wal(config: &RootConfig) {
+        let wal = open_wal_store::<dolos_cardano::CardanoDelta>(config).unwrap();
+        wal.reset_to(&ChainPoint::Origin).unwrap();
+        wal.shutdown().unwrap();
+    }
+
     /// Over stores this release opens, `--continue` proceeds whatever storage
-    /// holds, and the other flags decide only about a node, a state with a
-    /// cursor: empty storage, or a state with rows and no cursor, proceeds
-    /// under every one.
+    /// holds, and the other flags decide about any store holding data: only
+    /// empty storage, or an empty WAL file, proceeds under every one. A node
+    /// is a state with a cursor, and only a node is skipped: data without
+    /// one is refused under `--skip-if-data`, naming `--force`, and the
+    /// refusal with no flag offers `--skip-if-data` only over a node.
     #[test]
     fn inspecting_storage_follows_the_flags_over_stores_this_release_opens() {
-        let writes: [fn(&RootConfig); 3] = [
-            |_| {},
-            written_state_without_cursor,
-            |config| written_state(config, current().as_deref()),
+        /// What a case writes, whether storage then holds data, and whether
+        /// it holds a node.
+        type Case = (fn(&RootConfig), bool, bool);
+
+        let writes: [Case; 6] = [
+            (|_| {}, false, false),
+            (
+                |config| {
+                    open_wal_store::<dolos_cardano::CardanoDelta>(config)
+                        .unwrap()
+                        .shutdown()
+                        .unwrap()
+                },
+                false,
+                false,
+            ),
+            (written_wal, true, false),
+            (
+                |config| written_archive(config, current().as_deref()),
+                true,
+                false,
+            ),
+            (written_state_without_cursor, true, false),
+            (
+                |config| written_state(config, current().as_deref()),
+                true,
+                true,
+            ),
         ];
 
-        for (write, node) in writes.into_iter().zip([false, false, true]) {
+        for (write, held, node) in writes {
             let temp = tempfile::tempdir().unwrap();
             let config = config_over(&temp.path().join("data"));
             write(&config);
@@ -2319,19 +3000,42 @@ mod tests {
             for policy in every_policy() {
                 let inspected = inspect_existing_data(&config, policy);
 
-                if policy.r#continue || !node {
+                if policy.r#continue || !held {
                     assert_eq!(inspected.unwrap(), Existing::Proceed, "{policy:?}");
-                } else if policy.skip_if_data {
+                } else if policy.skip_if_data && node {
                     assert_eq!(inspected.unwrap(), Existing::Skip, "{policy:?}");
+                } else if policy.skip_if_data {
+                    let message = inspected.unwrap_err().to_string();
+                    assert!(message.contains("existing data detected"), "{message}");
+                    assert!(message.contains("no node"), "{message}");
+                    assert!(message.contains("--force"), "{message}");
                 } else if policy.force {
                     assert_eq!(inspected.unwrap(), Existing::Clear, "{policy:?}");
                 } else {
-                    assert!(inspected.is_err(), "{policy:?}");
+                    let message = inspected.unwrap_err().to_string();
+                    assert!(message.contains("existing data detected"), "{message}");
+                    assert!(message.contains("--force"), "{message}");
+                    assert_eq!(message.contains("--skip-if-data"), node, "{message}");
                 }
             }
 
             assert_eq!(has_existing_data(&config).unwrap(), node);
         }
+    }
+
+    /// The WAL is read without being opened as a store, which would stamp
+    /// its version: inspecting leaves its file as it was.
+    #[test]
+    fn inspecting_storage_reads_the_wal_without_writing_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(&temp.path().join("data"));
+        written_wal(&config);
+
+        let path = config.wal_path().unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        assert!(inspect_existing_data(&config, ExistingDataPolicy::default()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     /// Bootstrap's look at storage opens nothing absent, lets `--force` on
@@ -2447,9 +3151,8 @@ mod tests {
     /// refuses while a directory outside the root holds data, naming it: a
     /// state or archive with data, refused or current, an archive it can't
     /// open, or block segments. Looking doesn't recreate a directory the
-    /// operator removed. Once it is gone, `--force` clears a store still
-    /// refused, and with a refused state removed nothing is left refused, so
-    /// it clears nothing.
+    /// operator removed. Once it is gone, `--force` clears what the root
+    /// still holds, refused or not.
     #[test]
     fn force_names_data_outside_the_root() {
         let stores = [
@@ -2502,16 +3205,292 @@ mod tests {
                 let inspected = inspect_existing_data(&config, force()).unwrap();
                 assert!(!outside.exists(), "{}", outside.display());
 
-                let state_kept = config.storage.state_path().unwrap().exists();
-                let expected = if state_kept || archive == Kept::Refused {
-                    Existing::Clear
-                } else {
-                    Existing::Proceed
-                };
-
-                assert_eq!(inspected, expected, "{state:?} {archive:?}");
+                assert_eq!(inspected, Existing::Clear, "{state:?} {archive:?}");
             }
         }
+    }
+
+    /// Over stores this release opens, `--force` refuses the same way while
+    /// data outside the root, a WAL included, would outlive the clear: the
+    /// node it leaves wouldn't start. Once that data is gone, it clears.
+    #[test]
+    fn force_names_current_data_outside_the_root() {
+        let wal: (Edit, Outside) = (
+            |config, elsewhere| config.sync.wal_path = Some(elsewhere.join("wal")),
+            |config| config.wal_path(),
+        );
+
+        for (edit, outside) in outside_layouts().into_iter().chain([wal]) {
+            let temp = tempfile::tempdir().unwrap();
+            let mut config = config_over(&temp.path().join("data"));
+            edit(&mut config, &temp.path().join("elsewhere"));
+            std::fs::create_dir_all(&config.storage.path).unwrap();
+            std::fs::create_dir_all(temp.path().join("elsewhere")).unwrap();
+
+            keep_state(&config, Kept::Current);
+            keep_archive(&config, Kept::Current);
+            written_wal(&config);
+
+            if let Some(blocks) = config.storage.blocks_path() {
+                written_segment(&blocks);
+            }
+
+            let outside = outside(&config).unwrap();
+
+            let message = match inspect_existing_data(&config, force()) {
+                Err(Error::Message(message)) => message,
+                other => panic!("{} not refused: {other:?}", outside.display()),
+            };
+
+            assert!(message.contains("existing data detected"), "{message}");
+            assert!(
+                message.contains(&format!(
+                    "{}: data outside {}, the storage root `--force` clears",
+                    outside.display(),
+                    config.storage.path.display()
+                )),
+                "{message}"
+            );
+
+            if outside.is_dir() {
+                std::fs::remove_dir_all(&outside).unwrap();
+            } else {
+                std::fs::remove_file(&outside).unwrap();
+            }
+
+            assert_eq!(
+                inspect_existing_data(&config, force()).unwrap(),
+                Existing::Clear,
+                "{}",
+                outside.display()
+            );
+        }
+    }
+
+    /// A WAL another process holds can't be read, so it is in use rather
+    /// than data: every flag but `--continue` refuses it, `--force` included,
+    /// beside a refused store too. Once it is closed, it is data again.
+    #[test]
+    fn a_wal_another_process_holds_is_in_use() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(&temp.path().join("data"));
+        written_wal(&config);
+
+        let held = open_wal_store::<dolos_cardano::CardanoDelta>(&config).unwrap();
+
+        for policy in every_policy() {
+            let inspected = inspect_existing_data(&config, policy);
+
+            if policy.r#continue {
+                assert_eq!(inspected.unwrap(), Existing::Proceed, "{policy:?}");
+            } else {
+                let message = inspected.unwrap_err().to_string();
+                assert!(message.contains("in use by another process"), "{message}");
+            }
+        }
+
+        written_archive(&config, None);
+
+        let message = inspect_existing_data(&config, force())
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("no compatibility identity"), "{message}");
+        assert!(
+            message.contains("a WAL another process holds open"),
+            "{message}"
+        );
+
+        drop(held);
+
+        assert_eq!(
+            inspect_existing_data(&config, force()).unwrap(),
+            Existing::Clear
+        );
+    }
+
+    /// A WAL that fails to read, one left unclean by a process killed while
+    /// it held it or one that is no store at all, counts as data: outside
+    /// the root, `--force` names it rather than leave it behind.
+    #[test]
+    fn force_names_an_unreadable_wal_outside_the_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let elsewhere = temp.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+
+        let with_wal = |wal: PathBuf| {
+            let mut config = config_over(&temp.path().join("data"));
+            config.sync.wal_path = Some(wal);
+            config
+        };
+
+        std::fs::write(elsewhere.join("garbage"), b"not a store").unwrap();
+
+        #[allow(unused_mut)]
+        let mut names = vec!["garbage"];
+
+        // Windows locks a WAL redb holds against the copy that leaves it
+        // unclean.
+        #[cfg(unix)]
+        {
+            let held = with_wal(elsewhere.join("held"));
+            let wal = open_wal_store::<dolos_cardano::CardanoDelta>(&held).unwrap();
+            wal.reset_to(&ChainPoint::Origin).unwrap();
+            std::fs::copy(elsewhere.join("held"), elsewhere.join("unclean")).unwrap();
+            wal.shutdown().unwrap();
+
+            names.push("unclean");
+        }
+
+        for name in names {
+            let path = elsewhere.join(name);
+            assert!(dolos_redb3::wal::probe(&path).is_err(), "{name}");
+
+            let config = with_wal(path.clone());
+
+            let message = inspect_existing_data(&config, force())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                message.contains(&format!("{}: data outside", path.display())),
+                "{message}"
+            );
+
+            assert!(inspect_existing_data(&config, ExistingDataPolicy::default()).is_err());
+        }
+    }
+
+    /// A path reaches into a directory however it is written: as it, under
+    /// it, or through `..`; and, where the paths exist, through a link to it,
+    /// a link inside it, or a link followed by `..`.
+    #[test]
+    fn a_path_reaches_into_a_directory_however_it_is_written() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+
+        for (path, reaches) in [
+            (root.clone(), true),
+            (root.join("node-db"), true),
+            (root.join("..").join("data").join("db"), true),
+            (temp.path().to_path_buf(), false),
+            (temp.path().join("elsewhere"), false),
+            (temp.path().join("data-db"), false),
+        ] {
+            assert_eq!(
+                reaches_into(&path, &root).unwrap(),
+                reaches,
+                "{}",
+                path.display()
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            let elsewhere = temp.path().join("elsewhere");
+            std::fs::create_dir_all(root.join("sub")).unwrap();
+            std::fs::create_dir_all(&elsewhere).unwrap();
+
+            let to_root = temp.path().join("to-root");
+            std::os::unix::fs::symlink(&root, &to_root).unwrap();
+            assert!(reaches_into(&to_root.join("db"), &root).unwrap());
+
+            let inside = root.join("node-db");
+            std::os::unix::fs::symlink(&elsewhere, &inside).unwrap();
+            assert!(reaches_into(&inside, &root).unwrap());
+            assert!(!reaches_into(&elsewhere, &root).unwrap());
+
+            let to_sub = temp.path().join("to-sub");
+            std::os::unix::fs::symlink(root.join("sub"), &to_sub).unwrap();
+            assert!(reaches_into(&to_sub.join("..").join("node-db"), &root).unwrap());
+            assert!(reaches_into(&to_sub.join("..").join("missing"), &root).unwrap());
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let resolved = std::fs::canonicalize(&root).unwrap();
+            let alias = Path::new("/System/Volumes/Data").join(resolved.strip_prefix("/").unwrap());
+
+            if alias.is_dir() {
+                assert!(reaches_into(&alias.join("node-db"), &root).unwrap());
+            }
+        }
+    }
+
+    /// A link's relative target is read from the link's own directory, as
+    /// the OS reads it, not from the working directory.
+    #[cfg(unix)]
+    #[test]
+    fn a_relative_link_is_followed_from_its_own_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        std::fs::create_dir_all(root.join("stele")).unwrap();
+        std::fs::create_dir_all(temp.path().join("srv")).unwrap();
+
+        let link = temp.path().join("srv").join("stele");
+        std::os::unix::fs::symlink(Path::new("..").join("data").join("stele"), &link).unwrap();
+
+        assert!(reaches_into(&link, &root).unwrap());
+        assert!(reaches_into(&link.join("blobs"), &root).unwrap());
+    }
+
+    /// A path through a directory not made yet and back out of it with `..`
+    /// lands where the OS makes it, past the `..`, as `create_dir_all` takes
+    /// it.
+    #[test]
+    fn a_path_through_a_directory_not_made_yet_lands_past_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("db");
+        std::fs::create_dir_all(&db).unwrap();
+
+        let missing = temp.path().join("missing");
+
+        for (path, reaches) in [
+            (missing.join("..").join("db").join("state"), true),
+            (
+                missing.join("deeper").join("..").join("..").join("db"),
+                true,
+            ),
+            (missing.join("..").join("elsewhere").join("state"), false),
+            (missing.join("db").join(".."), false),
+        ] {
+            assert_eq!(
+                reaches_into(&path, &db).unwrap(),
+                reaches,
+                "{}",
+                path.display()
+            );
+        }
+
+        std::fs::create_dir_all(missing.join("..").join("db").join("state")).unwrap();
+        assert!(db.join("state").is_dir());
+    }
+
+    /// A directory that can't be listed stops the whole removal of what
+    /// holds it, which names it, and is passed over by a removal read as far
+    /// as it can be.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_that_cant_be_listed_is_named_or_passed_over() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("db");
+        let locked = db.join("lost+found");
+        std::fs::create_dir_all(locked.join("inner")).unwrap();
+
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let listed = std::fs::read_dir(&locked).is_ok();
+        let whole = Removal::of(&db).err().map(|error| error.to_string());
+        let readable = Removal::of_readable(&db).and_then(|removal| removal.takes(&locked));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Whoever lists it anyway, as root does, has nothing to pass over.
+        if listed {
+            return;
+        }
+
+        let message = whole.expect("the directory was listed");
+        assert!(message.contains(&locked.display().to_string()), "{message}");
+        assert!(readable.unwrap());
     }
 
     /// Beside a refused store, a directory outside the root that holds no
@@ -2710,9 +3689,9 @@ mod tests {
         }
     }
 
-    /// A state that opens but whose rows fail to read is no node without a
-    /// cursor, so every flag goes ahead and leaves the failure to the command
-    /// that uses the state.
+    /// A state that opens but whose rows fail to read counts as data, so the
+    /// flags decide about it as about any data without a node, and the
+    /// failure is left to the command that uses the state.
     #[test]
     fn a_state_whose_rows_fail_to_read_is_left_to_the_command() {
         let temp = tempfile::tempdir().unwrap();
@@ -2721,12 +3700,21 @@ mod tests {
         assert!(open_state_store(&config).unwrap().holds_data().is_err());
 
         for policy in every_policy() {
-            assert_eq!(
-                inspect_existing_data(&config, policy).unwrap(),
-                Existing::Proceed,
-                "{policy:?}"
-            );
+            let inspected = inspect_existing_data(&config, policy);
+
+            if policy.r#continue {
+                assert_eq!(inspected.unwrap(), Existing::Proceed, "{policy:?}");
+            } else if policy.skip_if_data {
+                let message = inspected.unwrap_err().to_string();
+                assert!(message.contains("no node"), "{message}");
+            } else if policy.force {
+                assert_eq!(inspected.unwrap(), Existing::Clear, "{policy:?}");
+            } else {
+                assert!(inspected.is_err(), "{policy:?}");
+            }
         }
+
+        assert!(!has_existing_data(&config).unwrap());
     }
 
     /// A state whose cursor fails to read can't be told from a node, so it is
@@ -3067,6 +4055,65 @@ mod tests {
             .unwrap();
 
         assert_eq!(records, [EntityRecord::new(kind, id, 10).unwrap()]);
+    }
+
+    const DELETED_NS: &str = "deleted-logs";
+
+    fn deleted_schema() -> StateSchema {
+        let mut schema = StateSchema::default();
+        schema.insert(DELETED_NS, dolos_core::NamespaceType::KeyValue);
+        schema
+    }
+
+    /// A row written to `store` and deleted through `via`'s writer is gone.
+    fn deleted_through(store: &ArchiveStoreBackend, via: &ArchiveStoreBackend, entity: u8) {
+        let key = LogKey::of(10, &[entity; 32]);
+
+        let writer = store.start_writer().unwrap();
+        writer
+            .write_log(DELETED_NS, &key, &b"row".to_vec())
+            .unwrap();
+        writer.commit().unwrap();
+
+        assert_eq!(
+            store.read_logs(DELETED_NS, &[&key]).unwrap(),
+            [Some(b"row".to_vec())]
+        );
+
+        let writer = via.start_writer().unwrap();
+        writer.delete_log(DELETED_NS, &key).unwrap();
+        writer.commit().unwrap();
+
+        assert_eq!(store.read_logs(DELETED_NS, &[&key]).unwrap(), [None]);
+    }
+
+    /// Finding TA8 of the third QA review of dolos#1524: `rebuild-state
+    /// --rewrite-logs` seals through the `LogsOnly` gate, and its rewrites
+    /// delete stale first-mint chunks, so the gate passes deletes through.
+    #[test]
+    fn the_logs_only_gate_passes_log_deletes_through() {
+        let store = ArchiveStoreBackend::in_memory(deleted_schema()).unwrap();
+        let gate = store.logs_only().unwrap();
+
+        deleted_through(&store, &gate, 1);
+    }
+
+    /// The node's archive deletes a log row, directly and through the gate.
+    #[test]
+    fn the_fjall_archive_deletes_a_log_row() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ArchiveStoreBackend::open_fjall(
+            temp.path(),
+            deleted_schema(),
+            None,
+            dolos_fjall::Preset::Standard,
+        )
+        .unwrap();
+
+        deleted_through(&store, &store, 1);
+
+        let gate = store.logs_only().unwrap();
+        deleted_through(&store, &gate, 2);
     }
 }
 

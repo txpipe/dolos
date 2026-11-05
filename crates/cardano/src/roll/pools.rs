@@ -53,7 +53,7 @@ impl CalidusFloors {
     ///
     /// Only pools without a state row read the log, in one pass over it. The
     /// slot bound keeps a re-roll over an archive that already holds later
-    /// moves (`doctor rebuild-state`) from reading a final row the pool has
+    /// moves (`data rebuild`) from reading a final row the pool has
     /// not reached yet: a row is keyed after the registration that precedes
     /// its retirement.
     pub fn load<S: StateStore, A: ArchiveStore>(

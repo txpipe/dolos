@@ -37,7 +37,7 @@ the node's store opener checks before anything else (see the data layer docs):
 
 ```
 Key:   "identity"
-Value: UTF-8 contract identifier, e.g. "v2-alpha.1"
+Value: UTF-8 contract identifier, e.g. "v2-alpha.2"
 ```
 
 ### UTxO Keyspace (`state-utxos`)

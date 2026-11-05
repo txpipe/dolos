@@ -4,8 +4,8 @@
 //!
 //! The namespace is not in the record: it is the layer's *kind*, one per log
 //! namespace (`crate::LOG_KINDS`), so a shape change to one namespace's logs
-//! costs a backfill of that namespace's blobs and leaves the other eight alone.
-//! Which is also why this module has one codec rather than nine — the nine
+//! costs a backfill of that namespace's blobs and leaves the others alone.
+//! Which is also why this module has one codec rather than one per kind — the
 //! kinds differ in what they carry, never in how a record is written — and why
 //! its refusals name the record shape, `log`, rather than a layer.
 //!
@@ -21,10 +21,8 @@
 //! Deriving them at restore time means replaying the ledger, which is the thing
 //! a snapshot exists to avoid — so they travel, and the value is the stored
 //! minicbor of the entity, byte for byte. This codec never decodes an entity: a
-//! log value is an opaque byte string here, which is also why an entity holding
-//! a float (`PoolEpochLog::relative_size`) does not collide with the layer's
-//! no-floats encoding rule. The rule governs the record's own CBOR, and the
-//! value is a byte string within it.
+//! log value is an opaque byte string here. The layer's encoding rules govern
+//! the record's own CBOR, and the value is a byte string within it.
 //!
 //! Determinism therefore rests on the entity encoders being deterministic — an
 //! ADR-004 limitation, and an audit that belongs to the export slice, not here.
@@ -37,7 +35,7 @@ use stelae::codec::{blob, close, open};
 
 /// The name this codec refuses under.
 ///
-/// One record shape serves all six `log-{ns}` kinds, so an error names the
+/// One record shape serves every `log-{ns}` kind, so an error names the
 /// shape rather than a layer — the layer is already in the message the caller
 /// wraps it in.
 const LOG: &str = "log";
@@ -125,9 +123,9 @@ impl OrderCheck {
 #[cfg(test)]
 mod tests {
     use dolos_cardano::model::{
-        AccountAddressChunk, AccountStats, AddressStats, AssetMintChunk, DRepEpochLog, EpochState,
-        FirstMintChunk, FirstScriptChunk, FixedNamespace as _, PaymentAddressChunk, PolicyKey,
-        PolicyMintChunk, PoolEpochLog, PoolKey, PoolState, ProposalState,
+        AccountAddressEpochs, AccountStats, AddressStats, AssetMintChunk, DRepEpochLog, DRepState,
+        EpochState, FirstMintChunk, FirstScriptChunk, FixedNamespace as _, PaymentAddressEpochs,
+        PolicyFirstMintChunk, PolicyKey, PoolEpochLog, PoolKey, PoolState, ProposalState,
     };
 
     use super::*;
@@ -159,7 +157,7 @@ mod tests {
     /// Each log takes exactly the keys of its kind after the slot: none for
     /// the epoch log, a chunk index for first mints and first scripts, a policy
     /// and a chunk for the per-policy list, an asset key and a chunk for an
-    /// asset's mints, a pool or a proposal for its final row.
+    /// asset's mints, a pool, a proposal or a DRep for its final row.
     #[test]
     fn keys_are_held_to_their_namespace_kind() {
         let slot = 7u64.to_be_bytes();
@@ -168,7 +166,7 @@ mod tests {
             (EpochState::NS, 0),
             (FirstMintChunk::NS, 4),
             (FirstScriptChunk::NS, 4),
-            (PolicyMintChunk::NS, 32),
+            (PolicyFirstMintChunk::NS, 32),
             (AssetMintChunk::NS, 36),
             (PoolEpochLog::NS, 28),
             (PoolState::NS, 28),
@@ -181,10 +179,14 @@ mod tests {
         let policy = LogKey::of(7, &(PolicyKey([1; 28].into()), 3u32));
         assert_eq!(policy.entity().len(), 32);
 
-        // account address chunks take an account: a credential header and its hash
+        // account stats take an account: a credential header and its hash;
+        // account address pages take an account and a page
         let account = [slot.as_slice(), &[0x82, 0x01, 0x58, 0x1c], &[1; 28]].concat();
-        decode(AccountAddressChunk::NS, wire(&account).as_bytes()).unwrap();
         decode(AccountStats::NS, wire(&account).as_bytes()).unwrap();
+        let page = [account.as_slice(), &3u32.to_be_bytes()].concat();
+        decode(AccountAddressEpochs::NS, wire(&page).as_bytes()).unwrap();
+        let err = decode(AccountAddressEpochs::NS, wire(&account).as_bytes()).unwrap_err();
+        assert!(matches!(err, Error::MalformedRecord { .. }), "{err:?}");
 
         // address stats take an account and a base address's header and
         // payment hash, or a tag and the address whole
@@ -192,27 +194,36 @@ mod tests {
         decode(AddressStats::NS, wire(&staked).as_bytes()).unwrap();
         let unstaked = [slot.as_slice(), &[0x00], &[1; 29]].concat();
         decode(AddressStats::NS, wire(&unstaked).as_bytes()).unwrap();
+        // payment address pages take a payment hash and a page
         decode(
-            PaymentAddressChunk::NS,
-            wire(&[slot.as_slice(), &[1; 28]].concat()).as_bytes(),
+            PaymentAddressEpochs::NS,
+            wire(&[slot.as_slice(), &[1; 28], &3u32.to_be_bytes()].concat()).as_bytes(),
         )
         .unwrap();
+        let err = decode(
+            PaymentAddressEpochs::NS,
+            wire(&[slot.as_slice(), &[1; 28]].concat()).as_bytes(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::MalformedRecord { .. }), "{err:?}");
 
-        // drep epochs take a drep: a credential header and its hash, or the
-        // one-byte tag of Abstain or NoConfidence
-        for drep in [&[0x22][..], &[0x23], &[0x00], &[0x01]] {
-            let hash: &[u8] = if drep[0] > 1 { &[1; 28] } else { &[] };
-            let key = [slot.as_slice(), drep, hash].concat();
-            decode(DRepEpochLog::NS, wire(&key).as_bytes()).unwrap();
-        }
+        // drep epochs and a DRep's final row take a drep: a credential
+        // header and its hash, or the one-byte tag of Abstain or NoConfidence
+        for ns in [DRepEpochLog::NS, DRepState::NS] {
+            for drep in [&[0x22][..], &[0x23], &[0x00], &[0x01]] {
+                let hash: &[u8] = if drep[0] > 1 { &[1; 28] } else { &[] };
+                let key = [slot.as_slice(), drep, hash].concat();
+                decode(ns, wire(&key).as_bytes()).unwrap_or_else(|err| panic!("{ns}: {err:?}"));
+            }
 
-        for drep in [&[][..], &[0x22; 28], &[0x22; 30], &[0x00, 0x01], &[0x02]] {
-            let key = [slot.as_slice(), drep].concat();
-            let err = decode(DRepEpochLog::NS, wire(&key).as_bytes()).unwrap_err();
-            assert!(
-                matches!(err, Error::MalformedRecord { .. }),
-                "drep-epochs/{drep:02x?}: {err:?}"
-            );
+            for drep in [&[][..], &[0x22; 28], &[0x22; 30], &[0x00, 0x01], &[0x02]] {
+                let key = [slot.as_slice(), drep].concat();
+                let err = decode(ns, wire(&key).as_bytes()).unwrap_err();
+                assert!(
+                    matches!(err, Error::MalformedRecord { .. }),
+                    "{ns}/{drep:02x?}: {err:?}"
+                );
+            }
         }
 
         for (ns, len) in [
@@ -220,12 +231,12 @@ mod tests {
             (FirstMintChunk::NS, 32),
             (FirstScriptChunk::NS, 32),
             (AssetMintChunk::NS, 32),
-            (AccountAddressChunk::NS, 32),
+            (AccountAddressEpochs::NS, 32),
             (AccountStats::NS, 32),
             (AddressStats::NS, 1),
             (AddressStats::NS, 32),
             (AddressStats::NS, 33),
-            (PaymentAddressChunk::NS, 32),
+            (PaymentAddressEpochs::NS, 31),
             (PoolEpochLog::NS, 32),
             (PoolEpochLog::NS, 0),
             (PoolState::NS, 32),

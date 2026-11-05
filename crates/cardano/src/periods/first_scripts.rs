@@ -9,13 +9,13 @@
 
 use std::{collections::BTreeMap, ops::RangeInclusive};
 
-use dolos_core::{ArchiveWriter as _, BlockSlot, ChainError, Domain, StateStore};
+use dolos_core::{ArchiveWriter as _, BlockSlot, ChainError, Domain, RangeOf, StateStore};
 use pallas::{crypto::hash::Hash, ledger::primitives::Epoch};
 
 use super::{Period, Segment};
 use crate::{
     indexes::{entities, SlotOrder},
-    ChainSummary, FirstScriptChunk, FirstScriptSet,
+    ChainSummary, FirstScriptChunk, FirstScriptKey, FirstScriptSet,
 };
 
 /// Seal the staged first scripts of every epoch `sealable` accepts.
@@ -84,7 +84,12 @@ pub(crate) fn seal<D: Domain>(
     )
 }
 
-/// The staged first scripts in `epochs`, by epoch, in first-seen order.
+/// The staged first scripts in `epochs` from epoch `from` on, by epoch, in
+/// first-seen order.
+///
+/// With `from` the [`super::staged_floor`], the scan starts past the rows the
+/// seals deleted, which a storage engine keeps as tombstones until it compacts
+/// them.
 ///
 /// A row whose block is past `archived` is left out: the roll commits state
 /// before it hands the batch's blocks to the archive, and `/scripts/{hash}`
@@ -92,14 +97,22 @@ pub(crate) fn seal<D: Domain>(
 fn read_staged<S: StateStore>(
     state: &S,
     epochs: &RangeInclusive<Epoch>,
+    from: Epoch,
     archived: BlockSlot,
 ) -> Result<BTreeMap<Epoch, Vec<Hash<28>>>, ChainError> {
     let mut out: BTreeMap<Epoch, Vec<(FirstScriptSet, Hash<28>)>> = BTreeMap::new();
 
-    for row in state.iter_entities_typed::<FirstScriptSet>(None)? {
+    let range = RangeOf::<FirstScriptKey>::all().starting_at_prefix(&from.max(*epochs.start()));
+
+    for row in state.iter_entities_typed::<FirstScriptSet>(Some(range))? {
         let (key, row) = row?;
 
-        if epochs.contains(&key.epoch) && row.slot <= archived {
+        // epoch first: every row after one past the range is too
+        if key.epoch > *epochs.end() {
+            break;
+        }
+
+        if row.slot <= archived {
             out.entry(key.epoch).or_default().push((row, key.member.0));
         }
     }
@@ -129,7 +142,8 @@ pub fn all_page<D: Domain>(
 ) -> Result<Vec<Hash<28>>, ChainError> {
     let (state, archive) = (domain.state(), domain.archive());
 
-    let staged = read_staged(state, &epochs, archived)?;
+    let floor = super::staged_floor(domain, chain)?;
+    let staged = read_staged(state, &epochs, floor, archived)?;
     let sealed = super::read_sealed::<_, FirstScriptChunk>(archive, chain, epochs, |_| 0)?;
 
     let mut segments = Vec::new();
@@ -224,20 +238,38 @@ mod tests {
         domain
     }
 
-    fn sealable(domain: &ToyDomain) -> impl Fn(Epoch) -> bool {
+    fn sealable(domain: &ToyDomain, boundary: Epoch) -> impl Fn(Epoch) -> bool {
         let chain = chain(domain);
         let mutable = crate::utils::mutable_slots(&domain.genesis());
-        move |epoch| is_sealable(&chain, mutable, epoch, BOUNDARY)
+        move |epoch| is_sealable(&chain, mutable, epoch, boundary)
     }
 
-    fn seal_as<D: Domain>(domain: &D, at: &ToyDomain) -> Result<(), ChainError> {
+    fn seal_at<D: Domain>(domain: &D, at: &ToyDomain, boundary: Epoch) -> Result<(), ChainError> {
         seal::<D>(
             domain.state(),
             domain.archive(),
             &chain(at),
-            &sealable(at),
+            &sealable(at, boundary),
             2,
         )
+    }
+
+    fn seal_as<D: Domain>(domain: &D, at: &ToyDomain) -> Result<(), ChainError> {
+        seal_at(domain, at, BOUNDARY)
+    }
+
+    /// The ledger standing in epoch `number`.
+    fn set_ledger(domain: &ToyDomain, number: Epoch) {
+        let mut epoch = crate::load_epoch::<ToyDomain>(domain.state()).unwrap();
+        epoch.number = number;
+
+        let writer = domain.state().start_writer().unwrap();
+        writer.write_entity_typed(&(), &epoch).unwrap();
+        writer.commit().unwrap();
+    }
+
+    fn floor(domain: &ToyDomain) -> Epoch {
+        crate::periods::staged_floor(domain, &chain(domain)).unwrap()
     }
 
     fn logs(domain: &ToyDomain) -> Vec<(BlockSlot, u32, FirstScriptChunk)> {
@@ -315,6 +347,96 @@ mod tests {
 
         // a page inside the second chunk of epoch 6
         assert_eq!(page(&domain, SlotOrder::Asc, 270, 5), expected[270..275]);
+    }
+
+    /// The staged epochs a read from `from` over `epochs` returns.
+    fn staged_epochs(domain: &ToyDomain, epochs: RangeInclusive<Epoch>, from: Epoch) -> Vec<Epoch> {
+        read_staged(domain.state(), &epochs, from, u64::MAX)
+            .unwrap()
+            .into_keys()
+            .collect()
+    }
+
+    /// The read starts at the later of its floor and the range's start, and
+    /// stops at the range's end: rows outside are never seen, even staged
+    /// ones.
+    #[test]
+    fn staged_scripts_are_read_from_their_floor() {
+        let domain = seeded();
+
+        assert_eq!(staged_epochs(&domain, 0..=BOUNDARY, 0), vec![5, 6, 7]);
+        assert_eq!(staged_epochs(&domain, 0..=BOUNDARY, 6), vec![6, 7]);
+        assert_eq!(staged_epochs(&domain, 6..=BOUNDARY, 0), vec![6, 7]);
+        assert_eq!(staged_epochs(&domain, 0..=6, 6), vec![6]);
+        assert_eq!(staged_epochs(&domain, 0..=BOUNDARY, 8), Vec::<Epoch>::new());
+
+        let staged = read_staged(domain.state(), &(0..=BOUNDARY), 7, u64::MAX).unwrap();
+        assert_eq!(staged[&7].len(), 3);
+    }
+
+    /// With the ledger in the epoch whose boundary sealed 5 and 6, the floor
+    /// is 7, past their deleted rows, and every page is the one the unsealed
+    /// rows answer. The pages never read below the floor: a row written into
+    /// epoch 4, which sealed empty, stays out of them.
+    #[test]
+    fn sealed_epochs_ahead_of_the_staged_ones_keep_the_pages() {
+        let domain = seeded();
+        let before = pages(&domain);
+
+        seal_as(&domain, &domain).unwrap();
+        set_ledger(&domain, BOUNDARY);
+
+        assert_eq!(floor(&domain), 7);
+        assert_eq!(pages(&domain), before);
+
+        let key = GroupKey {
+            group: Ungrouped,
+            epoch: 4,
+            member: ScriptKey(hash(4, 0)),
+        };
+        let row = FirstScriptSet {
+            slot: chain(&domain).epoch_start(4),
+            tx_index: 0,
+            order: 0,
+        };
+
+        let writer = domain.state().start_writer().unwrap();
+        writer.write_entity_typed(&key, &row).unwrap();
+        writer.commit().unwrap();
+
+        assert_eq!(pages(&domain), before);
+    }
+
+    /// A seal that dies after any commit leaves the ledger in the epoch before
+    /// its boundary, and the floor with it: every page is the one the unsealed
+    /// rows answer.
+    #[test]
+    fn an_unfinished_seal_keeps_the_pages() {
+        let before = pages(&seeded());
+        let mut crash_after = 0;
+
+        loop {
+            let domain = seeded();
+            seal_at(&domain, &domain, BOUNDARY - 1).unwrap();
+            set_ledger(&domain, BOUNDARY - 1);
+
+            let crashing =
+                FaultyToyDomain::new(domain.clone(), TestFault::CrashAfterCommits(crash_after));
+            let done = seal_as(&crashing, &domain).is_ok();
+
+            let at = format!("after commit {crash_after}");
+            assert_eq!(floor(&domain), 6, "{at}");
+            assert_eq!(pages(&domain), before, "{at}");
+
+            if done {
+                break;
+            }
+
+            crash_after += 1;
+        }
+
+        // the archive commit, then the state delete
+        assert_eq!(crash_after, 2);
     }
 
     /// A staged row whose block the archive does not hold yet is left out.

@@ -1,0 +1,13 @@
+dumps the archive's blocks
+
+Usage: dolos data dump blocks [OPTIONS]
+
+Options:
+      --from-slot <SLOT>  the first slot to dump
+      --to-slot <SLOT>    the last slot to dump
+      --limit <N>         Print at most this many records; 0 prints every one [default: 100]
+      --offset <N>        Skip this many records first [default: 0]
+      --format <FORMAT>   How to print the result: text for people, JSON for scripts [default: text]
+                          [possible values: text, json]
+  -c, --config <CONFIG>   
+  -h, --help              Print help

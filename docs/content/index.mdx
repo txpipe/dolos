@@ -46,17 +46,23 @@ In this guide we're going to learn how to go from zero to a running Dolos instan
 
 2. ### Configuration & Bootstrap
 
-    To configure and bootstrap _Dolos_, run the following command that will guide you through a set of questions to automatically configure your instance and sync the history of the chain:
+    To configure _Dolos_, run the following command that will guide you through a set of questions and write the configuration file, `dolos.toml`:
 
     ```sh
     dolos init
     ```
 
-    For more detailed information on how to configure Dolos, check the [configuration section](./dolos/configuration)
+    Then fill its stores with the history of the chain. With no source named, the command asks which one to use: a Stelae snapshot, Mithril or a local ImmutableDB.
+
+    ```sh
+    dolos bootstrap
+    ```
+
+    For more detailed information on how to configure and bootstrap Dolos, check the [configuration section](./dolos/configuration) and the [bootstrap section](./dolos/bootstrap)
 
 3. ### Running
 
-    Run the following command to start Dolos in `daemon` mode. This will keep runnig forever while syncing the chain from the upstream node and serving data through the APIs. 
+    Run the following command to start Dolos in `daemon` mode. It syncs the chain from the upstream node and serves data through the APIs until it is stopped, or until its sync gives up on the upstream peer under `[sync.retry]`, when it exits 1.
 
     ```sh
     dolos daemon

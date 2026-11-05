@@ -8,13 +8,14 @@ use serde::{Deserialize, Serialize};
 use super::AssetKey;
 use crate::periods::{ChunkRow, GroupKey, GroupRow, StageIfAbsent};
 
-/// The first mint of an asset within one epoch, held in state until the epoch
-/// seals into a [`FirstMintChunk`] and a [`PolicyMintChunk`].
+/// The first mint of an asset, held in state until its epoch seals into a
+/// [`FirstMintChunk`], a [`PolicyFirstMintChunk`] and the asset's entity index
+/// entry.
 ///
 /// Keyed `policy ‖ epoch ‖ asset key`, so one prefix scan returns every
-/// unsealed epoch of a policy, and nothing else. Re-mints of an asset
-/// first minted in an earlier epoch are staged too; readers and the seal keep
-/// only the rows whose slot is the asset's `initial_slot`.
+/// unsealed epoch of a policy, and nothing else. The roll's witness stages a
+/// row only for an asset that neither the entity index nor another staged row
+/// knows, so every row is a first mint ever.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
 pub struct FirstMintSet {
     #[n(0)]
@@ -60,7 +61,7 @@ impl FirstMintSet {
         (self.slot, self.tx_index, self.subject())
     }
 
-    /// The `AssetState` key of the minted asset.
+    /// The key of the minted asset.
     pub fn asset_key(&self) -> AssetKey {
         AssetKey::of_parts(self.policy.as_slice(), &self.name)
     }
@@ -89,7 +90,14 @@ pub struct FirstMintChunk {
     pub count: u64,
 
     #[n(1)]
-    pub subjects: Vec<ByteVec>,
+    pub subjects: Vec<FirstMintItem>,
+}
+
+/// One subject of a [`FirstMintChunk`].
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+pub struct FirstMintItem {
+    #[n(0)]
+    pub subject: ByteVec,
 }
 
 entity_boilerplate!(FirstMintChunk, "first-mint-chunks", log = u32);
@@ -100,12 +108,20 @@ impl ChunkRow for FirstMintChunk {
     fn new(count: u64, items: Vec<Vec<u8>>) -> Self {
         Self {
             count,
-            subjects: items.into_iter().map(ByteVec::from).collect(),
+            subjects: items
+                .into_iter()
+                .map(|subject| FirstMintItem {
+                    subject: subject.into(),
+                })
+                .collect(),
         }
     }
 
     fn into_items(self) -> Vec<Vec<u8>> {
-        self.subjects.into_iter().map(Vec::from).collect()
+        self.subjects
+            .into_iter()
+            .map(|item| item.subject.into())
+            .collect()
     }
 }
 
@@ -115,32 +131,45 @@ impl ChunkRow for FirstMintChunk {
 /// Sealed at `epoch_start(e) ‖ policy ‖ chunk (4 B)`, with the policy's total
 /// for the epoch on every chunk.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Default)]
-pub struct PolicyMintChunk {
+pub struct PolicyFirstMintChunk {
     #[n(0)]
     pub count: u64,
 
     #[n(1)]
-    pub names: Vec<ByteVec>,
+    pub names: Vec<PolicyFirstMintItem>,
+}
+
+/// One asset name of a [`PolicyFirstMintChunk`].
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+pub struct PolicyFirstMintItem {
+    #[n(0)]
+    pub name: ByteVec,
 }
 
 entity_boilerplate!(
-    PolicyMintChunk,
-    "policy-mint-chunks",
+    PolicyFirstMintChunk,
+    "policy-first-mint-chunks",
     log = (PolicyKey, u32)
 );
 
-impl ChunkRow for PolicyMintChunk {
+impl ChunkRow for PolicyFirstMintChunk {
     type Item = Vec<u8>;
 
     fn new(count: u64, items: Vec<Vec<u8>>) -> Self {
         Self {
             count,
-            names: items.into_iter().map(ByteVec::from).collect(),
+            names: items
+                .into_iter()
+                .map(|name| PolicyFirstMintItem { name: name.into() })
+                .collect(),
         }
     }
 
     fn into_items(self) -> Vec<Vec<u8>> {
-        self.names.into_iter().map(Vec::from).collect()
+        self.names
+            .into_iter()
+            .map(|item| item.name.into())
+            .collect()
     }
 }
 

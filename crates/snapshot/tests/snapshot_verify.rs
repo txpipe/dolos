@@ -49,7 +49,7 @@ use serde_json::json;
 use stelae::{Digest, SteleReader as _};
 
 use node::{account_layer, plan_at_boundary, settled, stake_only, write_account_row, Node};
-use registry_fixture::{Fixture, Unanswered};
+use registry_fixture::{Distribution, Fixture, Unanswered};
 
 /// Layers of epoch 0 that sequence 2 inherits: `blocks`, `indexes` and
 /// `log-epochs`. The harness also seeds `log-account-epochs`, which a publish
@@ -545,6 +545,91 @@ fn a_resumed_registry_publish_rebuilds_an_account_window_the_manifest_lacks() {
     assert_eq!(reproduced.digest().unwrap(), published.identity);
 }
 
+/// A batch prepared and staged once, then published in sequence, is the chain
+/// the direct publishes write: same identities, same inheritance, and each
+/// chained onto the stele its predecessor left.
+#[test]
+#[ignore = "spawns a registry"]
+fn a_prepared_batch_publishes_what_direct_publishes_do() {
+    use dolos_snapshot::{
+        prepare::{self, Finalizing, IndexTail, Request},
+        staging::Budget,
+    };
+
+    let fixture = Fixture::spawn();
+    let direct = fixture.repository("dolos/direct");
+    let batched = fixture.repository("dolos/batched");
+    let node = Node::build();
+
+    let scratch = tempfile::tempdir().unwrap();
+    let store = prepare::Store::open(scratch.path().join("bundles"), "test").unwrap();
+    let silent = stelae::progress::Observer::silent();
+
+    let bundles: Vec<_> = [&node.first, &node.second]
+        .into_iter()
+        .map(|plan| {
+            let stores = node.stores(plan);
+
+            prepare::prepare(
+                &store,
+                plan,
+                stores.archive(),
+                stores.state(),
+                &Request {
+                    store_contract: dolos_core::compat::SUPPORTED_CONTRACTS[0].to_owned(),
+                    mutable_slots: dolos_cardano::mutable_slots(stores.genesis().as_ref()),
+                    tail: IndexTail::Traverse,
+                },
+                &silent,
+            )
+            .unwrap()
+        })
+        .collect();
+
+    let staged = prepare::stage_batch(
+        &scratch.path().join("runs"),
+        node.domain.archive(),
+        node.domain.state(),
+        &bundles,
+        &export::First,
+        Budget::new(u64::MAX),
+        &silent,
+    )
+    .unwrap();
+
+    for (plan, bundle) in [&node.first, &node.second].into_iter().zip(&bundles) {
+        let expected = node.publish(&direct, plan, false);
+
+        let published = registry::publish_prepared(
+            Publishing::new(&batched),
+            &Finalizing {
+                store: &store,
+                bundle,
+                staged: &staged,
+                producers: export::Producers::DEFAULT,
+            },
+            node.domain.archive(),
+            None,
+            &silent,
+        )
+        .unwrap();
+
+        assert_eq!(published.identity, expected.identity);
+        assert_eq!(published.layers_reused, expected.layers_reused);
+    }
+
+    assert_eq!(
+        batched
+            .latest(&DolosProfile)
+            .unwrap()
+            .unwrap()
+            .read_inscription()
+            .unwrap()
+            .sequence,
+        node.second.sequence,
+    );
+}
+
 /// The registry, except that the seal fails: every layer is up and recorded,
 /// and the stele never becomes readable.
 struct SealFails<'a>(&'a stelae::oci::Registry);
@@ -655,203 +740,4 @@ fn an_inspection_reports_the_manifest_and_its_json_chains_a_digest() {
         inspected.total_compressed,
         reproduced.digest().unwrap(),
     );
-}
-
-// ---------------------------------------------------------------------------
-// The raw distribution client the tampers need
-// ---------------------------------------------------------------------------
-
-/// The distribution API, spoken directly.
-///
-/// Exists because the tampered artifacts these tests plant are exactly the
-/// documents the transport refuses to write. HTTP/1.0 with `Connection:
-/// close` over a loopback socket, which keeps the parsing to a status line,
-/// a header block and a read-to-EOF body — and assumes the `distribution`
-/// server the fixture runs by default.
-struct Distribution {
-    address: String,
-}
-
-impl Distribution {
-    fn new(fixture: &Fixture) -> Self {
-        Self {
-            address: fixture.address(),
-        }
-    }
-
-    /// Every socket operation is bounded, for the reason the fixture's
-    /// `wait_until_ready` bounds its own: a registry that accepts and then says
-    /// nothing turns an `#[ignore]`d end-to-end test into a CI job that hangs
-    /// rather than one that fails with a message. A loopback exchange of a few
-    /// test-sized blobs has no legitimate use for more than this.
-    const PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
-
-    fn request(
-        &self,
-        method: &str,
-        path: &str,
-        headers: &[(&str, String)],
-        body: &[u8],
-    ) -> (u16, Vec<(String, String)>, Vec<u8>) {
-        use std::io::{Read as _, Write as _};
-
-        // `Fixture::address` is `127.0.0.1:{port}`, so this parses without
-        // resolution — which is what lets the connect itself be bounded.
-        let socket_address: std::net::SocketAddr =
-            self.address.parse().expect("a loopback address and a port");
-
-        let mut socket =
-            std::net::TcpStream::connect_timeout(&socket_address, Self::PATIENCE).unwrap();
-
-        socket.set_write_timeout(Some(Self::PATIENCE)).unwrap();
-        socket.set_read_timeout(Some(Self::PATIENCE)).unwrap();
-
-        let credentials =
-            base64(format!("{}:{}", registry_fixture::USER, registry_fixture::PASSWORD).as_bytes());
-
-        let mut request = format!(
-            "{method} {path} HTTP/1.0\r\nHost: {}\r\nAuthorization: Basic {credentials}\r\n\
-             Connection: close\r\nContent-Length: {}\r\n",
-            self.address,
-            body.len(),
-        );
-
-        for (name, value) in headers {
-            request.push_str(&format!("{name}: {value}\r\n"));
-        }
-
-        request.push_str("\r\n");
-
-        socket.write_all(request.as_bytes()).unwrap();
-        socket.write_all(body).unwrap();
-
-        let mut raw = Vec::new();
-        socket.read_to_end(&mut raw).unwrap();
-
-        let boundary = raw
-            .windows(4)
-            .position(|window| window == b"\r\n\r\n")
-            .expect("an HTTP response has a header block");
-
-        let head = String::from_utf8_lossy(&raw[..boundary]).into_owned();
-        let body = raw[boundary + 4..].to_vec();
-
-        let mut lines = head.lines();
-
-        let status: u16 = lines
-            .next()
-            .and_then(|line| line.split_whitespace().nth(1))
-            .and_then(|code| code.parse().ok())
-            .unwrap_or_else(|| panic!("no status line in {head:?}"));
-
-        let headers = lines
-            .filter_map(|line| line.split_once(':'))
-            .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_owned()))
-            .collect();
-
-        (status, headers, body)
-    }
-
-    fn manifest(&self, repository: &str, tag: &str) -> serde_json::Value {
-        let (status, _, body) = self.request(
-            "GET",
-            &format!("/v2/{repository}/manifests/{tag}"),
-            &[(
-                "Accept",
-                "application/vnd.oci.image.manifest.v1+json".to_owned(),
-            )],
-            &[],
-        );
-
-        assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
-
-        serde_json::from_slice(&body).unwrap()
-    }
-
-    fn put_manifest(&self, repository: &str, tag: &str, manifest: &serde_json::Value) {
-        let body = serde_json::to_vec(manifest).unwrap();
-
-        let (status, _, response) = self.request(
-            "PUT",
-            &format!("/v2/{repository}/manifests/{tag}"),
-            &[(
-                "Content-Type",
-                "application/vnd.oci.image.manifest.v1+json".to_owned(),
-            )],
-            &body,
-        );
-
-        assert_eq!(status, 201, "{}", String::from_utf8_lossy(&response));
-    }
-
-    /// Upload a blob and return the digest it is addressed by.
-    ///
-    /// The registry checks the digest against the bytes, so this can plant
-    /// wrong *content* but never a wrong name — which is the property the
-    /// corrupted-blob test leans on.
-    fn put_blob(&self, repository: &str, bytes: &[u8]) -> String {
-        let digest = Digest::compute(bytes).to_string();
-
-        let (status, headers, response) = self.request(
-            "POST",
-            &format!("/v2/{repository}/blobs/uploads/"),
-            &[],
-            &[],
-        );
-
-        assert_eq!(status, 202, "{}", String::from_utf8_lossy(&response));
-
-        let location = headers
-            .iter()
-            .find(|(name, _)| name == "location")
-            .map(|(_, value)| value.clone())
-            .expect("an upload start answers with a Location");
-
-        // Absolute or path-relative, per the server's taste.
-        let location = location
-            .strip_prefix(&format!("http://{}", self.address))
-            .unwrap_or(&location)
-            .to_owned();
-
-        let separator = if location.contains('?') { '&' } else { '?' };
-
-        let (status, _, response) = self.request(
-            "PUT",
-            &format!("{location}{separator}digest={digest}"),
-            &[("Content-Type", "application/octet-stream".to_owned())],
-            bytes,
-        );
-
-        assert_eq!(status, 201, "{}", String::from_utf8_lossy(&response));
-
-        digest
-    }
-}
-
-/// Standard base64, for the Basic credential pair.
-///
-/// Hand-rolled rather than imported: it is eleven lines, it runs in a test,
-/// and a dev-dependency for one header is a dependency review nobody needs.
-fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    let mut encoded = String::new();
-
-    for chunk in bytes.chunks(3) {
-        let mut word = 0u32;
-
-        for (index, byte) in chunk.iter().enumerate() {
-            word |= u32::from(*byte) << (16 - 8 * index);
-        }
-
-        for index in 0..4 {
-            if index <= chunk.len() {
-                encoded.push(ALPHABET[((word >> (18 - 6 * index)) & 0x3f) as usize] as char);
-            } else {
-                encoded.push('=');
-            }
-        }
-    }
-
-    encoded
 }

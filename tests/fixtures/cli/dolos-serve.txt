@@ -1,0 +1,7 @@
+Just serve data through apis
+
+Usage: dolos serve [OPTIONS]
+
+Options:
+  -c, --config <CONFIG>  
+  -h, --help             Print help

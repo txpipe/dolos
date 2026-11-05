@@ -65,6 +65,6 @@ This is why the WAL exists as a separate store — it is the bounded buffer of r
 
 ## Housekeeping
 
-As the tip advances, the pipeline periodically prunes history it no longer needs — trimming the WAL and, in sliding-history mode, the archive — according to the configured retention window. The `dolos doctor` and `dolos data` commands expose the same maintenance operations for manual use.
+As the tip advances, the pipeline periodically prunes history it no longer needs — trimming the WAL and, in sliding-history mode, the archive — according to the configured retention window. `dolos data housekeeping` runs the same pruning by hand, and the `dolos sync` group inspects, recovers and rolls back the WAL.
 
 Source: `src/sync/{mod,pull,apply,submit,emulator}.rs`, `src/relay/*`, and the `WorkUnit` / roll traits in `crates/core/src/{work_unit,sync}.rs`.

@@ -2,7 +2,6 @@ use axum::{
     extract::{Path, Query, State},
     Json,
 };
-use dolos_cardano::model::AssetState;
 use dolos_core::Domain;
 
 use crate::{error::Error, pagination::PaginationParameters, Facade};
@@ -18,7 +17,6 @@ pub async fn by_subject_txs<D>(
 ) -> Result<Json<Vec<String>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
-    Option<AssetState>: From<D::Entity>,
 {
     // Blockfrost does not define `from`/`to` for this variant and ignores any
     // supplied values, so the alias drops them before delegating.

@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::proposal::Proposal;
-use dolos_cardano::model::{ProposalAction, ProposalKey, ProposalState};
+use dolos_cardano::model::{ProposalKey, ProposalState};
 use dolos_core::{ArchiveStore as _, Domain};
 use pallas::{
     crypto::hash::Hash,
@@ -79,12 +79,6 @@ where
 
     let gov_action = load_gov_action(domain, tx, idx).await?;
 
-    // A legacy row keeps no action detail. When the archived tx cannot
-    // resolve it either, any response would guess the type.
-    if matches!(state.action, ProposalAction::Other) && gov_action.is_none() {
-        return Err(StatusCode::NOT_FOUND);
-    }
-
     let chain = domain.get_chain_summary()?;
 
     let (tip, _) = domain
@@ -147,7 +141,7 @@ mod tests {
     };
     use bech32::{Bech32, Hrp};
     use blockfrost_openapi::models::proposal;
-    use dolos_cardano::model::GovPurpose;
+    use dolos_cardano::model::{GovPurpose, ProposalAction};
     use dolos_core::{StateStore as _, StateWriter as _};
     use dolos_testing::{synthetic::SyntheticBlockConfig, toy_domain::ToyDomain};
     use pallas::ledger::primitives::{conway::GovActionId, StakeCredential};
@@ -163,7 +157,7 @@ mod tests {
             canceled_epoch: None,
             deposit: Some(100_000_000),
             reward_account: Some(StakeCredential::AddrKeyhash([7u8; 28].into())),
-            proposed_in: Some(2),
+            proposed_in: 2,
             parent: Some(GovActionId {
                 transaction_id: [9u8; 32].into(),
                 action_index: 0,
@@ -235,13 +229,13 @@ mod tests {
                 slot: 1,
                 tx: proposal_tx(),
                 idx: 0,
-                action: ProposalAction::Other,
+                action: ProposalAction::ParamChange(Default::default()),
                 max_epoch: None,
                 ratified_epoch: None,
                 canceled_epoch: None,
                 deposit: None,
                 reward_account: None,
-                proposed_in: None,
+                proposed_in: 0,
                 parent: None,
                 purpose: None,
                 anchor: None,

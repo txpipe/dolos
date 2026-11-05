@@ -1050,8 +1050,8 @@ fn mib(bytes: u64) -> f64 {
 
 /// What holding one `indexes` layer open costs resident.
 ///
-/// [`IndexBand`](dolos_snapshot::export::IndexBand) divides a memory ceiling by
-/// this number to arrive at K, so the number has to come from somewhere other
+/// [`LAYER_SINK_BYTES`](dolos_snapshot::export::LAYER_SINK_BYTES) is what a
+/// publish's memory is sized on, so the number has to come from somewhere other
 /// than a guess about zstd's internals. Sinks are opened one at a time against
 /// a real stele and each is given records to compress, because a compression
 /// context that has never compressed anything has not yet allocated its
@@ -1116,8 +1116,8 @@ fn measure_layer_sink_residency() {
         mib(held - base) / SINKS as f64,
     );
     println!(
-        "IndexBand::SINK_BYTES is pinned at {:.1} MiB",
-        mib(dolos_snapshot::export::IndexBand::SINK_BYTES as u64),
+        "LAYER_SINK_BYTES is pinned at {:.1} MiB",
+        mib(dolos_snapshot::export::LAYER_SINK_BYTES as u64),
     );
 
     // Kept alive to here on purpose: a sink dropped early is a sink whose
@@ -1125,8 +1125,8 @@ fn measure_layer_sink_residency() {
     drop(sinks);
 }
 
-/// The whole-publish figure the banding is sized on: what a first publish of a
-/// store this deep costs, banded and unbanded.
+/// The whole-publish figure: what a first publish of a store this deep costs,
+/// staging its index in one traversal.
 ///
 /// The stele is written for real — compressed, framed and landed in a
 /// directory — because the claim is about a publish and not about a loop. Only
@@ -1139,14 +1139,12 @@ fn measure_layer_sink_residency() {
 ///
 /// Run with:
 /// `cargo test --release --test archive_index_roundtrip -- --ignored
-/// --nocapture measure_banded_publish_cost`, and `DOLOS_INDEX_COST_EPOCHS=32`
+/// --nocapture measure_staged_publish_cost`, and `DOLOS_INDEX_COST_EPOCHS=32`
 /// for the deeper store [`measure_one_epoch_iteration_cost`] also reports.
 #[cfg(unix)]
 #[test]
 #[ignore = "measurement, not an assertion"]
-fn measure_banded_publish_cost() {
-    use dolos_snapshot::export::IndexBand;
-
+fn measure_staged_publish_cost() {
     let (store, _guard) = Fjall::open();
 
     let epochs = cost_epochs();
@@ -1157,53 +1155,29 @@ fn measure_banded_publish_cost() {
     let seeding = started.elapsed();
     let tip = boundary_after(&store, epochs);
 
-    println!("--- banded publish cost ---");
+    println!("--- staged publish cost ---");
     println!(
         "store: {epochs} epochs, {} tag records, {} exact records (seeded in {seeding:.1?})",
         written.tags(),
         written.exacts(),
     );
 
-    // The banded arm runs **first**, and the order is the measurement rather
-    // than a preference. `ru_maxrss` is a high-water mark, so only the first
-    // arm's delta is that arm's own; the second reports what it added above the
-    // first. What this plan has to state is the peak of a *banded* publish, so
-    // that is the arm that goes first — and it leaves the unbanded arm running
-    // against the warmer page cache, which is the direction that understates
-    // the improvement rather than inventing it.
-    let bands = [("banded", IndexBand::DEFAULT.epochs()), ("unbanded", 1)];
+    let before = max_rss_bytes();
+    let started = std::time::Instant::now();
 
-    let mut documents = Vec::new();
+    let (_inscription, temp) = publish_staged(&store, &tip);
 
-    for (label, band) in bands {
-        let before = max_rss_bytes();
-        let started = std::time::Instant::now();
+    let elapsed = started.elapsed();
+    let peak = max_rss_bytes();
 
-        let (inscription, temp) = publish_at_band(&store, &tip, band);
-
-        let elapsed = started.elapsed();
-        let peak = max_rss_bytes();
-
-        let traversals = epochs.div_ceil(band as u64);
-
-        println!(
-            "{label:>9} (K={band:>3}): {traversals:>3} traversals, {elapsed:>10.1?}, \
-             peak rss {:>8.1} MiB (+{:.1} MiB above the mark this arm started at)",
-            mib(peak),
-            mib(peak.saturating_sub(before)),
-        );
-
-        documents.push(inscription.canonicalize().expect("canonicalize"));
-
-        // Held until the figures are printed, then released: the stele on disk
-        // is the size of the index store and the next arm wants the space.
-        drop(temp);
-    }
-
-    assert_eq!(
-        documents[0], documents[1],
-        "the banded publish produced a different document",
+    println!(
+        "one traversal: {elapsed:>10.1?}, peak rss {:>8.1} MiB (+{:.1} MiB above the mark it \
+         started at)",
+        mib(peak),
+        mib(peak.saturating_sub(before)),
     );
+
+    drop(temp);
 }
 
 /// Append the two empty blocks that put a publish on the boundary opening the
@@ -1226,19 +1200,15 @@ fn boundary_after<S: CoreArchiveStore>(store: &S, epochs: u64) -> dolos_core::Ch
     first
 }
 
-/// Publish the seeded archive at `band`, standing at `tip`, into a directory
-/// that lives as long as the returned guard.
+/// Publish the seeded archive, standing at `tip`, into a directory that lives
+/// as long as the returned guard.
 #[cfg(unix)]
-fn publish_at_band<S: CoreArchiveStore>(
+fn publish_staged<S: CoreArchiveStore>(
     store: &S,
     tip: &dolos_core::ChainPoint,
-    band: usize,
 ) -> (dolos_snapshot::inscription::Inscription, tempfile::TempDir) {
     use dolos_core::{StateStore as _, StateWriter as _};
-    use dolos_snapshot::{
-        export::{IndexBand, Plan},
-        Network,
-    };
+    use dolos_snapshot::{export::Plan, Network};
 
     let temp = tempfile::tempdir().expect("tempdir");
 
@@ -1263,10 +1233,7 @@ fn publish_at_band<S: CoreArchiveStore>(
         tip.clone(),
         Default::default(),
     )
-    .expect("plan")
-    .with_band(IndexBand::new(
-        band.try_into().expect("a band of no epochs"),
-    ));
+    .expect("plan");
 
     let inscription = dolos_snapshot::export::publish(
         temp.path().join("stele"),

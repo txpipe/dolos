@@ -1,0 +1,7 @@
+Run the node in all its glory
+
+Usage: dolos daemon [OPTIONS]
+
+Options:
+  -c, --config <CONFIG>  
+  -h, --help             Print help

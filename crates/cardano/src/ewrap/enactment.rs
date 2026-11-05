@@ -28,7 +28,6 @@ pub struct BoundaryVisitor {
 /// `committee_seated` says whether a committee is seated at the boundary,
 /// and `epoch` is the epoch the boundary opens.
 pub(crate) fn enactment_deltas(
-    id: &ProposalId,
     proposal: &ProposalState,
     deliverable_withdrawal_targets: &HashSet<StakeCredential>,
     committee_seated: bool,
@@ -91,11 +90,6 @@ pub(crate) fn enactment_deltas(
         }
         // Info actions ratify but carry no state effect.
         ProposalAction::Info => (),
-        // Only reachable from rows written before the specific variants
-        // existed, where the action's content was never recorded.
-        ProposalAction::Other => {
-            tracing::error!(proposal=%id, "can't enact legacy proposal with untracked action");
-        }
     }
 
     // `ensPrevGovActionIds` is Conway enact-state: it names Conway
@@ -147,7 +141,6 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         }
 
         self.deltas.extend(enactment_deltas(
-            id,
             proposal,
             &ctx.deliverable_withdrawal_targets,
             ctx.gov.committee.is_some(),
@@ -190,7 +183,7 @@ mod tests {
             canceled_epoch: None,
             deposit: None,
             reward_account: None,
-            proposed_in: None,
+            proposed_in: 0,
             parent: None,
             purpose: None,
             anchor: None,
@@ -241,7 +234,6 @@ mod tests {
     #[test]
     fn enactment_without_recorded_purpose_claims_no_lineage_root() {
         let action = ProposalAction::ParamChange(PParamsSet::default());
-        let id = ProposalId::new([9u8; 32].into(), 0);
 
         let legacy = proposal([9u8; 32].into(), 0, action.clone());
         assert_eq!(legacy.purpose, None);
@@ -251,7 +243,7 @@ mod tests {
             "the action's shape alone would claim a tree"
         );
 
-        let deltas = enactment_deltas(&id, &legacy, &HashSet::new(), true, 1);
+        let deltas = enactment_deltas(&legacy, &HashSet::new(), true, 1);
 
         assert!(
             deltas
@@ -270,7 +262,7 @@ mod tests {
         let mut conway = proposal([9u8; 32].into(), 0, action);
         conway.purpose = Some(GovPurpose::PParamUpdate);
 
-        let deltas = enactment_deltas(&id, &conway, &HashSet::new(), true, 1);
+        let deltas = enactment_deltas(&conway, &HashSet::new(), true, 1);
 
         assert!(
             deltas
@@ -294,11 +286,10 @@ mod tests {
             (unregistered.clone(), 5_000_000),
         ]);
 
-        let id = ProposalId::new([3u8; 32].into(), 0);
         let row = proposal([3u8; 32].into(), 0, action);
 
         let deliverable = HashSet::from([registered.clone()]);
-        let deltas = enactment_deltas(&id, &row, &deliverable, true, 1);
+        let deltas = enactment_deltas(&row, &deliverable, true, 1);
 
         let credited: Vec<_> = deltas
             .iter()
@@ -312,8 +303,7 @@ mod tests {
     }
 
     /// Every governance action a Conway chain can carry has an enactment
-    /// effect — no variant falls through to an error arm. Only the legacy
-    /// `Other` catch-all, which never records the action's content, does.
+    /// effect — no variant falls through to an error arm.
     #[test]
     fn every_real_action_enacts() {
         let cred = StakeCredential::AddrKeyhash([1u8; 28].into());
@@ -354,10 +344,9 @@ mod tests {
 
         for (action, purpose) in cases {
             let is_info = matches!(action, ProposalAction::Info);
-            let id = ProposalId::new([7u8; 32].into(), 0);
             let mut row = proposal([7u8; 32].into(), 0, action.clone());
             row.purpose = purpose;
-            let deltas = enactment_deltas(&id, &row, &deliverable, true, 1);
+            let deltas = enactment_deltas(&row, &deliverable, true, 1);
 
             let roots = deltas
                 .iter()
@@ -386,7 +375,6 @@ mod tests {
     #[test]
     fn committee_actions_emit_snapshot_deltas_first() {
         let cred = StakeCredential::AddrKeyhash([1u8; 28].into());
-        let id = ProposalId::new([8u8; 32].into(), 0);
 
         let names = |deltas: &[CardanoDelta]| -> Vec<&'static str> {
             deltas
@@ -404,10 +392,10 @@ mod tests {
         let mut no_confidence = proposal([8u8; 32].into(), 0, ProposalAction::NoConfidence);
         no_confidence.purpose = Some(GovPurpose::Committee);
 
-        let seated = enactment_deltas(&id, &no_confidence, &HashSet::new(), true, 600);
+        let seated = enactment_deltas(&no_confidence, &HashSet::new(), true, 600);
         assert_eq!(names(&seated), ["dissolve", "update", "root"]);
 
-        let dissolved = enactment_deltas(&id, &no_confidence, &HashSet::new(), false, 600);
+        let dissolved = enactment_deltas(&no_confidence, &HashSet::new(), false, 600);
         assert_eq!(names(&dissolved), ["update", "root"]);
 
         let mut update = proposal(
@@ -422,7 +410,7 @@ mod tests {
         update.purpose = Some(GovPurpose::Committee);
 
         for committee_seated in [true, false] {
-            let deltas = enactment_deltas(&id, &update, &HashSet::new(), committee_seated, 600);
+            let deltas = enactment_deltas(&update, &HashSet::new(), committee_seated, 600);
             assert_eq!(names(&deltas), ["reseat", "update", "root"]);
         }
     }
@@ -449,14 +437,10 @@ mod tests {
         );
 
         let tx: Hash<32> = [8u8; 32].into();
-        let id = ProposalId::new(tx, 2);
         let mut row = proposal(tx, 2, ProposalAction::NoConfidence);
         row.purpose = Some(GovPurpose::Committee);
 
-        state = apply_gov(
-            state,
-            enactment_deltas(&id, &row, &HashSet::new(), true, 600),
-        );
+        state = apply_gov(state, enactment_deltas(&row, &HashSet::new(), true, 600));
 
         assert_eq!(state.committee, None);
         let snapshot = state.dissolved_committee.clone().unwrap();
@@ -484,12 +468,8 @@ mod tests {
             },
         );
         row.purpose = Some(GovPurpose::Committee);
-        let id = ProposalId::new(tx, 3);
 
-        state = apply_gov(
-            state,
-            enactment_deltas(&id, &row, &HashSet::new(), false, 610),
-        );
+        state = apply_gov(state, enactment_deltas(&row, &HashSet::new(), false, 610));
 
         assert!(state.committee.is_some());
         assert_eq!(state.dissolved_committee, None);
@@ -537,7 +517,6 @@ mod tests {
             guardrail_script: Some([2u8; 28].into()),
         };
 
-        let id = ProposalId::new(constitution_tx, 0);
         let mut row = proposal(
             constitution_tx,
             0,
@@ -547,12 +526,8 @@ mod tests {
             },
         );
         row.purpose = Some(GovPurpose::Constitution);
-        state = apply_gov(
-            state,
-            enactment_deltas(&id, &row, &HashSet::new(), true, 508),
-        );
+        state = apply_gov(state, enactment_deltas(&row, &HashSet::new(), true, 508));
 
-        let id = ProposalId::new(committee_tx, 0);
         let mut row = proposal(
             committee_tx,
             0,
@@ -563,10 +538,7 @@ mod tests {
             },
         );
         row.purpose = Some(GovPurpose::Committee);
-        state = apply_gov(
-            state,
-            enactment_deltas(&id, &row, &HashSet::new(), true, 508),
-        );
+        state = apply_gov(state, enactment_deltas(&row, &HashSet::new(), true, 508));
 
         assert_eq!(state.constitution, Some(enacted_constitution));
         assert_ne!(state.constitution, Some(constitution));

@@ -1,0 +1,11 @@
+rebuilds a sample of entries without the cache and compares them
+
+Usage: dolos cache verify [OPTIONS]
+
+Options:
+      --namespace <NAMESPACE>  the namespace to check, every one with a use if omitted
+      --sample <SAMPLE>        entries rebuilt per namespace [default: 100]
+      --format <FORMAT>        How to print the result: text for people, JSON for scripts [default:
+                               text] [possible values: text, json]
+  -c, --config <CONFIG>        
+  -h, --help                   Print help

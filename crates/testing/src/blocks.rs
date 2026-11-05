@@ -17,20 +17,31 @@ use std::collections::BTreeMap;
 
 /// Write one deterministic immutable chunk and an excluded volatile tail.
 pub fn write_immutable_fixture(dir: &std::path::Path, blocks: &[RawBlock]) {
-    let mut primary = vec![1u8];
-    let mut secondary = Vec::new();
-    let mut chunk = Vec::new();
-    for (index, body) in blocks.iter().enumerate() {
-        primary.extend_from_slice(&((index * 56) as u32).to_be_bytes());
-        secondary.extend_from_slice(&(chunk.len() as u64).to_be_bytes());
-        secondary.extend_from_slice(&[0u8; 48]);
-        chunk.extend_from_slice(body);
+    write_immutable_chunks(dir, &[blocks]);
+}
+
+/// [`write_immutable_fixture`] over several chunks, numbered from `00000` in
+/// order, each holding its blocks. Each secondary entry records its block's
+/// offset and checksum, as cardano-node writes them.
+pub fn write_immutable_chunks(dir: &std::path::Path, chunks: &[&[RawBlock]]) {
+    for (number, blocks) in chunks.iter().enumerate() {
+        let mut primary = vec![1u8];
+        let mut secondary = Vec::new();
+        let mut chunk = Vec::new();
+        for (index, body) in blocks.iter().enumerate() {
+            primary.extend_from_slice(&((index * 56) as u32).to_be_bytes());
+            secondary.extend_from_slice(&(chunk.len() as u64).to_be_bytes());
+            secondary.extend_from_slice(&[0u8; 4]);
+            secondary.extend_from_slice(&crc32fast::hash(body).to_be_bytes());
+            secondary.extend_from_slice(&[0u8; 40]);
+            chunk.extend_from_slice(body);
+        }
+        primary.extend_from_slice(&((blocks.len() * 56) as u32).to_be_bytes());
+        std::fs::write(dir.join(format!("{number:05}.primary")), primary).unwrap();
+        std::fs::write(dir.join(format!("{number:05}.secondary")), secondary).unwrap();
+        std::fs::write(dir.join(format!("{number:05}.chunk")), chunk).unwrap();
     }
-    primary.extend_from_slice(&((blocks.len() * 56) as u32).to_be_bytes());
-    std::fs::write(dir.join("00000.primary"), primary).unwrap();
-    std::fs::write(dir.join("00000.secondary"), secondary).unwrap();
-    std::fs::write(dir.join("00000.chunk"), chunk).unwrap();
-    std::fs::write(dir.join("00001.chunk"), []).unwrap();
+    std::fs::write(dir.join(format!("{:05}.chunk", chunks.len())), []).unwrap();
 }
 
 pub fn slot_to_hash(slot: u64) -> BlockHash {
@@ -129,6 +140,40 @@ pub fn make_conway_block_with_txs_at(
     )>,
     auxiliary_data: Option<alonzo::AuxiliaryData>,
 ) -> (ChainPoint, RawBlock) {
+    let txs = txs
+        .into_iter()
+        .map(|(body, valid)| (body, empty_witness_set(), valid))
+        .collect();
+
+    make_conway_block_with_witnessed_txs_at(slot, block_number, prev_hash, txs, auxiliary_data)
+}
+
+/// A witness set with nothing in it.
+pub fn empty_witness_set() -> WitnessSet<'static> {
+    WitnessSet {
+        vkeywitness: None,
+        native_script: None,
+        bootstrap_witness: None,
+        plutus_v1_script: None,
+        plutus_data: None,
+        redeemer: None,
+        plutus_v2_script: None,
+        plutus_v3_script: None,
+    }
+}
+
+/// [`make_conway_block_with_txs_at`] with each tx's witness set given.
+pub fn make_conway_block_with_witnessed_txs_at(
+    slot: BlockSlot,
+    block_number: u64,
+    prev_hash: Option<Hash<32>>,
+    txs: Vec<(
+        pallas::ledger::primitives::conway::TransactionBody<'static>,
+        WitnessSet<'static>,
+        bool,
+    )>,
+    auxiliary_data: Option<alonzo::AuxiliaryData>,
+) -> (ChainPoint, RawBlock) {
     let header_body = HeaderBody {
         block_number,
         slot,
@@ -152,31 +197,22 @@ pub fn make_conway_block_with_txs_at(
         body_signature: Bytes::from(vec![0x18]),
     };
 
-    let witness_set = || WitnessSet {
-        vkeywitness: None,
-        native_script: None,
-        bootstrap_witness: None,
-        plutus_v1_script: None,
-        plutus_data: None,
-        redeemer: None,
-        plutus_v2_script: None,
-        plutus_v3_script: None,
-    };
-
     let invalid: Vec<u32> = txs
         .iter()
         .enumerate()
-        .filter(|(_, (_, valid))| !valid)
+        .filter(|(_, (_, _, valid))| !valid)
         .map(|(index, _)| index as u32)
         .collect();
 
+    let (transaction_bodies, transaction_witness_sets) = txs
+        .into_iter()
+        .map(|(body, witness_set, _)| (KeepRaw::from(body), KeepRaw::from(witness_set)))
+        .unzip();
+
     let block = Block {
         header: KeepRaw::from(header),
-        transaction_witness_sets: txs.iter().map(|_| KeepRaw::from(witness_set())).collect(),
-        transaction_bodies: txs
-            .into_iter()
-            .map(|(body, _)| KeepRaw::from(body))
-            .collect(),
+        transaction_witness_sets,
+        transaction_bodies,
         auxiliary_data_set: match auxiliary_data {
             Some(aux) => {
                 let mut map = BTreeMap::new();

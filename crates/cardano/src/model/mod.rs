@@ -107,7 +107,7 @@ pub mod accounts;
 pub mod asset_mints;
 pub mod assets;
 pub mod datums;
-pub mod drep_sightings;
+pub mod drep_observations;
 pub mod dreps;
 pub mod epoch_value;
 pub mod epochs;
@@ -131,7 +131,7 @@ pub use accounts::*;
 pub use asset_mints::*;
 pub use assets::*;
 pub use datums::*;
-pub use drep_sightings::*;
+pub use drep_observations::*;
 pub use dreps::*;
 pub use epoch_value::*;
 pub use epochs::*;
@@ -153,11 +153,10 @@ pub use stats::*;
 pub enum CardanoEntity {
     EraState(Box<EraState>),
     AccountState(Box<AccountState>),
-    AssetState(Box<AssetState>),
     PoolState(Box<PoolState>),
     EpochState(Box<EpochState>),
     DRepState(Box<DRepState>),
-    DRepSightingState(Box<DRepSightingState>),
+    DRepObservationState(Box<DRepObservationState>),
     ProposalState(Box<ProposalState>),
     PoolEpochLog(Box<PoolEpochLog>),
     DatumState(Box<DatumState>),
@@ -168,19 +167,20 @@ pub enum CardanoEntity {
     DRepEpochLog(Box<DRepEpochLog>),
     FirstMintSet(Box<FirstMintSet>),
     FirstMintChunk(Box<FirstMintChunk>),
-    PolicyMintChunk(Box<PolicyMintChunk>),
+    PolicyFirstMintChunk(Box<PolicyFirstMintChunk>),
     AccountAddressSet(Box<AccountAddressSet>),
-    AccountAddressChunk(Box<AccountAddressChunk>),
+    AccountAddressEpochs(Box<AccountAddressEpochs>),
     AddressStats(Box<AddressStats>),
     PaymentAddressSet(Box<PaymentAddressSet>),
     PaymentStats(Box<PaymentStats>),
-    PaymentAddressChunk(Box<PaymentAddressChunk>),
+    PaymentAddressEpochs(Box<PaymentAddressEpochs>),
     AccountStats(Box<AccountStats>),
     FirstScriptSet(Box<FirstScriptSet>),
     FirstScriptChunk(Box<FirstScriptChunk>),
     MetadataLabelState(Box<MetadataLabelState>),
     AssetMintSet(Box<AssetMintSet>),
     AssetMintChunk(Box<AssetMintChunk>),
+    AccountHistoryState(Box<AccountHistoryState>),
 }
 
 macro_rules! variant_boilerplate {
@@ -204,11 +204,10 @@ macro_rules! variant_boilerplate {
 
 variant_boilerplate!(EraState);
 variant_boilerplate!(AccountState);
-variant_boilerplate!(AssetState);
 variant_boilerplate!(PoolState);
 variant_boilerplate!(EpochState);
 variant_boilerplate!(DRepState);
-variant_boilerplate!(DRepSightingState);
+variant_boilerplate!(DRepObservationState);
 variant_boilerplate!(ProposalState);
 variant_boilerplate!(PoolEpochLog);
 variant_boilerplate!(DatumState);
@@ -219,30 +218,32 @@ variant_boilerplate!(AccountEpochLog);
 variant_boilerplate!(DRepEpochLog);
 variant_boilerplate!(FirstMintSet);
 variant_boilerplate!(FirstMintChunk);
-variant_boilerplate!(PolicyMintChunk);
+variant_boilerplate!(PolicyFirstMintChunk);
 variant_boilerplate!(AccountAddressSet);
-variant_boilerplate!(AccountAddressChunk);
+variant_boilerplate!(AccountAddressEpochs);
 variant_boilerplate!(AddressStats);
 variant_boilerplate!(PaymentAddressSet);
 variant_boilerplate!(PaymentStats);
-variant_boilerplate!(PaymentAddressChunk);
+variant_boilerplate!(PaymentAddressEpochs);
 variant_boilerplate!(AccountStats);
 variant_boilerplate!(FirstScriptSet);
 variant_boilerplate!(FirstScriptChunk);
 variant_boilerplate!(MetadataLabelState);
 variant_boilerplate!(AssetMintSet);
 variant_boilerplate!(AssetMintChunk);
+variant_boilerplate!(AccountHistoryState);
 
 impl dolos_core::Entity for CardanoEntity {
     fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError> {
         match ns {
             EraState::NS => EraState::decode_entity(ns, value).map(Into::into),
             AccountState::NS => AccountState::decode_entity(ns, value).map(Into::into),
-            AssetState::NS => AssetState::decode_entity(ns, value).map(Into::into),
             PoolState::NS => PoolState::decode_entity(ns, value).map(Into::into),
             EpochState::NS => EpochState::decode_entity(ns, value).map(Into::into),
             DRepState::NS => DRepState::decode_entity(ns, value).map(Into::into),
-            DRepSightingState::NS => DRepSightingState::decode_entity(ns, value).map(Into::into),
+            DRepObservationState::NS => {
+                DRepObservationState::decode_entity(ns, value).map(Into::into)
+            }
             ProposalState::NS => ProposalState::decode_entity(ns, value).map(Into::into),
             PoolEpochLog::NS => PoolEpochLog::decode_entity(ns, value).map(Into::into),
             DatumState::NS => DatumState::decode_entity(ns, value).map(Into::into),
@@ -253,16 +254,18 @@ impl dolos_core::Entity for CardanoEntity {
             DRepEpochLog::NS => DRepEpochLog::decode_entity(ns, value).map(Into::into),
             FirstMintSet::NS => FirstMintSet::decode_entity(ns, value).map(Into::into),
             FirstMintChunk::NS => FirstMintChunk::decode_entity(ns, value).map(Into::into),
-            PolicyMintChunk::NS => PolicyMintChunk::decode_entity(ns, value).map(Into::into),
+            PolicyFirstMintChunk::NS => {
+                PolicyFirstMintChunk::decode_entity(ns, value).map(Into::into)
+            }
             AccountAddressSet::NS => AccountAddressSet::decode_entity(ns, value).map(Into::into),
-            AccountAddressChunk::NS => {
-                AccountAddressChunk::decode_entity(ns, value).map(Into::into)
+            AccountAddressEpochs::NS => {
+                AccountAddressEpochs::decode_entity(ns, value).map(Into::into)
             }
             AddressStats::NS => AddressStats::decode_entity(ns, value).map(Into::into),
             PaymentAddressSet::NS => PaymentAddressSet::decode_entity(ns, value).map(Into::into),
             PaymentStats::NS => PaymentStats::decode_entity(ns, value).map(Into::into),
-            PaymentAddressChunk::NS => {
-                PaymentAddressChunk::decode_entity(ns, value).map(Into::into)
+            PaymentAddressEpochs::NS => {
+                PaymentAddressEpochs::decode_entity(ns, value).map(Into::into)
             }
             AccountStats::NS => AccountStats::decode_entity(ns, value).map(Into::into),
             FirstScriptSet::NS => FirstScriptSet::decode_entity(ns, value).map(Into::into),
@@ -270,6 +273,9 @@ impl dolos_core::Entity for CardanoEntity {
             MetadataLabelState::NS => MetadataLabelState::decode_entity(ns, value).map(Into::into),
             AssetMintSet::NS => AssetMintSet::decode_entity(ns, value).map(Into::into),
             AssetMintChunk::NS => AssetMintChunk::decode_entity(ns, value).map(Into::into),
+            AccountHistoryState::NS => {
+                AccountHistoryState::decode_entity(ns, value).map(Into::into)
+            }
             _ => Err(ChainError::InvalidNamespace(ns)),
         }
     }
@@ -278,11 +284,10 @@ impl dolos_core::Entity for CardanoEntity {
         match value {
             Self::EraState(x) => EraState::encode_entity(x),
             Self::AccountState(x) => AccountState::encode_entity(x),
-            Self::AssetState(x) => AssetState::encode_entity(x),
             Self::PoolState(x) => PoolState::encode_entity(x),
             Self::EpochState(x) => EpochState::encode_entity(x),
             Self::DRepState(x) => DRepState::encode_entity(x),
-            Self::DRepSightingState(x) => DRepSightingState::encode_entity(x),
+            Self::DRepObservationState(x) => DRepObservationState::encode_entity(x),
             Self::ProposalState(x) => ProposalState::encode_entity(x),
             Self::PoolEpochLog(x) => PoolEpochLog::encode_entity(x),
             Self::DatumState(x) => DatumState::encode_entity(x),
@@ -293,19 +298,20 @@ impl dolos_core::Entity for CardanoEntity {
             Self::DRepEpochLog(x) => DRepEpochLog::encode_entity(x),
             Self::FirstMintSet(x) => FirstMintSet::encode_entity(x),
             Self::FirstMintChunk(x) => FirstMintChunk::encode_entity(x),
-            Self::PolicyMintChunk(x) => PolicyMintChunk::encode_entity(x),
+            Self::PolicyFirstMintChunk(x) => PolicyFirstMintChunk::encode_entity(x),
             Self::AccountAddressSet(x) => AccountAddressSet::encode_entity(x),
-            Self::AccountAddressChunk(x) => AccountAddressChunk::encode_entity(x),
+            Self::AccountAddressEpochs(x) => AccountAddressEpochs::encode_entity(x),
             Self::AddressStats(x) => AddressStats::encode_entity(x),
             Self::PaymentAddressSet(x) => PaymentAddressSet::encode_entity(x),
             Self::PaymentStats(x) => PaymentStats::encode_entity(x),
-            Self::PaymentAddressChunk(x) => PaymentAddressChunk::encode_entity(x),
+            Self::PaymentAddressEpochs(x) => PaymentAddressEpochs::encode_entity(x),
             Self::AccountStats(x) => AccountStats::encode_entity(x),
             Self::FirstScriptSet(x) => FirstScriptSet::encode_entity(x),
             Self::FirstScriptChunk(x) => FirstScriptChunk::encode_entity(x),
             Self::MetadataLabelState(x) => MetadataLabelState::encode_entity(x),
             Self::AssetMintSet(x) => AssetMintSet::encode_entity(x),
             Self::AssetMintChunk(x) => AssetMintChunk::encode_entity(x),
+            Self::AccountHistoryState(x) => AccountHistoryState::encode_entity(x),
         }
     }
 }
@@ -326,11 +332,10 @@ pub fn build_schema() -> StateSchema {
     let mut schema = StateSchema::default();
     register_state::<EraState>(&mut schema);
     register_state::<AccountState>(&mut schema);
-    register_state::<AssetState>(&mut schema);
     register_state::<PoolState>(&mut schema);
     register_state::<EpochState>(&mut schema);
     register_state::<DRepState>(&mut schema);
-    register_state::<DRepSightingState>(&mut schema);
+    register_state::<DRepObservationState>(&mut schema);
     register_state::<ProposalState>(&mut schema);
     register_state::<DatumState>(&mut schema);
     register_state::<PendingRewardState>(&mut schema);
@@ -345,6 +350,7 @@ pub fn build_schema() -> StateSchema {
     register_state::<FirstScriptSet>(&mut schema);
     register_state::<MetadataLabelState>(&mut schema);
     register_state::<AssetMintSet>(&mut schema);
+    register_state::<AccountHistoryState>(&mut schema);
     schema
 }
 
@@ -356,14 +362,15 @@ pub fn build_log_schema() -> StateSchema {
     register_log::<AccountEpochLog>(&mut schema);
     register_log::<DRepEpochLog>(&mut schema);
     register_log::<FirstMintChunk>(&mut schema);
-    register_log::<PolicyMintChunk>(&mut schema);
+    register_log::<PolicyFirstMintChunk>(&mut schema);
     register_log::<FirstScriptChunk>(&mut schema);
-    register_log::<AccountAddressChunk>(&mut schema);
+    register_log::<AccountAddressEpochs>(&mut schema);
     register_log::<AddressStats>(&mut schema);
-    register_log::<PaymentAddressChunk>(&mut schema);
+    register_log::<PaymentAddressEpochs>(&mut schema);
     register_log::<AccountStats>(&mut schema);
     register_log::<AssetMintChunk>(&mut schema);
     register_log::<ProposalState>(&mut schema);
+    register_log::<DRepState>(&mut schema);
     register_log::<PoolState>(&mut schema);
     schema
 }
@@ -381,9 +388,9 @@ mod schema_tests {
             AccountEpochLog::NS,
             PoolEpochLog::NS,
             DRepEpochLog::NS,
-            AccountAddressChunk::NS,
-            PaymentAddressChunk::NS,
-            PolicyMintChunk::NS,
+            AccountAddressEpochs::NS,
+            PaymentAddressEpochs::NS,
+            PolicyFirstMintChunk::NS,
             FirstMintChunk::NS,
             AssetMintChunk::NS,
         ] {
@@ -399,7 +406,7 @@ mod schema_tests {
         let states = build_schema();
         let logs = build_log_schema();
 
-        for ns in [ProposalState::NS, PoolState::NS] {
+        for ns in [ProposalState::NS, DRepState::NS, PoolState::NS] {
             assert!(states.contains_key(ns), "{ns} is not a state namespace");
             assert!(logs.contains_key(ns), "{ns} is not a log namespace");
         }
@@ -428,8 +435,11 @@ pub enum CardanoDelta {
     PoolRegistration(Box<PoolRegistration>),
     PoolDeRegistration(Box<PoolDeRegistration>),
     MintedBlocksInc(Box<MintedBlocksInc>),
-    MintStatsUpdate(Box<MintStatsUpdate>),
-    MetadataTxUpdate(Box<MetadataTxUpdate>),
+    /// `MintStatsUpdate`, which kept `AssetState`'s supply, mint count and
+    /// first mint; the asset-mint period logs derive them.
+    RetiredMintStatsUpdate(RetiredDelta),
+    /// `MetadataTxUpdate`, which kept `AssetState`'s metadata tx.
+    RetiredMetadataTxUpdate(RetiredDelta),
     EpochStatsUpdate(Box<EpochStatsUpdate>),
     DRepRegistration(Box<DRepRegistration>),
     DRepUnRegistration(Box<DRepUnRegistration>),
@@ -497,7 +507,7 @@ pub enum CardanoDelta {
     RetiredScriptFirstSeen(RetiredDelta),
     StageFirstScript(Box<StageFirstScript>),
     StageAssetMint(Box<StageAssetMint>),
-    DRepSighting(Box<DRepSighting>),
+    DRepObservation(Box<DRepObservation>),
     CommitteeDissolve(Box<CommitteeDissolve>),
     CommitteeReseat(Box<CommitteeReseat>),
     PoolCalidusUpdate(Box<PoolCalidusUpdate>),
@@ -557,14 +567,12 @@ delta_from!(StakeDeregistration);
 delta_from!(PoolRegistration);
 delta_from!(PoolDeRegistration);
 delta_from!(MintedBlocksInc);
-delta_from!(MintStatsUpdate);
-delta_from!(MetadataTxUpdate);
 delta_from!(EpochStatsUpdate);
 delta_from!(DRepRegistration);
 delta_from!(DRepUnRegistration);
 delta_from!(DRepActivity);
 delta_from!(DRepExpiration);
-delta_from!(DRepSighting);
+delta_from!(DRepObservation);
 delta_from!(WithdrawalInc);
 delta_from!(VoteDelegation);
 delta_from!(PParamsUpdate);
@@ -644,14 +652,12 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PoolRegistration(x) => x.key(),
             Self::PoolDeRegistration(x) => x.key(),
             Self::MintedBlocksInc(x) => x.key(),
-            Self::MintStatsUpdate(x) => x.key(),
-            Self::MetadataTxUpdate(x) => x.key(),
             Self::EpochStatsUpdate(x) => x.key(),
             Self::DRepRegistration(x) => x.key(),
             Self::DRepActivity(x) => x.key(),
             Self::DRepUnRegistration(x) => x.key(),
             Self::DRepExpiration(x) => x.key(),
-            Self::DRepSighting(x) => x.key(),
+            Self::DRepObservation(x) => x.key(),
             Self::WithdrawalInc(x) => x.key(),
             Self::VoteDelegation(x) => x.key(),
             Self::PParamsUpdate(x) => x.key(),
@@ -712,7 +718,9 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::CommitteeDissolve(x) => x.key(),
             Self::CommitteeReseat(x) => x.key(),
             Self::PoolCalidusUpdate(x) => x.key(),
-            Self::RetiredDRepAnchorUpdate(x)
+            Self::RetiredMintStatsUpdate(x)
+            | Self::RetiredMetadataTxUpdate(x)
+            | Self::RetiredDRepAnchorUpdate(x)
             | Self::RetiredDRepPowerUpdate(x)
             | Self::RetiredScriptFirstSeen(x) => x.unreachable(),
         }
@@ -728,14 +736,12 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PoolRegistration(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::PoolDeRegistration(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::MintedBlocksInc(x) => Self::downcast_apply(x.as_mut(), entity),
-            Self::MintStatsUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
-            Self::MetadataTxUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::EpochStatsUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DRepRegistration(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DRepUnRegistration(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DRepActivity(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DRepExpiration(x) => Self::downcast_apply(x.as_mut(), entity),
-            Self::DRepSighting(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::DRepObservation(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::WithdrawalInc(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::VoteDelegation(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::PParamsUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
@@ -796,7 +802,9 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::CommitteeDissolve(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::CommitteeReseat(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::PoolCalidusUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
-            Self::RetiredDRepAnchorUpdate(x)
+            Self::RetiredMintStatsUpdate(x)
+            | Self::RetiredMetadataTxUpdate(x)
+            | Self::RetiredDRepAnchorUpdate(x)
             | Self::RetiredDRepPowerUpdate(x)
             | Self::RetiredScriptFirstSeen(x) => x.unreachable(),
         }
@@ -812,14 +820,12 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PoolRegistration(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::PoolDeRegistration(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::MintedBlocksInc(x) => Self::downcast_undo(x.as_ref(), entity),
-            Self::MintStatsUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
-            Self::MetadataTxUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::EpochStatsUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DRepRegistration(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DRepUnRegistration(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DRepActivity(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DRepExpiration(x) => Self::downcast_undo(x.as_ref(), entity),
-            Self::DRepSighting(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::DRepObservation(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::WithdrawalInc(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::VoteDelegation(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::PParamsUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
@@ -880,7 +886,9 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::CommitteeDissolve(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::CommitteeReseat(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::PoolCalidusUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
-            Self::RetiredDRepAnchorUpdate(x)
+            Self::RetiredMintStatsUpdate(x)
+            | Self::RetiredMetadataTxUpdate(x)
+            | Self::RetiredDRepAnchorUpdate(x)
             | Self::RetiredDRepPowerUpdate(x)
             | Self::RetiredScriptFirstSeen(x) => x.unreachable(),
         }
@@ -898,6 +906,8 @@ mod wal_tests {
         let account = AccountKey(StakeCredential::AddrKeyhash([0x11; 28].into()));
         let deltas: Vec<(u32, CardanoDelta)> = vec![
             // retired, never reused
+            (8, CardanoDelta::RetiredMintStatsUpdate(RetiredDelta)),
+            (9, CardanoDelta::RetiredMetadataTxUpdate(RetiredDelta)),
             (45, CardanoDelta::RetiredDRepAnchorUpdate(RetiredDelta)),
             (58, CardanoDelta::RetiredDRepPowerUpdate(RetiredDelta)),
             (
