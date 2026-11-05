@@ -7013,12 +7013,34 @@ mod boundary_preparation {
     }
 
     /// A decoder's read error is damage, though it arrives as an IO error: it
-    /// carries no operating system code, and a retry would never cure it.
+    /// carries no operating system code, and a retry would never cure it. The
+    /// one record spans many compressed blocks, so the first decode fine and
+    /// the error comes up from the middle of the stream.
     #[test]
     fn a_payload_the_decoder_rejects_is_corrupt() {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
+
+        let mut noise: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut value = vec![0x5a, 0x00, 0x10, 0x00, 0x00];
+
+        value.extend((0..1 << 20).map(|_| {
+            noise = noise.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (noise >> 56) as u8
+        }));
+
+        let writer = chain.state.start_writer().unwrap();
+
+        writer
+            .write_entity(
+                AccountState::NS,
+                &EntityKey::from_raw(&common::state_key(AccountState::NS, 0x40)),
+                &value,
+            )
+            .unwrap();
+        writer.commit().unwrap();
+
         let bundle = chain.prepare(&store, &[]).unwrap();
 
         chain.advance_to(3);
@@ -7028,24 +7050,32 @@ mod boundary_preparation {
             std::slice::from_ref(&bundle),
             &export::First,
         );
+
         let loaded = store.load(2).unwrap();
-        let paths: Vec<_> = blobs(root.path())
+        let path = blobs(root.path())
             .into_iter()
             .map(|name| root.path().join("blobs/sha256").join(name))
-            .collect();
-        let originals: Vec<_> = paths.iter().map(|path| fs::read(path).unwrap()).collect();
+            .max_by_key(|path| fs::metadata(path).unwrap().len())
+            .unwrap();
+        let original = fs::read(&path).unwrap();
 
-        let frame_magic = |bytes: &[u8]| {
-            let mut bytes = bytes.to_vec();
-            bytes[0] ^= 0xff;
-            bytes
+        assert!(original.len() > 1 << 20, "the noise did not compress");
+
+        let at_the_start = {
+            let mut damaged = original.clone();
+            damaged[0] ^= 0xff;
+            damaged
         };
-        let cut_short = |bytes: &[u8]| bytes[..bytes.len() / 2].to_vec();
+        let past_the_first_blocks = {
+            let mut damaged = original.clone();
+            let from = damaged.len() / 2;
+            damaged[from..].fill(0xff);
+            damaged
+        };
+        let cut_short = original[..original.len() / 2].to_vec();
 
-        for damage in [&frame_magic as &dyn Fn(&[u8]) -> Vec<u8>, &cut_short] {
-            for (path, original) in paths.iter().zip(&originals) {
-                fs::write(path, damage(original)).unwrap();
-            }
+        for damaged in [at_the_start, past_the_first_blocks, cut_short] {
+            fs::write(&path, damaged).unwrap();
 
             let refused =
                 chain.finalize(tempdir().path(), &store, &loaded, &staged, &export::First);
@@ -7056,6 +7086,12 @@ mod boundary_preparation {
                 "{refusal:?}"
             );
         }
+
+        fs::write(&path, &original).unwrap();
+
+        chain
+            .finalize(tempdir().path(), &store, &loaded, &staged, &export::First)
+            .unwrap();
     }
 
     #[test]
