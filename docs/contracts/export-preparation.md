@@ -186,9 +186,10 @@ every unfinished bundle first, and deletes any staging root of that batch, whose
 runs came from the old archive. Should it forget the root, `stage_batch` refuses
 the boundaries it captures again (`staging::Refusal::SourceMismatch`).
 `staging::stage` takes no captures: it refuses a root `stage_batch` wrote the same
-way, whose identity holds them, and reuses the runs under a root it wrote itself. A
-host that keeps its bundles, or a `Staged` it already holds, through a rebuild gets
-no refusal: they still agree with each other, and nothing can see the stores moved.
+way, whose identity holds them, and reuses the runs under a root it wrote itself,
+for the same request. A host that keeps its bundles, or a `Staged` it already holds,
+through a rebuild gets no refusal: they still agree with each other, and nothing can
+see the stores moved.
 
 **Loading** checks the checksum, the format, the sequence, the owner, that the
 bundle was captured as the records this build publishes (profile, profile version
