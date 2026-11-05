@@ -1221,6 +1221,8 @@ pub struct Finalizing<'a> {
 ///
 /// Only here does the inscription take a history. Nothing the boundary captured
 /// is read from `archive`, and a window it could still have changed never is.
+/// A window `previous` forecast when the batch was staged and declines now is
+/// staged here, from the same view.
 pub fn finalize<W, A>(
     stele: &W,
     finalizing: &Finalizing<'_>,

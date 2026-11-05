@@ -7012,6 +7012,52 @@ mod boundary_preparation {
         assert!(matches!(refusal, Refusal::Io(_)), "{refusal:?}");
     }
 
+    /// A decoder's read error is damage, though it arrives as an IO error: it
+    /// carries no operating system code, and a retry would never cure it.
+    #[test]
+    fn a_payload_the_decoder_rejects_is_corrupt() {
+        let (root, stage_root) = (tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let bundle = chain.prepare(&store, &[]).unwrap();
+
+        chain.advance_to(3);
+
+        let staged = chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &export::First,
+        );
+        let loaded = store.load(2).unwrap();
+        let paths: Vec<_> = blobs(root.path())
+            .into_iter()
+            .map(|name| root.path().join("blobs/sha256").join(name))
+            .collect();
+        let originals: Vec<_> = paths.iter().map(|path| fs::read(path).unwrap()).collect();
+
+        let frame_magic = |bytes: &[u8]| {
+            let mut bytes = bytes.to_vec();
+            bytes[0] ^= 0xff;
+            bytes
+        };
+        let cut_short = |bytes: &[u8]| bytes[..bytes.len() / 2].to_vec();
+
+        for damage in [&frame_magic as &dyn Fn(&[u8]) -> Vec<u8>, &cut_short] {
+            for (path, original) in paths.iter().zip(&originals) {
+                fs::write(path, damage(original)).unwrap();
+            }
+
+            let refused =
+                chain.finalize(tempdir().path(), &store, &loaded, &staged, &export::First);
+            let refusal = preparation_refusal(refused);
+
+            assert!(
+                matches!(refusal, Refusal::Corrupt { sequence: 2, .. }),
+                "{refusal:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_vanished_payload_is_a_missing_artifact() {
         let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
