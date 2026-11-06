@@ -564,13 +564,18 @@ async fn an_acquire_with_no_point_takes_the_state_cursor() {
 
 #[tokio::test]
 async fn a_store_with_no_cursor_is_at_origin() {
-    let domain = ToyDomain::new(None, None);
+    let dir = tempfile::tempdir().unwrap();
+    let domain = real_domain(dir.path());
+    assert_eq!(domain.state().read_cursor().unwrap(), None);
 
-    let (mut client, _server, _dir) = connect_session(domain).await;
+    let (mut client, _server, _socket) = connect_session(domain).await;
 
     within(client.statequery().acquire(None)).await.unwrap();
 
-    expect_tip(&mut client, Point::Origin).await;
+    let point = within(q16::get_chain_point(client.statequery()))
+        .await
+        .unwrap();
+    assert_eq!(point, Point::Origin);
 }
 
 /// The state between an epoch boundary's commit and its block's: the cursor
