@@ -10,7 +10,7 @@ use pallas::network::{
     facades::{NodeClient, NodeServer},
     miniprotocols::{
         chainsync::{BlockContent, NextResponse},
-        Point,
+        localstate, Point,
     },
 };
 use tempfile::TempDir;
@@ -51,8 +51,8 @@ fn write_wal<D: Domain>(domain: &D, blocks: &[(ChainPoint, RawBlock)]) {
     domain.wal().append_entries(entries).unwrap();
 }
 
-/// A domain over the stores a real node opens, whose tip replay `ToyDomain`
-/// doesn't reproduce.
+/// A domain over the stores a real node opens. `ToyDomain` has its own copy of
+/// the tip replay, so only these tests exercise the adapter's.
 fn real_domain(dir: &Path) -> DomainAdapter {
     dolos_cardano::include::preview::save(dir).unwrap();
 
@@ -165,15 +165,8 @@ async fn expect_forward(client: &mut NodeClient, block: &RawBlock) {
     }
 }
 
-/// Ask for the next block with none available, then see `block` arrive at the
-/// tip. Anything sent before it is a replay of a block the client already
-/// holds.
-async fn expect_await_then_forward<D: Domain>(
-    client: &mut NodeClient,
-    domain: &D,
-    point: &ChainPoint,
-    block: &RawBlock,
-) {
+/// Ask for the next block with none available.
+async fn expect_await(client: &mut NodeClient) {
     within(client.chainsync().send_request_next())
         .await
         .unwrap();
@@ -184,7 +177,28 @@ async fn expect_await_then_forward<D: Domain>(
             .unwrap(),
         NextResponse::Await
     ));
+}
 
+/// Ask for the next block with none available, then see `block` arrive at the
+/// tip. Anything sent before it is a replay of a block the client already
+/// holds.
+async fn expect_await_then_forward<D: Domain>(
+    client: &mut NodeClient,
+    domain: &D,
+    point: &ChainPoint,
+    block: &RawBlock,
+) {
+    expect_await(client).await;
+    expect_tip_forward(client, domain, point, block).await;
+}
+
+/// With the client waiting at the tip, see `block` arrive there.
+async fn expect_tip_forward<D: Domain>(
+    client: &mut NodeClient,
+    domain: &D,
+    point: &ChainPoint,
+    block: &RawBlock,
+) {
     domain.notify_tip(TipEvent::Apply(point.clone(), block.clone()));
 
     match within(client.chainsync().recv_while_must_reply())
@@ -194,6 +208,18 @@ async fn expect_await_then_forward<D: Domain>(
         NextResponse::RollForward(BlockContent(got), _) => assert_eq!(&got, block.as_ref()),
         other => panic!("expected the new block, got {:?}", discriminant(&other)),
     }
+}
+
+/// A point the archive doesn't hold.
+fn missing_point() -> Option<Point> {
+    Some(Point::Specific(999, vec![0; 32]))
+}
+
+fn expect_acquire_failure(result: Result<(), localstate::ClientError>) {
+    assert!(
+        matches!(result, Err(localstate::ClientError::AcquirePointNotFound)),
+        "expected an acquire failure, got {result:?}"
+    );
 }
 
 fn discriminant(response: &NextResponse<BlockContent>) -> &'static str {
@@ -334,4 +360,72 @@ async fn a_seeded_wal_on_a_real_domain_replays_no_empty_block() {
     expect_rollback(&mut client, &chain[0].0).await;
 
     expect_await_then_forward(&mut client, &domain, &chain[1].0, &chain[1].1).await;
+}
+
+/// Asking for a block before any intersection panics in the chain-sync task, so
+/// this needs another trigger once that panic is fixed.
+#[tokio::test]
+async fn a_panicking_protocol_ends_the_connection() {
+    let domain = ToyDomain::new(None, None);
+
+    let (mut client, server, _dir) = connect_session(domain).await;
+
+    let reply = within(client.chainsync().request_next()).await;
+
+    assert!(reply.is_err(), "the client should see the connection end");
+    within(server).await.unwrap().unwrap_err();
+}
+
+#[tokio::test]
+async fn a_failed_acquire_can_be_retried_with_chain_sync_still_serving() {
+    let domain = ToyDomain::new(None, None);
+    let chain = blocks(&[100, 110]);
+    write_wal(&domain, &chain[..1]);
+
+    let (mut client, _server, _dir) = connect_session(domain.clone()).await;
+
+    intersect(&mut client, &chain[0].0).await;
+    expect_rollback(&mut client, &chain[0].0).await;
+    expect_await(&mut client).await;
+
+    expect_acquire_failure(within(client.statequery().acquire(missing_point())).await);
+    within(client.statequery().acquire(Some(Point::Origin)))
+        .await
+        .unwrap();
+
+    expect_tip_forward(&mut client, &domain, &chain[1].0, &chain[1].1).await;
+}
+
+#[tokio::test]
+async fn a_failed_reacquire_can_be_followed_by_an_acquire() {
+    let domain = ToyDomain::new(None, None);
+
+    let (mut client, _server, _dir) = connect_session(domain).await;
+
+    within(client.statequery().acquire(Some(Point::Origin)))
+        .await
+        .unwrap();
+
+    within(client.statequery().send_reacquire(missing_point()))
+        .await
+        .unwrap();
+    expect_acquire_failure(within(client.statequery().recv_while_acquiring()).await);
+
+    within(client.statequery().acquire(Some(Point::Origin)))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_failed_acquire_then_done_ends_the_session_cleanly() {
+    let domain = ToyDomain::new(None, None);
+
+    let (mut client, server, _dir) = connect_session(domain).await;
+
+    expect_acquire_failure(within(client.statequery().acquire(missing_point())).await);
+
+    within(client.statequery().send_done()).await.unwrap();
+    within(client.chainsync().send_done()).await.unwrap();
+
+    within(server).await.unwrap().unwrap();
 }

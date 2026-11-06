@@ -67,10 +67,13 @@ impl<D: Domain> Session<D> {
         Ok(())
     }
 
+    /// Answer an Acquire or ReAcquire, returning whether the point was
+    /// acquired. A failure puts the protocol back in Idle, whichever one
+    /// was asked.
     async fn handle_acquire(
         &mut self,
         point: Option<pallas::network::miniprotocols::Point>,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         debug!(?point, "handling acquire request");
 
         let chain_point = match point {
@@ -104,11 +107,12 @@ impl<D: Domain> Session<D> {
             self.acquired_point = Some(chain_point);
             self.send_acquired().await?;
         } else {
+            self.acquired_point = None;
             self.send_failure(localstate::AcquireFailure::PointNotOnChain)
                 .await?;
         }
 
-        Ok(())
+        Ok(exists)
     }
 
     /// Decode cardano-cli tagged query format.
@@ -351,7 +355,7 @@ impl<D: Domain> Session<D> {
     async fn handle_reacquire(
         &mut self,
         point: Option<pallas::network::miniprotocols::Point>,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         debug!(?point, "handling reacquire request");
         self.handle_acquire(point).await
     }
@@ -370,7 +374,9 @@ impl<D: Domain> Session<D> {
                 .await
                 .map_err(Error::server)?
             {
-                self.handle_acquire(req.0).await?;
+                if !self.handle_acquire(req.0).await? {
+                    continue;
+                }
             } else {
                 break;
             }
@@ -386,9 +392,11 @@ impl<D: Domain> Session<D> {
                         self.handle_query(query).await?;
                     }
                     localstate::ClientQueryRequest::ReAcquire(point) => {
-                        self.handle_reacquire(point).await?;
                         // After reacquire, we stay in acquired state but with
-                        // new point
+                        // new point, unless it failed
+                        if !self.handle_reacquire(point).await? {
+                            break;
+                        }
                     }
                     localstate::ClientQueryRequest::Release => {
                         self.handle_release().await?;
