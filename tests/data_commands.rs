@@ -589,6 +589,7 @@ fn voted_proposal() -> dolos_cardano::ProposalState {
         cc_votes: BTreeMap::from([(StakeCredential::ScriptHash([0xc0; 28].into()), vote.clone())]),
         drep_votes: BTreeMap::from([(StakeCredential::AddrKeyhash([0xd0; 28].into()), vote)]),
         spo_votes: BTreeMap::new(),
+        cost_models_present: false,
     }
 }
 
