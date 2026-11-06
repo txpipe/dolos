@@ -148,8 +148,10 @@ impl Domain for DomainAdapter {
 
         // We then collect any gap between the from point and the current tip. This
         // assumes that no event will be sent between the creation of the receiver and
-        // the collection of the replay. It starts after `from`: a client at `from`
-        // already holds it, and one that named no intersect starts from the next block.
+        // the collection of the replay. It holds what follows `from`, not `from`
+        // itself: a client at `from` already has that block, and
+        // `ChainCrawler::start` passes the WAL tip for a client with no intersect.
+        // `None` replays the whole WAL.
         let replay = self
             .wal()
             .iter_blocks(from.clone(), None)?
