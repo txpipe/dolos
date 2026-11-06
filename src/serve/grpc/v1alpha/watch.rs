@@ -10,6 +10,7 @@ use std::pin::Pin;
 use tonic::{Request, Response, Status};
 
 use crate::prelude::*;
+use crate::serve::grpc::convert::chain_stream_status;
 use crate::serve::grpc::stream::ChainStream;
 
 fn outputs_match_address(
@@ -487,7 +488,7 @@ where
 
         let stream =
             ChainStream::start::<D, _>(self.domain.clone(), intersect.clone(), self.cancel.clone())
-                .map_err(|e| Status::internal(format!("failed to start chain stream: {e}")))?
+                .map_err(|e| chain_stream_status("failed to start chain stream", &e))?
                 .ok_or_else(|| {
                     Status::not_found(format!(
                         "none of the requested points intersect with local history: {intersect:?}"
@@ -500,12 +501,69 @@ where
             Ok(log) => roll_to_watch_response(&mapper, &log, &inner_req)
                 .map(Ok)
                 .left_stream(),
-            Err(e) => futures_util::stream::once(std::future::ready(Err(Status::internal(
-                format!("chain stream failed: {e}"),
+            Err(e) => futures_util::stream::once(std::future::ready(Err(chain_stream_status(
+                "chain stream failed",
+                &e,
             ))))
             .right_stream(),
         });
 
         Ok(Response::new(Box::pin(stream)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn watch_tx_from(point: &ChainPoint) -> Request<u5c::watch::WatchTxRequest> {
+        Request::new(u5c::watch::WatchTxRequest {
+            intersect: vec![u5c::watch::BlockRef {
+                slot: point.slot(),
+                hash: point.hash().unwrap().to_vec().into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+    }
+
+    #[tokio::test]
+    async fn watch_tx_tells_the_client_to_retry_when_it_loses_the_overlap() {
+        use pallas::interop::utxorpc::v1alpha::spec::watch::watch_service_server::WatchService as _;
+
+        let domain = dolos_testing::toy_domain::ToyDomain::new(None, None);
+        let chain = crate::serve::grpc::stream::tests::archived_chain(&domain, &[100, 110, 120]);
+
+        let service = WatchServiceImpl::new(domain, crate::serve::CancelTokenImpl::default());
+
+        let response = service
+            .watch_tx(watch_tx_from(&chain[0].0))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let items: Vec<_> = response.collect().await;
+
+        assert_eq!(
+            items.last().unwrap().as_ref().unwrap_err().code(),
+            tonic::Code::Unavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_tx_tells_the_client_to_retry_when_it_starts_without_overlap() {
+        use pallas::interop::utxorpc::v1alpha::spec::watch::watch_service_server::WatchService as _;
+
+        let domain = dolos_testing::toy_domain::ToyDomain::new(None, None);
+        let chain = crate::serve::grpc::stream::tests::archived_chain(&domain, &[100]);
+
+        let service = WatchServiceImpl::new(domain, crate::serve::CancelTokenImpl::default());
+
+        let status = match service.watch_tx(watch_tx_from(&chain[0].0)).await {
+            Ok(_) => panic!("expected the start to fail"),
+            Err(status) => status,
+        };
+
+        assert_eq!(status.code(), tonic::Code::Unavailable);
     }
 }

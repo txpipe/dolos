@@ -61,7 +61,7 @@ impl ChainStream {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::time::Duration;
 
     use dolos_core::{ArchiveStore as _, ArchiveWriter as _};
@@ -75,6 +75,20 @@ mod tests {
 
     use super::*;
     use crate::serve::CancelTokenImpl;
+
+    /// Blocks at `slots`, written to the archive only, so a crawl runs out of
+    /// overlap once it drains them.
+    pub(crate) fn archived_chain(domain: &ToyDomain, slots: &[u64]) -> Vec<(ChainPoint, RawBlock)> {
+        let chain: Vec<_> = slots.iter().map(|slot| make_conway_block(*slot)).collect();
+
+        let writer = domain.archive().start_writer().unwrap();
+        for (point, block) in &chain {
+            writer.apply(point, block).unwrap();
+        }
+        writer.commit().unwrap();
+
+        chain
+    }
 
     #[tokio::test]
     async fn test_stream_waiting() {
@@ -195,7 +209,36 @@ mod tests {
 
         assert!(matches!(
             s.next().await,
-            Some(Err(DomainError::Internal(_)))
+            Some(Err(DomainError::NoOverlap(_)))
+        ));
+        assert!(s.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_stream_reports_a_cursor_gone_from_both_stores() {
+        let domain = ToyDomain::new(None, None);
+        let chain = archived_chain(&domain, &[100, 110, 120]);
+
+        let s = ChainStream::start::<ToyDomain, CancelTokenImpl>(
+            domain.clone(),
+            vec![chain[0].0.clone()],
+            CancelTokenImpl(CancellationToken::new()),
+        )
+        .unwrap()
+        .expect("the archive covers the start point");
+
+        pin_mut!(s);
+
+        s.next().await.unwrap().unwrap();
+        s.next().await.unwrap().unwrap();
+        s.next().await.unwrap().unwrap();
+
+        // Re-seeking finds nothing now, which must not read as reaching the tip.
+        domain.archive().truncate_front(&chain[0].0).unwrap();
+
+        assert!(matches!(
+            s.next().await,
+            Some(Err(DomainError::NoOverlap(120)))
         ));
         assert!(s.next().await.is_none());
     }

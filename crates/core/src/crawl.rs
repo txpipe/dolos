@@ -1,6 +1,7 @@
 use std::{collections::VecDeque, sync::Arc};
 
 use pallas::ledger::traverse::MultiEraBlock;
+use tracing::warn;
 
 use crate::{
     ArchiveError, ArchiveStore as _, ChainPoint, Domain, DomainError, RawBlock, TipEvent,
@@ -37,11 +38,36 @@ impl<D: Domain> Batch<D> {
     }
 
     fn from_archive(last_point: ChainPoint, domain: &D) -> Result<Self, DomainError> {
-        let page = domain
+        let mut rows = domain
             .archive()
             .get_range(Some(last_point.slot()), None)?
-            // skip the last point, we already seen it
-            .skip(1)
+            .peekable();
+
+        // A slot can hold more than one block, so the cursor is found by its hash and
+        // the crawl continues after it. Origin has seen nothing, so it skips nothing.
+        if let ChainPoint::Specific(slot, hash) = &last_point {
+            let mut found = false;
+            let mut seen_other = false;
+
+            while let Some((_, body)) = rows.next_if(|(row_slot, _)| row_slot == slot) {
+                let block = MultiEraBlock::decode(&body).map_err(ArchiveError::from)?;
+
+                if block.hash() == *hash {
+                    found = true;
+                    break;
+                }
+
+                seen_other = true;
+            }
+
+            // Later rows without the cursor mean a rollback replaced it, and carrying on
+            // would hand out a fork with no rollback.
+            if !found && (seen_other || rows.peek().is_some()) {
+                return Err(no_overlap(&last_point));
+            }
+        }
+
+        let page = rows
             .take(LOAD_BATCH_SIZE)
             // Both stores intersect a point by its hash, so a cursor that only
             // knew its slot could never cross into the WAL or seek back here.
@@ -62,10 +88,7 @@ impl<D: Domain> Batch<D> {
             // crawling from. Returning an error lets the caller re-seek instead
             // of unwinding the task it is streaming from.
             let Some((point, _)) = intersect else {
-                return Err(DomainError::Internal(format!(
-                    "no overlap between archive and wal at {}",
-                    last_point.slot()
-                )));
+                return Err(no_overlap(&last_point));
             };
 
             return Self::from_wal(point, domain);
@@ -111,6 +134,15 @@ impl<D: Domain> Batch<D> {
 
 const LOAD_BATCH_SIZE: usize = 10;
 
+fn no_overlap(point: &ChainPoint) -> DomainError {
+    warn!(
+        slot = point.slot(),
+        "crawl cursor has no overlap with the stores"
+    );
+
+    DomainError::NoOverlap(point.slot())
+}
+
 pub struct ChainCrawler<D: Domain> {
     domain: D,
     batch: Batch<D>,
@@ -125,8 +157,7 @@ impl<D: Domain> ChainCrawler<D> {
 
         if intersect.is_empty() {
             // An empty WAL has no tip to start from. Report it rather than
-            // unwinding, so a client connecting before the first block is
-            // imported gets an error it can retry.
+            // unwinding, so the caller gets an error it can retry.
             let (point, _) = domain.wal().find_tip()?.ok_or(DomainError::WalIsEmpty)?;
             let batch = Batch::from_tip(point.clone(), &domain)?;
 
