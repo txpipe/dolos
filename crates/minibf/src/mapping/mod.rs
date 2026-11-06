@@ -2083,6 +2083,27 @@ impl IntoModel<TxContentPoolCertsInnerRelaysInner> for alonzo::Relay {
     }
 }
 
+/// The JSON number of a datum integer.
+///
+/// A value within `i64` or `u64` is written as that integer, digit for digit.
+/// A JSON number holds nothing wider here, so a value past both is written as
+/// the nearest double, which is also what a client reading numbers as doubles
+/// makes of the exact digits.
+fn datum_int(value: &BigInt) -> Result<serde_json::Number, StatusCode> {
+    if let Some(value) = value.to_i64() {
+        return Ok(value.into());
+    }
+
+    if let Some(value) = value.to_u64() {
+        return Ok(value.into());
+    }
+
+    value
+        .to_f64()
+        .and_then(serde_json::Number::from_f64)
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+}
+
 pub struct PlutusDataWrapper(pub PlutusData);
 impl PlutusDataWrapper {
     fn as_value(&self) -> Result<serde_json::Value, StatusCode> {
@@ -2134,37 +2155,25 @@ impl PlutusDataWrapper {
                 )])))
             }
 
-            PlutusData::BigInt(x) => match x {
-                pallas::ledger::primitives::BigInt::Int(int) => {
-                    let i = Into::<i128>::into(*int);
-                    Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
-                        "int".to_string(),
-                        serde_json::Value::Number((i as i64).into()),
-                    )])))
-                }
-                pallas::ledger::primitives::BigInt::BigUInt(bounded_bytes) => {
-                    let bigint = num_bigint::BigUint::from_bytes_be(bounded_bytes.as_slice());
-                    let number = serde_json::Number::from_f64(
-                        bigint.to_f64().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
-                    )
-                    .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-                    Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
-                        "int".to_string(),
-                        serde_json::Value::Number(number),
-                    )])))
-                }
-                pallas::ledger::primitives::BigInt::BigNInt(bounded_bytes) => {
-                    let bigint = num_bigint::BigInt::from_signed_bytes_be(bounded_bytes.as_slice());
-                    let number = serde_json::Number::from_f64(
-                        bigint.to_f64().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
-                    )
-                    .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-                    Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
-                        "int".to_string(),
-                        serde_json::Value::Number(number),
-                    )])))
-                }
-            },
+            PlutusData::BigInt(x) => {
+                let value = match x {
+                    pallas::ledger::primitives::BigInt::Int(int) => {
+                        BigInt::from(Into::<i128>::into(*int))
+                    }
+                    pallas::ledger::primitives::BigInt::BigUInt(magnitude) => {
+                        BigInt::from(num_bigint::BigUint::from_bytes_be(magnitude.as_slice()))
+                    }
+                    // a negative bignum holds `n` for the value `-1 - n`
+                    pallas::ledger::primitives::BigInt::BigNInt(magnitude) => {
+                        -BigInt::from(num_bigint::BigUint::from_bytes_be(magnitude.as_slice())) - 1
+                    }
+                };
+
+                Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
+                    "int".to_string(),
+                    serde_json::Value::Number(datum_int(&value)?),
+                )])))
+            }
 
             PlutusData::BoundedBytes(x) => {
                 Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
@@ -2208,5 +2217,138 @@ mod tests {
 
         // 10 * 577/10000 + 100 * 721/10000000 = 0.584... — the fee rounds up
         assert_eq!(redeemer_fee(&units, &prices).expect("fee"), 1);
+    }
+
+    /// The JSON text of the datum whose CBOR is `cbor`.
+    fn datum_json(cbor: &str) -> String {
+        let cbor = hex::decode(cbor).expect("hex");
+        let datum: PlutusData = minicbor::decode(&cbor).expect("plutus data");
+        let value = PlutusDataWrapper(datum).as_value().expect("json");
+
+        serde_json::to_string(&value).expect("text")
+    }
+
+    #[test]
+    fn datum_integers_keep_their_digits_within_64_bits() {
+        for (cbor, json) in [
+            ("182a", r#"{"int":42}"#),
+            ("20", r#"{"int":-1}"#),
+            // 2^53 + 1, the first integer a double cannot hold
+            ("1b0020000000000001", r#"{"int":9007199254740993}"#),
+            // i64::MAX, then the two values past it that wrapped to negative
+            ("1b7fffffffffffffff", r#"{"int":9223372036854775807}"#),
+            ("1b8000000000000000", r#"{"int":9223372036854775808}"#),
+            ("1bffffffffffffffff", r#"{"int":18446744073709551615}"#),
+            // i64::MIN
+            ("3b7fffffffffffffff", r#"{"int":-9223372036854775808}"#),
+        ] {
+            assert_eq!(datum_json(cbor), json, "{cbor}");
+        }
+    }
+
+    #[test]
+    fn datum_bignums_follow_the_cbor_rules() {
+        for (cbor, json) in [
+            // a positive bignum that fits is an integer, not a float
+            ("c24105", r#"{"int":5}"#),
+            ("c248ffffffffffffffff", r#"{"int":18446744073709551615}"#),
+            // a negative bignum holds n for -1 - n: 0 is -1, 0xff is -256
+            ("c34100", r#"{"int":-1}"#),
+            ("c341ff", r#"{"int":-256}"#),
+            ("c3487fffffffffffffff", r#"{"int":-9223372036854775808}"#),
+        ] {
+            assert_eq!(datum_json(cbor), json, "{cbor}");
+        }
+    }
+
+    #[test]
+    fn datum_integers_past_64_bits_are_the_nearest_double() {
+        for (cbor, double) in [
+            // -2^63 - 1 and -2^64, the negative integers past i64
+            ("3b8000000000000000", -9_223_372_036_854_775_809_f64),
+            ("3bffffffffffffffff", -18_446_744_073_709_551_616_f64),
+            // 2^64 and -2^64 - 1 as bignums
+            ("c249010000000000000000", 18_446_744_073_709_551_616_f64),
+            ("c349010000000000000000", -18_446_744_073_709_551_617_f64),
+        ] {
+            let value: serde_json::Value = serde_json::from_str(&datum_json(cbor)).expect("json");
+            assert_eq!(value["int"].as_f64(), Some(double), "{cbor}");
+        }
+    }
+
+    /// Whether two JSON values are equal with every number read as a double.
+    fn same_as_doubles(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+        use serde_json::Value;
+
+        match (a, b) {
+            (Value::Number(a), Value::Number(b)) => a.as_f64() == b.as_f64(),
+            (Value::Array(a), Value::Array(b)) => {
+                a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same_as_doubles(a, b))
+            }
+            (Value::Object(a), Value::Object(b)) => {
+                a.len() == b.len()
+                    && a.iter()
+                        .all(|(key, a)| b.get(key).is_some_and(|b| same_as_doubles(a, b)))
+            }
+            _ => a == b,
+        }
+    }
+
+    /// Preview datums beside what Blockfrost answers for them. Blockfrost
+    /// reads every number through a double, so past 2^53 its digits are a
+    /// rounded integer or an exponent form, and the two agree as doubles.
+    #[test]
+    fn datum_json_matches_blockfrost_as_doubles() {
+        // integers past 2^53 and past i64, and a positive bignum
+        const WIDE: &str = "7e85cadb22634a84abc99655295b8612c39e8401e25252c953072cb10d430a73";
+        const WIDE_CBOR: &str = "8b1b00000081b09b977f051b000019883d2e5aca1b000000010974337e\
+            1a03f81e8a1b003d56ddda530a91821bab13140218149b1fc24c02449ccbb90463bad2f8e000\
+            1b0000019f9df6a5981b0000019f9e106758821b0000000956a8e8041b000001d2dfcc7433\
+            1a002dc6c0";
+        const WIDE_BLOCKFROST: &str = r#"{"list":[{"int":557013768063},{"int":5},
+            {"int":28072932694730},{"int":4453577598},{"int":66592394},
+            {"int":17265484429986448},
+            {"list":[{"int":12327218604269672000},{"int":7.0191742256875e+26}]},
+            {"int":1785061615000},{"int":1785063303000},
+            {"list":[{"int":40108615684},{"int":2005209478195}]},{"int":3000000}]}"#;
+
+        // a negative bignum
+        const NEGATIVE: &str = "aeef1c285332e73fc606e2fc8f2c40d8ad84b2d4401b7ab2360cde2950b71170";
+        const NEGATIVE_CBOR: &str = "d87a86d879804474657374d87a80195ea0\
+            c34e061208446788844c1533f84ff3b2a14378797a1901bd";
+        const NEGATIVE_BLOCKFROST: &str = r#"{"fields":[{"fields":[],"constructor":0},
+            {"bytes":"74657374"},{"fields":[],"constructor":1},{"int":24224},
+            {"int":-1.2312312312312312e+32},
+            {"map":[{"k":{"bytes":"78797a"},"v":{"int":445}}]}],"constructor":1}"#;
+
+        let json = |cbor: &str| -> serde_json::Value {
+            serde_json::from_str(&datum_json(cbor)).expect("json")
+        };
+
+        for (hash, cbor, blockfrost) in [
+            (WIDE, WIDE_CBOR, WIDE_BLOCKFROST),
+            (NEGATIVE, NEGATIVE_CBOR, NEGATIVE_BLOCKFROST),
+        ] {
+            let ours = json(cbor);
+            let theirs: serde_json::Value = serde_json::from_str(blockfrost).expect("json");
+
+            assert!(
+                same_as_doubles(&ours, &theirs),
+                "{hash}: {ours} != {theirs}"
+            );
+        }
+
+        let wide = json(WIDE_CBOR);
+
+        // past i64: once a negative number here, a rounded one on Blockfrost
+        assert_eq!(
+            wide["list"][6]["list"][0]["int"],
+            serde_json::json!(12_327_218_604_269_673_247_u64)
+        );
+        // past 2^53: the digits on chain, where Blockfrost rounds to ...448
+        assert_eq!(
+            wide["list"][5]["int"],
+            serde_json::json!(17_265_484_429_986_449_u64)
+        );
     }
 }
