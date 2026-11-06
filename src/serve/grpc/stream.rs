@@ -10,28 +10,37 @@ impl ChainStream {
         domain: D,
         intersect: Vec<ChainPoint>,
         cancel: C,
-    ) -> Result<Option<impl Stream<Item = TipEvent> + 'static>, DomainError> {
+    ) -> Result<Option<impl Stream<Item = Result<TipEvent, DomainError>> + 'static>, DomainError>
+    {
         let Some((mut crawler, intersected)) = ChainCrawler::<D>::start(&domain, &intersect)?
         else {
             return Ok(None);
         };
 
         Ok(Some(async_stream::stream! {
-            yield TipEvent::Mark(intersected.clone());
+            yield Ok(TipEvent::Mark(intersected.clone()));
 
             loop {
                 match crawler.next_block() {
-                    Ok(Some((point, block))) => yield TipEvent::Apply(point, block),
+                    Ok(Some((point, block))) => yield Ok(TipEvent::Apply(point, block)),
                     Ok(None) => break,
                     Err(err) => {
                         // Lost the archive/WAL overlap mid-stream. Re-seek from
-                        // where we stalled rather than ending the stream; give up
-                        // only if that point is gone from both stores.
+                        // where we stalled, and report the failure if that
+                        // doesn't restore it so the client can tell it from an
+                        // orderly end of stream.
                         warn!(%err, "crawler lost its overlap, re-seeking from the last point");
 
                         match ChainCrawler::<D>::start(&domain, std::slice::from_ref(crawler.last_point())) {
                             Ok(Some((next, _))) => crawler = next,
-                            _ => return,
+                            Ok(None) => {
+                                yield Err(err);
+                                return;
+                            }
+                            Err(reseek_err) => {
+                                yield Err(reseek_err);
+                                return;
+                            }
                         }
                     }
                 }
@@ -43,7 +52,7 @@ impl ChainStream {
                         break;
                     }
                     next = crawler.next_tip() => {
-                        yield next;
+                        yield Ok(next);
                     }
                 }
             }
@@ -55,9 +64,12 @@ impl ChainStream {
 mod tests {
     use std::time::Duration;
 
+    use dolos_core::{ArchiveStore as _, ArchiveWriter as _};
     use dolos_testing::blocks::make_conway_block;
+    use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
     use dolos_testing::toy_domain::ToyDomain;
     use futures_util::{pin_mut, StreamExt};
+    use pallas::ledger::traverse::MultiEraBlock;
     use tokio::time::timeout;
     use tokio_util::sync::CancellationToken;
 
@@ -98,7 +110,7 @@ mod tests {
 
         pin_mut!(s);
 
-        let first = s.next().await.unwrap();
+        let first = s.next().await.unwrap().unwrap();
 
         assert_eq!(first, TipEvent::Mark(chain_point));
 
@@ -106,7 +118,7 @@ mod tests {
             let evt = timeout(Duration::from_secs(5), s.next())
                 .await
                 .expect("took too long");
-            let value = evt.unwrap();
+            let value = evt.unwrap().unwrap();
 
             match value {
                 TipEvent::Apply(p, _) => {
@@ -140,5 +152,51 @@ mod tests {
         );
 
         assert!(result.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_stream_reports_a_lost_overlap() {
+        let domain = ToyDomain::new(None, None);
+
+        let (blocks, _, _) = build_synthetic_blocks(SyntheticBlockConfig::default());
+
+        let writer = domain.archive().start_writer().unwrap();
+        for raw in &blocks {
+            let block = MultiEraBlock::decode(raw).unwrap();
+            let point = ChainPoint::Specific(block.slot(), block.hash());
+
+            writer.apply(&point, raw).unwrap();
+        }
+        writer.commit().unwrap();
+
+        let first = MultiEraBlock::decode(&blocks[0]).unwrap();
+        let start = ChainPoint::Specific(first.slot(), first.hash());
+
+        let s = ChainStream::start::<ToyDomain, CancelTokenImpl>(
+            domain,
+            vec![start.clone()],
+            CancelTokenImpl(CancellationToken::new()),
+        )
+        .unwrap()
+        .expect("the archive covers the start point");
+
+        pin_mut!(s);
+
+        assert_eq!(s.next().await.unwrap().unwrap(), TipEvent::Mark(start));
+
+        // Every block after the start point arrives once, then the gap is an
+        // error rather than a replay or an orderly end of stream.
+        for raw in &blocks[1..] {
+            match s.next().await.unwrap().unwrap() {
+                TipEvent::Apply(_, block) => assert_eq!(&block, raw),
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+
+        assert!(matches!(
+            s.next().await,
+            Some(Err(DomainError::Internal(_)))
+        ));
+        assert!(s.next().await.is_none());
     }
 }
