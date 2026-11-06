@@ -60,8 +60,8 @@ impl<D: Domain> Batch<D> {
                 seen_other = true;
             }
 
-            // Later rows without the cursor mean a rollback replaced it, and carrying on
-            // would hand out a fork with no rollback.
+            // Later rows without the cursor mean it was rolled back or pruned, and carrying
+            // on would hand out a fork or a gap.
             if !found && (seen_other || rows.peek().is_some()) {
                 return Err(no_overlap(&last_point));
             }
