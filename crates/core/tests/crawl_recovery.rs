@@ -9,9 +9,11 @@
 //! Reaching this branch needs a point the *archive* can resolve, so the block
 //! below is written to the archive only and the WAL is left untouched.
 
+use std::collections::HashMap;
+
 use dolos_core::{
     crawl::ChainCrawler, indexes::ArchiveIndexDelta, ArchiveStore as _, ArchiveWriter as _,
-    ChainPoint, Domain as _, DomainError,
+    ChainPoint, Domain as _, DomainError, LogValue, RawBlock,
 };
 use dolos_testing::{
     synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
@@ -44,15 +46,14 @@ fn domain_with_archived_point() -> (ToyDomain, ChainPoint) {
     (domain, point)
 }
 
-/// A domain whose archive holds blocks after `start`, but whose WAL never covers
-/// any of them: `start` succeeds and the failure only shows up once drained.
-fn domain_that_runs_out_mid_crawl() -> (ToyDomain, ChainPoint) {
+/// A domain holding the first `count` synthetic blocks in its archive only.
+fn domain_with_archived_blocks(count: usize) -> (ToyDomain, Vec<RawBlock>) {
     let domain = ToyDomain::new(None, None);
 
     let (blocks, _, _) = build_synthetic_blocks(SyntheticBlockConfig::default());
 
     let writer = domain.archive().start_writer().unwrap();
-    for raw in blocks.iter().take(3) {
+    for raw in blocks.iter().take(count) {
         let block = MultiEraBlock::decode(raw).unwrap();
         let point = ChainPoint::Specific(block.slot(), block.hash());
 
@@ -69,10 +70,96 @@ fn domain_that_runs_out_mid_crawl() -> (ToyDomain, ChainPoint) {
     }
     writer.commit().unwrap();
 
-    let first = MultiEraBlock::decode(&blocks[0]).unwrap();
-    let point = ChainPoint::Specific(first.slot(), first.hash());
+    (domain, blocks)
+}
+
+/// A domain whose archive holds blocks after `start`, but whose WAL never
+/// covers any of them: `start` succeeds and the failure only shows up once
+/// drained.
+fn domain_that_runs_out_mid_crawl() -> (ToyDomain, ChainPoint) {
+    let (domain, blocks) = domain_with_archived_blocks(3);
+    let point = point_of(&blocks[0]);
 
     (domain, point)
+}
+
+fn point_of(raw: &RawBlock) -> ChainPoint {
+    let block = MultiEraBlock::decode(raw).unwrap();
+    ChainPoint::Specific(block.slot(), block.hash())
+}
+
+/// A domain whose archive holds the first two blocks and whose WAL holds the
+/// last two, so they overlap the way a running node's stores do.
+fn domain_with_overlapping_stores() -> (ToyDomain, Vec<ChainPoint>) {
+    let (domain, blocks) = domain_with_archived_blocks(2);
+
+    let entries: Vec<_> = blocks[1..]
+        .iter()
+        .map(|raw| {
+            let value = LogValue {
+                block: raw.to_vec(),
+                delta: vec![],
+                inputs: HashMap::new(),
+            };
+            (point_of(raw), value)
+        })
+        .collect();
+    domain.wal().append_entries(&entries).unwrap();
+
+    let points = blocks.iter().map(point_of).collect();
+
+    (domain, points)
+}
+
+#[test]
+fn crawl_crosses_from_archive_to_wal_where_they_overlap() {
+    let (domain, points) = domain_with_overlapping_stores();
+
+    let (mut crawler, _) = ChainCrawler::start(&domain, &points[..1])
+        .expect("the archive covers the start point")
+        .expect("the archive covers the start point");
+
+    for expected in &points[1..] {
+        let (point, _) = crawler
+            .next_block()
+            .expect("the WAL overlaps the archive")
+            .expect("a block remains before the tip");
+
+        assert_eq!(&point, expected);
+    }
+
+    assert!(crawler.next_block().unwrap().is_none());
+}
+
+#[test]
+fn re_seek_from_a_stalled_archive_cursor_stays_at_the_stalled_point() {
+    let (domain, start) = domain_that_runs_out_mid_crawl();
+
+    let (mut crawler, _) = ChainCrawler::start(&domain, &[start])
+        .unwrap()
+        .expect("the archive covers the start point");
+
+    crawler.next_block().unwrap().unwrap();
+    let (last, _) = crawler.next_block().unwrap().unwrap();
+    crawler.next_block().unwrap_err();
+
+    assert_eq!(crawler.last_point(), &last);
+
+    // The gap is still there, so seeking back must report it again. Seeking
+    // anywhere else would replay or skip blocks on a client's stream.
+    let reseek = ChainCrawler::start(&domain, std::slice::from_ref(&last));
+
+    assert!(matches!(reseek, Err(DomainError::Internal(_))));
+}
+
+#[test]
+fn starting_at_the_tip_of_an_empty_wal_errors_instead_of_panicking() {
+    let domain = ToyDomain::new(None, None);
+    domain.wal().remove_before(1).unwrap();
+
+    let result = ChainCrawler::start(&domain, &[]);
+
+    assert!(matches!(result, Err(DomainError::WalIsEmpty)));
 }
 
 #[test]
@@ -85,7 +172,8 @@ fn crawl_that_runs_out_of_overlap_errors_instead_of_ending() {
 
     // Drains the two archived blocks that follow the start point.
     assert!(crawler.next_block().unwrap().is_some());
-    assert!(crawler.next_block().unwrap().is_some());
+    let (last, _) = crawler.next_block().unwrap().unwrap();
+    let last_slot = last.slot();
 
     // The WAL never intersects, so the next load reports the gap instead of
     // reporting `None` as if the crawl had reached the tip.
@@ -100,7 +188,7 @@ fn crawl_that_runs_out_of_overlap_errors_instead_of_ending() {
     }
 
     // The stalled point survives so the caller can re-seek from it.
-    assert!(crawler.last_point().is_some());
+    assert_eq!(crawler.last_point().slot(), last_slot);
 }
 
 #[test]

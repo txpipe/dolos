@@ -1,8 +1,10 @@
 use std::{collections::VecDeque, sync::Arc};
 
+use pallas::ledger::traverse::MultiEraBlock;
+
 use crate::{
-    ArchiveStore as _, ChainPoint, Domain, DomainError, RawBlock, TipEvent, TipSubscription,
-    WalStore,
+    ArchiveError, ArchiveStore as _, ChainPoint, Domain, DomainError, RawBlock, TipEvent,
+    TipSubscription, WalStore,
 };
 
 pub enum Batch<D: Domain> {
@@ -41,8 +43,13 @@ impl<D: Domain> Batch<D> {
             // skip the last point, we already seen it
             .skip(1)
             .take(LOAD_BATCH_SIZE)
-            .map(|(slot, body)| (ChainPoint::Slot(slot), Arc::new(body)))
-            .collect::<VecDeque<_>>();
+            // Both stores intersect a point by its hash, so a cursor that only
+            // knew its slot could never cross into the WAL or seek back here.
+            .map(|(slot, body)| {
+                let block = MultiEraBlock::decode(&body).map_err(ArchiveError::from)?;
+                Ok((ChainPoint::Specific(slot, block.hash()), Arc::new(body)))
+            })
+            .collect::<Result<VecDeque<_>, DomainError>>()?;
 
         // if the archive page is empty, this means we reached the end of the archive
         // store and we need to transition to the wal.
@@ -159,13 +166,11 @@ impl<D: Domain> ChainCrawler<D> {
         Ok(())
     }
 
-    /// The point the cursor currently sits on, if it has one. Used by callers
-    /// that need to re-seek after a loading error.
-    pub fn last_point(&self) -> Option<&ChainPoint> {
+    /// The point the cursor currently sits on. Used by callers that need to
+    /// re-seek after a loading error.
+    pub fn last_point(&self) -> &ChainPoint {
         match &self.batch {
-            Batch::Tip(point, _) | Batch::WalPage(point, _) | Batch::ArchivePage(point, _) => {
-                Some(point)
-            }
+            Batch::Tip(point, _) | Batch::WalPage(point, _) | Batch::ArchivePage(point, _) => point,
         }
     }
 

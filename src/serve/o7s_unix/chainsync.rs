@@ -135,7 +135,7 @@ impl<D: Domain> Session<D> {
                 // stalled on instead of unwinding the session's task.
                 warn!(%err, "crawler lost its overlap, re-seeking from the last point");
 
-                self.reseek().await?;
+                self.reseek()?;
 
                 // The fresh cursor may hold buffered pages, but the peer only asked for one
                 // reply: any RollForward leaves us idle with the client holding agency, so
@@ -153,25 +153,14 @@ impl<D: Domain> Session<D> {
         }
     }
 
-    async fn reseek(&mut self) -> Result<(), Error> {
-        let point = self.assume_crawler().last_point().cloned();
+    fn reseek(&mut self) -> Result<(), Error> {
+        let point = self.assume_crawler().last_point().clone();
 
-        let mut found = match &point {
-            Some(point) => {
-                ChainCrawler::<D>::start(&self.domain, &[point.clone()]).map_err(Error::server)?
-            }
-            None => None,
-        };
-
-        // Falling back to an empty intersect parks the cursor on the WAL tip so
-        // the session always keeps something to wait on.
-        if found.is_none() {
-            found = ChainCrawler::<D>::start(&self.domain, &[]).map_err(Error::server)?;
-        }
-
-        let Some((crawler, _)) = found else {
-            return Err(Error::custom("crawler could not re-seek"));
-        };
+        // A point gone from both stores ends the session: moving the cursor
+        // anywhere else would leave a gap in the client's chain.
+        let (crawler, _) = ChainCrawler::<D>::start(&self.domain, &[point])
+            .map_err(Error::server)?
+            .ok_or_else(|| Error::custom("crawler could not re-seek"))?;
 
         self.crawler = Some(crawler);
 
@@ -192,7 +181,7 @@ impl<D: Domain> Session<D> {
 
         let points = points.into_iter().map(From::from).collect_vec();
 
-        let intersect = ChainCrawler::<D>::start(&self.domain, &points).unwrap();
+        let intersect = ChainCrawler::<D>::start(&self.domain, &points).map_err(Error::server)?;
 
         if let Some((crawler, point)) = intersect {
             debug!(%point, "found intersect point");

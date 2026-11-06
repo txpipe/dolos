@@ -29,14 +29,9 @@ impl ChainStream {
                         // only if that point is gone from both stores.
                         warn!(%err, "crawler lost its overlap, re-seeking from the last point");
 
-                        match crawler.last_point().cloned() {
-                            Some(point) => match ChainCrawler::<D>::start(&domain, &[point]) {
-                                Ok(Some((next, _))) => {
-                                    crawler = next;
-                                }
-                                _ => return,
-                            },
-                            None => return,
+                        match ChainCrawler::<D>::start(&domain, std::slice::from_ref(crawler.last_point())) {
+                            Ok(Some((next, _))) => crawler = next,
+                            _ => return,
                         }
                     }
                 }
