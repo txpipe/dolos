@@ -4,7 +4,6 @@ use crate::{
     ArchiveStore as _, ChainPoint, Domain, DomainError, RawBlock, TipEvent, TipSubscription,
     WalStore,
 };
-use tracing::warn;
 
 pub enum Batch<D: Domain> {
     Tip(ChainPoint, D::TipSubscription),
@@ -48,11 +47,18 @@ impl<D: Domain> Batch<D> {
         // if the archive page is empty, this means we reached the end of the archive
         // store and we need to transition to the wal.
         if page.is_empty() {
-            let intersect = domain.wal().find_intersect(&[last_point])?;
+            let intersect = domain
+                .wal()
+                .find_intersect(std::slice::from_ref(&last_point))?;
 
+            // No overlap means the WAL no longer covers the point we were
+            // crawling from. Returning an error lets the caller re-seek instead
+            // of unwinding the task it is streaming from.
             let Some((point, _)) = intersect else {
-                warn!("no overlap between archive and wal");
-                panic!("no overlap between archive and wal");
+                return Err(DomainError::Internal(format!(
+                    "no overlap between archive and wal at {}",
+                    last_point.slot()
+                )));
             };
 
             return Self::from_wal(point, domain);
@@ -111,7 +117,10 @@ impl<D: Domain> ChainCrawler<D> {
         let domain = domain.clone();
 
         if intersect.is_empty() {
-            let (point, _) = domain.wal().find_tip()?.unwrap();
+            // An empty WAL has no tip to start from. Report it rather than
+            // unwinding, so a client connecting before the first block is
+            // imported gets an error it can retry.
+            let (point, _) = domain.wal().find_tip()?.ok_or(DomainError::WalIsEmpty)?;
             let batch = Batch::from_tip(point.clone(), &domain)?;
 
             let iter = Self { domain, batch };
@@ -150,16 +159,31 @@ impl<D: Domain> ChainCrawler<D> {
         Ok(())
     }
 
-    pub fn next_block(&mut self) -> Option<(ChainPoint, RawBlock)> {
+    /// The point the cursor currently sits on, if it has one. Used by callers
+    /// that need to re-seek after a loading error.
+    pub fn last_point(&self) -> Option<&ChainPoint> {
+        match &self.batch {
+            Batch::Tip(point, _) | Batch::WalPage(point, _) | Batch::ArchivePage(point, _) => {
+                Some(point)
+            }
+        }
+    }
+
+    /// Advance the cursor, reporting a failure to load the next batch.
+    ///
+    /// A drained batch stays in place when loading fails, so the caller can
+    /// re-seek from [`Self::last_point`] and call again. Returning `None` means
+    /// the cursor genuinely reached the tip and has nothing more to hand out.
+    pub fn next_block(&mut self) -> Result<Option<(ChainPoint, RawBlock)>, DomainError> {
         if self.batch.is_drained() {
-            self.load_next_batch().ok()?;
+            self.load_next_batch()?;
         }
 
         if self.batch.is_tip() {
-            return None;
+            return Ok(None);
         }
 
-        self.batch.pop()
+        Ok(self.batch.pop())
     }
 
     pub async fn next_tip(&mut self) -> TipEvent {
@@ -179,7 +203,7 @@ impl<D: Domain> Iterator for ChainCrawler<D> {
     type Item = (ChainPoint, RawBlock);
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.next_block()
+        self.next_block().ok().flatten()
     }
 }
 
