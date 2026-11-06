@@ -13,7 +13,8 @@ use pallas::network::{
     facades::{NodeClient, NodeServer},
     miniprotocols::{
         chainsync::{BlockContent, NextResponse},
-        localstate, Point,
+        localstate::{self, queries_v16 as q16},
+        Point,
     },
 };
 use tempfile::TempDir;
@@ -229,6 +230,32 @@ fn expect_acquire_failure(result: Result<(), localstate::ClientError>) {
     );
 }
 
+fn set_cursor<D: Domain>(domain: &D, point: ChainPoint) {
+    let writer = domain.state().start_writer().unwrap();
+    writer.set_cursor(point).unwrap();
+    writer.commit().unwrap();
+}
+
+/// What the tip-reading queries answer, which must agree. The session must be
+/// acquired.
+async fn expect_tip(client: &mut NodeClient, expected: Point) {
+    let point = within(q16::get_chain_point(client.statequery()))
+        .await
+        .unwrap();
+    assert_eq!(point, expected);
+
+    let query = q16::Request::LedgerQuery(q16::LedgerQuery::BlockQuery(
+        0,
+        q16::BlockQuery::GetLedgerTip,
+    ));
+    let (point,): (Point,) = within(client.statequery().query(query)).await.unwrap();
+    assert_eq!(point, expected);
+
+    within(q16::get_block_epoch_number(client.statequery(), 0))
+        .await
+        .unwrap();
+}
+
 fn discriminant(response: &NextResponse<BlockContent>) -> &'static str {
     match response {
         NextResponse::RollForward(..) => "a roll forward",
@@ -409,7 +436,12 @@ async fn a_failed_state_query_ends_the_connection() {
     .await;
 
     assert!(reply.is_err(), "the client should see the connection end");
-    within(server).await.unwrap().unwrap_err();
+
+    let err = within(server).await.unwrap().unwrap_err();
+    assert!(
+        !matches!(&err, ServeError::Internal(e) if e.downcast_ref::<JoinError>().is_some()),
+        "expected the session's error, got the task's panic: {err:?}"
+    );
 }
 
 #[tokio::test]
@@ -517,9 +549,7 @@ async fn an_acquire_with_no_point_takes_the_state_cursor() {
     let domain = ToyDomain::new(None, None);
     let chain = blocks(&[100]);
 
-    let writer = domain.state().start_writer().unwrap();
-    writer.set_cursor(chain[0].0.clone()).unwrap();
-    writer.commit().unwrap();
+    set_cursor(&domain, chain[0].0.clone());
 
     let (mut client, _server, _dir) = connect_session(domain.clone()).await;
 
@@ -528,4 +558,67 @@ async fn an_acquire_with_no_point_takes_the_state_cursor() {
 
     write_archive(&domain, &chain);
     within(client.statequery().acquire(None)).await.unwrap();
+
+    expect_tip(&mut client, Point::try_from(chain[0].0.clone()).unwrap()).await;
+}
+
+#[tokio::test]
+async fn a_store_with_no_cursor_is_at_origin() {
+    let domain = ToyDomain::new(None, None);
+
+    let (mut client, _server, _dir) = connect_session(domain).await;
+
+    within(client.statequery().acquire(None)).await.unwrap();
+
+    expect_tip(&mut client, Point::Origin).await;
+}
+
+/// The state between an epoch boundary's commit and its block's: the cursor
+/// names a slot whose block isn't archived yet.
+#[tokio::test]
+async fn a_state_query_at_an_epoch_boundary_keeps_chain_sync_serving() {
+    let domain = ToyDomain::new(None, None);
+    let chain = blocks(&[100, 110]);
+    write_archive(&domain, &chain[..1]);
+    write_wal(&domain, &chain[..1]);
+    set_cursor(&domain, ChainPoint::Slot(110));
+
+    let (mut client, _server, _dir) = connect_session(domain.clone()).await;
+
+    intersect(&mut client, &chain[0].0).await;
+    expect_rollback(&mut client, &chain[0].0).await;
+    expect_await(&mut client).await;
+
+    within(client.statequery().acquire(None)).await.unwrap();
+
+    expect_tip(&mut client, Point::try_from(chain[0].0.clone()).unwrap()).await;
+
+    expect_tip_forward(&mut client, &domain, &chain[1].0, &chain[1].1).await;
+}
+
+#[tokio::test]
+async fn a_slot_cursor_with_nothing_archived_is_at_origin() {
+    let domain = ToyDomain::new(None, None);
+    set_cursor(&domain, ChainPoint::Slot(110));
+
+    let (mut client, _server, _dir) = connect_session(domain).await;
+
+    within(client.statequery().acquire(None)).await.unwrap();
+
+    expect_tip(&mut client, Point::Origin).await;
+}
+
+/// The cursor's own block, not the archive tip past it.
+#[tokio::test]
+async fn a_slot_cursor_with_its_block_archived_takes_that_block() {
+    let domain = ToyDomain::new(None, None);
+    let chain = blocks(&[100, 110]);
+    write_archive(&domain, &chain);
+    set_cursor(&domain, ChainPoint::Slot(100));
+
+    let (mut client, _server, _dir) = connect_session(domain).await;
+
+    within(client.statequery().acquire(None)).await.unwrap();
+
+    expect_tip(&mut client, Point::try_from(chain[0].0.clone()).unwrap()).await;
 }

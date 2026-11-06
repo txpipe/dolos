@@ -33,12 +33,19 @@ impl<D: Domain> Session<D> {
 
         match point {
             ChainPoint::Slot(slot) => {
-                let body = self
-                    .domain
-                    .archive()
-                    .get_block_by_slot(&slot)
-                    .map_err(Error::server)?
-                    .ok_or_else(|| Error::server("block not found for slot"))?;
+                let archive = self.domain.archive();
+
+                // An epoch boundary commits this cursor before its block is
+                // applied, so until then the tip is the last archived block.
+                let found = archive.get_block_by_slot(&slot).map_err(Error::server)?;
+                let tip = match found {
+                    Some(body) => Some((slot, body)),
+                    None => archive.get_tip().map_err(Error::server)?,
+                };
+
+                let Some((slot, body)) = tip else {
+                    return Ok(ChainPoint::Origin);
+                };
 
                 let block =
                     MultiEraBlock::decode(&body).map_err(|e| Error::server(e.to_string()))?;
