@@ -1,11 +1,14 @@
-//! Chain-sync sessions as a client sees them, over a real Unix socket.
+//! Chain-sync and state-query sessions as a client sees them, over a real Unix
+//! socket.
 
 use std::{collections::HashMap, future::Future, path::Path, sync::Arc, time::Duration};
 
 use dolos_core::{
-    config::RootConfig, ArchiveStore as _, ArchiveWriter as _, LogValue, TipEvent, WalStore as _,
+    config::RootConfig, ArchiveStore as _, ArchiveWriter as _, LogValue, StateStore as _,
+    StateWriter as _, TipEvent, WalStore as _,
 };
 use dolos_testing::{blocks::make_conway_block, toy_domain::ToyDomain};
+use pallas::codec::utils::AnyCbor;
 use pallas::network::{
     facades::{NodeClient, NodeServer},
     miniprotocols::{
@@ -14,7 +17,11 @@ use pallas::network::{
     },
 };
 use tempfile::TempDir;
-use tokio::{net::UnixListener, task::JoinHandle, time::timeout};
+use tokio::{
+    net::UnixListener,
+    task::{JoinError, JoinHandle},
+    time::timeout,
+};
 
 use super::{chainsync, handle_session};
 use crate::{adapters::DomainAdapter, engine::DomainBuilder, prelude::*, serve::CancelTokenImpl};
@@ -373,6 +380,35 @@ async fn a_panicking_protocol_ends_the_connection() {
     let reply = within(client.chainsync().request_next()).await;
 
     assert!(reply.is_err(), "the client should see the connection end");
+
+    let err = within(server).await.unwrap().unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            ServeError::Internal(e)
+                if e.downcast_ref::<JoinError>().is_some_and(JoinError::is_panic)
+        ),
+        "expected the task's panic, got {err:?}"
+    );
+}
+
+/// A corrupt archive body makes the acquire itself fail, rather than answer.
+#[tokio::test]
+async fn a_failed_state_query_ends_the_connection() {
+    let domain = ToyDomain::new(None, None);
+    let (point, _) = make_conway_block(100);
+    write_archive(&domain, &[(point.clone(), Arc::new(vec![0u8; 4]))]);
+
+    let (mut client, server, _dir) = connect_session(domain).await;
+
+    let reply = within(
+        client
+            .statequery()
+            .acquire(Some(Point::try_from(point).unwrap())),
+    )
+    .await;
+
+    assert!(reply.is_err(), "the client should see the connection end");
     within(server).await.unwrap().unwrap_err();
 }
 
@@ -428,4 +464,68 @@ async fn a_failed_acquire_then_done_ends_the_session_cleanly() {
     within(client.chainsync().send_done()).await.unwrap();
 
     within(server).await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn a_successful_reacquire_stays_acquired() {
+    let domain = ToyDomain::new(None, None);
+
+    let (mut client, _server, _dir) = connect_session(domain).await;
+
+    within(client.statequery().acquire(Some(Point::Origin)))
+        .await
+        .unwrap();
+
+    within(client.statequery().send_reacquire(Some(Point::Origin)))
+        .await
+        .unwrap();
+    within(client.statequery().recv_while_acquiring())
+        .await
+        .unwrap();
+
+    // Both of these are only legal while acquired.
+    within(client.statequery().query_any(AnyCbor::from_encode(())))
+        .await
+        .unwrap();
+    within(client.statequery().send_release()).await.unwrap();
+
+    within(client.statequery().acquire(Some(Point::Origin)))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn an_acquire_checks_its_point_against_the_archive() {
+    let domain = ToyDomain::new(None, None);
+    let chain = blocks(&[100]);
+    write_archive(&domain, &chain);
+
+    let (mut client, _server, _dir) = connect_session(domain).await;
+
+    let held = Point::try_from(chain[0].0.clone()).unwrap();
+    within(client.statequery().acquire(Some(held)))
+        .await
+        .unwrap();
+    within(client.statequery().send_release()).await.unwrap();
+
+    let other_hash = Point::Specific(100, vec![0; 32]);
+    expect_acquire_failure(within(client.statequery().acquire(Some(other_hash))).await);
+}
+
+#[tokio::test]
+async fn an_acquire_with_no_point_takes_the_state_cursor() {
+    let domain = ToyDomain::new(None, None);
+    let chain = blocks(&[100]);
+
+    let writer = domain.state().start_writer().unwrap();
+    writer.set_cursor(chain[0].0.clone()).unwrap();
+    writer.commit().unwrap();
+
+    let (mut client, _server, _dir) = connect_session(domain.clone()).await;
+
+    // The cursor's block isn't archived yet.
+    expect_acquire_failure(within(client.statequery().acquire(None)).await);
+
+    write_archive(&domain, &chain);
+    within(client.statequery().acquire(None)).await.unwrap();
 }
