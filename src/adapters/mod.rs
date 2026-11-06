@@ -148,7 +148,8 @@ impl Domain for DomainAdapter {
 
         // We then collect any gap between the from point and the current tip. This
         // assumes that no event will be sent between the creation of the receiver and
-        // the collection of the replay. A caller naming `from` already holds it.
+        // the collection of the replay. It starts after `from`: a client at `from`
+        // already holds it, and one that named no intersect starts from the next block.
         let replay = self
             .wal()
             .iter_blocks(from.clone(), None)?

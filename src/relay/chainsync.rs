@@ -128,9 +128,9 @@ impl<D: Domain> Session<D> {
             Ok(Some((point, block))) => self.send_forward(point, block).await,
             Ok(None) => self.send_await_and_next().await,
             Err(err) => {
-                // The cursor can no longer load the next batch (it found no overlap
-                // crossing from the archive to the WAL, or a load failed). Re-seek
-                // from the point we stalled on instead of unwinding the session's task.
+                // The cursor can no longer load the next batch (it has no overlap with
+                // the stores, or a load failed). Re-seek from the point we stalled on
+                // instead of unwinding the session's task.
                 warn!(%err, "crawler lost its overlap, re-seeking from the last point");
 
                 self.reseek()?;
