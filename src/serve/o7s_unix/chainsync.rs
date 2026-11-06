@@ -72,31 +72,15 @@ impl<D: Domain> Session<D> {
         Ok(())
     }
 
-    async fn send_forward(&mut self, point: ChainPoint, block: RawBlock) -> Result<(), Error> {
+    async fn send_forward(&mut self, block: RawBlock) -> Result<(), Error> {
         debug!("sending forward event");
 
         let tip = self.prepare_tip()?;
 
-        let point = Point::try_from(point).map_err(|_| Error::custom("invalid point"))?;
-
-        // Ouroboros chain-sync always starts by sending the intersection point as an
-        // initial rollback event. The `is_new_intersection`` flag allows us to track if
-        // we have already sent that initial rollback or not
-        if self.is_new_intersection {
-            self.connection
-                .send_roll_backward(point, tip)
-                .await
-                .map_err(Error::server)?;
-
-            self.is_new_intersection = false;
-        } else {
-            self.connection
-                .send_roll_forward(BlockContent((*block).clone()), tip)
-                .await
-                .map_err(Error::server)?;
-        }
-
-        Ok(())
+        self.connection
+            .send_roll_forward(BlockContent((*block).clone()), tip)
+            .await
+            .map_err(Error::server)
     }
 
     async fn send_rollback(&mut self, point: ChainPoint) -> Result<(), Error> {
@@ -114,7 +98,7 @@ impl<D: Domain> Session<D> {
 
     async fn send_tip_event(&mut self, log: TipEvent) -> Result<(), Error> {
         match log {
-            TipEvent::Apply(p, b) => self.send_forward(p, b).await,
+            TipEvent::Apply(_, b) => self.send_forward(b).await,
             TipEvent::Mark(p) => self.send_rollback(p).await,
             // we skip undo events and expect a Mark to come after
             _ => Ok(()),
@@ -124,32 +108,32 @@ impl<D: Domain> Session<D> {
     async fn handle_next_request(&mut self) -> Result<(), Error> {
         debug!("handling next request");
 
-        let crawler = self.assume_crawler();
+        // Ouroboros chain-sync always starts by sending the intersection point as an
+        // initial rollback event, without consuming a block from the cursor.
+        if self.is_new_intersection {
+            self.is_new_intersection = false;
 
-        match crawler.next_block() {
-            Ok(Some((point, block))) => self.send_forward(point, block).await,
-            Ok(None) => self.send_await_and_next().await,
+            let point = self.assume_crawler().last_point().clone();
+
+            return self.send_rollback(point).await;
+        }
+
+        let next = match self.assume_crawler().next_block() {
+            Ok(next) => next,
             Err(err) => {
-                // The cursor can no longer load the next batch (the WAL dropped
-                // the overlap we were crawling from). Re-seek from the point we
-                // stalled on instead of unwinding the session's task.
-                warn!(%err, "crawler lost its overlap, re-seeking from the last point");
+                // The cursor can't load the next batch. Re-seek from the point it stalled
+                // on; a fresh cursor holds a page or a tip, so it has nothing left to load.
+                warn!(%err, "crawler failed to load, re-seeking from the last point");
 
                 self.reseek()?;
 
-                // The fresh cursor may hold buffered pages, but the peer only asked for one
-                // reply: any RollForward leaves us idle with the client holding agency, so
-                // answer with a single block (or an await if there is none) and let the next
-                // RequestNext drain the rest.
-                match self.assume_crawler().next_block() {
-                    Ok(Some((point, block))) => self.send_forward(point, block).await,
-                    Ok(None) => self.send_await_and_next().await,
-                    Err(retry_err) => {
-                        warn!(%retry_err, "re-seek did not restore overlap, ending session");
-                        Err(Error::server(retry_err))
-                    }
-                }
+                self.assume_crawler().next_block().map_err(Error::server)?
             }
+        };
+
+        match next {
+            Some((_, block)) => self.send_forward(block).await,
+            None => self.send_await_and_next().await,
         }
     }
 
@@ -230,7 +214,11 @@ pub async fn handle_session<D: Domain, C: CancelToken>(
     };
 
     tokio::select! {
-        _ = session.process_requests() => {
+        result = session.process_requests() => {
+            if let Err(e) = result {
+                warn!(?e, "chainsync session error");
+                return Err(ServeError::Internal(e.into()));
+            }
             info!("client ended protocol");
         },
         _ = cancel.cancelled() => {
