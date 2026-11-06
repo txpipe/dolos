@@ -18,6 +18,7 @@ mod by_subject;
 mod history;
 mod transactions;
 mod txs;
+mod utxos;
 
 pub use addresses::by_subject_addresses;
 pub use all::all;
@@ -26,6 +27,7 @@ pub use by_subject::by_subject;
 pub use history::by_subject_history;
 pub use transactions::by_subject_transactions;
 pub use txs::by_subject_txs;
+pub use utxos::by_subject_utxos;
 
 fn tx_has_subject(
     resolver: &mut InputResolver<'_>,
