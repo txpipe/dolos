@@ -283,6 +283,18 @@ fn a_slot_holding_only_another_block_reports_the_lost_cursor() {
 
     crawler.next_block().unwrap().unwrap();
 
+    // The WAL still holds the cursor, so crossing into it would pass over the block
+    // that replaced it in the archive.
+    let entry = LogValue {
+        block: main.1.to_vec(),
+        delta: vec![],
+        inputs: HashMap::new(),
+    };
+    domain
+        .wal()
+        .append_entries(&[(main.0.clone(), entry)])
+        .unwrap();
+
     // The whole slot is rolled back and replaced by a block the cursor never saw.
     let before = make_conway_block(slot - 10);
     write_archive(&domain, std::slice::from_ref(&before));
