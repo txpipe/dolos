@@ -50,8 +50,13 @@ fn to_n2n_body(mempool_tx: MempoolTx) -> EraTxBody {
 /// forever.
 const MAX_UNACKNOWLEDGED_OFFERS: u32 = 3;
 
-/// `pending` with each transaction after the pending ones it spends from, which
-/// a peer needs to have first, and otherwise in the order given.
+/// Offers after which a transaction is a suspect: at least one earlier session
+/// ended without acknowledging it.
+const SUSPECT_OFFERS: u32 = 2;
+
+/// `pending` with each transaction after the pending ones it requires, as an
+/// input, a reference input or collateral, which a peer needs to have first,
+/// and otherwise in the order given.
 fn parents_first(pending: Vec<MempoolTx>) -> Vec<MempoolTx> {
     let positions: HashMap<TxHash, usize> = pending
         .iter()
@@ -67,7 +72,7 @@ fn parents_first(pending: Vec<MempoolTx>) -> Vec<MempoolTx> {
             continue;
         };
 
-        for input in decoded.consumes() {
+        for input in decoded.requires() {
             if let Some(&parent) = positions.get(input.hash()) {
                 children[parent].push(child);
                 unmet_parents[child] += 1;
@@ -141,6 +146,20 @@ impl Worker {
             propagated_hashes: VecDeque::new(),
             requested: false,
         })
+    }
+
+    /// The answer to a non-blocking request. A peer asks ahead of judging what
+    /// it was just offered, so while a suspect is unacknowledged nothing else
+    /// goes out: if that suspect ends the session, nothing else takes the count
+    /// for it. The peer's blocking request waits for its acknowledgements, so
+    /// an empty answer can't stall the session.
+    fn next_non_blocking_offer(&self, stage: &Stage, limit: usize) -> Vec<MempoolTx> {
+        if stage.any_suspect(&self.propagated_hashes) {
+            debug!("holding back offers until a suspect tx is acknowledged");
+            return Vec::new();
+        }
+
+        stage.next_offer(limit)
     }
 
     fn txsubmission(&mut self) -> &mut txsubmission::Client {
@@ -300,7 +319,7 @@ impl gasket::framework::Worker<Stage> for Worker {
 
                 self.acknowledge_propagated(stage, *ack as usize)?;
 
-                let txs = stage.next_offer(*req as usize);
+                let txs = self.next_non_blocking_offer(stage, *req as usize);
                 self.propagate_txs(stage, txs).await?;
             }
             Request::Txs(ids) => {
@@ -424,6 +443,14 @@ impl Stage {
         offer
     }
 
+    fn any_suspect(&self, hashes: &VecDeque<TxHash>) -> bool {
+        let offers = self.unacknowledged_offers.borrow();
+
+        hashes
+            .iter()
+            .any(|hash| offers.get(hash).is_some_and(|n| *n >= SUSPECT_OFFERS))
+    }
+
     fn count_offers(&self, hashes: &[TxHash]) {
         let mut offers = self.unacknowledged_offers.borrow_mut();
 
@@ -443,7 +470,9 @@ impl Stage {
 
 #[cfg(test)]
 mod tests {
-    use dolos_testing::mempool::{make_test_mempool_tx, make_test_mempool_tx_spending};
+    use dolos_testing::mempool::{
+        make_test_mempool_tx, make_test_mempool_tx_requiring, make_test_mempool_tx_spending,
+    };
     use dolos_testing::tx_sequence_to_hash;
 
     use super::*;
@@ -493,6 +522,80 @@ mod tests {
     }
 
     #[test]
+    fn parents_first_counts_a_parent_used_as_a_reference_input() {
+        let parent = make_test_mempool_tx_spending(&[tx_sequence_to_hash(1)], 1);
+        let child = make_test_mempool_tx_requiring(&[parent.hash], &[], 2);
+        let order = [parent.hash, child.hash];
+
+        assert_eq!(hashes(&parents_first(vec![child, parent])), order);
+    }
+
+    #[test]
+    fn parents_first_counts_a_parent_used_as_collateral() {
+        let parent = make_test_mempool_tx_spending(&[tx_sequence_to_hash(1)], 1);
+        let child = make_test_mempool_tx_requiring(&[], &[parent.hash], 2);
+        let order = [parent.hash, child.hash];
+
+        assert_eq!(hashes(&parents_first(vec![child, parent])), order);
+    }
+
+    #[test]
+    fn parents_first_counts_a_parent_used_both_ways() {
+        let parent = make_test_mempool_tx_spending(&[tx_sequence_to_hash(1)], 1);
+        let child = make_test_mempool_tx_requiring(&[parent.hash], &[parent.hash], 2);
+        let order = [parent.hash, child.hash];
+
+        assert_eq!(hashes(&parents_first(vec![child, parent])), order);
+    }
+
+    #[test]
+    fn a_short_offer_takes_the_parent_of_what_is_queued_first() {
+        let stage = stage();
+        let parent = make_test_mempool_tx_spending(&[tx_sequence_to_hash(1)], 1);
+        let child = make_test_mempool_tx_spending(&[parent.hash], 2);
+        let parent_hash = parent.hash;
+        stage.mempool.receive(child).unwrap();
+        stage.mempool.receive(parent).unwrap();
+
+        assert_eq!(hashes(&stage.next_offer(1)), [parent_hash]);
+    }
+
+    fn worker_with_offers(hashes: &[TxHash]) -> Worker {
+        Worker {
+            peer_session: None,
+            unfulfilled_request: None,
+            propagated_hashes: hashes.iter().copied().collect(),
+            requested: true,
+        }
+    }
+
+    #[test]
+    fn an_unacknowledged_suspect_holds_back_non_blocking_offers() {
+        let stage = stage();
+        let (suspect, next) = (receive_new(&stage, 1), receive_new(&stage, 2));
+        stage.mempool.mark_inflight(&[suspect]).unwrap();
+        stage.count_offers(&[suspect, suspect]);
+
+        let mut worker = worker_with_offers(&[suspect]);
+        assert!(worker.next_non_blocking_offer(&stage, 5).is_empty());
+
+        worker.acknowledge_propagated(&stage, 1).unwrap();
+        assert_eq!(hashes(&worker.next_non_blocking_offer(&stage, 5)), [next]);
+    }
+
+    #[test]
+    fn a_first_offer_does_not_hold_back_non_blocking_offers() {
+        let stage = stage();
+        let (offered, next) = (receive_new(&stage, 1), receive_new(&stage, 2));
+        stage.mempool.mark_inflight(&[offered]).unwrap();
+        stage.count_offers(&[offered]);
+
+        let worker = worker_with_offers(&[offered]);
+
+        assert_eq!(hashes(&worker.next_non_blocking_offer(&stage, 5)), [next]);
+    }
+
+    #[test]
     fn a_tx_already_offered_goes_alone_until_it_is_acknowledged() {
         let stage = stage();
         let (a, b, c) = (
@@ -531,6 +634,28 @@ mod tests {
             stage.mempool.check_status(&spent).stage,
             MempoolTxStage::Propagated
         );
+
+        // A session that ends before the drop must not bring it back.
+        stage.requeue_unacknowledged().unwrap();
+
+        assert_eq!(hashes(&stage.mempool.peek_pending()), [again]);
+        assert_eq!(
+            stage.mempool.check_status(&spent).stage,
+            MempoolTxStage::Propagated
+        );
+    }
+
+    #[test]
+    fn a_count_survives_while_the_tx_is_pending() {
+        let stage = stage();
+        let hash = receive_new(&stage, 1);
+        stage.mempool.mark_inflight(&[hash]).unwrap();
+        stage.count_offers(&[hash]);
+
+        stage.requeue_unacknowledged().unwrap();
+        stage.requeue_unacknowledged().unwrap();
+
+        assert_eq!(stage.unacknowledged_offers.borrow().get(&hash), Some(&1));
     }
 
     #[test]

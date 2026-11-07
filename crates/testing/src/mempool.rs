@@ -2,7 +2,7 @@ use dolos_core::mempool::{MempoolEvent, MempoolTx, MempoolTxStage};
 use dolos_core::{ChainPoint, EraCbor, MempoolError, MempoolStore, TxHash, TxStatus};
 
 use pallas::codec::minicbor;
-use pallas::codec::utils::{KeepRaw, Nullable, Set};
+use pallas::codec::utils::{KeepRaw, NonEmptySet, Nullable, Set};
 use pallas::ledger::primitives::conway::{TransactionBody, TransactionInput, Tx};
 use pallas::ledger::traverse::MultiEraTx;
 
@@ -17,16 +17,38 @@ pub fn make_test_mempool_tx(hash: TxHash) -> MempoolTx {
 /// output of each of `parents`. `salt` tells apart transactions that spend the
 /// same.
 pub fn make_test_mempool_tx_spending(parents: &[TxHash], salt: u64) -> MempoolTx {
+    make_conway_tx(parents, &[], &[], salt)
+}
+
+/// Build a `MempoolTx` holding a real Conway transaction that uses the first
+/// output of each of `reference_inputs` and `collateral` that way, and spends
+/// nothing.
+pub fn make_test_mempool_tx_requiring(
+    reference_inputs: &[TxHash],
+    collateral: &[TxHash],
+    salt: u64,
+) -> MempoolTx {
+    make_conway_tx(&[], reference_inputs, collateral, salt)
+}
+
+fn first_outputs(parents: &[TxHash]) -> Vec<TransactionInput> {
+    parents
+        .iter()
+        .map(|parent| TransactionInput {
+            transaction_id: *parent,
+            index: 0,
+        })
+        .collect()
+}
+
+fn make_conway_tx(
+    inputs: &[TxHash],
+    reference_inputs: &[TxHash],
+    collateral: &[TxHash],
+    salt: u64,
+) -> MempoolTx {
     let body = TransactionBody {
-        inputs: Set::from(
-            parents
-                .iter()
-                .map(|parent| TransactionInput {
-                    transaction_id: *parent,
-                    index: 0,
-                })
-                .collect::<Vec<_>>(),
-        ),
+        inputs: Set::from(first_outputs(inputs)),
         outputs: vec![],
         fee: 200_000 + salt,
         ttl: None,
@@ -36,12 +58,12 @@ pub fn make_test_mempool_tx_spending(parents: &[TxHash], salt: u64) -> MempoolTx
         auxiliary_data_hash: None,
         mint: None,
         script_data_hash: None,
-        collateral: None,
+        collateral: NonEmptySet::from_vec(first_outputs(collateral)),
         required_signers: None,
         network_id: None,
         collateral_return: None,
         total_collateral: None,
-        reference_inputs: None,
+        reference_inputs: NonEmptySet::from_vec(first_outputs(reference_inputs)),
         voting_procedures: None,
         proposal_procedures: None,
         treasury_value: None,
