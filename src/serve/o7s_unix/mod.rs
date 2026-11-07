@@ -8,7 +8,7 @@ use crate::prelude::*;
 
 mod chainsync;
 mod statequery;
-mod utils;
+pub(crate) mod utils;
 
 #[derive(Clone)]
 pub struct DriverConfig {

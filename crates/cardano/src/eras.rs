@@ -1,4 +1,4 @@
-use dolos_core::{BlockSlot, ChainError, Domain, StateStore};
+use dolos_core::{BlockSlot, ChainError, Domain, Genesis, StateStore};
 use pallas::ledger::primitives::Epoch;
 
 use crate::{model::EraState, EraBoundary, EraKey};
@@ -275,6 +275,118 @@ pub fn load_chain_summary_from_state(state: &impl StateStore) -> Result<ChainSum
     }
 
     Ok(chain)
+}
+
+/// The protocol versions that open an era. A bump inside an era keeps its row.
+const ERA_OPENING_PROTOCOLS: [u16; 6] = [2, 3, 4, 5, 7, 9];
+
+/// The eras of a public network from Byron to the edge, one row per era.
+///
+/// Stores don't hold Byron's bounds, and preview opens in Alonzo, so those
+/// rows come from the network's known history. Each row ends where the next
+/// one starts. The last row is open when it comes from `recorded`, and keeps
+/// its known bound when `recorded` holds nothing past the padding.
+///
+/// `None` when the genesis doesn't describe a public network.
+pub fn era_table(recorded: &[(u16, EraState)], genesis: &Genesis) -> Option<Vec<EraState>> {
+    let system_start = genesis.shelley.system_start.as_ref()?;
+    let system_start = chrono::DateTime::parse_from_rfc3339(system_start)
+        .ok()?
+        .timestamp() as u64;
+
+    let padded = |protocol, epoch_length: u64, slot_length: u64, end_epoch: u64| {
+        let end_slot = end_epoch * epoch_length;
+
+        EraState {
+            start: EraBoundary {
+                epoch: 0,
+                slot: 0,
+                timestamp: system_start,
+            },
+            end: Some(EraBoundary {
+                epoch: end_epoch,
+                slot: end_slot,
+                timestamp: system_start + end_slot * slot_length,
+            }),
+            epoch_length,
+            slot_length,
+            protocol,
+        }
+    };
+
+    let mut table = match genesis.shelley.network_magic? {
+        764824073 => vec![padded(0, 21600, 20, 208)],
+        1 => vec![padded(0, 21600, 20, 4)],
+        2 => {
+            let epoch_length = u64::from(genesis.shelley.epoch_length?);
+            let slot_length = u64::from(genesis.shelley.slot_length?);
+
+            let mut table = vec![padded(0, 4320, 20, 0)];
+            for protocol in [2, 3, 4, 5] {
+                table.push(padded(protocol, epoch_length, slot_length, 0));
+            }
+            table
+        }
+        _ => return None,
+    };
+
+    let opening = recorded
+        .iter()
+        .filter(|(protocol, _)| ERA_OPENING_PROTOCOLS.contains(protocol));
+
+    for (protocol, era) in opening {
+        if let Some(previous) = table.last_mut() {
+            previous.end = Some(era.start.clone());
+        }
+
+        table.push(EraState {
+            end: None,
+            protocol: *protocol,
+            ..era.clone()
+        });
+    }
+
+    Some(table)
+}
+
+/// The era table to serve to clients: [`era_table`] on a public network, and
+/// the rows state holds anywhere else. The last row is always open, since the
+/// tip doesn't bound what a client may ask to convert. Empty on an empty store.
+pub fn load_era_table(
+    state: &impl StateStore,
+    genesis: &Genesis,
+) -> Result<Vec<EraState>, ChainError> {
+    let mut recorded = Vec::new();
+
+    for result in state.iter_entities_typed::<EraState>(None)? {
+        let (protocol, era) = result?;
+        recorded.push((u16::from(protocol), era));
+    }
+
+    if recorded.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut table = era_table(&recorded, genesis).unwrap_or_else(|| {
+        recorded
+            .into_iter()
+            .map(|(protocol, era)| EraState { protocol, ..era })
+            .collect()
+    });
+
+    if let Some(last) = table.last_mut() {
+        last.end = None;
+    }
+
+    Ok(table)
+}
+
+/// The row of `table` a chain at protocol `active_protocol` is in. A row stands
+/// for its opening protocol, so it covers the bumps up to the next row's.
+pub fn active_era_index(table: &[EraState], active_protocol: u16) -> Option<usize> {
+    table
+        .iter()
+        .rposition(|era| era.protocol <= active_protocol)
 }
 
 /// The slots that start `start_epoch` and `end_epoch`, and, when both are
