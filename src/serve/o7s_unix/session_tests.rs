@@ -651,8 +651,8 @@ async fn an_epoch_query_answers_the_tips_epoch() {
 #[tokio::test]
 async fn an_epoch_query_at_an_epoch_boundary_answers_the_old_epoch() {
     let domain = ToyDomain::new(None, None);
-    write_archive(&domain, &blocks(&[431_990]));
-    set_cursor(&domain, ChainPoint::Slot(432_010));
+    write_archive(&domain, &blocks(&[863_990]));
+    set_cursor(&domain, ChainPoint::Slot(864_010));
 
     let (mut client, _server, _dir) = connect_session(domain).await;
 
@@ -661,7 +661,7 @@ async fn an_epoch_query_at_an_epoch_boundary_answers_the_old_epoch() {
     let epoch = within(q16::get_block_epoch_number(client.statequery(), 0))
         .await
         .unwrap();
-    assert_eq!(epoch, 0);
+    assert_eq!(epoch, 1);
 }
 
 /// A corrupt block under a slot cursor is a failure, not an answer of `Origin`.
