@@ -593,6 +593,203 @@ fn assert_unconfirmed_tx_still_drops<S: MempoolStore>(store: &S) {
     assert_eq!(dropped.unwrap().stage, MempoolTxStage::Dropped);
 }
 
+// ---------------------------------------------------------------------------
+// Re-queueing on a new peer session
+// ---------------------------------------------------------------------------
+
+/// Only `Propagated` returns to pending, with its counters reset.
+fn assert_requeue_moves_only_propagated<S: MempoolStore>(store: &S) {
+    let (propagated, acknowledged, confirmed) = (test_tx(60), test_tx(61), test_tx(62));
+    let (propagated_hash, acknowledged_hash, confirmed_hash) =
+        (propagated.hash, acknowledged.hash, confirmed.hash);
+
+    advance_to_propagated(store, propagated);
+    advance_to_acknowledged(store, acknowledged);
+    advance_to_acknowledged(store, confirmed);
+
+    // The others go stale for a block; this one confirms.
+    store
+        .confirm(
+            &test_point(1),
+            &[confirmed_hash],
+            &[],
+            FINALIZE_THRESHOLD,
+            DROP_THRESHOLD,
+        )
+        .unwrap();
+    assert_eq!(store.check_status(&propagated_hash).non_confirmations, 1);
+
+    store.requeue_propagated().unwrap();
+
+    let status = store.check_status(&propagated_hash);
+    assert_eq!(status.stage, MempoolTxStage::Pending);
+    assert_eq!(status.confirmations, 0);
+    assert_eq!(status.non_confirmations, 0);
+    assert_eq!(status.confirmed_at, None);
+    let pending: Vec<TxHash> = store.peek_pending().iter().map(|tx| tx.hash).collect();
+    assert_eq!(pending, [propagated_hash]);
+    assert!(store.find_inflight(&propagated_hash).is_none());
+
+    let status = store.check_status(&acknowledged_hash);
+    assert_eq!(status.stage, MempoolTxStage::Acknowledged);
+    assert_eq!(status.non_confirmations, 1);
+
+    let status = store.check_status(&confirmed_hash);
+    assert_eq!(status.stage, MempoolTxStage::Confirmed);
+    assert_eq!(status.confirmations, 1);
+    assert_eq!(status.confirmed_at, Some(test_point(1)));
+
+    // Nothing left to move.
+    store.requeue_propagated().unwrap();
+    assert_eq!(store.peek_pending().len(), 1);
+}
+
+/// Staleness from before the re-queue doesn't count toward the drop.
+fn assert_requeue_restarts_the_drop_count<S: MempoolStore>(store: &S) {
+    let tx = test_tx(63);
+    let hash = tx.hash;
+    advance_to_propagated(store, tx);
+
+    let stale_block = |slot| {
+        store
+            .confirm(
+                &test_point(slot),
+                &[],
+                &[],
+                FINALIZE_THRESHOLD,
+                DROP_THRESHOLD,
+            )
+            .unwrap()
+    };
+
+    stale_block(1);
+    store.requeue_propagated().unwrap();
+    store.mark_inflight(&[hash]).unwrap();
+    stale_block(2);
+
+    assert!(find_in_finalized(store, &hash).is_none());
+    assert_eq!(store.check_status(&hash).non_confirmations, 1);
+}
+
+/// Offered again on the new session, then seen on chain.
+fn assert_requeued_tx_finalizes_after_being_offered_again<S: MempoolStore>(store: &S) {
+    let tx = test_tx(64);
+    let hash = tx.hash;
+    advance_to_propagated(store, tx);
+
+    store.requeue_propagated().unwrap();
+    store.mark_inflight(&[hash]).unwrap();
+    store.mark_acknowledged(&[hash]).unwrap();
+
+    for slot in 1..=FINALIZE_THRESHOLD as u64 {
+        store
+            .confirm(
+                &test_point(slot),
+                &[hash],
+                &[],
+                FINALIZE_THRESHOLD,
+                DROP_THRESHOLD,
+            )
+            .unwrap();
+    }
+
+    let finalized = find_in_finalized(store, &hash).expect("the tx finalized");
+    assert_eq!(finalized.stage, MempoolTxStage::Finalized);
+}
+
+/// The old session's peer got it through: it lands on chain while pending, and
+/// isn't offered again or dropped for it.
+fn assert_requeued_tx_seen_while_pending_finalizes<S: MempoolStore>(store: &S) {
+    let tx = test_tx(65);
+    let hash = tx.hash;
+    advance_to_propagated(store, tx);
+    store.requeue_propagated().unwrap();
+
+    store
+        .confirm(
+            &test_point(1),
+            &[hash],
+            &[],
+            FINALIZE_THRESHOLD,
+            DROP_THRESHOLD,
+        )
+        .unwrap();
+
+    let status = store.check_status(&hash);
+    assert_eq!(status.stage, MempoolTxStage::Confirmed);
+    assert_eq!(status.confirmations, 1);
+    assert_eq!(status.confirmed_at, Some(test_point(1)));
+    assert!(!store.has_pending());
+
+    // Later blocks don't carry it again.
+    for slot in 2..=FINALIZE_THRESHOLD as u64 {
+        store
+            .confirm(
+                &test_point(slot),
+                &[],
+                &[],
+                FINALIZE_THRESHOLD,
+                DROP_THRESHOLD,
+            )
+            .unwrap();
+    }
+
+    let finalized = find_in_finalized(store, &hash).expect("the tx finalized");
+    assert_eq!(finalized.stage, MempoolTxStage::Finalized);
+}
+
+#[test]
+fn ephemeral_requeue_moves_only_propagated() {
+    assert_requeue_moves_only_propagated(&EphemeralMempool::new());
+}
+
+#[test]
+fn ephemeral_requeue_restarts_the_drop_count() {
+    assert_requeue_restarts_the_drop_count(&EphemeralMempool::new());
+}
+
+#[test]
+fn ephemeral_requeued_tx_finalizes_after_being_offered_again() {
+    assert_requeued_tx_finalizes_after_being_offered_again(&EphemeralMempool::new());
+}
+
+#[test]
+fn ephemeral_requeued_tx_seen_while_pending_finalizes() {
+    assert_requeued_tx_seen_while_pending_finalizes(&EphemeralMempool::new());
+}
+
+#[test]
+fn ephemeral_requeue_keeps_one_copy_of_a_tx_received_again() {
+    let store = EphemeralMempool::new();
+    let tx = test_tx(66);
+    advance_to_propagated(&store, tx.clone());
+    store.receive(tx).unwrap();
+
+    store.requeue_propagated().unwrap();
+
+    assert_eq!(store.peek_pending().len(), 1);
+}
+
+#[test]
+fn redb_requeue_moves_only_propagated() {
+    assert_requeue_moves_only_propagated(&RedbMempool::in_memory().unwrap());
+}
+
+#[test]
+fn redb_requeue_restarts_the_drop_count() {
+    assert_requeue_restarts_the_drop_count(&RedbMempool::in_memory().unwrap());
+}
+
+#[test]
+fn redb_requeued_tx_finalizes_after_being_offered_again() {
+    assert_requeued_tx_finalizes_after_being_offered_again(&RedbMempool::in_memory().unwrap());
+}
+
+#[test]
+fn redb_requeued_tx_seen_while_pending_finalizes() {
+    assert_requeued_tx_seen_while_pending_finalizes(&RedbMempool::in_memory().unwrap());
+}
+
 #[test]
 fn ephemeral_confirmed_tx_finalizes_across_blocks() {
     assert_confirmed_tx_finalizes_across_blocks(&EphemeralMempool::new());

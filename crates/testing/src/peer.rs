@@ -209,6 +209,7 @@ struct Shared {
     intersected_at: Mutex<Vec<Instant>>,
     sessions: AtomicUsize,
     tx_submissions: AtomicUsize,
+    tx_ids_offered: Mutex<Vec<(usize, Vec<u8>)>>,
     closed_by_node: AtomicUsize,
     stop: watch::Sender<bool>,
 }
@@ -260,6 +261,7 @@ impl PeerFixture {
             intersected_at: Mutex::new(Vec::new()),
             sessions: AtomicUsize::new(0),
             tx_submissions: AtomicUsize::new(0),
+            tx_ids_offered: Mutex::new(Vec::new()),
             closed_by_node: AtomicUsize::new(0),
             stop: watch::Sender::new(false),
         });
@@ -320,6 +322,12 @@ impl PeerFixture {
     /// The sessions that started tx-submission so far.
     pub fn tx_submissions(&self) -> usize {
         self.shared.tx_submissions.load(Ordering::SeqCst)
+    }
+
+    /// The transaction ids the node replied with, each with the number of its
+    /// tx-submission session, counted from 1.
+    pub fn tx_ids_offered(&self) -> Vec<(usize, Vec<u8>)> {
+        self.shared.tx_ids_offered.lock().unwrap().clone()
     }
 
     /// The connections closed with [`PeerOptions::close_with_fin`] that the
@@ -607,7 +615,10 @@ async fn serve_txsubmission(mut server: txsubmission::Server, shared: &Shared) {
             .await
             .is_ok()
         {
-            let _ = server.receive_next_reply().await;
+            if let Ok(txsubmission::Reply::TxIds(ids)) = server.receive_next_reply().await {
+                let mut offered = shared.tx_ids_offered.lock().unwrap();
+                offered.extend(ids.into_iter().map(|id| (number, id.0 .1)));
+            }
         }
 
         return;

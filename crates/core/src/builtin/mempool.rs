@@ -168,6 +168,39 @@ impl MempoolStore for EphemeralMempool {
         Ok(())
     }
 
+    fn requeue_propagated(&self) -> Result<(), MempoolError> {
+        let mut state = self.state.write().unwrap();
+
+        let mut requeued: Vec<MempoolTx> = state.inflight.drain(..).collect();
+
+        // `confirm` promotes propagated txs into the acknowledged map as they are.
+        let promoted: Vec<TxHash> = state
+            .acknowledged
+            .values()
+            .filter(|tx| tx.stage == MempoolTxStage::Propagated)
+            .map(|tx| tx.hash)
+            .collect();
+
+        for hash in promoted {
+            requeued.extend(state.acknowledged.remove(&hash));
+        }
+
+        for mut tx in requeued {
+            // `receive` lets a tx in again while it is inflight.
+            if state.pending.iter().any(|p| p.hash == tx.hash) {
+                continue;
+            }
+
+            debug!(tx.hash = %tx.hash, "tx requeued");
+            tx.retry();
+            state.pending.push(tx.clone());
+            self.notify(tx);
+        }
+
+        self.log_state(&state);
+        Ok(())
+    }
+
     fn find_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx> {
         let state = self.state.read().unwrap();
         // Check propagated (inflight vec)
@@ -206,11 +239,21 @@ impl MempoolStore for EphemeralMempool {
             state.acknowledged.insert(tx.hash, tx);
         }
 
+        let seen_set: HashSet<&TxHash> = seen_txs.iter().collect();
+
+        // A re-queued tx can land on chain before it is offered again.
+        let (seen_pending, pending): (Vec<_>, Vec<_>) = std::mem::take(&mut state.pending)
+            .into_iter()
+            .partition(|tx| seen_set.contains(&tx.hash));
+        state.pending = pending;
+        for tx in seen_pending {
+            state.acknowledged.insert(tx.hash, tx);
+        }
+
         if state.acknowledged.is_empty() {
             return Ok(());
         }
 
-        let seen_set: HashSet<&TxHash> = seen_txs.iter().collect();
         let unseen_set: HashSet<&TxHash> = unseen_txs.iter().collect();
 
         let hashes: Vec<TxHash> = state.acknowledged.keys().copied().collect();

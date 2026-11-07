@@ -68,6 +68,10 @@ impl MempoolStore for Mempool {
         Ok(())
     }
 
+    fn requeue_propagated(&self) -> Result<(), MempoolError> {
+        Ok(())
+    }
+
     fn find_inflight(&self, _tx_hash: &TxHash) -> Option<MempoolTx> {
         None
     }

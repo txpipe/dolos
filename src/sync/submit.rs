@@ -74,6 +74,12 @@ impl Worker {
             return Err(Failure::new("starting tx-submission", &error));
         }
 
+        // What an earlier session offered may never have reached the peer.
+        if let Err(error) = stage.mempool.requeue_propagated() {
+            peer_session.abort().await;
+            return Err(Failure::new("re-queueing propagated txs", &error));
+        }
+
         Ok(Self {
             peer_session: Some(peer_session),
             unfulfilled_request: Default::default(),

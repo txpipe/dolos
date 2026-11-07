@@ -866,6 +866,35 @@ fn a_tx_submission_session_the_peer_asked_in_starts_the_count_again() {
 }
 
 #[test]
+fn a_new_submit_session_offers_again_what_the_last_one_left_unacknowledged() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, domain) = domain_over(temp.path(), no_backoff(10));
+
+    let tx = dolos_testing::mempool::make_test_mempool_tx(dolos_testing::tx_sequence_to_hash(1));
+    let hash = tx.hash;
+    domain.mempool().receive(tx).unwrap();
+
+    // Sessions 1 and 2 ask once and close before acknowledging the reply.
+    let peer = peer(PeerOptions {
+        request_tx_ids_at: vec![1, 2],
+        ..Default::default()
+    });
+
+    let (_, stages) = submit_alone(&config, peer.address().to_string(), &domain);
+
+    wait_until("session 3 starts", Duration::from_secs(30), || {
+        peer.tx_submissions() >= 3
+    });
+    wait_until("session 3 re-queues", Duration::from_secs(5), || {
+        domain.mempool().check_status(&hash).stage == MempoolTxStage::Pending
+    });
+    stages.teardown();
+
+    let offered = peer.tx_ids_offered();
+    assert_eq!(offered, [(1, hash.to_vec()), (2, hash.to_vec())]);
+}
+
+#[test]
 fn a_submit_stage_whose_peer_is_unreachable_gives_up_on_it() {
     let temp = tempfile::tempdir().unwrap();
     let (config, domain) = domain_over(temp.path(), no_backoff(1));
