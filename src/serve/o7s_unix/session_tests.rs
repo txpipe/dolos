@@ -236,8 +236,9 @@ fn set_cursor<D: Domain>(domain: &D, point: ChainPoint) {
     writer.commit().unwrap();
 }
 
-/// What the tip-reading queries answer, which must agree. The session must be
-/// acquired.
+/// What the tip-reading queries answer. The two points must agree; the epoch
+/// is only checked to answer, because the tests here sit in epoch 0. The
+/// session must be acquired.
 async fn expect_tip(client: &mut NodeClient, expected: Point) {
     let point = within(q16::get_chain_point(client.statequery()))
         .await
@@ -626,4 +627,59 @@ async fn a_slot_cursor_with_its_block_archived_takes_that_block() {
     within(client.statequery().acquire(None)).await.unwrap();
 
     expect_tip(&mut client, Point::try_from(chain[0].0.clone()).unwrap()).await;
+}
+
+/// `ToyDomain`'s epochs are 432000 slots long.
+#[tokio::test]
+async fn an_epoch_query_answers_the_tips_epoch() {
+    let domain = ToyDomain::new(None, None);
+    let chain = blocks(&[432_100]);
+    write_archive(&domain, &chain);
+    set_cursor(&domain, chain[0].0.clone());
+
+    let (mut client, _server, _dir) = connect_session(domain).await;
+
+    within(client.statequery().acquire(None)).await.unwrap();
+
+    let epoch = within(q16::get_block_epoch_number(client.statequery(), 0))
+        .await
+        .unwrap();
+    assert_eq!(epoch, 1);
+}
+
+/// Until the boundary block is applied, the epoch is the last archived block's.
+#[tokio::test]
+async fn an_epoch_query_at_an_epoch_boundary_answers_the_old_epoch() {
+    let domain = ToyDomain::new(None, None);
+    write_archive(&domain, &blocks(&[431_990]));
+    set_cursor(&domain, ChainPoint::Slot(432_010));
+
+    let (mut client, _server, _dir) = connect_session(domain).await;
+
+    within(client.statequery().acquire(None)).await.unwrap();
+
+    let epoch = within(q16::get_block_epoch_number(client.statequery(), 0))
+        .await
+        .unwrap();
+    assert_eq!(epoch, 0);
+}
+
+/// A corrupt block under a slot cursor is a failure, not an answer of `Origin`.
+#[tokio::test]
+async fn a_slot_cursor_on_a_corrupt_block_ends_the_connection() {
+    let domain = ToyDomain::new(None, None);
+    let (point, _) = make_conway_block(100);
+    write_archive(&domain, &[(point, Arc::new(vec![0u8; 4]))]);
+    set_cursor(&domain, ChainPoint::Slot(100));
+
+    let (mut client, server, _dir) = connect_session(domain).await;
+
+    let reply = within(client.statequery().acquire(None)).await;
+    assert!(reply.is_err(), "the client should see the connection end");
+
+    let err = within(server).await.unwrap().unwrap_err();
+    assert!(
+        !matches!(&err, ServeError::Internal(e) if e.downcast_ref::<JoinError>().is_some()),
+        "expected the session's error, got the task's panic: {err:?}"
+    );
 }
