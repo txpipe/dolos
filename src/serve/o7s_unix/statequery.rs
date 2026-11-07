@@ -33,12 +33,19 @@ impl<D: Domain> Session<D> {
 
         match point {
             ChainPoint::Slot(slot) => {
-                let body = self
-                    .domain
-                    .archive()
-                    .get_block_by_slot(&slot)
-                    .map_err(Error::server)?
-                    .ok_or_else(|| Error::server("block not found for slot"))?;
+                let archive = self.domain.archive();
+
+                // An epoch boundary commits this cursor before its block is
+                // applied, so until then the tip is the last archived block.
+                let found = archive.get_block_by_slot(&slot).map_err(Error::server)?;
+                let tip = match found {
+                    Some(body) => Some((slot, body)),
+                    None => archive.get_tip().map_err(Error::server)?,
+                };
+
+                let Some((slot, body)) = tip else {
+                    return Ok(ChainPoint::Origin);
+                };
 
                 let block =
                     MultiEraBlock::decode(&body).map_err(|e| Error::server(e.to_string()))?;
@@ -67,10 +74,13 @@ impl<D: Domain> Session<D> {
         Ok(())
     }
 
+    /// Answer an Acquire or ReAcquire, returning whether the point was
+    /// acquired. A failure puts the protocol back in Idle, whichever one
+    /// was asked.
     async fn handle_acquire(
         &mut self,
         point: Option<pallas::network::miniprotocols::Point>,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         debug!(?point, "handling acquire request");
 
         let chain_point = match point {
@@ -104,11 +114,12 @@ impl<D: Domain> Session<D> {
             self.acquired_point = Some(chain_point);
             self.send_acquired().await?;
         } else {
+            self.acquired_point = None;
             self.send_failure(localstate::AcquireFailure::PointNotOnChain)
                 .await?;
         }
 
-        Ok(())
+        Ok(exists)
     }
 
     /// Decode cardano-cli tagged query format.
@@ -351,7 +362,7 @@ impl<D: Domain> Session<D> {
     async fn handle_reacquire(
         &mut self,
         point: Option<pallas::network::miniprotocols::Point>,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         debug!(?point, "handling reacquire request");
         self.handle_acquire(point).await
     }
@@ -370,7 +381,9 @@ impl<D: Domain> Session<D> {
                 .await
                 .map_err(Error::server)?
             {
-                self.handle_acquire(req.0).await?;
+                if !self.handle_acquire(req.0).await? {
+                    continue;
+                }
             } else {
                 break;
             }
@@ -386,9 +399,11 @@ impl<D: Domain> Session<D> {
                         self.handle_query(query).await?;
                     }
                     localstate::ClientQueryRequest::ReAcquire(point) => {
-                        self.handle_reacquire(point).await?;
                         // After reacquire, we stay in acquired state but with
-                        // new point
+                        // new point, unless it failed
+                        if !self.handle_reacquire(point).await? {
+                            break;
+                        }
                     }
                     localstate::ClientQueryRequest::Release => {
                         self.handle_release().await?;
