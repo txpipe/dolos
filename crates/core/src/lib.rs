@@ -901,6 +901,9 @@ pub enum DomainError {
     #[error("wal is empty")]
     WalIsEmpty,
 
+    #[error("no chain overlap at slot {0}")]
+    NoOverlap(BlockSlot),
+
     #[error("forced stop epoch reached")]
     StopEpochReached,
 }
