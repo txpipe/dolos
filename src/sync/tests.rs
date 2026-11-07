@@ -1123,17 +1123,109 @@ fn a_tx_whose_body_ends_sessions_spares_the_one_behind_it_on_a_persistent_mempoo
     a_tx_whose_body_ends_sessions_spares_the_one_behind_it(true);
 }
 
-/// A healthy session keeps its batches: a first offer holds nothing back.
+/// `honest` has two offers behind it when fresh `poison` comes first: the node
+/// asks for more before it judges the poison, and a third offer then would
+/// cost `honest` its last one for a session already ending.
+fn a_counted_tx_behind_a_poison_is_judged(persistent_mempool: bool) {
+    use dolos_testing::mempool::make_test_mempool_tx_spending as spending;
+
+    let temp = tempfile::tempdir().unwrap();
+    let (config, domain) = domain_with_mempool(temp.path(), no_backoff(100), persistent_mempool);
+    let mempool = domain.mempool();
+
+    let poison = spending(&[dolos_testing::tx_sequence_to_hash(1)], 1);
+    let honest = spending(&[dolos_testing::tx_sequence_to_hash(2)], 2);
+    let (poison_hash, honest_hash) = (poison.hash, honest.hash);
+    let honest_body = honest.payload.1.clone();
+
+    // As after a session that ended: the re-queue puts `honest` behind `poison`.
+    mempool.receive(poison).unwrap();
+    mempool.receive(honest).unwrap();
+    mempool.mark_inflight(&[honest_hash]).unwrap();
+
+    let peer = peer(PeerOptions {
+        close_at_body_of: Some(poison_hash.to_vec()),
+        tx_ids_per_request: 3,
+        ..Default::default()
+    });
+
+    let submit = submit::Stage::new(
+        peer.address().to_string(),
+        PREVIEW_MAGIC,
+        mempool.clone(),
+        &config.sync.retry,
+        Arc::default(),
+    );
+    submit.count_offers(&[honest_hash, honest_hash]);
+    let tether = gasket::runtime::spawn_stage(submit, define_gasket_policy(&config.sync.retry));
+    let stages = Stages(vec![tether]);
+
+    wait_until("session 4 starts", Duration::from_secs(30), || {
+        peer.tx_submissions() >= 4
+    });
+    wait_until(
+        "the honest tx is acknowledged",
+        Duration::from_secs(5),
+        || mempool.check_status(&honest_hash).stage == MempoolTxStage::Acknowledged,
+    );
+
+    let (poison_id, honest_id) = (poison_hash.to_vec(), honest_hash.to_vec());
+    let expected = vec![
+        (1, vec![poison_id.clone()]),
+        (1, vec![]),
+        (2, vec![honest_id.clone()]),
+        (2, vec![]),
+        (2, vec![poison_id.clone()]),
+        (2, vec![]),
+        (3, vec![poison_id.clone()]),
+        (3, vec![]),
+    ];
+    assert_eq!(peer.tx_id_replies(), expected);
+    assert!(peer
+        .tx_bodies_served()
+        .contains(&(vec![honest_id], vec![honest_body])));
+    assert_eq!(
+        mempool.check_status(&poison_hash).stage,
+        MempoolTxStage::Propagated
+    );
+
+    for slot in 1..=2 {
+        mempool
+            .confirm(&point(slot), &[honest_hash], &[], 10, 2)
+            .unwrap();
+    }
+    stages.teardown();
+
+    assert_eq!(peer.tx_id_replies(), expected);
+    let finalized = mempool.dump_finalized(0, 10).items;
+    assert_eq!(finalized.len(), 1);
+    assert_eq!(finalized[0].hash, poison_hash);
+    assert_eq!(finalized[0].stage, MempoolTxStage::Dropped);
+}
+
+#[test]
+fn a_counted_tx_behind_a_poison_is_judged_on_the_ephemeral_mempool() {
+    a_counted_tx_behind_a_poison_is_judged(false);
+}
+
+#[test]
+fn a_counted_tx_behind_a_poison_is_judged_on_a_persistent_mempool() {
+    a_counted_tx_behind_a_poison_is_judged(true);
+}
+
+/// A healthy session keeps its batches: a first offer holds nothing back. Each
+/// reply stays within what was asked, and each id asked for gets its body.
 #[test]
 fn a_node_that_judges_each_offer_gets_every_tx_in_one_session() {
+    use dolos_testing::mempool::make_test_mempool_tx_spending as spending;
+
     let temp = tempfile::tempdir().unwrap();
     let (config, domain) = domain_over(temp.path(), no_backoff(10));
     let mempool = domain.mempool();
 
-    let txs = [1, 2, 3].map(|n| {
-        dolos_testing::mempool::make_test_mempool_tx(dolos_testing::tx_sequence_to_hash(n))
-    });
+    let txs = [1, 2, 3, 4, 5].map(|n| spending(&[dolos_testing::tx_sequence_to_hash(n)], n));
     let ids = txs.clone().map(|tx| tx.hash.to_vec());
+    let bodies = txs.clone().map(|tx| tx.payload.1);
     let hashes = txs.clone().map(|tx| tx.hash);
     for tx in txs {
         mempool.receive(tx).unwrap();
@@ -1156,6 +1248,23 @@ fn a_node_that_judges_each_offer_gets_every_tx_in_one_session() {
 
     assert_eq!(offers_by_session(&peer), [ids.to_vec()]);
     assert_eq!(peer.tx_submissions(), 1);
+    assert_eq!(
+        peer.tx_id_replies(),
+        [
+            (1, ids[..2].to_vec()),
+            (1, ids[2..4].to_vec()),
+            (1, ids[4..].to_vec()),
+            (1, vec![]),
+        ]
+    );
+    assert_eq!(
+        peer.tx_bodies_served(),
+        [
+            (ids[..2].to_vec(), bodies[..2].to_vec()),
+            (ids[2..4].to_vec(), bodies[2..4].to_vec()),
+            (ids[4..].to_vec(), bodies[4..].to_vec()),
+        ]
+    );
 }
 
 #[test]

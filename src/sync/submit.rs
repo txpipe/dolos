@@ -149,17 +149,27 @@ impl Worker {
     }
 
     /// The answer to a non-blocking request. A peer asks ahead of judging what
-    /// it was just offered, so while a suspect is unacknowledged nothing else
-    /// goes out: if that suspect ends the session, nothing else takes the count
-    /// for it. The peer's blocking request waits for its acknowledgements, so
-    /// an empty answer can't stall the session.
+    /// it was just offered, so that session may be about to end. A tx already
+    /// offered waits until nothing is unacknowledged, and nothing goes out
+    /// while a suspect is: what ends the session takes no count from the rest.
+    /// The peer's blocking request waits for its acknowledgements, so an empty
+    /// answer can't stall the session.
     fn next_non_blocking_offer(&self, stage: &Stage, limit: usize) -> Vec<MempoolTx> {
         if stage.any_suspect(&self.propagated_hashes) {
             debug!("holding back offers until a suspect tx is acknowledged");
             return Vec::new();
         }
 
-        stage.next_offer(limit)
+        let offer = stage.next_offer(limit);
+
+        if !self.propagated_hashes.is_empty()
+            && offer.first().is_some_and(|tx| stage.was_offered(&tx.hash))
+        {
+            debug!("holding back a tx already offered until the last offer is judged");
+            return Vec::new();
+        }
+
+        offer
     }
 
     fn txsubmission(&mut self) -> &mut txsubmission::Client {
@@ -451,7 +461,11 @@ impl Stage {
             .any(|hash| offers.get(hash).is_some_and(|n| *n >= SUSPECT_OFFERS))
     }
 
-    fn count_offers(&self, hashes: &[TxHash]) {
+    fn was_offered(&self, hash: &TxHash) -> bool {
+        self.unacknowledged_offers.borrow().contains_key(hash)
+    }
+
+    pub(super) fn count_offers(&self, hashes: &[TxHash]) {
         let mut offers = self.unacknowledged_offers.borrow_mut();
 
         for hash in hashes {
@@ -593,6 +607,45 @@ mod tests {
         let worker = worker_with_offers(&[offered]);
 
         assert_eq!(hashes(&worker.next_non_blocking_offer(&stage, 5)), [next]);
+    }
+
+    /// A first offer out, with a tx already offered twice behind it.
+    fn a_counted_tx_behind_a_first_offer(stage: &Stage) -> (TxHash, TxHash) {
+        let (first, counted) = (receive_new(stage, 1), receive_new(stage, 2));
+        stage.count_offers(&[counted, counted]);
+        stage.mempool.mark_inflight(&[first]).unwrap();
+        stage.count_offers(&[first]);
+        (first, counted)
+    }
+
+    #[test]
+    fn a_counted_tx_waits_for_a_first_offer_to_be_judged() {
+        let stage = stage();
+        let (first, counted) = a_counted_tx_behind_a_first_offer(&stage);
+
+        let mut worker = worker_with_offers(&[first]);
+        assert!(worker.next_non_blocking_offer(&stage, 3).is_empty());
+        assert_eq!(stage.unacknowledged_offers.borrow().get(&counted), Some(&2));
+
+        worker.acknowledge_propagated(&stage, 1).unwrap();
+        assert_eq!(
+            hashes(&worker.next_non_blocking_offer(&stage, 3)),
+            [counted]
+        );
+    }
+
+    #[test]
+    fn a_counted_tx_goes_out_when_nothing_is_unacknowledged() {
+        let stage = stage();
+        let counted = receive_new(&stage, 1);
+        stage.count_offers(&[counted]);
+
+        let worker = worker_with_offers(&[]);
+
+        assert_eq!(
+            hashes(&worker.next_non_blocking_offer(&stage, 3)),
+            [counted]
+        );
     }
 
     #[test]

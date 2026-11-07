@@ -29,6 +29,10 @@ use tokio::sync::watch;
 
 use crate::blocks::make_conway_block_with_prev;
 
+/// The ids a request for transaction bodies asked for, and the bytes of the
+/// bodies the node replied with.
+pub type TxBodiesServed = (Vec<Vec<u8>>, Vec<Vec<u8>>);
+
 /// How a [`PeerFixture`] serves its chain.
 #[derive(Debug, Clone, Default)]
 pub struct PeerOptions {
@@ -219,7 +223,8 @@ struct Shared {
     intersected_at: Mutex<Vec<Instant>>,
     sessions: AtomicUsize,
     tx_submissions: AtomicUsize,
-    tx_ids_offered: Mutex<Vec<(usize, Vec<u8>)>>,
+    tx_id_replies: Mutex<Vec<(usize, Vec<Vec<u8>>)>>,
+    tx_bodies_served: Mutex<Vec<TxBodiesServed>>,
     closed_by_node: AtomicUsize,
     stop: watch::Sender<bool>,
 }
@@ -243,6 +248,10 @@ impl Shared {
 
     fn stopped(&self) -> bool {
         *self.stop.borrow()
+    }
+
+    fn record_tx_id_reply(&self, session: usize, ids: Vec<Vec<u8>>) {
+        self.tx_id_replies.lock().unwrap().push((session, ids));
     }
 }
 
@@ -271,7 +280,8 @@ impl PeerFixture {
             intersected_at: Mutex::new(Vec::new()),
             sessions: AtomicUsize::new(0),
             tx_submissions: AtomicUsize::new(0),
-            tx_ids_offered: Mutex::new(Vec::new()),
+            tx_id_replies: Mutex::new(Vec::new()),
+            tx_bodies_served: Mutex::new(Vec::new()),
             closed_by_node: AtomicUsize::new(0),
             stop: watch::Sender::new(false),
         });
@@ -337,7 +347,22 @@ impl PeerFixture {
     /// The transaction ids the node replied with, each with the number of its
     /// tx-submission session, counted from 1.
     pub fn tx_ids_offered(&self) -> Vec<(usize, Vec<u8>)> {
-        self.shared.tx_ids_offered.lock().unwrap().clone()
+        self.tx_id_replies()
+            .into_iter()
+            .flat_map(|(session, ids)| ids.into_iter().map(move |id| (session, id)))
+            .collect()
+    }
+
+    /// Each reply of transaction ids the node sent, empty ones too, in order,
+    /// with the number of its tx-submission session.
+    pub fn tx_id_replies(&self) -> Vec<(usize, Vec<Vec<u8>>)> {
+        self.shared.tx_id_replies.lock().unwrap().clone()
+    }
+
+    /// Each request for transaction bodies, in order.
+    /// [`PeerOptions::close_at_body_of`] is what asks for them.
+    pub fn tx_bodies_served(&self) -> Vec<TxBodiesServed> {
+        self.shared.tx_bodies_served.lock().unwrap().clone()
     }
 
     /// The connections closed with [`PeerOptions::close_with_fin`] that the
@@ -627,8 +652,7 @@ async fn serve_txsubmission(mut server: txsubmission::Server, shared: &Shared) {
             .is_ok()
         {
             if let Ok(txsubmission::Reply::TxIds(ids)) = server.receive_next_reply().await {
-                let mut offered = shared.tx_ids_offered.lock().unwrap();
-                offered.extend(ids.into_iter().map(|id| (number, id.0 .1)));
+                shared.record_tx_id_reply(number, ids.into_iter().map(|id| id.0 .1).collect());
             }
         }
 
@@ -657,11 +681,7 @@ async fn serve_txsubmission(mut server: txsubmission::Server, shared: &Shared) {
             let closes = ids.contains(poison);
             acknowledge = ids.len() as u16;
 
-            shared
-                .tx_ids_offered
-                .lock()
-                .unwrap()
-                .extend(ids.into_iter().map(|id| (number, id)));
+            shared.record_tx_id_reply(number, ids);
 
             if closes {
                 return;
@@ -702,7 +722,13 @@ async fn serve_as_a_node(
             let closes = offer.iter().any(|id| id.1 == poison);
 
             server.request_txs(offer.clone()).await?;
-            server.receive_next_reply().await?;
+
+            if let txsubmission::Reply::Txs(bodies) = server.receive_next_reply().await? {
+                shared.tx_bodies_served.lock().unwrap().push((
+                    offer.iter().map(|id| id.1.clone()).collect(),
+                    bodies.into_iter().map(|body| body.1).collect(),
+                ));
+            }
 
             let next = request_offer(server, shared, number, false, judged, per_request).await?;
 
@@ -734,8 +760,7 @@ async fn request_offer(
 
     let ids: Vec<_> = ids.into_iter().map(|id| id.0).collect();
 
-    let mut offered = shared.tx_ids_offered.lock().unwrap();
-    offered.extend(ids.iter().map(|id| (number, id.1.clone())));
+    shared.record_tx_id_reply(number, ids.iter().map(|id| id.1.clone()).collect());
 
     Ok(ids)
 }
