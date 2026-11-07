@@ -3,6 +3,7 @@ use std::sync::Arc;
 use dolos_cardano::{active_era_index, era_table, load_era_table, EraBoundary, EraKey, EraState};
 use dolos_core::{Domain as _, StateStore as _, StateWriter as _};
 use dolos_testing::{era_fixtures::PublicNetwork, toy_domain::ToyDomain};
+use pallas::crypto::hash::Hash;
 
 fn protocols(table: &[EraState]) -> Vec<u16> {
     table.iter().map(|era| era.protocol).collect()
@@ -132,6 +133,58 @@ fn loading_a_custom_network_returns_what_state_holds() {
     assert_eq!(loaded[0].start.slot, 0);
     assert_eq!(loaded[1].start.slot, 86400);
     assert!(loaded[1].end.is_none());
+}
+
+#[test]
+fn loading_a_custom_chain_on_a_public_magic_returns_what_state_holds() {
+    for (magic, starting_protocol) in [(1, 10), (1, 9), (764824073, 10), (2, 9)] {
+        let mut genesis = dolos_cardano::include::preview::load();
+        genesis.shelley.network_magic = Some(magic);
+        genesis.shelley_hash = Hash::new([7; 32]);
+        genesis.force_protocol = Some(starting_protocol);
+        let genesis = Arc::new(genesis);
+        let domain = ToyDomain::new_with_genesis(genesis.clone(), None, None);
+
+        let loaded = load_era_table(domain.state(), &genesis).unwrap();
+
+        assert_eq!(protocols(&loaded), [starting_protocol as u16]);
+        assert_eq!(loaded[0].slot_length, 1);
+        assert_eq!(loaded[0].start.slot, 0);
+        assert!(loaded[0].end.is_none());
+    }
+}
+
+#[test]
+fn byron_rows_of_a_store_synced_from_genesis_collapse_into_one() {
+    let network = PublicNetwork::mainnet();
+    let first_shelley = network.eras[0].1.start.clone();
+
+    let byron = |protocol, start_epoch: u64, end: EraBoundary| {
+        let start_slot = start_epoch * 21600;
+
+        (
+            protocol,
+            EraState {
+                start: EraBoundary {
+                    epoch: start_epoch,
+                    slot: start_slot,
+                    timestamp: 1506203091 + start_slot * 20,
+                },
+                end: Some(end),
+                epoch_length: 21600,
+                slot_length: 20,
+                protocol,
+            },
+        )
+    };
+
+    let mut recorded = vec![byron(1, 176, first_shelley)];
+    recorded.extend(network.eras.iter().cloned());
+
+    let table = era_table(&recorded, &network.genesis).unwrap();
+
+    assert_eq!(protocols(&table), [0, 2, 3, 4, 5, 7, 9]);
+    assert_eq!(table[0].end.as_ref().unwrap().slot, 4492800);
 }
 
 #[test]

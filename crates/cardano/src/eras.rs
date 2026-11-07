@@ -1,7 +1,7 @@
 use dolos_core::{BlockSlot, ChainError, Domain, Genesis, StateStore};
 use pallas::ledger::primitives::Epoch;
 
-use crate::{model::EraState, EraBoundary, EraKey};
+use crate::{model::EraState, networks::KnownNetwork, EraBoundary, EraKey};
 
 pub type EpochSlot = u32;
 
@@ -287,7 +287,9 @@ const ERA_OPENING_PROTOCOLS: [u16; 6] = [2, 3, 4, 5, 7, 9];
 /// one starts. The last row is open when it comes from `recorded`, and keeps
 /// its known bound when `recorded` holds nothing past the padding.
 ///
-/// `None` when the genesis doesn't describe a public network.
+/// The magic alone picks the history, so a caller that can see a custom chain
+/// checks the genesis first, as [`load_era_table`] does. `None` on any other
+/// magic, or when the genesis lacks a field the history needs.
 pub fn era_table(recorded: &[(u16, EraState)], genesis: &Genesis) -> Option<Vec<EraState>> {
     let system_start = genesis.shelley.system_start.as_ref()?;
     let system_start = chrono::DateTime::parse_from_rfc3339(system_start)
@@ -350,8 +352,9 @@ pub fn era_table(recorded: &[(u16, EraState)], genesis: &Genesis) -> Option<Vec<
 }
 
 /// The era table to serve to clients: [`era_table`] on a public network, and
-/// the rows state holds anywhere else. The last row is always open, since the
-/// tip doesn't bound what a client may ask to convert. Empty on an empty store.
+/// the rows state holds anywhere else, including a custom chain on a public
+/// magic. The last row is always open, since the tip doesn't bound what a
+/// client may ask to convert. Empty on an empty store.
 pub fn load_era_table(
     state: &impl StateStore,
     genesis: &Genesis,
@@ -367,7 +370,15 @@ pub fn load_era_table(
         return Ok(Vec::new());
     }
 
-    let mut table = era_table(&recorded, genesis).unwrap_or_else(|| {
+    let is_public = genesis
+        .shelley
+        .network_magic
+        .and_then(|magic| KnownNetwork::by_magic(magic.into()))
+        .is_some_and(|network| network.is_genesis_of(genesis));
+
+    let padded = is_public.then(|| era_table(&recorded, genesis)).flatten();
+
+    let mut table = padded.unwrap_or_else(|| {
         recorded
             .into_iter()
             .map(|(protocol, era)| EraState { protocol, ..era })

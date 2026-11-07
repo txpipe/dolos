@@ -4,6 +4,7 @@ use pallas::codec::minicbor::{self, Encoder};
 use pallas::codec::utils::AnyCbor;
 
 const PICOSECONDS_PER_SECOND: u128 = 1_000_000_000_000;
+const MILLISECONDS_PER_SECOND: u64 = 1_000;
 
 /// Seconds since the system start, in picoseconds. The node writes this as a
 /// CBOR integer, which takes a bignum past `u64` (about 213 days of chain).
@@ -33,7 +34,10 @@ fn encode_relative_time<W: minicbor::encode::Write>(
 pub struct EraHistoryResponse<'a> {
     pub eras: &'a [DolosEraState],
     pub system_start: u64,
-    pub security_param: u64,
+    /// The safe zone and genesis window of a Byron row: 2k.
+    pub byron_safe_zone: u64,
+    /// The safe zone and genesis window from Shelley on: 3k/f.
+    pub shelley_safe_zone: u64,
 }
 
 impl<'a, C> minicbor::Encode<C> for EraHistoryResponse<'a> {
@@ -64,15 +68,15 @@ impl<'a, C> minicbor::Encode<C> for EraHistoryResponse<'a> {
                 }
             }
 
-            let safe_from_tip = self.security_param * 2;
-            let genesis_window = self.security_param * 2;
+            let safe_zone = if era.protocol < 2 {
+                self.byron_safe_zone
+            } else {
+                self.shelley_safe_zone
+            };
 
             encoder.array(4)?;
             encoder.u64(era.epoch_length)?;
-            let slot_length_picos = (era.slot_length as u128)
-                .saturating_mul(PICOSECONDS_PER_SECOND)
-                .min(u64::MAX as u128) as u64;
-            encoder.u64(slot_length_picos)?;
+            encoder.u64(era.slot_length.saturating_mul(MILLISECONDS_PER_SECOND))?;
 
             if era.end.is_none() {
                 encoder.array(1)?;
@@ -80,13 +84,13 @@ impl<'a, C> minicbor::Encode<C> for EraHistoryResponse<'a> {
             } else {
                 encoder.array(3)?;
                 encoder.u8(0)?;
-                encoder.u64(safe_from_tip)?;
+                encoder.u64(safe_zone)?;
 
                 encoder.array(1)?;
                 encoder.u8(0)?;
             }
 
-            encoder.u64(genesis_window)?;
+            encoder.u64(safe_zone)?;
         }
         Ok(())
     }
@@ -114,16 +118,42 @@ fn build_era_history_response(eras: &[DolosEraState], genesis: &Genesis) -> Resu
         .map(|dt| dt.timestamp() as u64)
         .ok_or_else(|| Error::server("invalid system start"))?;
 
-    let security_param = genesis
-        .shelley
-        .security_param
-        .ok_or_else(|| Error::server("missing security param"))?;
+    // `mutable_slots` needs this value, and a custom genesis may not have it
+    if genesis.shelley.active_slots_coeff.is_none() {
+        return Err(Error::server("missing active slots coefficient"));
+    }
 
     let resp = EraHistoryResponse {
         eras,
         system_start,
-        security_param: security_param.into(),
+        byron_safe_zone: genesis.byron.protocol_consts.k as u64 * 2,
+        shelley_safe_zone: dolos_cardano::mutable_slots(genesis),
     };
 
     Ok(AnyCbor::from_encode(resp))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_genesis_without_active_slots_coeff_is_an_error() {
+        let mut genesis = dolos_cardano::include::preview::load();
+        genesis.shelley.active_slots_coeff = None;
+
+        let era = DolosEraState {
+            start: dolos_cardano::EraBoundary {
+                epoch: 0,
+                slot: 0,
+                timestamp: 1666656000,
+            },
+            end: None,
+            epoch_length: 86400,
+            slot_length: 1,
+            protocol: 6,
+        };
+
+        assert!(build_era_history_response(&[era], &genesis).is_err());
+    }
 }
