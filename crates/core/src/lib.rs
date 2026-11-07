@@ -579,15 +579,9 @@ impl Genesis {
             .map_err(|_| ChainError::UnsupportedStartingProtocol(major))
     }
 
-    /// Whether the chain opens where its genesis files say: `force_protocol` is
-    /// unset, or names the start those files give anyway.
-    pub fn starts_as_its_files_say(&self) -> bool {
-        self.force_protocol
-            .is_none_or(|forced| Some(forced as u64) == self.derived_starting_major())
-    }
-
     /// The start the Shelley genesis alone gives, ignoring `force_protocol`.
-    fn derived_starting_major(&self) -> Option<u64> {
+    /// `None` is a Byron start.
+    pub fn derived_starting_major(&self) -> Option<u64> {
         let major = self.shelley.protocol_params.protocol_version.major;
 
         (major > 2).then_some(major)

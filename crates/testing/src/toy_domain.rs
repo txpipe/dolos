@@ -422,6 +422,13 @@ impl<B: ToyStores> ToyDomain<B> {
         domain
     }
 
+    /// Swap the genesis the domain serves under, keeping its stores as genesis
+    /// left them: a node restarted under an edited config.
+    pub fn with_genesis(mut self, genesis: Arc<dolos_core::Genesis>) -> Self {
+        self.genesis = genesis;
+        self
+    }
+
     /// Override the history policy so tests can exercise archive pruning;
     /// the default keeps everything.
     pub fn with_history_config(mut self, history_config: HistoryConfig) -> Self {

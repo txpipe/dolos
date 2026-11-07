@@ -158,6 +158,42 @@ fn loading_a_custom_chain_on_a_public_magic_returns_what_state_holds() {
 }
 
 #[test]
+fn loading_a_custom_chain_on_a_public_magic_that_starts_where_its_files_say_returns_what_state_holds(
+) {
+    for magic in [1, 764824073] {
+        let mut genesis = dolos_cardano::include::preview::load();
+        genesis.shelley.network_magic = Some(magic);
+        genesis.shelley_hash = Hash::new([7; 32]);
+        genesis.shelley.protocol_params.protocol_version.major = 10;
+        genesis.force_protocol = None;
+        let genesis = Arc::new(genesis);
+        let domain = ToyDomain::new_with_genesis(genesis.clone(), None, None);
+
+        let loaded = load_era_table(domain.state(), &genesis).unwrap();
+
+        assert_eq!(protocols(&loaded), [10]);
+        assert_eq!(loaded[0].slot_length, 1);
+        assert!(loaded[0].end.is_none());
+    }
+}
+
+#[test]
+fn loading_a_forced_start_after_the_force_is_removed_returns_what_state_holds() {
+    for magic in [764824073, 1, 2] {
+        let mut forced = KnownNetwork::by_magic(magic).unwrap().genesis();
+        forced.force_protocol = Some(10);
+        let domain = ToyDomain::new_with_genesis(Arc::new(forced), None, None);
+
+        let unforced = KnownNetwork::by_magic(magic).unwrap().genesis();
+        let loaded = load_era_table(domain.state(), &unforced).unwrap();
+
+        assert_eq!(protocols(&loaded), [10]);
+        assert_eq!(loaded[0].slot_length, 1);
+        assert!(loaded[0].end.is_none());
+    }
+}
+
+#[test]
 fn loading_a_custom_start_on_a_public_networks_files_returns_what_state_holds() {
     let cases = [
         (764824073, 10),

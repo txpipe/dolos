@@ -455,6 +455,50 @@ async fn a_custom_start_on_a_public_networks_files_answers_with_what_state_holds
     }
 }
 
+/// A custom chain on a public magic whose own Shelley file opens it at 10.
+#[tokio::test]
+async fn a_custom_chain_on_a_public_magic_starting_where_its_files_say_answers_with_what_state_holds(
+) {
+    for magic in [1, 764824073] {
+        let mut genesis = (*custom_genesis()).clone();
+        genesis.shelley.network_magic = Some(magic);
+        genesis.shelley_hash = pallas::crypto::hash::Hash::new([7; 32]);
+        genesis.shelley.protocol_params.protocol_version.major = 10;
+        genesis.force_protocol = None;
+        let domain = ToyDomain::new_with_genesis(Arc::new(genesis), None, None);
+        let expected = ((0, 0), None);
+
+        let alpha = read_era_summary!(v1alpha, domain).unwrap();
+        let beta = read_era_summary!(v1beta, domain).unwrap();
+
+        assert_eq!(alpha, vec![("conway".to_string(), expected, true)]);
+        assert_eq!(beta, alpha);
+
+        let interpreter = interpreter_rows(&domain);
+        assert_eq!(plain_rows(&interpreter), vec![expected]);
+        assert_eq!(interpreter[0].slot_length_ms, 1000);
+    }
+}
+
+/// `force_protocol` is read only when genesis is applied, so removing it later
+/// must not hand the store a public history it never had.
+#[tokio::test]
+async fn a_forced_start_restarted_without_the_force_answers_with_what_state_holds() {
+    let domain =
+        on_public_files(1, 10).with_genesis(Arc::new(KnownNetwork::by_magic(1).unwrap().genesis()));
+    let expected = ((0, 0), None);
+
+    let alpha = read_era_summary!(v1alpha, domain).unwrap();
+    let beta = read_era_summary!(v1beta, domain).unwrap();
+
+    assert_eq!(alpha, vec![("conway".to_string(), expected, true)]);
+    assert_eq!(beta, alpha);
+
+    let interpreter = interpreter_rows(&domain);
+    assert_eq!(plain_rows(&interpreter), vec![expected]);
+    assert_eq!(interpreter[0].slot_length_ms, 1000);
+}
+
 /// Preview's files give protocol 6, so forcing it changes nothing.
 #[tokio::test]
 async fn preview_forcing_its_own_start_keeps_its_history() {
