@@ -353,8 +353,10 @@ pub fn era_table(recorded: &[(u16, EraState)], genesis: &Genesis) -> Option<Vec<
 
 /// The era table to serve to clients: [`era_table`] on a public network, and
 /// the rows state holds anywhere else, including a custom chain on a public
-/// magic. The last row is always open, since the tip doesn't bound what a
-/// client may ask to convert. Empty on an empty store.
+/// magic with other files or its own `force_protocol`. A custom config on a
+/// public network's own files with no force gets that network's history, which
+/// converts correctly. The last row is always open, since the tip doesn't bound
+/// what a client may ask to convert. Empty on an empty store.
 pub fn load_era_table(
     state: &impl StateStore,
     genesis: &Genesis,
@@ -374,7 +376,7 @@ pub fn load_era_table(
         .shelley
         .network_magic
         .and_then(|magic| KnownNetwork::by_magic(magic.into()))
-        .is_some_and(|network| network.is_genesis_of(genesis));
+        .is_some_and(|network| network.is_genesis_of(genesis) && genesis.starts_as_its_files_say());
 
     let padded = is_public.then(|| era_table(&recorded, genesis)).flatten();
 

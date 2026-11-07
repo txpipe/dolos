@@ -4,12 +4,15 @@
 use std::sync::Arc;
 
 use axum::{body::Body, http::Request as HttpRequest};
-use dolos_cardano::{model::EpochState, EraState};
+use dolos_cardano::{model::EpochState, networks::KnownNetwork, PParamValue};
 use dolos_core::config::MinibfConfig;
 use dolos_core::{
     Domain, EntityKey, FixedNamespace as _, Genesis, StateStore as _, StateWriter as _,
 };
-use dolos_testing::{era_fixtures::PublicNetwork, toy_domain::ToyDomain};
+use dolos_testing::{
+    era_fixtures::{clear_eras, PublicNetwork},
+    toy_domain::ToyDomain,
+};
 use pallas::codec::minicbor;
 use tonic::Request;
 use tower::ServiceExt as _;
@@ -206,11 +209,18 @@ fn with_network(network: &PublicNetwork) -> ToyDomain {
 
 /// A domain whose state is at protocol 10, as the live public networks are.
 fn at_protocol_ten(network: &PublicNetwork) -> ToyDomain {
-    let mut genesis = (*network.genesis).clone();
-    genesis.force_protocol = Some(10);
+    let domain = with_network(network);
 
-    let domain = ToyDomain::new_with_genesis(Arc::new(genesis), None, None);
-    network.seed(&domain);
+    let mut epoch = dolos_cardano::load_epoch::<ToyDomain>(domain.state()).unwrap();
+    epoch
+        .pparams
+        .unwrap_live_mut()
+        .set(PParamValue::ProtocolVersion((10, 0)));
+
+    let writer = domain.state().start_writer().unwrap();
+    writer.write_entity_typed(&(), &epoch).unwrap();
+    writer.commit().unwrap();
+
     domain
 }
 
@@ -419,21 +429,53 @@ async fn a_custom_chain_on_a_public_magic_answers_with_what_state_holds() {
     }
 }
 
-fn clear_eras(domain: &ToyDomain) {
-    let keys: Vec<_> = domain
-        .state()
-        .iter_entities_typed::<EraState>(None)
-        .unwrap()
-        .map(|row| row.unwrap().0)
-        .collect();
+/// A custom chain on a public network's own files, with its own start.
+fn on_public_files(magic: u32, force_protocol: usize) -> ToyDomain {
+    let mut genesis = KnownNetwork::by_magic(magic.into()).unwrap().genesis();
+    genesis.force_protocol = Some(force_protocol);
 
-    let writer = domain.state().start_writer().unwrap();
-    for key in keys {
-        writer
-            .delete_entity(EraState::NS, &EntityKey::of(&key))
-            .unwrap();
+    ToyDomain::new_with_genesis(Arc::new(genesis), None, None)
+}
+
+#[tokio::test]
+async fn a_custom_start_on_a_public_networks_files_answers_with_what_state_holds() {
+    for (magic, force_protocol) in [(764824073, 10), (1, 10), (1, 9), (2, 10)] {
+        let domain = on_public_files(magic, force_protocol);
+        let expected = ((0, 0), None);
+
+        let alpha = read_era_summary!(v1alpha, domain).unwrap();
+        let beta = read_era_summary!(v1beta, domain).unwrap();
+
+        assert_eq!(alpha, vec![("conway".to_string(), expected, true)]);
+        assert_eq!(beta, alpha);
+
+        let interpreter = interpreter_rows(&domain);
+        assert_eq!(plain_rows(&interpreter), vec![expected]);
+        assert_eq!(interpreter[0].slot_length_ms, 1000);
     }
-    writer.commit().unwrap();
+}
+
+/// Preview's files give protocol 6, so forcing it changes nothing.
+#[tokio::test]
+async fn preview_forcing_its_own_start_keeps_its_history() {
+    for force_protocol in [None, Some(6)] {
+        let network = PublicNetwork::preview();
+        let mut genesis = (*network.genesis).clone();
+        genesis.force_protocol = force_protocol;
+
+        let domain = ToyDomain::new_with_genesis(Arc::new(genesis), None, None);
+        network.seed(&domain);
+
+        let alpha = read_era_summary!(v1alpha, domain).unwrap();
+        let beta = read_era_summary!(v1beta, domain).unwrap();
+
+        assert_eq!(
+            alpha.iter().map(|era| era.0.as_str()).collect::<Vec<_>>(),
+            ERA_NAMES
+        );
+        assert_eq!(beta, alpha);
+        assert_eq!(interpreter_rows(&domain).len(), ERA_NAMES.len());
+    }
 }
 
 #[tokio::test]

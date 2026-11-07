@@ -427,6 +427,26 @@ mod tests {
     }
 
     #[test]
+    fn a_force_only_matches_the_files_when_it_names_their_start() {
+        let forcing = |network: &KnownNetwork, forced| {
+            let mut genesis = network.genesis();
+            genesis.force_protocol = forced;
+            genesis.starts_as_its_files_say()
+        };
+
+        assert!(forcing(&MAINNET, None));
+        assert!(forcing(&PREPROD, None));
+        assert!(forcing(&PREVIEW, None));
+        assert!(forcing(&PREVIEW, Some(6)));
+
+        assert!(!forcing(&PREVIEW, Some(4)));
+        assert!(!forcing(&PREVIEW, Some(10)));
+        assert!(!forcing(&MAINNET, Some(2)));
+        assert!(!forcing(&MAINNET, Some(10)));
+        assert!(!forcing(&PREPROD, Some(2)));
+    }
+
+    #[test]
     fn shelley_major_above_two_is_a_fast_forwarded_start() {
         let mut genesis = PREVIEW.genesis();
 

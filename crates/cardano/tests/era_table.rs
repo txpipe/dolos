@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use dolos_cardano::{active_era_index, era_table, load_era_table, EraBoundary, EraKey, EraState};
+use dolos_cardano::{
+    active_era_index, era_table, load_era_table, networks::KnownNetwork, EraBoundary, EraKey,
+    EraState,
+};
 use dolos_core::{Domain as _, StateStore as _, StateWriter as _};
 use dolos_testing::{era_fixtures::PublicNetwork, toy_domain::ToyDomain};
 use pallas::crypto::hash::Hash;
@@ -151,6 +154,47 @@ fn loading_a_custom_chain_on_a_public_magic_returns_what_state_holds() {
         assert_eq!(loaded[0].slot_length, 1);
         assert_eq!(loaded[0].start.slot, 0);
         assert!(loaded[0].end.is_none());
+    }
+}
+
+#[test]
+fn loading_a_custom_start_on_a_public_networks_files_returns_what_state_holds() {
+    let cases = [
+        (764824073, 10),
+        (764824073, 2),
+        (1, 10),
+        (1, 9),
+        (1, 2),
+        (2, 10),
+    ];
+
+    for (magic, starting_protocol) in cases {
+        let mut genesis = KnownNetwork::by_magic(magic).unwrap().genesis();
+        genesis.force_protocol = Some(starting_protocol);
+        let genesis = Arc::new(genesis);
+        let domain = ToyDomain::new_with_genesis(genesis.clone(), None, None);
+
+        let loaded = load_era_table(domain.state(), &genesis).unwrap();
+
+        assert_eq!(protocols(&loaded), [starting_protocol as u16]);
+        assert_eq!(loaded[0].start.slot, 0);
+        assert!(loaded[0].end.is_none());
+    }
+}
+
+#[test]
+fn loading_a_public_networks_files_keeps_its_history_unless_the_start_moves() {
+    for force_protocol in [None, Some(6)] {
+        let network = PublicNetwork::preview();
+        let mut genesis = (*network.genesis).clone();
+        genesis.force_protocol = force_protocol;
+        let genesis = Arc::new(genesis);
+        let domain = ToyDomain::new_with_genesis(genesis.clone(), None, None);
+        network.seed(&domain);
+
+        let loaded = load_era_table(domain.state(), &genesis).unwrap();
+
+        assert_eq!(protocols(&loaded), [0, 2, 3, 4, 5, 7, 9]);
     }
 }
 

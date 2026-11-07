@@ -4,7 +4,10 @@
 use std::sync::Arc;
 
 use dolos_cardano::{EraBoundary, EraKey, EraState};
-use dolos_core::{BlockSlot, ChainPoint, Domain, Genesis, StateStore as _, StateWriter as _};
+use dolos_core::{
+    BlockSlot, ChainPoint, Domain, EntityKey, FixedNamespace as _, Genesis, StateStore as _,
+    StateWriter as _,
+};
 
 pub struct PublicNetwork {
     pub genesis: Arc<Genesis>,
@@ -92,6 +95,24 @@ impl PublicNetwork {
         writer.set_cursor(ChainPoint::Slot(self.tip)).unwrap();
         writer.commit().unwrap();
     }
+}
+
+/// Deletes every era row from `domain`'s state.
+pub fn clear_eras<D: Domain>(domain: &D) {
+    let keys: Vec<_> = domain
+        .state()
+        .iter_entities_typed::<EraState>(None)
+        .unwrap()
+        .map(|row| row.unwrap().0)
+        .collect();
+
+    let writer = domain.state().start_writer().unwrap();
+    for key in keys {
+        writer
+            .delete_entity(EraState::NS, &EntityKey::of(&key))
+            .unwrap();
+    }
+    writer.commit().unwrap();
 }
 
 fn shelley_eras(
