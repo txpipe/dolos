@@ -151,9 +151,9 @@ impl Worker {
     /// The answer to a non-blocking request. A peer asks ahead of judging what
     /// it was just offered, so that session may be about to end. A tx already
     /// offered waits until nothing is unacknowledged, and nothing goes out
-    /// while a suspect is: what ends the session takes no count from the rest.
-    /// The peer's blocking request waits for its acknowledgements, so an empty
-    /// answer can't stall the session.
+    /// while a suspect is: a tx already offered that ends the session takes no
+    /// count from the rest. The peer's blocking request waits for its
+    /// acknowledgements, so an empty answer can't stall the session.
     fn next_non_blocking_offer(&self, stage: &Stage, limit: usize) -> Vec<MempoolTx> {
         if stage.any_suspect(&self.propagated_hashes) {
             debug!("holding back offers until a suspect tx is acknowledged");
@@ -626,6 +626,24 @@ mod tests {
         let mut worker = worker_with_offers(&[first]);
         assert!(worker.next_non_blocking_offer(&stage, 3).is_empty());
         assert_eq!(stage.unacknowledged_offers.borrow().get(&counted), Some(&2));
+
+        worker.acknowledge_propagated(&stage, 1).unwrap();
+        assert_eq!(
+            hashes(&worker.next_non_blocking_offer(&stage, 3)),
+            [counted]
+        );
+    }
+
+    #[test]
+    fn a_tx_offered_once_waits_for_a_first_offer_to_be_judged() {
+        let stage = stage();
+        let (first, counted) = (receive_new(&stage, 1), receive_new(&stage, 2));
+        stage.count_offers(&[counted]);
+        stage.mempool.mark_inflight(&[first]).unwrap();
+        stage.count_offers(&[first]);
+
+        let mut worker = worker_with_offers(&[first]);
+        assert!(worker.next_non_blocking_offer(&stage, 3).is_empty());
 
         worker.acknowledge_propagated(&stage, 1).unwrap();
         assert_eq!(
