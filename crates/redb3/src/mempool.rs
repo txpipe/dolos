@@ -870,11 +870,11 @@ impl MempoolStore for RedbMempool {
         Ok(())
     }
 
-    fn requeue_propagated(&self) -> Result<(), MempoolError> {
+    fn requeue_propagated(&self, except: &[TxHash]) -> Result<(), MempoolError> {
         self.with_write_tx(|wx| {
             let mut events = Vec::new();
             for (hash, record) in InflightTable::collect_all(wx)? {
-                if record.stage == InflightStage::Propagated {
+                if record.stage == InflightStage::Propagated && !except.contains(&hash) {
                     InflightTable::remove(wx, &hash)?;
                     PendingTable::insert(wx, &hash, &record.payload)?;
                     let mut tx = record.to_mempool_tx(hash);

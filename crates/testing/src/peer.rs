@@ -58,6 +58,11 @@ pub struct PeerOptions {
     /// In these tx-submission sessions, numbered from 1, ask for transaction
     /// ids once, then close the session once the node replies.
     pub request_tx_ids_at: Vec<usize>,
+    /// In every other tx-submission session, keep asking for transaction ids
+    /// and acknowledging them, and close the session at an offer of this id.
+    pub close_at_offer_of: Option<Vec<u8>>,
+    /// How many transaction ids to ask for at a time; one when zero.
+    pub tx_ids_per_request: u16,
     /// Serve this block's body as bytes that decode as no block.
     pub corrupt_body: Option<u64>,
     /// Close each session with a FIN, as a node does, rather than a reset,
@@ -608,10 +613,11 @@ async fn serve_txsubmission(mut server: txsubmission::Server, shared: &Shared) {
 
     let number = shared.tx_submissions.fetch_add(1, Ordering::SeqCst) + 1;
     let options = &shared.options;
+    let per_request = options.tx_ids_per_request.max(1);
 
     if options.request_tx_ids_at.contains(&number) {
         if server
-            .acknowledge_and_request_tx_ids(false, 0, 1)
+            .acknowledge_and_request_tx_ids(false, 0, per_request)
             .await
             .is_ok()
         {
@@ -619,6 +625,38 @@ async fn serve_txsubmission(mut server: txsubmission::Server, shared: &Shared) {
                 let mut offered = shared.tx_ids_offered.lock().unwrap();
                 offered.extend(ids.into_iter().map(|id| (number, id.0 .1)));
             }
+        }
+
+        return;
+    }
+
+    if let Some(poison) = &options.close_at_offer_of {
+        let mut acknowledge = 0;
+
+        while server
+            .acknowledge_and_request_tx_ids(false, acknowledge, per_request)
+            .await
+            .is_ok()
+        {
+            let Ok(txsubmission::Reply::TxIds(ids)) = server.receive_next_reply().await else {
+                return;
+            };
+
+            let ids: Vec<Vec<u8>> = ids.into_iter().map(|id| id.0 .1).collect();
+            let closes = ids.contains(poison);
+            acknowledge = ids.len() as u16;
+
+            shared
+                .tx_ids_offered
+                .lock()
+                .unwrap()
+                .extend(ids.into_iter().map(|id| (number, id)));
+
+            if closes {
+                return;
+            }
+
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
         return;

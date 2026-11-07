@@ -619,7 +619,7 @@ fn assert_requeue_moves_only_propagated<S: MempoolStore>(store: &S) {
         .unwrap();
     assert_eq!(store.check_status(&propagated_hash).non_confirmations, 1);
 
-    store.requeue_propagated().unwrap();
+    store.requeue_propagated(&[]).unwrap();
 
     let status = store.check_status(&propagated_hash);
     assert_eq!(status.stage, MempoolTxStage::Pending);
@@ -640,7 +640,7 @@ fn assert_requeue_moves_only_propagated<S: MempoolStore>(store: &S) {
     assert_eq!(status.confirmed_at, Some(test_point(1)));
 
     // Nothing left to move.
-    store.requeue_propagated().unwrap();
+    store.requeue_propagated(&[]).unwrap();
     assert_eq!(store.peek_pending().len(), 1);
 }
 
@@ -663,7 +663,7 @@ fn assert_requeue_restarts_the_drop_count<S: MempoolStore>(store: &S) {
     };
 
     stale_block(1);
-    store.requeue_propagated().unwrap();
+    store.requeue_propagated(&[]).unwrap();
     store.mark_inflight(&[hash]).unwrap();
     stale_block(2);
 
@@ -677,7 +677,7 @@ fn assert_requeued_tx_finalizes_after_being_offered_again<S: MempoolStore>(store
     let hash = tx.hash;
     advance_to_propagated(store, tx);
 
-    store.requeue_propagated().unwrap();
+    store.requeue_propagated(&[]).unwrap();
     store.mark_inflight(&[hash]).unwrap();
     store.mark_acknowledged(&[hash]).unwrap();
 
@@ -698,12 +698,16 @@ fn assert_requeued_tx_finalizes_after_being_offered_again<S: MempoolStore>(store
 }
 
 /// The old session's peer got it through: it lands on chain while pending, and
-/// isn't offered again or dropped for it.
+/// isn't offered again or dropped for it. A pending tx not on chain stays as
+/// it was.
 fn assert_requeued_tx_seen_while_pending_finalizes<S: MempoolStore>(store: &S) {
     let tx = test_tx(65);
     let hash = tx.hash;
+    let bystander = test_tx(67);
+    let bystander_hash = bystander.hash;
     advance_to_propagated(store, tx);
-    store.requeue_propagated().unwrap();
+    store.requeue_propagated(&[]).unwrap();
+    store.receive(bystander).unwrap();
 
     store
         .confirm(
@@ -719,7 +723,9 @@ fn assert_requeued_tx_seen_while_pending_finalizes<S: MempoolStore>(store: &S) {
     assert_eq!(status.stage, MempoolTxStage::Confirmed);
     assert_eq!(status.confirmations, 1);
     assert_eq!(status.confirmed_at, Some(test_point(1)));
-    assert!(!store.has_pending());
+
+    let pending: Vec<TxHash> = store.peek_pending().iter().map(|tx| tx.hash).collect();
+    assert_eq!(pending, [bystander_hash]);
 
     // Later blocks don't carry it again.
     for slot in 2..=FINALIZE_THRESHOLD as u64 {
@@ -736,6 +742,64 @@ fn assert_requeued_tx_seen_while_pending_finalizes<S: MempoolStore>(store: &S) {
 
     let finalized = find_in_finalized(store, &hash).expect("the tx finalized");
     assert_eq!(finalized.stage, MempoolTxStage::Finalized);
+
+    let status = store.check_status(&bystander_hash);
+    assert_eq!(status.stage, MempoolTxStage::Pending);
+    assert_eq!(status.non_confirmations, 0);
+    assert!(find_in_finalized(store, &bystander_hash).is_none());
+}
+
+/// What a re-queue excepts stays `Propagated`, keeps its staleness and drops,
+/// whether or not a block already promoted it on the ephemeral backend.
+fn assert_requeue_except_leaves_a_tx_to_drop<S: MempoolStore>(store: &S) {
+    let (excepted, other) = (test_tx(68), test_tx(69));
+    let (excepted_hash, other_hash) = (excepted.hash, other.hash);
+    advance_to_propagated(store, excepted);
+    advance_to_propagated(store, other);
+
+    let stale_block = |slot| {
+        store
+            .confirm(
+                &test_point(slot),
+                &[],
+                &[],
+                FINALIZE_THRESHOLD,
+                DROP_THRESHOLD,
+            )
+            .unwrap()
+    };
+
+    store.requeue_propagated(&[excepted_hash]).unwrap();
+    assert_eq!(
+        store.check_status(&excepted_hash).stage,
+        MempoolTxStage::Propagated
+    );
+    assert_eq!(
+        store.check_status(&other_hash).stage,
+        MempoolTxStage::Pending
+    );
+
+    stale_block(1);
+    store.requeue_propagated(&[excepted_hash]).unwrap();
+    assert_eq!(store.check_status(&excepted_hash).non_confirmations, 1);
+
+    stale_block(2);
+    let dropped = find_in_finalized(store, &excepted_hash).expect("the tx dropped");
+    assert_eq!(dropped.stage, MempoolTxStage::Dropped);
+    assert_eq!(
+        store.check_status(&other_hash).stage,
+        MempoolTxStage::Pending
+    );
+}
+
+#[test]
+fn ephemeral_requeue_except_leaves_a_tx_to_drop() {
+    assert_requeue_except_leaves_a_tx_to_drop(&EphemeralMempool::new());
+}
+
+#[test]
+fn redb_requeue_except_leaves_a_tx_to_drop() {
+    assert_requeue_except_leaves_a_tx_to_drop(&RedbMempool::in_memory().unwrap());
 }
 
 #[test]
@@ -765,7 +829,7 @@ fn ephemeral_requeue_keeps_one_copy_of_a_tx_received_again() {
     advance_to_propagated(&store, tx.clone());
     store.receive(tx).unwrap();
 
-    store.requeue_propagated().unwrap();
+    store.requeue_propagated(&[]).unwrap();
 
     assert_eq!(store.peek_pending().len(), 1);
 }

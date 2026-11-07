@@ -147,7 +147,8 @@ pub enum MempoolError {
 /// ([`requeue_propagated`](Self::requeue_propagated)), and a `Pending` one seen
 /// on chain goes straight to `Confirmed` ([`confirm`](Self::confirm)).
 ///
-/// - **Pending** — received but not yet submitted to a peer.
+/// - **Pending** — queued to be offered to a peer; it may have been offered
+///   before.
 /// - **Propagated** — sent to a peer, awaiting acknowledgement.
 /// - **Acknowledged** — the peer accepted the transaction.
 /// - **Confirmed** — observed on-chain; confirmation counter tracks depth.
@@ -198,8 +199,9 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
     /// counters reset, so that a new peer session offers it again.
     ///
     /// No peer acknowledged these, and the session they were offered on is
-    /// gone. `Acknowledged` and `Confirmed` transactions are left untouched.
-    fn requeue_propagated(&self) -> Result<(), MempoolError>;
+    /// gone. Those in `except` stay `Propagated`, on their way to the normal
+    /// drop. `Acknowledged` and `Confirmed` transactions are left untouched.
+    fn requeue_propagated(&self, except: &[TxHash]) -> Result<(), MempoolError>;
 
     /// Returns the transaction if it is currently in any inflight sub-stage
     /// (Propagated, Acknowledged, or Confirmed), `None` otherwise.
@@ -485,7 +487,7 @@ mod tests {
             Ok(())
         }
 
-        fn requeue_propagated(&self) -> Result<(), MempoolError> {
+        fn requeue_propagated(&self, _except: &[TxHash]) -> Result<(), MempoolError> {
             Ok(())
         }
 

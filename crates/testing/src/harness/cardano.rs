@@ -68,7 +68,7 @@ impl MempoolStore for Mempool {
         Ok(())
     }
 
-    fn requeue_propagated(&self) -> Result<(), MempoolError> {
+    fn requeue_propagated(&self, _except: &[TxHash]) -> Result<(), MempoolError> {
         Ok(())
     }
 

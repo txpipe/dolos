@@ -1,10 +1,13 @@
-use std::collections::VecDeque;
+use std::cell::RefCell;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::sync::Arc;
 
 use dolos_core::config::RetryConfig;
 use gasket::framework::*;
 use itertools::Itertools as _;
 use pallas::crypto::hash::Hash;
+use pallas::ledger::traverse::MultiEraTx;
 use pallas::network::facades::PeerClient;
 use pallas::network::miniprotocols::txsubmission::{
     self, EraTxBody, EraTxId, Request, TxIdAndSize,
@@ -41,6 +44,57 @@ fn to_n2n_body(mempool_tx: MempoolTx) -> EraTxBody {
     EraTxBody(era, bytes)
 }
 
+/// Offers of a transaction that may go unacknowledged before a new session
+/// stops re-queueing it. A session that ended is no fault of what it offered,
+/// but one that keeps ending at the same offer may be, and must not retry
+/// forever.
+const MAX_UNACKNOWLEDGED_OFFERS: u32 = 3;
+
+/// `pending` with each transaction after the pending ones it spends from, which
+/// a peer needs to have first, and otherwise in the order given.
+fn parents_first(pending: Vec<MempoolTx>) -> Vec<MempoolTx> {
+    let positions: HashMap<TxHash, usize> = pending
+        .iter()
+        .enumerate()
+        .map(|(position, tx)| (tx.hash, position))
+        .collect();
+
+    let mut children = vec![Vec::new(); pending.len()];
+    let mut unmet_parents = vec![0; pending.len()];
+
+    for (child, tx) in pending.iter().enumerate() {
+        let Ok(decoded) = MultiEraTx::try_from(&tx.payload) else {
+            continue;
+        };
+
+        for input in decoded.consumes() {
+            if let Some(&parent) = positions.get(input.hash()) {
+                children[parent].push(child);
+                unmet_parents[child] += 1;
+            }
+        }
+    }
+
+    let mut ready: BinaryHeap<_> = (0..pending.len())
+        .filter(|&position| unmet_parents[position] == 0)
+        .map(Reverse)
+        .collect();
+    let mut ordered = Vec::with_capacity(pending.len());
+
+    while let Some(Reverse(position)) = ready.pop() {
+        ordered.push(pending[position].clone());
+
+        for &child in &children[position] {
+            unmet_parents[child] -= 1;
+            if unmet_parents[child] == 0 {
+                ready.push(Reverse(child));
+            }
+        }
+    }
+
+    ordered
+}
+
 pub struct Worker {
     /// The session, until the worker's teardown aborts it.
     peer_session: Option<PeerClient>,
@@ -55,6 +109,13 @@ pub struct Worker {
 impl Worker {
     /// Connect to the peer and start tx-submission: one attempt.
     async fn open(stage: &Stage) -> Result<Self, Failure> {
+        // What an earlier session offered may never have reached the peer. This
+        // comes before connecting, since blocks that arrive during an outage would
+        // otherwise count against it and drop it.
+        stage
+            .requeue_unacknowledged()
+            .map_err(|error| Failure::new("re-queueing propagated txs", &error))?;
+
         debug!("connecting to peer");
 
         let mut peer_session = PeerClient::connect(&stage.peer_address, stage.network_magic)
@@ -74,12 +135,6 @@ impl Worker {
             return Err(Failure::new("starting tx-submission", &error));
         }
 
-        // What an earlier session offered may never have reached the peer.
-        if let Err(error) = stage.mempool.requeue_propagated() {
-            peer_session.abort().await;
-            return Err(Failure::new("re-queueing propagated txs", &error));
-        }
-
         Ok(Self {
             peer_session: Some(peer_session),
             unfulfilled_request: Default::default(),
@@ -97,13 +152,14 @@ impl Worker {
 
     async fn propagate_txs(
         &mut self,
-        mempool: &MempoolBackend,
+        stage: &Stage,
         txs: Vec<MempoolTx>,
     ) -> Result<(), WorkerError> {
         debug!(n = txs.len(), "propagating tx ids");
 
         let hashes: Vec<TxHash> = txs.iter().map(|tx| tx.hash).collect();
-        mempool.mark_inflight(&hashes).or_restart()?;
+        stage.mempool.mark_inflight(&hashes).or_restart()?;
+        stage.count_offers(&hashes);
         self.propagated_hashes.extend(hashes);
 
         let payload = txs.iter().map(to_n2n_reply).collect_vec();
@@ -118,18 +174,15 @@ impl Worker {
     }
 
     /// Drain the first `count` propagated hashes and mark them as acknowledged.
-    fn acknowledge_propagated(
-        &mut self,
-        mempool: &MempoolBackend,
-        count: usize,
-    ) -> Result<(), WorkerError> {
+    fn acknowledge_propagated(&mut self, stage: &Stage, count: usize) -> Result<(), WorkerError> {
         let drain_count = count.min(self.propagated_hashes.len());
         if drain_count == 0 {
             return Ok(());
         }
 
         let acked: Vec<TxHash> = self.propagated_hashes.drain(..drain_count).collect();
-        mempool.mark_acknowledged(&acked).or_restart()?;
+        stage.mempool.mark_acknowledged(&acked).or_restart()?;
+        stage.forget_offers(&acked);
         Ok(())
     }
 
@@ -232,11 +285,11 @@ impl gasket::framework::Worker<Stage> for Worker {
 
                 debug!(req, ack, "blocking tx ids request");
 
-                self.acknowledge_propagated(&stage.mempool, ack)?;
+                self.acknowledge_propagated(stage, ack)?;
 
                 if stage.mempool.has_pending() {
-                    let txs: Vec<_> = stage.mempool.peek_pending().into_iter().take(req).collect();
-                    self.propagate_txs(&stage.mempool, txs).await?;
+                    let txs = stage.next_offer(req);
+                    self.propagate_txs(stage, txs).await?;
                 } else {
                     debug!(req, "not enough txs to fulfill request");
                     self.unfulfilled_request = Some(req);
@@ -245,15 +298,10 @@ impl gasket::framework::Worker<Stage> for Worker {
             Request::TxIdsNonBlocking(ack, req) => {
                 debug!(req, ack, "non-blocking tx ids request");
 
-                self.acknowledge_propagated(&stage.mempool, *ack as usize)?;
+                self.acknowledge_propagated(stage, *ack as usize)?;
 
-                let txs: Vec<_> = stage
-                    .mempool
-                    .peek_pending()
-                    .into_iter()
-                    .take(*req as usize)
-                    .collect();
-                self.propagate_txs(&stage.mempool, txs).await?;
+                let txs = stage.next_offer(*req as usize);
+                self.propagate_txs(stage, txs).await?;
             }
             Request::Txs(ids) => {
                 debug!("tx batch request");
@@ -303,6 +351,10 @@ pub struct Stage {
     /// Connections and sessions that failed in a row before the peer sent a
     /// request, with no pull delivery between them.
     attempts: Attempts,
+
+    /// How many times each transaction was offered with no acknowledgement
+    /// yet, across sessions.
+    unacknowledged_offers: RefCell<HashMap<TxHash, u32>>,
 }
 
 impl Stage {
@@ -318,6 +370,194 @@ impl Stage {
             peer_address,
             network_magic,
             mempool,
+            unacknowledged_offers: RefCell::default(),
         }
+    }
+
+    /// Return what no session has left to acknowledge to pending, except what
+    /// was offered too many times, which goes stale and drops.
+    fn requeue_unacknowledged(&self) -> Result<(), MempoolError> {
+        let mut offers = self.unacknowledged_offers.borrow_mut();
+
+        offers.retain(|hash, _| {
+            let stage = self.mempool.check_status(hash).stage;
+            matches!(stage, MempoolTxStage::Pending | MempoolTxStage::Propagated)
+        });
+
+        let exhausted = offers
+            .iter()
+            .filter(|(_, offers)| **offers >= MAX_UNACKNOWLEDGED_OFFERS)
+            .map(|(hash, _)| *hash)
+            .collect_vec();
+
+        if !exhausted.is_empty() {
+            warn!(
+                ?exhausted,
+                "txs offered too many times, no longer re-queued"
+            );
+        }
+
+        self.mempool.requeue_propagated(&exhausted)
+    }
+
+    /// The next transactions to offer, at most `limit`. One already offered
+    /// goes alone: if its offer ended a session, nothing else takes the
+    /// count for it.
+    fn next_offer(&self, limit: usize) -> Vec<MempoolTx> {
+        let offers = self.unacknowledged_offers.borrow();
+        let mut offer = Vec::new();
+
+        for tx in parents_first(self.mempool.peek_pending())
+            .into_iter()
+            .take(limit)
+        {
+            if offers.contains_key(&tx.hash) {
+                if offer.is_empty() {
+                    offer.push(tx);
+                }
+                break;
+            }
+
+            offer.push(tx);
+        }
+
+        offer
+    }
+
+    fn count_offers(&self, hashes: &[TxHash]) {
+        let mut offers = self.unacknowledged_offers.borrow_mut();
+
+        for hash in hashes {
+            *offers.entry(*hash).or_default() += 1;
+        }
+    }
+
+    fn forget_offers(&self, hashes: &[TxHash]) {
+        let mut offers = self.unacknowledged_offers.borrow_mut();
+
+        for hash in hashes {
+            offers.remove(hash);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dolos_testing::mempool::{make_test_mempool_tx, make_test_mempool_tx_spending};
+    use dolos_testing::tx_sequence_to_hash;
+
+    use super::*;
+
+    fn stage() -> Stage {
+        Stage::new(
+            String::new(),
+            0,
+            MempoolBackend::Ephemeral(dolos_core::builtin::EphemeralMempool::new()),
+            &RetryConfig::default(),
+            Arc::default(),
+        )
+    }
+
+    fn hashes(txs: &[MempoolTx]) -> Vec<TxHash> {
+        txs.iter().map(|tx| tx.hash).collect()
+    }
+
+    fn receive_new(stage: &Stage, n: u64) -> TxHash {
+        let tx = make_test_mempool_tx(tx_sequence_to_hash(n));
+        let hash = tx.hash;
+        stage.mempool.receive(tx).unwrap();
+        hash
+    }
+
+    #[test]
+    fn parents_first_keeps_the_order_of_what_is_unrelated() {
+        let a = make_test_mempool_tx_spending(&[tx_sequence_to_hash(1)], 1);
+        let b = make_test_mempool_tx_spending(&[tx_sequence_to_hash(2)], 2);
+        let undecodable = make_test_mempool_tx(tx_sequence_to_hash(3));
+        let order = [b.hash, undecodable.hash, a.hash];
+
+        assert_eq!(hashes(&parents_first(vec![b, undecodable, a])), order);
+    }
+
+    #[test]
+    fn parents_first_moves_only_a_child_ahead_of_its_parent() {
+        let parent = make_test_mempool_tx_spending(&[tx_sequence_to_hash(1)], 1);
+        let child = make_test_mempool_tx_spending(&[parent.hash], 2);
+        let unrelated = make_test_mempool_tx_spending(&[tx_sequence_to_hash(2)], 3);
+        let order = [unrelated.hash, parent.hash, child.hash];
+
+        assert_eq!(
+            hashes(&parents_first(vec![child, unrelated, parent])),
+            order
+        );
+    }
+
+    #[test]
+    fn a_tx_already_offered_goes_alone_until_it_is_acknowledged() {
+        let stage = stage();
+        let (a, b, c) = (
+            receive_new(&stage, 1),
+            receive_new(&stage, 2),
+            receive_new(&stage, 3),
+        );
+
+        assert_eq!(hashes(&stage.next_offer(2)), [a, b]);
+
+        stage.count_offers(&[b]);
+        assert_eq!(hashes(&stage.next_offer(10)), [a], "the batch stops short");
+
+        stage.count_offers(&[a]);
+        assert_eq!(hashes(&stage.next_offer(10)), [a], "alone");
+
+        stage.forget_offers(&[a, b]);
+        assert_eq!(hashes(&stage.next_offer(10)), [a, b, c]);
+    }
+
+    #[test]
+    fn only_a_tx_offered_too_many_times_stays_out_of_the_queue() {
+        let stage = stage();
+        let (spent, again) = (receive_new(&stage, 1), receive_new(&stage, 2));
+        stage.mempool.mark_inflight(&[spent, again]).unwrap();
+
+        stage.count_offers(&[spent, again]);
+        for _ in 1..MAX_UNACKNOWLEDGED_OFFERS {
+            stage.count_offers(&[spent]);
+        }
+
+        stage.requeue_unacknowledged().unwrap();
+
+        assert_eq!(hashes(&stage.mempool.peek_pending()), [again]);
+        assert_eq!(
+            stage.mempool.check_status(&spent).stage,
+            MempoolTxStage::Propagated
+        );
+    }
+
+    #[test]
+    fn an_acknowledgement_forgets_the_offers() {
+        let stage = stage();
+        let hash = receive_new(&stage, 1);
+        stage.mempool.mark_inflight(&[hash]).unwrap();
+        stage.count_offers(&[hash]);
+
+        let mut worker = Worker {
+            peer_session: None,
+            unfulfilled_request: None,
+            propagated_hashes: VecDeque::from([hash]),
+            requested: true,
+        };
+        worker.acknowledge_propagated(&stage, 1).unwrap();
+
+        assert!(stage.unacknowledged_offers.borrow().is_empty());
+    }
+
+    #[test]
+    fn the_count_of_a_tx_no_longer_tracked_is_forgotten() {
+        let stage = stage();
+        stage.count_offers(&[tx_sequence_to_hash(1)]);
+
+        stage.requeue_unacknowledged().unwrap();
+
+        assert!(stage.unacknowledged_offers.borrow().is_empty());
     }
 }

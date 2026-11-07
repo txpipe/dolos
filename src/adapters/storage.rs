@@ -2506,10 +2506,10 @@ impl MempoolStore for MempoolBackend {
         }
     }
 
-    fn requeue_propagated(&self) -> Result<(), MempoolError> {
+    fn requeue_propagated(&self, except: &[TxHash]) -> Result<(), MempoolError> {
         match self {
-            Self::Ephemeral(s) => s.requeue_propagated(),
-            Self::Redb(s) => s.requeue_propagated(),
+            Self::Ephemeral(s) => s.requeue_propagated(except),
+            Self::Redb(s) => s.requeue_propagated(except),
         }
     }
 

@@ -168,16 +168,19 @@ impl MempoolStore for EphemeralMempool {
         Ok(())
     }
 
-    fn requeue_propagated(&self) -> Result<(), MempoolError> {
+    fn requeue_propagated(&self, except: &[TxHash]) -> Result<(), MempoolError> {
         let mut state = self.state.write().unwrap();
 
-        let mut requeued: Vec<MempoolTx> = state.inflight.drain(..).collect();
+        let (kept, mut requeued): (Vec<_>, Vec<_>) = std::mem::take(&mut state.inflight)
+            .into_iter()
+            .partition(|tx| except.contains(&tx.hash));
+        state.inflight = kept;
 
         // `confirm` promotes propagated txs into the acknowledged map as they are.
         let promoted: Vec<TxHash> = state
             .acknowledged
             .values()
-            .filter(|tx| tx.stage == MempoolTxStage::Propagated)
+            .filter(|tx| tx.stage == MempoolTxStage::Propagated && !except.contains(&tx.hash))
             .map(|tx| tx.hash)
             .collect();
 

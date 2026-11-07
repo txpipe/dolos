@@ -1,11 +1,65 @@
 use dolos_core::mempool::{MempoolEvent, MempoolTx, MempoolTxStage};
 use dolos_core::{ChainPoint, EraCbor, MempoolError, MempoolStore, TxHash, TxStatus};
 
+use pallas::codec::minicbor;
+use pallas::codec::utils::{KeepRaw, Nullable, Set};
+use pallas::ledger::primitives::conway::{TransactionBody, TransactionInput, Tx};
+use pallas::ledger::traverse::MultiEraTx;
+
 use crate::streams::ScriptedStream;
 
 /// Build a minimal `MempoolTx` for testing.
 pub fn make_test_mempool_tx(hash: TxHash) -> MempoolTx {
     MempoolTx::new(hash, EraCbor(7, vec![0x80]), vec![])
+}
+
+/// Build a `MempoolTx` holding a real Conway transaction that spends the first
+/// output of each of `parents`. `salt` tells apart transactions that spend the
+/// same.
+pub fn make_test_mempool_tx_spending(parents: &[TxHash], salt: u64) -> MempoolTx {
+    let body = TransactionBody {
+        inputs: Set::from(
+            parents
+                .iter()
+                .map(|parent| TransactionInput {
+                    transaction_id: *parent,
+                    index: 0,
+                })
+                .collect::<Vec<_>>(),
+        ),
+        outputs: vec![],
+        fee: 200_000 + salt,
+        ttl: None,
+        validity_interval_start: None,
+        certificates: None,
+        withdrawals: None,
+        auxiliary_data_hash: None,
+        mint: None,
+        script_data_hash: None,
+        collateral: None,
+        required_signers: None,
+        network_id: None,
+        collateral_return: None,
+        total_collateral: None,
+        reference_inputs: None,
+        voting_procedures: None,
+        proposal_procedures: None,
+        treasury_value: None,
+        donation: None,
+    };
+
+    let tx = Tx {
+        transaction_body: KeepRaw::from(body),
+        transaction_witness_set: KeepRaw::from(crate::blocks::empty_witness_set()),
+        success: true,
+        auxiliary_data: Nullable::Null,
+    };
+
+    let bytes = minicbor::to_vec(&tx).unwrap();
+    let payload = EraCbor(7, bytes);
+    let hash = MultiEraTx::try_from(&payload).unwrap().hash();
+
+    MempoolTx::new(hash, payload, vec![])
 }
 
 /// Build a minimal `MempoolEvent` at the `Pending` stage for testing.
@@ -42,7 +96,7 @@ impl MempoolStore for MockMempoolStore {
         Ok(())
     }
 
-    fn requeue_propagated(&self) -> Result<(), MempoolError> {
+    fn requeue_propagated(&self, _except: &[TxHash]) -> Result<(), MempoolError> {
         Ok(())
     }
 
