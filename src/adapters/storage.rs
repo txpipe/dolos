@@ -2506,6 +2506,13 @@ impl MempoolStore for MempoolBackend {
         }
     }
 
+    fn requeue_propagated(&self, except: &[TxHash]) -> Result<(), MempoolError> {
+        match self {
+            Self::Ephemeral(s) => s.requeue_propagated(except),
+            Self::Redb(s) => s.requeue_propagated(except),
+        }
+    }
+
     fn find_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx> {
         match self {
             Self::Ephemeral(s) => s.find_inflight(tx_hash),
