@@ -6,6 +6,7 @@ use dolos_core::{
     config::{CardanoConfig, ChainConfig, CustomUtxo, GenesisConfig},
     ChainError, Genesis,
 };
+use pallas::crypto::hash::Hasher;
 
 use crate::include;
 
@@ -183,6 +184,14 @@ impl KnownNetwork {
     /// The embedded genesis.
     pub fn genesis(&self) -> Genesis {
         (self.load_genesis)()
+    }
+
+    /// Whether `genesis` is this network's own, going by its Shelley file's
+    /// hash. A custom chain can reuse a public magic with other files.
+    pub fn is_genesis_of(&self, genesis: &Genesis) -> bool {
+        let [_, shelley, ..] = self.genesis_files;
+
+        Hasher::<256>::hash(shelley) == genesis.shelley_hash
     }
 
     /// Writes the embedded genesis files into `root`.
@@ -364,6 +373,19 @@ mod tests {
         ));
         assert!(KnownNetwork::by_name("devnet").is_none());
         assert!(KnownNetwork::by_magic(42).is_none());
+    }
+
+    #[test]
+    fn a_network_recognises_only_its_own_genesis() {
+        for network in KnownNetwork::all() {
+            let mut genesis = network.genesis();
+            assert!(network.is_genesis_of(&genesis), "{}", network.name);
+
+            genesis.shelley_hash = pallas::crypto::hash::Hash::new([0; 32]);
+            assert!(!network.is_genesis_of(&genesis), "{}", network.name);
+        }
+
+        assert!(!PREPROD.is_genesis_of(&PREVIEW.genesis()));
     }
 
     #[test]

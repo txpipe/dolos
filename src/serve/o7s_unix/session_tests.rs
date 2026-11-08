@@ -7,7 +7,11 @@ use dolos_core::{
     config::RootConfig, ArchiveStore as _, ArchiveWriter as _, LogValue, StateStore as _,
     StateWriter as _, TipEvent, WalStore as _,
 };
-use dolos_testing::{blocks::make_conway_block, toy_domain::ToyDomain};
+use dolos_testing::{
+    blocks::make_conway_block,
+    era_fixtures::{clear_eras, PublicNetwork},
+    toy_domain::ToyDomain,
+};
 use pallas::codec::utils::AnyCbor;
 use pallas::network::{
     facades::{NodeClient, NodeServer},
@@ -24,7 +28,7 @@ use tokio::{
     time::timeout,
 };
 
-use super::{chainsync, handle_session};
+use super::{chainsync, handle_session, utils::load_era_history_response};
 use crate::{adapters::DomainAdapter, engine::DomainBuilder, prelude::*, serve::CancelTokenImpl};
 
 const MAGIC: u64 = 2;
@@ -675,6 +679,48 @@ async fn a_slot_cursor_on_a_corrupt_block_ends_the_connection() {
     let (mut client, server, _dir) = connect_session(domain).await;
 
     let reply = within(client.statequery().acquire(None)).await;
+    assert!(reply.is_err(), "the client should see the connection end");
+
+    let err = within(server).await.unwrap().unwrap_err();
+    assert!(
+        !matches!(&err, ServeError::Internal(e) if e.downcast_ref::<JoinError>().is_some()),
+        "expected the session's error, got the task's panic: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_interpreter_query_answers_the_era_history() {
+    let network = PublicNetwork::mainnet();
+    let domain = ToyDomain::new_with_genesis(network.genesis.clone(), None, None);
+    network.seed(&domain);
+    let expected = load_era_history_response(&domain).unwrap();
+
+    let (mut client, _server, _dir) = connect_session(domain).await;
+
+    within(client.statequery().acquire(None)).await.unwrap();
+
+    let query = q16::Request::LedgerQuery(q16::LedgerQuery::HardForkQuery(
+        q16::HardForkQuery::GetInterpreter,
+    ));
+    let reply: AnyCbor = within(client.statequery().query(query)).await.unwrap();
+    assert_eq!(reply.raw_bytes(), expected.raw_bytes());
+}
+
+/// LocalStateQuery has no query-error message, so a close is the error a client
+/// can get. Chain sync stays idle here, and must not keep the connection open.
+#[tokio::test]
+async fn an_interpreter_query_on_a_store_with_no_eras_ends_the_connection() {
+    let domain = ToyDomain::new(None, None);
+    clear_eras(&domain);
+
+    let (mut client, server, _dir) = connect_session(domain).await;
+
+    within(client.statequery().acquire(None)).await.unwrap();
+
+    let query = q16::Request::LedgerQuery(q16::LedgerQuery::HardForkQuery(
+        q16::HardForkQuery::GetInterpreter,
+    ));
+    let reply: Result<AnyCbor, _> = within(client.statequery().query(query)).await;
     assert!(reply.is_err(), "the client should see the connection end");
 
     let err = within(server).await.unwrap().unwrap_err();

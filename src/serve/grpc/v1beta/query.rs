@@ -720,14 +720,14 @@ fn protocol_to_era_name(protocol: u16) -> &'static str {
 
 fn map_era_summary(
     era: &dolos_cardano::EraState,
-    active_protocol: u16,
+    is_active: bool,
     active_params: &u5c::cardano::PParams,
 ) -> u5c::cardano::EraSummary {
     u5c::cardano::EraSummary {
         name: protocol_to_era_name(era.protocol).into(),
         start: Some(map_era_boundary(&era.start)),
         end: era.end.as_ref().map(map_era_boundary),
-        protocol_params: (era.protocol == active_protocol).then(|| active_params.clone()),
+        protocol_params: is_active.then(|| active_params.clone()),
     }
 }
 
@@ -1050,19 +1050,21 @@ where
 
         info!("received new grpc query - read_era_summary");
 
-        let chain_summary = dolos_cardano::load_era_summary::<D>(self.domain.state())
+        let era_table = dolos_cardano::load_era_table(self.domain.state(), &self.domain.genesis())
             .map_err(|e| Status::internal(format!("failed to load era summary: {e}")))?;
 
         let active_pparams = dolos_cardano::load_effective_pparams::<D>(self.domain.state())
             .map_err(|e| Status::internal(format!("failed to load current pparams: {e}")))?;
-        let active_protocol = active_pparams.protocol_major_or_default();
+        let active_era =
+            dolos_cardano::active_era_index(&era_table, active_pparams.protocol_major_or_default());
         let active_params = self
             .mapper
             .map_pparams(dolos_cardano::utils::pparams_to_pallas(&active_pparams));
 
-        let summaries = chain_summary
-            .iter_all()
-            .map(|era| map_era_summary(era, active_protocol, &active_params))
+        let summaries = era_table
+            .iter()
+            .enumerate()
+            .map(|(index, era)| map_era_summary(era, Some(index) == active_era, &active_params))
             .collect();
 
         let mut response = u5c::query::ReadEraSummaryResponse {

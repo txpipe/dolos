@@ -1,5 +1,5 @@
 use chrono::{Datelike, Timelike};
-use dolos_cardano::{load_era_summary, EraState as DolosEraState};
+use dolos_cardano::load_era_summary;
 use dolos_core::StateStore;
 use pallas::codec::utils::AnyCbor;
 use pallas::ledger::traverse::MultiEraBlock;
@@ -11,9 +11,9 @@ use tracing::{debug, info, warn};
 use crate::prelude::*;
 use crate::serve::o7s_unix::utils;
 use utils::{
-    build_account_state_response, build_era_history_response, build_pool_state_response,
-    build_protocol_params, build_stake_pool_params_response, build_stake_pools_response,
-    build_stake_snapshots_response, build_utxo_by_address_response,
+    build_account_state_response, build_pool_state_response, build_protocol_params,
+    build_stake_pool_params_response, build_stake_pools_response, build_stake_snapshots_response,
+    build_utxo_by_address_response, load_era_history_response,
 };
 
 pub struct Session<D: Domain> {
@@ -235,13 +235,7 @@ impl<D: Domain> Session<D> {
             ))) => {
                 debug!("GetInterpreter query");
 
-                let chain_summary = load_era_summary::<D>(self.domain.state())
-                    .map_err(|e| Error::server(format!("failed to load era summary: {}", e)))?;
-
-                let eras: Vec<DolosEraState> = chain_summary.iter_all().cloned().collect();
-
-                let genesis = self.domain.genesis();
-                build_era_history_response(&eras, &genesis)?
+                load_era_history_response(&self.domain)?
             }
             Ok(q16::Request::LedgerQuery(q16::LedgerQuery::HardForkQuery(
                 q16::HardForkQuery::GetCurrentEra,
