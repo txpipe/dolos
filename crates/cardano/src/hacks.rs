@@ -117,6 +117,18 @@ pub mod proposals {
                 "1ec9c47c32bbdcd8054bae9d72fde39ea6de02227f91b003a5d3569f7d434f67#0" => {
                     Canceled(1330)
                 }
+                // Update Committee enacted at epoch 1361
+                "65c41d163aceb2be0b821b79fa71ee1ead7ecd13bd1ae812baddf5c962c9d62b#0" => {
+                    Ratified(1360)
+                }
+                // Parameter Change enacted at epoch 1367
+                "dd4fbc61680bd7fa3cf97d815bdfaf54bc9872d2fd0c6f5e9bdb86fef0260c51#0" => {
+                    Ratified(1366)
+                }
+                // Update Committee enacted at epoch 1370
+                "06dcb60f4b6ee78024bd4c7978e8e093437903198cf06c3c5d34bf825129bc73#0" => {
+                    Ratified(1369)
+                }
                 "69c948cde90c6b9d7d61595e8534c106ec44132cb049ab2558399db1260c1f69#0" => {
                     Ratified(1095)
                 }
@@ -344,6 +356,14 @@ pub mod proposals {
                 // Parameter Change superseded at epoch 296
                 "7b8b1d6c22fc2ff8f1a1526a8027ad9df025dc9a7013b81ef51fb869bcc1af44#0" => {
                     Canceled(296)
+                }
+                // Update Committee enacted at epoch 304
+                "bbfa303aa35d19919934fb5fe36b174609a0c1dfb47a546ccd6ea58aa752e2aa#0" => {
+                    Ratified(303)
+                }
+                // Parameter Change enacted at epoch 305
+                "e641ec802bb109e150e920c6c0387e85f2efd30944a46d08d08212bde540f69c#0" => {
+                    Ratified(304)
                 }
                 _ => match protocol {
                     0..=8 => RatifiedCurrentEpoch,
@@ -755,6 +775,53 @@ pub mod proposals {
                 "4f6e5df9a6e14bd49e406e2bbb0d108b3be2be64b9569b930053a0c1eebe0d47#0" => {
                     Ratified(642)
                 }
+                // Treasury Withdrawals enacted at epoch 645
+                "fbb8d1a4a8d6b62f8cd706944a0582b884c2b90187b8fada7953d5c6a33eb5a7#0" => {
+                    Ratified(644)
+                }
+                "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#1" => {
+                    Ratified(644)
+                }
+                "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#7" => {
+                    Ratified(644)
+                }
+                "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#8" => {
+                    Ratified(644)
+                }
+                "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#9" => {
+                    Ratified(644)
+                }
+                "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#10" => {
+                    Ratified(644)
+                }
+                // Treasury Withdrawals enacted at epoch 646
+                "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#2" => {
+                    Ratified(645)
+                }
+                "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#3" => {
+                    Ratified(645)
+                }
+                "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#4" => {
+                    Ratified(645)
+                }
+                "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#5" => {
+                    Ratified(645)
+                }
+                "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#6" => {
+                    Ratified(645)
+                }
+                // Treasury Withdrawal enacted at epoch 647
+                "d8de068952df50c862fa1bce9b8180d3387976cbae0fb2c3d9ef84f0faaf64d6#0" => {
+                    Ratified(646)
+                }
+                // Treasury Withdrawal enacted at epoch 650
+                "529dccaadaa000746c22f1682574cb3f436eeba4d19710b90791a54226dc96d7#0" => {
+                    Ratified(649)
+                }
+                // Update Committee enacted at epoch 654
+                "729daaf2f9f89f842a61f6e3ebf7e57d16d6fa4116e29c13114780cb39090850#0" => {
+                    Ratified(653)
+                }
 
                 _ => match protocol {
                     0..=8 => RatifiedCurrentEpoch,
@@ -770,6 +837,142 @@ pub mod proposals {
             1 => preprod::outcome(protocol, proposal),
             2 => preview::outcome(protocol, proposal),
             _ => ProposalOutcome::Unknown,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::proposals::{outcome, ProposalOutcome};
+
+    const MAINNET: u32 = 764824073;
+    const PREPROD: u32 = 1;
+    const PREVIEW: u32 = 2;
+
+    /// Each row is (network magic, proposal id, enactment epoch as reported
+    /// by Koios). The table stores the epoch before enactment.
+    const ENACTED: &[(u32, &str, u64)] = &[
+        (
+            PREVIEW,
+            "65c41d163aceb2be0b821b79fa71ee1ead7ecd13bd1ae812baddf5c962c9d62b#0",
+            1361,
+        ),
+        (
+            PREVIEW,
+            "dd4fbc61680bd7fa3cf97d815bdfaf54bc9872d2fd0c6f5e9bdb86fef0260c51#0",
+            1367,
+        ),
+        (
+            PREVIEW,
+            "06dcb60f4b6ee78024bd4c7978e8e093437903198cf06c3c5d34bf825129bc73#0",
+            1370,
+        ),
+        (
+            PREPROD,
+            "bbfa303aa35d19919934fb5fe36b174609a0c1dfb47a546ccd6ea58aa752e2aa#0",
+            304,
+        ),
+        (
+            PREPROD,
+            "e641ec802bb109e150e920c6c0387e85f2efd30944a46d08d08212bde540f69c#0",
+            305,
+        ),
+        (
+            MAINNET,
+            "fbb8d1a4a8d6b62f8cd706944a0582b884c2b90187b8fada7953d5c6a33eb5a7#0",
+            645,
+        ),
+        (
+            MAINNET,
+            "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#1",
+            645,
+        ),
+        (
+            MAINNET,
+            "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#2",
+            646,
+        ),
+        (
+            MAINNET,
+            "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#3",
+            646,
+        ),
+        (
+            MAINNET,
+            "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#4",
+            646,
+        ),
+        (
+            MAINNET,
+            "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#5",
+            646,
+        ),
+        (
+            MAINNET,
+            "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#6",
+            646,
+        ),
+        (
+            MAINNET,
+            "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#7",
+            645,
+        ),
+        (
+            MAINNET,
+            "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#8",
+            645,
+        ),
+        (
+            MAINNET,
+            "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#9",
+            645,
+        ),
+        (
+            MAINNET,
+            "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#10",
+            645,
+        ),
+        (
+            MAINNET,
+            "d8de068952df50c862fa1bce9b8180d3387976cbae0fb2c3d9ef84f0faaf64d6#0",
+            647,
+        ),
+        (
+            MAINNET,
+            "529dccaadaa000746c22f1682574cb3f436eeba4d19710b90791a54226dc96d7#0",
+            650,
+        ),
+        (
+            MAINNET,
+            "729daaf2f9f89f842a61f6e3ebf7e57d16d6fa4116e29c13114780cb39090850#0",
+            654,
+        ),
+    ];
+
+    #[test]
+    fn enacted_actions_are_ratified_the_epoch_before_enactment() {
+        for (magic, id, enacted) in ENACTED {
+            let got = outcome(*magic, 10, id);
+            assert!(
+                matches!(got, ProposalOutcome::Ratified(e) if e == enacted - 1),
+                "{id} on magic {magic} should be Ratified({})",
+                enacted - 1
+            );
+        }
+    }
+
+    #[test]
+    fn enacted_actions_are_network_scoped() {
+        for (magic, id, _) in ENACTED {
+            for other in [MAINNET, PREPROD, PREVIEW] {
+                if other == *magic {
+                    continue;
+                }
+                assert!(
+                    matches!(outcome(other, 10, id), ProposalOutcome::Unknown),
+                    "{id} must not resolve on magic {other}"
+                );
+            }
         }
     }
 }
