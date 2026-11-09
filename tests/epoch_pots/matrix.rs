@@ -30,15 +30,15 @@ fn parse_range(range: &str) -> (u64, u64) {
     (parse(start), parse(end))
 }
 
-/// The tags the workflow's `tag` input can select, read from its choices.
-fn workflow_tags() -> HashSet<&'static str> {
-    let workflow = include_str!("../../.github/workflows/epoch-tests.yml");
-    let (_, tag_input) = workflow
-        .split_once("\n      tag:\n")
-        .expect("epoch-tests.yml has a tag input");
-    let options = tag_input
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("options: ["))
+/// The tags a workflow's `tag` input can select, read from its choices. Works
+/// line by line and trims each line, so a CRLF checkout parses the same.
+fn tag_options(workflow: &str) -> HashSet<&str> {
+    let mut lines = workflow.lines().map(str::trim);
+    lines
+        .find(|line| *line == "tag:")
+        .expect("the workflow has a tag input");
+    let options = lines
+        .find_map(|line| line.strip_prefix("options: ["))
         .and_then(|line| line.strip_suffix(']'))
         .expect("the tag input lists its options as [a, b]");
 
@@ -47,6 +47,20 @@ fn workflow_tags() -> HashSet<&'static str> {
         .map(str::trim)
         .filter(|tag| *tag != "all")
         .collect()
+}
+
+fn workflow_tags() -> HashSet<&'static str> {
+    tag_options(include_str!("../../.github/workflows/epoch-tests.yml"))
+}
+
+#[test]
+fn tag_options_ignore_line_endings() {
+    let lf = "on:\n  workflow_dispatch:\n    inputs:\n      tag:\n        type: choice\n        options: [all, conway, pv11]\n";
+    let crlf = lf.replace('\n', "\r\n");
+    let expected = HashSet::from(["conway", "pv11"]);
+
+    assert_eq!(tag_options(lf), expected);
+    assert_eq!(tag_options(&crlf), expected);
 }
 
 #[test]
@@ -72,6 +86,17 @@ fn matrix_entries_name_the_fixtures_the_harness_picks() {
     let tags = workflow_tags();
 
     let mut subjects = HashSet::new();
+
+    // A tag no entry carries would dispatch a run with no jobs, which reads
+    // as green.
+    for tag in &tags {
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.tags.iter().any(|t| t == tag)),
+            "the workflow's tag input offers {tag:?}, but no entry carries it"
+        );
+    }
 
     for entry in &entries {
         let name = format!("{}-{}", entry.network, entry.ground_truth_epoch);
