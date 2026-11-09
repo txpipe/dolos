@@ -1163,6 +1163,15 @@ mod tests {
         }
     }
 
+    fn pagination(order: Order, count: usize, page: u64) -> Pagination {
+        Pagination {
+            count,
+            page,
+            order,
+            ..Default::default()
+        }
+    }
+
     async fn utxo_page(app: &TestApp, stake_address: &str, query: &str) -> Vec<String> {
         let path = format!("/accounts/{stake_address}/utxos?{query}");
         let (status, bytes) = app.get_bytes(&path).await;
@@ -1253,6 +1262,99 @@ mod tests {
                 }
 
                 assert_eq!(walked, full, "order={order} count={count}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn many_spent_refs_are_walked_once() {
+        let block_count = 4 * MAX_WINDOW + 100;
+        let (blocks, vectors, chain_config) = build_synthetic_blocks(SyntheticBlockConfig {
+            block_count,
+            txs_per_block: 1,
+            slot: 1,
+            ..Default::default()
+        });
+        let domain = ToyDomain::with_stores(
+            Arc::new(dolos_cardano::include::preview::load()),
+            chain_config,
+            None,
+            None,
+            MeasuredStores::new(MemoryStores::open()),
+        );
+        domain.import_blocks(blocks).unwrap();
+        let address = Address::from_bech32(&vectors.address).unwrap().to_vec();
+        let tag = Tag::new(utxo_dimensions::ADDRESS, address);
+        let facade = Facade {
+            inner: domain,
+            config: MinibfConfig::new("[::]:0".parse().unwrap()),
+        };
+        let entries = facade
+            .state()
+            .utxos_by_tag_page(
+                tag.dimension,
+                &tag.key,
+                TagOrder::Asc,
+                TagStart::Skip(0),
+                usize::MAX,
+            )
+            .unwrap();
+        assert_eq!(entries.len(), block_count);
+
+        let spent: Vec<_> = entries[99..block_count - 1]
+            .iter()
+            .map(|entry| entry.txo.clone())
+            .collect();
+        let writer = facade.state().start_writer().unwrap();
+        writer
+            .apply_utxoset(&UtxoSetDelta {
+                consumed_utxo: facade.state().get_utxos(spent).unwrap(),
+                ..Default::default()
+            })
+            .unwrap();
+        writer.commit().unwrap();
+
+        for order in [Order::Asc, Order::Desc] {
+            let mut live: Vec<_> = entries[..99]
+                .iter()
+                .chain(&entries[block_count - 1..])
+                .map(|entry| entry.txo.to_string())
+                .collect();
+            if let Order::Desc = order {
+                live.reverse();
+            }
+
+            for count in [99, 100] {
+                let pagination = pagination(order, count, 1);
+                let expected: Vec<_> = live
+                    .iter()
+                    .skip(pagination.skip())
+                    .take(count)
+                    .cloned()
+                    .collect();
+                facade.state().counters.reset();
+                let actual: Vec<AddressUtxoContentInner> =
+                    load_tag_page(&facade, &tag, &pagination).await.unwrap();
+                let actual: Vec<_> = actual
+                    .into_iter()
+                    .map(|row| format!("{}#{}", row.tx_hash, row.output_index))
+                    .collect();
+                assert_eq!(actual, expected);
+                assert_eq!(actual.len(), count);
+                let work = facade.state().counters.snapshot();
+                assert_eq!(
+                    work.utxo_reads,
+                    (count
+                        + if count == 100 || matches!(order, Order::Desc) {
+                            block_count - 100
+                        } else {
+                            0
+                        }) as u64
+                );
+                assert_eq!(work.utxo_refs, work.utxo_reads);
+                assert_eq!(work.block_reads, actual.len() as u64);
+                assert_eq!(work.exact_lookups, 0);
+                assert_eq!(work.tip_reads, 0);
             }
         }
     }
