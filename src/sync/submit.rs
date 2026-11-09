@@ -357,6 +357,93 @@ mod tests {
         assert_eq!(hashes(&stage.mempool.peek_pending()), [hash]);
     }
 
+    #[tokio::test]
+    async fn a_new_session_leaves_a_tx_offered_too_many_times_out() {
+        // Nothing listens on port 1, so the attempt fails right after re-queueing.
+        let stage = Stage::new(
+            "127.0.0.1:1".into(),
+            0,
+            MempoolBackend::Ephemeral(dolos_core::builtin::EphemeralMempool::new()),
+        );
+        let hash = receive_new(&stage, 1);
+        stage.mempool.mark_inflight(&[hash]).unwrap();
+        for _ in 0..MAX_UNACKNOWLEDGED_OFFERS {
+            stage.count_offers(&[hash]);
+        }
+
+        let attempt = <Worker as gasket::framework::Worker<Stage>>::bootstrap(&stage).await;
+
+        assert!(attempt.is_err());
+        assert!(stage.mempool.peek_pending().is_empty());
+        assert_eq!(
+            stage.mempool.check_status(&hash).stage,
+            MempoolTxStage::Propagated
+        );
+    }
+
+    #[tokio::test]
+    async fn an_offer_is_counted_until_the_peer_acknowledges_it() {
+        use pallas::network::facades::PeerServer;
+        use tokio::net::TcpListener;
+
+        const MAGIC: u64 = 2;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let peer = tokio::spawn(async move {
+            let mut server = PeerServer::accept(&listener, MAGIC).await.unwrap();
+            let txsub = server.txsubmission();
+            txsub.wait_for_init().await.unwrap();
+            txsub
+                .acknowledge_and_request_tx_ids(true, 0, 1)
+                .await
+                .unwrap();
+            txsub.receive_next_reply().await.unwrap();
+            txsub
+                .acknowledge_and_request_tx_ids(true, 1, 1)
+                .await
+                .unwrap();
+            let _ = done_rx.await;
+            server
+        });
+
+        let mut stage = Stage::new(
+            address,
+            MAGIC,
+            MempoolBackend::Ephemeral(dolos_core::builtin::EphemeralMempool::new()),
+        );
+        let hash = receive_new(&stage, 1);
+
+        let mut worker = <Worker as gasket::framework::Worker<Stage>>::bootstrap(&stage)
+            .await
+            .unwrap();
+
+        let next = async |worker: &mut Worker, stage: &mut Stage| {
+            match <Worker as gasket::framework::Worker<Stage>>::schedule(worker, stage)
+                .await
+                .unwrap()
+            {
+                WorkSchedule::Unit(unit) => {
+                    <Worker as gasket::framework::Worker<Stage>>::execute(worker, &unit, stage)
+                        .await
+                        .unwrap()
+                }
+                _ => panic!("expected a request from the peer"),
+            }
+        };
+
+        next(&mut worker, &mut stage).await;
+        assert_eq!(stage.unacknowledged_offers.borrow().get(&hash), Some(&1));
+
+        next(&mut worker, &mut stage).await;
+        assert!(stage.unacknowledged_offers.borrow().is_empty());
+
+        done_tx.send(()).unwrap();
+        peer.await.unwrap();
+    }
+
     #[test]
     fn only_a_tx_offered_too_many_times_stays_out_of_the_queue() {
         let stage = stage();
