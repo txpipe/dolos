@@ -63,10 +63,12 @@ where
             }
         })
         .map(|x| {
-            (
-                <UtxoOutputModelBuilder<'_> as IntoModel<AddressUtxoContentInner>>::sort_key(&x),
-                x,
-            )
+            // Rows whose block was pruned from the archive have no chain
+            // position, so the `TxoRef` breaks ties to keep paging stable.
+            let TxoRef(tx_hash, txo_idx) = x.txo_ref();
+            let sort_key =
+                <UtxoOutputModelBuilder<'_> as IntoModel<AddressUtxoContentInner>>::sort_key(&x);
+            ((sort_key, tx_hash, txo_idx), x)
         })
         .collect();
 

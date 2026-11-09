@@ -1127,6 +1127,178 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn addresses_utxos_stable_pages_without_block_data() {
+        let app = TestApp::new_with_pruned_history();
+        let address = app.vectors().address.as_str();
+
+        let fetch = |path: String| {
+            let app = &app;
+            async move {
+                let (status, bytes) = app.get_bytes(&path).await;
+                assert_eq!(
+                    status,
+                    StatusCode::OK,
+                    "unexpected status {status} with body: {}",
+                    String::from_utf8_lossy(&bytes)
+                );
+                let items: Vec<AddressUtxoContentInner> =
+                    serde_json::from_slice(&bytes).expect("failed to parse address utxos");
+                items
+                    .into_iter()
+                    .map(|x| (format!("{}#{}", x.tx_hash, x.output_index), x.block))
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        for order in ["asc", "desc"] {
+            let full = fetch(format!("/addresses/{address}/utxos?order={order}")).await;
+            assert!(
+                full.iter().any(|(_, block)| block.is_empty()),
+                "expected rows whose block was pruned"
+            );
+            assert!(full.len() > 2, "expected more than one page of rows");
+
+            for _ in 0..5 {
+                let again = fetch(format!("/addresses/{address}/utxos?order={order}")).await;
+                assert_eq!(again, full, "order={order} changed between requests");
+            }
+
+            let mut paged = Vec::new();
+            for page in 1.. {
+                let items = fetch(format!(
+                    "/addresses/{address}/utxos?order={order}&count=2&page={page}"
+                ))
+                .await;
+                if items.is_empty() {
+                    break;
+                }
+                paged.extend(items);
+            }
+
+            let unique: std::collections::HashSet<_> = paged.iter().map(|(id, _)| id).collect();
+            assert_eq!(unique.len(), paged.len(), "order={order} pages overlap");
+            assert_eq!(paged, full, "order={order} pages miss or reorder rows");
+
+            // Rows without block data come first in asc and last in desc.
+            let has_block: Vec<bool> = full.iter().map(|(_, block)| !block.is_empty()).collect();
+            assert!(
+                has_block.contains(&true),
+                "expected rows that keep their block"
+            );
+            assert!(
+                has_block.windows(2).all(|w| if order == "asc" {
+                    w[0] <= w[1]
+                } else {
+                    w[0] >= w[1]
+                }),
+                "order={order} interleaves rows with and without block data"
+            );
+        }
+
+        let asc = fetch(format!("/addresses/{address}/utxos?order=asc")).await;
+        let mut desc = fetch(format!("/addresses/{address}/utxos?order=desc")).await;
+        desc.reverse();
+        assert_eq!(desc, asc, "order=desc is not order=asc reversed");
+    }
+
+    #[tokio::test]
+    async fn addresses_utxos_stable_order_for_outputs_of_one_tx_without_block_data() {
+        const OUTPUTS: u32 = 6;
+        let tx_hash = pallas::crypto::hash::Hash::<32>::from([0x5a; 32]);
+        let app = TestApp::new_with_pruned_history_and_utxos(|address| {
+            (0..OUTPUTS)
+                .map(|idx| {
+                    let EraCbor(_, cbor) = dolos_testing::utxo_with_value(
+                        address,
+                        pallas::ledger::primitives::conway::Value::Coin(1_000_000 + idx as u64),
+                    );
+                    dolos_core::config::CustomUtxo {
+                        ref_: TxoRef(tx_hash, idx),
+                        era: Some(pallas::ledger::traverse::Era::Conway.into()),
+                        cbor,
+                    }
+                })
+                .collect()
+        });
+        let address = app.vectors().address.as_str();
+        let tx_hash = tx_hash.to_string();
+
+        let fetch = |path: String| {
+            let app = &app;
+            async move {
+                let (status, bytes) = app.get_bytes(&path).await;
+                assert_eq!(
+                    status,
+                    StatusCode::OK,
+                    "unexpected status {status} with body: {}",
+                    String::from_utf8_lossy(&bytes)
+                );
+                let items: Vec<AddressUtxoContentInner> =
+                    serde_json::from_slice(&bytes).expect("failed to parse address utxos");
+                items
+                    .into_iter()
+                    .map(|x| (x.tx_hash, x.output_index, x.block))
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        for order in ["asc", "desc"] {
+            let full = fetch(format!("/addresses/{address}/utxos?order={order}")).await;
+
+            // Rows without block data are ordered by (tx_hash, output_index).
+            let mut expected: Vec<_> = full
+                .iter()
+                .filter(|(_, _, block)| block.is_empty())
+                .map(|(hash, idx, _)| (hash.clone(), *idx))
+                .collect();
+            expected.sort();
+            if order == "desc" {
+                expected.reverse();
+            }
+            let actual: Vec<_> = full
+                .iter()
+                .filter(|(_, _, block)| block.is_empty())
+                .map(|(hash, idx, _)| (hash.clone(), *idx))
+                .collect();
+            assert_eq!(actual, expected, "order={order} rows without block data");
+
+            let mut ours: Vec<_> = (0..OUTPUTS as i32)
+                .map(|idx| (tx_hash.clone(), idx))
+                .collect();
+            if order == "desc" {
+                ours.reverse();
+            }
+            let listed: Vec<_> = actual
+                .iter()
+                .filter(|(hash, _)| *hash == tx_hash)
+                .cloned()
+                .collect();
+            assert_eq!(listed, ours, "order={order} outputs of one tx");
+
+            for _ in 0..5 {
+                let again = fetch(format!("/addresses/{address}/utxos?order={order}")).await;
+                assert_eq!(again, full, "order={order} changed between requests");
+            }
+
+            let mut paged = Vec::new();
+            for page in 1.. {
+                let items = fetch(format!(
+                    "/addresses/{address}/utxos?order={order}&count=2&page={page}"
+                ))
+                .await;
+                if items.is_empty() {
+                    break;
+                }
+                paged.extend(items);
+            }
+            assert_eq!(
+                paged, full,
+                "order={order} pages miss, repeat or reorder rows"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn addresses_utxos_bad_request() {
         let app = TestApp::new();
         let path = format!("/addresses/{}/utxos", invalid_address());
