@@ -1,0 +1,90 @@
+---
+title: Blockfrost Conformance
+sidebar:
+  order: 2.5
+---
+
+[Mini Blockfrost](./minibf) is checked against Blockfrost's own integration suite, [blockfrost/blockfrost-tests](https://github.com/blockfrost/blockfrost-tests). The suite sends the requests it recorded against hosted Blockfrost to the server under test and compares each response with the recorded one. This page summarises the latest run on each network.
+
+Dolos does not pass the whole suite on any network yet. The tables state what it passes and fails, and the failures that come from Dolos are listed below as known gaps.
+
+## Latest run
+
+|                     | Mainnet    | Preprod    | Preview    |
+| ------------------- | ---------- | ---------- | ---------- |
+| Date                | 2026-10-31 | 2026-10-31 | 2026-10-31 |
+| Dolos commit        | [`8ed6402d`](https://github.com/txpipe/dolos/commit/8ed6402d8f0eda2bf71b2574adaa9c43c961a4d4) | [`8ed6402d`](https://github.com/txpipe/dolos/commit/8ed6402d8f0eda2bf71b2574adaa9c43c961a4d4) | [`8ed6402d`](https://github.com/txpipe/dolos/commit/8ed6402d8f0eda2bf71b2574adaa9c43c961a4d4) |
+| Suite commit        | [`f5bfe322`](https://github.com/blockfrost/blockfrost-tests/tree/f5bfe322c47131e2378ef85cf50c277dd1cce8b9) | [`f5bfe322`](https://github.com/blockfrost/blockfrost-tests/tree/f5bfe322c47131e2378ef85cf50c277dd1cce8b9) | [`f5bfe322`](https://github.com/blockfrost/blockfrost-tests/tree/f5bfe322c47131e2378ef85cf50c277dd1cce8b9) |
+| Protocol version    | 11.0       | 11.0       | 11.0       |
+| Endpoints exercised | 109        | 109        | 109        |
+| Tests               | 977        | 830        | 871        |
+| Passed              | 851        | 806        | 861        |
+| Failed              | 126        | 24         | 10         |
+
+The suite commit carries `@blockfrost/openapi` 0.1.93. The protocol version is the one `/epochs/latest/parameters` served during the run; that test passed on every network. The preview figures come from a second run once the node's caches were warm: a first run right after a restart had 16 more failures, all timeouts that passed on the second.
+
+## What the failures are
+
+Not every failure is a Dolos defect. Each one falls in one of these classes:
+
+| Class                                                          | Mainnet | Preprod | Preview |
+| -------------------------------------------------------------- | ------: | ------: | ------: |
+| Dolos gap: the response is wrong or incomplete                 |      34 |       2 |       7 |
+| Timeout: no answer within the suite's 15 seconds               |       7 |       0 |       0 |
+| Deep page refused by the scan limit                            |      79 |      20 |       3 |
+| Recorded response predates a change on chain or at its source  |       3 |       1 |       0 |
+| Off-chain document on IPFS not fetched in time                 |       2 |       0 |       0 |
+| Dolos lists a redeemer the recorded response leaves out        |       1 |       1 |       0 |
+| **Total**                                                      | **126** |  **24** |  **10** |
+
+- **Scan limit.** Dolos refuses a page whose position needs a scan past `max_scan_items` (see [Configuration](./minibf#configuration)) instead of walking the history to reach it. The suite asks for some pages deep in long listings, and these tests fail by that design.
+- **Recorded responses that moved on.** Pool metadata documents that were changed or removed at their host, and an account that delegated its vote after the response was recorded.
+- **Vote redeemers.** On `/scripts/{script_hash}/redeemers`, Dolos lists the vote-purpose redeemers of a script that Blockfrost's recorded response omits ([dolos#1426](https://github.com/txpipe/dolos/issues/1426), Dolos includes valid vote redeemers that Blockfrost leaves out).
+
+## Known gaps
+
+The failures in the first class, by endpoint group. A number is the count of failing tests on that network.
+
+| Endpoint group | Gap | Mainnet | Preprod | Preview | Issue |
+| -------------- | --- | ------: | ------: | ------: | ----- |
+| `/blocks/{hash_or_number}` and its `/next` and `/previous` walks | Byron epoch boundary blocks: `height` and `slot` served as `null`, the boundary block skipped in `next_block`, and the `fees` of blocks next to a boundary block | 12 | – | – | – |
+| `/blocks/{hash_or_number}` and its walks | `slot_leader` of the early Shelley blocks made by the genesis delegates | 8 | – | – | – |
+| `/blocks/{hash_or_number}` | A slot of 0 served as `null` | 1 | – | – | – |
+| `/blocks/{hash_or_number}/addresses` | Order of Byron addresses in the list | 4 | – | – | – |
+| `/accounts/{stake_address}/transactions` | Order of entries that share a block and index | 4 | – | – | – |
+| `/pools/extended` | A pool whose metadata host can't be reached has no `metadata.error` | 2 | – | 2 | – |
+| `/` | `url` reports the address the server binds | 1 | 1 | 1 | – |
+| `/addresses/{address}/extended` | A CIP-68 image split in chunks is served as hex | 1 | – | – | – |
+| `/governance/dreps/{drep_id}/metadata`, `/governance/proposals/{gov_action_id}/metadata` | An anchor that serves something other than JSON is reported as `HASH_MISMATCH`, where Blockfrost reports `HTTP_RESPONSE_ERROR` | 1 | – | 2 | – |
+| `/governance/dreps/{drep_id}/metadata` | The message for an anchor that answers 404 is worded differently | – | 1 | – | – |
+| `/governance/proposals/{tx_hash}/{cert_index}/parameters` | A cost-model update with no language is served as `cost_models: null`, where Blockfrost serves `{}` | – | – | 2 | [dolos#1375](https://github.com/txpipe/dolos/issues/1375), `null` instead of `{}` for an empty cost-model update |
+
+### Timeouts
+
+On mainnet, five forms of `/epochs/{epoch}/blocks/{pool_id}` for one epoch and pool timed out, intermittently, under the suite's concurrent requests. The other two are second pages of `/assets/{subject}/txs` for an asset with a long history, where the cost of a page grows with its depth. The two IPFS failures are proposal `/metadata` reads whose anchor lives on IPFS and was not fetched within the 15 seconds.
+
+## Running the suite yourself
+
+1. Run Dolos with Mini Blockfrost enabled, synced to the tip of the network you test. Set `token_registry_url` in `[serve.minibf]`: `https://tokens.cardano.org` on mainnet, `https://metadata.world.dev.cardano.org` on the testnets. Without it the asset off-chain metadata tests fail.
+2. Clone the suite and check out the commit you want to test against, then install its dependencies (Node 20 or later, with corepack enabled):
+
+   ```shell
+   git clone https://github.com/blockfrost/blockfrost-tests.git
+   cd blockfrost-tests
+   git checkout f5bfe322c47131e2378ef85cf50c277dd1cce8b9
+   yarn install
+   ```
+
+3. Write `endpoints-allowlist.json` at the suite's root: a JSON array of the endpoint paths to run. The suite skips every test of an endpoint not in it. Take the paths from the [Coverage](./minibf#coverage) table and use Blockfrost's parameter names, or the entry matches nothing and the endpoint is silently never tested: `{subject}` is `{asset}`, `{epoch}` is `{number}`, a pool's `{id}` is `{pool_id}`, and `{tx_hash}` under `/txs/` is `{hash}`. Leave out `/tx/submit` (it needs a funded wallet), `/metrics` (not a Blockfrost endpoint) and `/scripts/{script_hash}/utxos` (a Dolos extension).
+4. Export the settings and run the network's tests:
+
+   ```shell
+   export SERVER_URL=http://localhost:3000
+   export NETWORK=mainnet
+   export PROJECT_ID=unused
+   yarn test:mainnet
+   ```
+
+   `PROJECT_ID` only has to be set: the suite compares against the responses it recorded and sends no request to hosted Blockfrost, as long as `BLOCKCHAIN_STATE_SETUP` stays unset. Use `test:preprod` or `test:preview` for the testnets, with `NETWORK` to match.
+
+Each test has 15 seconds and the tests run concurrently, so run one network at a time on an otherwise idle machine, and repeat a run once the node's caches are warm before reading its timeouts. After the run, check that every endpoint in the allowlist ran at least one test.
