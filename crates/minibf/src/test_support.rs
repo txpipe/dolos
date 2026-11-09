@@ -6,7 +6,7 @@ use axum::{
     Router,
 };
 use dolos_core::{
-    config::{CardanoConfig, MinibfConfig},
+    config::{CardanoConfig, CustomUtxo, MinibfConfig},
     import::ImportExt as _,
     Domain, StateStore,
 };
@@ -29,7 +29,16 @@ pub struct TestDomainBuilder {
 }
 
 impl TestDomainBuilder {
-    pub fn new_with_synthetic(mut cfg: SyntheticBlockConfig) -> Self {
+    pub fn new_with_synthetic(cfg: SyntheticBlockConfig) -> Self {
+        Self::new_with_synthetic_and_utxos(cfg, Vec::new())
+    }
+
+    /// Like `new_with_synthetic`, with `extra_utxos` added to the genesis
+    /// UTxO set. They have no block in the archive.
+    pub fn new_with_synthetic_and_utxos(
+        mut cfg: SyntheticBlockConfig,
+        extra_utxos: Vec<CustomUtxo>,
+    ) -> Self {
         let genesis = Arc::new(dolos_cardano::include::preview::load());
         let min_slot = {
             let temp = ToyDomain::new_with_genesis_and_config(
@@ -45,7 +54,8 @@ impl TestDomainBuilder {
         if cfg.slot < min_slot {
             cfg.slot = min_slot;
         }
-        let (blocks, vectors, chain_config) = build_synthetic_blocks(cfg);
+        let (blocks, vectors, mut chain_config) = build_synthetic_blocks(cfg);
+        chain_config.custom_utxos.extend(extra_utxos);
 
         let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
         domain
@@ -115,12 +125,23 @@ impl TestApp {
     /// Like `new`, but with every block except the tip pruned from the
     /// archive, as `max_history` does on a long-running node.
     pub fn new_with_pruned_history() -> Self {
+        Self::new_with_pruned_history_and_utxos(|_| Vec::new())
+    }
+
+    /// Like `new_with_pruned_history`, with the UTxOs `extra_utxos` builds
+    /// for the synthetic address added to the genesis set. Like the pruned
+    /// rows, they have no block in the archive.
+    pub fn new_with_pruned_history_and_utxos(
+        extra_utxos: impl FnOnce(&str) -> Vec<CustomUtxo>,
+    ) -> Self {
         let cfg = SyntheticBlockConfig {
             block_count: 5,
             txs_per_block: 3,
             ..Default::default()
         };
-        let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
+        let extra_utxos = extra_utxos(&cfg.address);
+        let (domain, vectors) =
+            TestDomainBuilder::new_with_synthetic_and_utxos(cfg, extra_utxos).finish();
         domain
             .archive()
             .prune_history(0, None)
