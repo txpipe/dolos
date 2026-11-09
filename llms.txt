@@ -1,0 +1,51 @@
+# Dolos
+
+> Dolos is a lightweight Cardano data node written in Rust. It syncs the chain from a Cardano relay, keeps the ledger state, and serves it through Blockfrost-compatible HTTP (Mini-Blockfrost), UTxO RPC over gRPC, Cardano's node-to-client Ouroboros protocols on a local socket (which Ogmios and cardano-cli can use), a Kupo-compatible HTTP API (Mini-Kupo) and a Tx3 transaction resolver (TRP), without running a full node.
+
+Dolos is configured with one TOML file (`dolos.toml`) and run with the `dolos` CLI. A new node either syncs from genesis or is bootstrapped from a snapshot. Each API is enabled by its own `[serve.*]` table in the configuration.
+
+## Getting started
+
+- [Quickstart](https://docs.txpipe.io/dolos): from zero to a running instance, with install, `dolos init` and first queries
+- [What is Dolos](https://docs.txpipe.io/dolos/what): what Dolos does, its API surface and its resource profile
+- [Installation](https://docs.txpipe.io/dolos/installation): the available installation methods
+- [Binary releases](https://docs.txpipe.io/dolos/installation/binaries): the install scripts, Homebrew, npm and prebuilt downloads
+- [Docker](https://docs.txpipe.io/dolos/installation/docker): running Dolos from the container image
+- [From source](https://docs.txpipe.io/dolos/installation/source): building with Cargo
+
+## Configuration
+
+- [Configuration introduction](https://docs.txpipe.io/dolos/configuration/introduction): where the TOML file is read from, environment overrides and validation
+- [Configuration schema](https://docs.txpipe.io/dolos/configuration/schema): every section and field, including the `[serve.*]` tables that enable each API
+- [Bootstrap](https://docs.txpipe.io/dolos/bootstrap): filling the stores from a snapshot instead of syncing from genesis
+- [Mithril bootstrap](https://docs.txpipe.io/dolos/bootstrap/mithril): bootstrapping from a Mithril-certified ImmutableDB
+- [Local ImmutableDB bootstrap](https://docs.txpipe.io/dolos/bootstrap/local): bootstrapping from a local Cardano node database
+
+## APIs
+
+- [Mini-Blockfrost](https://docs.txpipe.io/dolos/apis/minibf): Blockfrost-compatible HTTP API, so existing Blockfrost clients and SDKs can point at Dolos
+- [UTxO RPC](https://docs.txpipe.io/dolos/apis/grpc): gRPC endpoint following the UTxO RPC spec for queries, chain following and transaction submission
+- [Ouroboros](https://docs.txpipe.io/dolos/apis/ouroboros): node-to-client mini-protocols on a Unix socket, for Ogmios, cardano-cli and other tools that expect a Cardano node
+- [Mini-Kupo](https://docs.txpipe.io/dolos/apis/minikupo): read-only, Kupo-compatible HTTP API for pattern matches, datums, scripts and metadata
+
+## Integrations
+
+- [UTxO RPC client guide](https://docs.txpipe.io/dolos/integrations/utxorpc): streaming filtered transactions with WatchTx
+- [Tx3](https://docs.txpipe.io/dolos/integrations/tx3): using the built-in TRP server to resolve Tx3 transaction templates
+- [Blaze](https://docs.txpipe.io/dolos/integrations/blaze): using Dolos as the UTxO RPC provider for the Blaze JavaScript SDK
+
+## Operations
+
+- [Operations](https://docs.txpipe.io/dolos/operations): running and operating an instance
+- [Operation modes](https://docs.txpipe.io/dolos/operations/modes): `daemon`, sync-only and serve-only modes
+- [Logging](https://docs.txpipe.io/dolos/operations/logging): log levels and output
+- [Tracing](https://docs.txpipe.io/dolos/operations/tracing): exporting OpenTelemetry traces
+- [Performance](https://docs.txpipe.io/dolos/operations/performance): expected sync time, resource use and query latency, with practical guidance
+- [Troubleshooting](https://docs.txpipe.io/dolos/operations/troubleshooting): the warning and error codes Dolos logs, and how to act on each
+
+## Optional
+
+- [Architecture overview](https://docs.txpipe.io/dolos/architecture): how the sync pipeline, ledger, storage and serving layers fit together
+- [Serving layer](https://docs.txpipe.io/dolos/architecture/serving-layer): how the APIs are built on the stores
+- [Source repository](https://github.com/txpipe/dolos): code, issues and the changelog
+- [Releases](https://github.com/txpipe/dolos/releases): release notes and binaries
