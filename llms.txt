@@ -6,7 +6,7 @@ Dolos is configured with one TOML file (`dolos.toml`) and run with the `dolos` C
 
 ## Getting started
 
-- [Quickstart](https://docs.txpipe.io/dolos): from zero to a running instance, with install, `dolos init` and first queries
+- [Quickstart](https://docs.txpipe.io/dolos): from zero to a running instance, with install, `dolos init` and `dolos daemon`
 - [What is Dolos](https://docs.txpipe.io/dolos/what): what Dolos does, its API surface and its resource profile
 - [Installation](https://docs.txpipe.io/dolos/installation): the available installation methods
 - [Binary releases](https://docs.txpipe.io/dolos/installation/binaries): the install scripts, Homebrew, npm and prebuilt downloads
