@@ -543,7 +543,7 @@ mod tests {
         StateStore, StateWriter as _, UtxoIndexDelta, UtxoPosition, UtxoSetDelta,
     };
     use dolos_testing::{
-        measured::MeasuredStores,
+        measured::{MeasuredStores, WorkSnapshot},
         synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
         toy_domain::{MemoryStores, ToyDomain, ToyStores as _},
         TestAddress, MIN_UTXO_AMOUNT,
@@ -1407,5 +1407,67 @@ mod tests {
 
         assert!(block_reads[0] > 0);
         assert_eq!(block_reads[1], block_reads[0] * block_count as u64);
+    }
+
+    /// The work one page does, whatever the address holds. A page of five
+    /// rows over 20 UTxOs and over 200 reads the same rows and blocks, in
+    /// both orders and past the first page.
+    #[tokio::test]
+    async fn a_page_costs_the_same_at_any_address_size() {
+        async fn page_work(block_count: usize, query: &str) -> WorkSnapshot {
+            let (blocks, vectors, chain_config) = build_synthetic_blocks(SyntheticBlockConfig {
+                block_count,
+                txs_per_block: 1,
+                slot: 1,
+                ..Default::default()
+            });
+            let domain = ToyDomain::with_stores(
+                Arc::new(dolos_cardano::include::preview::load()),
+                chain_config,
+                None,
+                None,
+                MeasuredStores::new(MemoryStores::open()),
+            );
+            domain
+                .import_blocks(blocks)
+                .expect("import synthetic blocks");
+
+            let router = crate::build_router(
+                MinibfConfig::new("[::]:0".parse().expect("listen address")),
+                domain.clone(),
+            );
+
+            domain.archive().counters.reset();
+            let path = format!("/addresses/{}/utxos?{query}", vectors.address);
+            let res = router
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+
+            let bytes = res.into_body().collect().await.unwrap().to_bytes();
+            let rows: Vec<AddressUtxoContentInner> = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(rows.len(), 5, "{query}");
+
+            // block sizes grow with the slot, so the decoded bytes do too
+            WorkSnapshot {
+                decoded_bytes: 0,
+                ..domain.archive().counters.snapshot()
+            }
+        }
+
+        for query in [
+            "count=5",
+            "count=5&page=2",
+            "count=5&order=desc",
+            "count=5&page=2&order=desc",
+        ] {
+            let small = page_work(20, query).await;
+            let large = page_work(200, query).await;
+
+            assert_eq!(small.utxo_reads, 5, "{query}");
+            assert_eq!(small.block_reads, 5, "{query}");
+            assert_eq!(small, large, "{query}");
+        }
     }
 }
