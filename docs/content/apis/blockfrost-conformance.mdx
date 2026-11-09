@@ -37,7 +37,7 @@ Not every failure is a Dolos defect. Each one falls in one of these classes:
 | Dolos lists a redeemer the recorded response leaves out        |       1 |       1 |       0 |
 | **Total**                                                      | **126** |  **24** |  **10** |
 
-- **Scan limit.** Dolos refuses a page whose position needs a scan past `max_scan_items` (see [Configuration](./minibf#configuration)) instead of walking the history to reach it. The suite asks for some pages deep in long listings, and these tests fail by that design.
+- **Scan limit.** Dolos refuses a page whose position needs a scan past `max_scan_items` (see [Configuration](./minibf#configuration)) instead of walking the history to reach it ([dolos#1270](https://github.com/txpipe/dolos/issues/1270), HTTP 400 when `page * count` is more than `max_scan_items`). The suite asks for some pages deep in long listings, and these tests fail by that design.
 - **Recorded responses that moved on.** Pool metadata documents that were changed or removed at their host, and an account that delegated its vote after the response was recorded.
 - **Vote redeemers.** On `/scripts/{script_hash}/redeemers`, Dolos lists the vote-purpose redeemers of a script that Blockfrost's recorded response omits ([dolos#1426](https://github.com/txpipe/dolos/issues/1426), Dolos includes valid vote redeemers that Blockfrost leaves out).
 
@@ -53,7 +53,7 @@ The failures in the first class, by endpoint group. A number is the count of fai
 | `/blocks/{hash_or_number}/addresses` | Order of Byron addresses in the list | 4 | – | – | – |
 | `/accounts/{stake_address}/transactions` | Order of entries that share a block and index | 4 | – | – | – |
 | `/pools/extended` | A pool whose metadata host can't be reached has no `metadata.error` | 2 | – | 2 | – |
-| `/` | `url` reports the address the server binds | 1 | 1 | 1 | – |
+| `/` | `url` reports the address the server binds when `public_url` is unset | 1 | 1 | 1 | – |
 | `/addresses/{address}/extended` | A CIP-68 image split in chunks is served as hex | 1 | – | – | – |
 | `/governance/dreps/{drep_id}/metadata`, `/governance/proposals/{gov_action_id}/metadata` | An anchor that serves something other than JSON is reported as `HASH_MISMATCH`, where Blockfrost reports `HTTP_RESPONSE_ERROR` | 1 | – | 2 | – |
 | `/governance/dreps/{drep_id}/metadata` | The message for an anchor that answers 404 is worded differently | – | 1 | – | – |
@@ -75,7 +75,7 @@ On mainnet, five forms of `/epochs/{epoch}/blocks/{pool_id}` for one epoch and p
    yarn install
    ```
 
-3. Write `endpoints-allowlist.json` at the suite's root: a JSON array of the endpoint paths to run. The suite skips every test of an endpoint not in it. Take the paths from the [Coverage](./minibf#coverage) table and use Blockfrost's parameter names, or the entry matches nothing and the endpoint is silently never tested: `{subject}` is `{asset}`, `{epoch}` is `{number}`, a pool's `{id}` is `{pool_id}`, and `{tx_hash}` under `/txs/` is `{hash}`. Leave out `/tx/submit` (it needs a funded wallet), `/metrics` (not a Blockfrost endpoint) and `/scripts/{script_hash}/utxos` (a Dolos extension).
+3. Write `endpoints-allowlist.json` at the suite's root: a JSON array of the endpoint paths to run. The suite skips every test of an endpoint not in it. Take the paths from the [Coverage](./minibf#coverage) table and use Blockfrost's parameter names, or the suite refuses the file and runs nothing: `{subject}` is `{asset}`, `{epoch}` is `{number}`, a pool's `{id}` is `{pool_id}`, and `{tx_hash}` under `/txs/` is `{hash}`. These runs left out three endpoints: `/tx/submit`, which needs a funded wallet, `/metrics`, which the suite has no tests for (Dolos's own `/metrics` serves Prometheus metrics, not Blockfrost's usage metrics), and `/scripts/{script_hash}/utxos`. The suite does test the last one, so you can include it.
 4. Export the settings and run the network's tests:
 
    ```shell
@@ -85,6 +85,6 @@ On mainnet, five forms of `/epochs/{epoch}/blocks/{pool_id}` for one epoch and p
    yarn test:mainnet
    ```
 
-   `PROJECT_ID` only has to be set: the suite compares against the responses it recorded and sends no request to hosted Blockfrost, as long as `BLOCKCHAIN_STATE_SETUP` stays unset. Use `test:preprod` or `test:preview` for the testnets, with `NETWORK` to match.
+   `PROJECT_ID` only has to be set: the suite sends every request to `SERVER_URL` and compares the response with the one it recorded. These runs left `BLOCKCHAIN_STATE_SETUP` unset, so the checks that need the current tip, such as slot and confirmation counts, passed without being made; set it to `1` to make them against the server under test. Use `test:preprod` or `test:preview` for the testnets, with `NETWORK` to match.
 
-Each test has 15 seconds and the tests run concurrently, so run one network at a time on an otherwise idle machine, and repeat a run once the node's caches are warm before reading its timeouts. After the run, check that every endpoint in the allowlist ran at least one test.
+Each test has 15 seconds by default, some up to a minute, and the tests run concurrently, so run one network at a time on an otherwise idle machine, and repeat a run once the node's caches are warm before reading its timeouts. After the run, check that every endpoint in the allowlist ran at least one test.
