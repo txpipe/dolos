@@ -52,6 +52,7 @@ fn build_registration<D: Domain>(
             ConwayCert::Reg(cred, coin) => (cred, true, Some(coin.to_string())),
             ConwayCert::UnReg(cred, _) => (cred, false, None),
             ConwayCert::StakeRegDeleg(cred, _, coin) => (cred, true, Some(coin.to_string())),
+            ConwayCert::VoteRegDeleg(cred, _, coin) => (cred, true, Some(coin.to_string())),
             ConwayCert::StakeVoteRegDeleg(cred, _, _, coin) => (cred, true, Some(coin.to_string())),
             _ => return Ok(None),
         },
@@ -226,6 +227,54 @@ mod tests {
             "positions should be in descending order: {:?}",
             desc_pos
         );
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_registrations_vote_reg_deleg() {
+        use dolos_testing::synthetic::SyntheticBlockConfig;
+        use pallas::{
+            crypto::hash::Hash,
+            ledger::{
+                addresses::Network,
+                primitives::{conway::DRep, StakeCredential},
+            },
+        };
+
+        // an account whose only certificate registers it and delegates its
+        // vote in one go; the deposit differs from the genesis key deposit so
+        // the test proves the cert's own coin is reported
+        let cred = StakeCredential::AddrKeyhash(Hash::from([0x7c; 28]));
+        let cert = ConwayCert::VoteRegDeleg(cred.clone(), DRep::Abstain, 2_500_000);
+
+        let cfg = SyntheticBlockConfig {
+            block_count: 2,
+            txs_per_block: 1,
+            extra_certs_by_block: vec![vec![vec![]], vec![vec![cert]]],
+            ..Default::default()
+        };
+        let app = TestApp::new_with_cfg(cfg);
+
+        let stake_address = mapping::stake_cred_to_address(&cred, Network::Testnet)
+            .to_bech32()
+            .expect("failed to encode stake address");
+        let path = format!("/accounts/{stake_address}/registrations");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let items: Vec<AccountRegistrationContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse account registrations");
+        let block = &app.vectors().blocks[1];
+
+        assert_eq!(items.len(), 1, "unexpected registrations: {items:?}");
+        assert_eq!(items[0].action, Action::Registered);
+        assert_eq!(items[0].deposit.as_deref(), Some("2500000"));
+        assert_eq!(items[0].tx_hash, block.tx_hashes[0]);
+        assert_eq!(items[0].block_height, block.block_number as i32);
     }
 
     #[tokio::test]
