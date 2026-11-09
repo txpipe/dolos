@@ -1127,6 +1127,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn addresses_utxos_stable_pages_without_block_data() {
+        let app = TestApp::new_with_pruned_history();
+        let address = app.vectors().address.as_str();
+
+        let fetch = |path: String| {
+            let app = &app;
+            async move {
+                let (status, bytes) = app.get_bytes(&path).await;
+                assert_eq!(
+                    status,
+                    StatusCode::OK,
+                    "unexpected status {status} with body: {}",
+                    String::from_utf8_lossy(&bytes)
+                );
+                let items: Vec<AddressUtxoContentInner> =
+                    serde_json::from_slice(&bytes).expect("failed to parse address utxos");
+                items
+                    .into_iter()
+                    .map(|x| (format!("{}#{}", x.tx_hash, x.output_index), x.block))
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        for order in ["asc", "desc"] {
+            let full = fetch(format!("/addresses/{address}/utxos?order={order}")).await;
+            assert!(
+                full.iter().any(|(_, block)| block.is_empty()),
+                "expected rows whose block was pruned"
+            );
+            assert!(full.len() > 2, "expected more than one page of rows");
+
+            for _ in 0..5 {
+                let again = fetch(format!("/addresses/{address}/utxos?order={order}")).await;
+                assert_eq!(again, full, "order={order} changed between requests");
+            }
+
+            let mut paged = Vec::new();
+            for page in 1.. {
+                let items = fetch(format!(
+                    "/addresses/{address}/utxos?order={order}&count=2&page={page}"
+                ))
+                .await;
+                if items.is_empty() {
+                    break;
+                }
+                paged.extend(items);
+            }
+
+            let unique: std::collections::HashSet<_> = paged.iter().map(|(id, _)| id).collect();
+            assert_eq!(unique.len(), paged.len(), "order={order} pages overlap");
+            assert_eq!(paged, full, "order={order} pages miss or reorder rows");
+        }
+    }
+
+    #[tokio::test]
     async fn addresses_utxos_bad_request() {
         let app = TestApp::new();
         let path = format!("/addresses/{}/utxos", invalid_address());

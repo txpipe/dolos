@@ -109,7 +109,26 @@ impl TestApp {
 
     pub fn new_with_cfg_and_fault(cfg: SyntheticBlockConfig, fault: Option<TestFault>) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
+        Self::from_domain(domain, vectors, fault)
+    }
 
+    /// Like `new`, but with every block except the tip pruned from the
+    /// archive, as `max_history` does on a long-running node.
+    pub fn new_with_pruned_history() -> Self {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+        let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
+        domain
+            .archive()
+            .prune_history(0, None)
+            .expect("failed to prune archive history");
+        Self::from_domain(domain, vectors, None)
+    }
+
+    fn from_domain(domain: ToyDomain, vectors: SyntheticVectors, fault: Option<TestFault>) -> Self {
         let domain = match fault {
             Some(fault) => dolos_testing::faults::FaultyToyDomain::new(domain, fault),
             None => dolos_testing::faults::FaultyToyDomain::new(domain, TestFault::None),
