@@ -416,9 +416,16 @@ mod tests {
         );
         let hash = receive_new(&stage, 1);
 
-        let mut worker = <Worker as gasket::framework::Worker<Stage>>::bootstrap(&stage)
-            .await
-            .unwrap();
+        // A failing exchange leaves both ends waiting, so bound every step.
+        let within = Duration::from_secs(10);
+
+        let mut worker = tokio::time::timeout(
+            within,
+            <Worker as gasket::framework::Worker<Stage>>::bootstrap(&stage),
+        )
+        .await
+        .expect("connecting timed out")
+        .unwrap();
 
         let next = async |worker: &mut Worker, stage: &mut Stage| {
             match <Worker as gasket::framework::Worker<Stage>>::schedule(worker, stage)
@@ -434,14 +441,21 @@ mod tests {
             }
         };
 
-        next(&mut worker, &mut stage).await;
+        tokio::time::timeout(within, next(&mut worker, &mut stage))
+            .await
+            .expect("the offer timed out");
         assert_eq!(stage.unacknowledged_offers.borrow().get(&hash), Some(&1));
 
-        next(&mut worker, &mut stage).await;
+        tokio::time::timeout(within, next(&mut worker, &mut stage))
+            .await
+            .expect("the acknowledgement timed out");
         assert!(stage.unacknowledged_offers.borrow().is_empty());
 
         done_tx.send(()).unwrap();
-        peer.await.unwrap();
+        tokio::time::timeout(within, peer)
+            .await
+            .expect("the peer timed out")
+            .unwrap();
     }
 
     #[test]
