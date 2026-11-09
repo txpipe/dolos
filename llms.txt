@@ -2,11 +2,11 @@
 
 > Dolos is a lightweight Cardano data node written in Rust. It syncs the chain from a Cardano relay, keeps the ledger state, and serves it through Blockfrost-compatible HTTP (Mini-Blockfrost), UTxO RPC over gRPC, Cardano's node-to-client Ouroboros protocols on a local socket (which Ogmios and cardano-cli can use), a Kupo-compatible HTTP API (Mini-Kupo) and a Tx3 transaction resolver (TRP), without running a full node.
 
-Dolos is configured with one TOML file (`dolos.toml`) and run with the `dolos` CLI. A new node either syncs from genesis or is bootstrapped from a snapshot. Each API is enabled by its own `[serve.*]` table in the configuration.
+Dolos is configured with one TOML file (`dolos.toml`) and run with the `dolos` CLI. A new node either syncs from genesis or is bootstrapped from a Stelae snapshot, Mithril or a local ImmutableDB. Each API is enabled by its own `[serve.*]` table in the configuration.
 
 ## Getting started
 
-- [Quickstart](https://docs.txpipe.io/dolos): from zero to a running instance, with install, `dolos init` and `dolos daemon`
+- [Quickstart](https://docs.txpipe.io/dolos): from zero to a running instance, with install, `dolos init`, `dolos bootstrap` and `dolos daemon`
 - [What is Dolos](https://docs.txpipe.io/dolos/what): what Dolos does, its API surface and its resource profile
 - [Installation](https://docs.txpipe.io/dolos/installation): the available installation methods
 - [Binary releases](https://docs.txpipe.io/dolos/installation/binaries): the install scripts, Homebrew, npm and prebuilt downloads
@@ -17,7 +17,7 @@ Dolos is configured with one TOML file (`dolos.toml`) and run with the `dolos` C
 
 - [Configuration introduction](https://docs.txpipe.io/dolos/configuration/introduction): where the TOML file is read from, environment overrides and validation
 - [Configuration schema](https://docs.txpipe.io/dolos/configuration/schema): every section and field, including the `[serve.*]` tables that enable each API
-- [Bootstrap](https://docs.txpipe.io/dolos/bootstrap): filling the stores from a snapshot instead of syncing from genesis
+- [Bootstrap](https://docs.txpipe.io/dolos/bootstrap): filling the stores from a Stelae snapshot (minutes), Mithril or a local ImmutableDB (hours) instead of syncing from genesis
 - [Mithril bootstrap](https://docs.txpipe.io/dolos/bootstrap/mithril): bootstrapping from a Mithril-certified ImmutableDB
 - [Local ImmutableDB bootstrap](https://docs.txpipe.io/dolos/bootstrap/local): bootstrapping from a local Cardano node database
 
@@ -37,7 +37,7 @@ Dolos is configured with one TOML file (`dolos.toml`) and run with the `dolos` C
 ## Operations
 
 - [Operations](https://docs.txpipe.io/dolos/operations): running and operating an instance
-- [Operation modes](https://docs.txpipe.io/dolos/operations/modes): `daemon`, sync-only and serve-only modes
+- [Operation modes](https://docs.txpipe.io/dolos/operations/modes): `daemon` (sync and serve), `sync catchup` (sync to the upstream tip and exit, or keep following with `--follow`) and `serve` (serve only)
 - [Logging](https://docs.txpipe.io/dolos/operations/logging): log levels and output
 - [Tracing](https://docs.txpipe.io/dolos/operations/tracing): exporting OpenTelemetry traces
 - [Performance](https://docs.txpipe.io/dolos/operations/performance): expected sync time, resource use and query latency, with practical guidance
