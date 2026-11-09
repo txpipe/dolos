@@ -1,4 +1,5 @@
 mod compare;
+mod matrix;
 
 use std::collections::HashMap;
 use std::io::Write;

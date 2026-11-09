@@ -68,3 +68,105 @@ cargo test --test epoch_pots -- --nocapture
 ```
 
 Set `EPOCH_POTS_KEEP_DIR=1` to preserve the temporary working directories for debugging.
+
+## Running in CI
+
+The [Epoch Tests](../../.github/workflows/epoch-tests.yml) workflow runs one job
+per entry of [`matrix.json`](matrix.json). Each job downloads the entry's
+seed, ground truth and upstream range from the bucket that the repository's
+`S3_BUCKET` variable names, then runs this test on them. It only runs on
+dispatch. Its inputs narrow a run to one network, or to the entries that carry
+a tag (`conway` marks the subject epochs in the Conway era):
+
+```bash
+gh workflow run epoch-tests.yml --ref <branch> -f network=all -f tag=conway
+```
+
+An entry names three archives, each holding one directory of the layout above:
+
+| Field | Archive | Holds |
+|---|---|---|
+| `seed_epoch` | `seeds/{network}-{seed_epoch}.tar` | `{network}-{seed_epoch}/state/` |
+| `ground_truth_epoch` | `ground-truth/{network}-{ground_truth_epoch}.tar` | `{network}-{ground_truth_epoch}/*.csv` |
+| `upstream_range` | `upstream/{network}-{upstream_range}.tar` | `{network}-{start}-{end}/immutable/` |
+
+The matrix test in this suite checks `matrix.json` without fixtures. Each
+seed must come before its subject epoch, each range must cover both, and each
+entry must name the seed and the range that the harness would pick if every
+fixture were present.
+
+## Producing Fixtures
+
+You need a Dolos checkout at the commit under test and a Mithril snapshot of
+the network that reaches past the end of the range. In `xtask.toml` (see the
+[xtask README](../../xtask/README.md)), point `snapshots.{network}` at the
+snapshot and `dbsync.{network}_url` at a cardano-db-sync for the network. The
+examples below build the `mainnet-537` entry: seed 535, range 535-538.
+
+### Seeds
+
+A seed is the state store of an instance bootstrapped up to the seed epoch. A
+bootstrap with `--stop-epoch S` stops on the first block of epoch S, after
+the S-1 boundary. So the seed serves only subject epochs after S. Seeds
+follow the state format: regenerate every seed after a breaking change to it.
+
+```bash
+cargo xtask bootstrap-mithril-local --network mainnet --stop-epoch 535 \
+  --name epoch-seeds-mainnet --skip-seed --verbose
+mkdir -p seeds/mainnet-535
+cp -R <instances_root>/epoch-seeds-mainnet/data/state seeds/mainnet-535/state
+tar -C seeds -cf mainnet-535.tar mainnet-535
+```
+
+To take a later seed on the same network, continue that instance rather than
+replaying from genesis again:
+
+```bash
+cargo run --release --bin dolos -- --config <instances_root>/epoch-seeds-mainnet/dolos.toml \
+  bootstrap --verbose mithril --skip-download --skip-validation --retain-snapshot \
+  --download-dir <snapshot> --stop-epoch 642 --continue
+```
+
+The instance keeps the full archive, so give it the disk of a synced node.
+
+### Upstream Ranges
+
+The range `{start}-{end}` holds the snapshot's immutable chunks from one
+before the first chunk of epoch `start` up to the second chunk of epoch
+`end + 1`. The replay stops on the first block after the subject epoch, and
+the reader skips the highest chunk it finds. From the first Shelley epoch on,
+every network has 20 chunks per epoch:
+
+| Network | First chunk of epoch E |
+|---|---|
+| mainnet (E ≥ 208) | 20E − 3952 |
+| preprod (E ≥ 4) | 20E − 76 |
+| preview | 20E |
+
+For `mainnet-535-538` these are chunks 6747 to 6829:
+
+```bash
+mkdir -p upstream/mainnet-535-538/immutable
+for n in $(seq -f %05g 6747 6829); do
+  cp <snapshot>/immutable/$n.{chunk,primary,secondary} upstream/mainnet-535-538/immutable/
+done
+tar -C upstream -cf mainnet-535-538.tar mainnet-535-538
+```
+
+### Ground Truth
+
+```bash
+cargo xtask ground-truth generate --network mainnet --subject-epoch 537 \
+  --output-dir ground-truth/mainnet-537
+tar -C ground-truth -cf mainnet-537.tar mainnet-537
+```
+
+### Upload
+
+Upload each archive under its prefix in the bucket:
+
+```bash
+aws s3 cp mainnet-535.tar "s3://$S3_BUCKET/seeds/"
+aws s3 cp mainnet-535-538.tar "s3://$S3_BUCKET/upstream/"
+aws s3 cp mainnet-537.tar "s3://$S3_BUCKET/ground-truth/"
+```
