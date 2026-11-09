@@ -8,6 +8,10 @@ If `cargo xtask` isn't available yet, install the helper once:
 cargo install --path xtask
 ```
 
+An installed helper stays at the commit it was built from. Reinstall it with
+`--force` after pulling, or run `cargo run -p xtask -- <command>` from the
+checkout instead.
+
 ## Configuration
 
 Most commands read settings from `xtask.toml` at the repo root:
@@ -187,9 +191,11 @@ Executes:
 ## Typical workflow
 
 1. Download a Mithril snapshot for the target network into the snapshots directory.
-2. Create a test instance:
+2. Create a test instance to serve as the seed. It stops on the first block
+   of `--epoch`, after the boundary before it, so stop it before the subject
+   epoch:
    ```
-   cargo xtask test-instance create --network preview --epoch 233
+   cargo xtask test-instance create --network preview --epoch 231
    ```
 3. Generate ground-truth fixtures (requires DBSync):
    ```
@@ -201,5 +207,5 @@ Executes:
    ```
 5. Clean up when done:
    ```
-   cargo xtask test-instance delete --network preview --epoch 233 --yes
+   cargo xtask test-instance delete --network preview --epoch 231 --yes
    ```

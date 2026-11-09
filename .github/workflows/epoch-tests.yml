@@ -81,21 +81,23 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-epoch-tests-
 
-      # Each archive streams into tar, so no copy of it sits on disk.
+      # Each archive streams into tar, so no copy of it sits on disk. Skip the
+      # AppleDouble `._*` files a macOS tar can add: the store and the chunk
+      # reader would take them for their own files.
       - name: Download seed
         run: |
           mkdir -p /tmp/fixtures/seeds
-          aws s3 cp "s3://${{ vars.S3_BUCKET }}/seeds/${{ matrix.network }}-${{ matrix.seed_epoch }}.tar" - | tar xf - -C /tmp/fixtures/seeds
+          aws s3 cp "s3://${{ vars.S3_BUCKET }}/seeds/${{ matrix.network }}-${{ matrix.seed_epoch }}.tar" - | tar xf - --exclude='._*' -C /tmp/fixtures/seeds
 
       - name: Download ground truth
         run: |
           mkdir -p /tmp/fixtures/ground-truth
-          aws s3 cp "s3://${{ vars.S3_BUCKET }}/ground-truth/${{ matrix.network }}-${{ matrix.ground_truth_epoch }}.tar" - | tar xf - -C /tmp/fixtures/ground-truth
+          aws s3 cp "s3://${{ vars.S3_BUCKET }}/ground-truth/${{ matrix.network }}-${{ matrix.ground_truth_epoch }}.tar" - | tar xf - --exclude='._*' -C /tmp/fixtures/ground-truth
 
       - name: Download upstream
         run: |
           mkdir -p /tmp/fixtures/upstream
-          aws s3 cp "s3://${{ vars.S3_BUCKET }}/upstream/${{ matrix.network }}-${{ matrix.upstream_range }}.tar" - | tar xf - -C /tmp/fixtures/upstream
+          aws s3 cp "s3://${{ vars.S3_BUCKET }}/upstream/${{ matrix.network }}-${{ matrix.upstream_range }}.tar" - | tar xf - --exclude='._*' -C /tmp/fixtures/upstream
           df -h /
 
       # An optimised build keeps the replay inside the job limit; the debug

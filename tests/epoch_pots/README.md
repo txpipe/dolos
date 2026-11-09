@@ -100,8 +100,32 @@ fixture were present.
 You need a Dolos checkout at the commit under test and a Mithril snapshot of
 the network that reaches past the end of the range. In `xtask.toml` (see the
 [xtask README](../../xtask/README.md)), point `snapshots.{network}` at the
-snapshot and `dbsync.{network}_url` at a cardano-db-sync for the network. The
-examples below build the `mainnet-537` entry: seed 535, range 535-538.
+snapshot and `dbsync.{network}_url` at a cardano-db-sync for the network.
+Run the commands below from the checkout's root. They build xtask from the
+checkout with `cargo run -p xtask`: an installed `cargo xtask` may predate
+fixes to the fixtures it writes. The examples build the `mainnet-537` entry:
+seed 535, range 535-538.
+
+To list the archives a subset needs, here the `conway` entries:
+
+```bash
+jq -r '.[] | select((.tags // []) | any(. == "conway"))
+  | "seeds/\(.network)-\(.seed_epoch).tar",
+    "upstream/\(.network)-\(.upstream_range).tar",
+    "ground-truth/\(.network)-\(.ground_truth_epoch).tar"' \
+  tests/epoch_pots/matrix.json | sort -u
+```
+
+An archive already in the bucket serves only while it matches the code under
+test: regenerate a seed after a breaking change to the state format, and
+ground truth after a change to its generator. The `conway` subset includes
+two older preview entries whose seed, `preview-500`, dates from before
+several such state changes, so regenerate that seed too.
+
+Create the archives with `COPYFILE_DISABLE=1 tar --no-xattrs`, as below. On
+macOS a plain `tar` adds AppleDouble `._*` files, which the store and the
+chunk reader on the runner would take for their own. The workflow also skips
+them when it extracts.
 
 ### Seeds
 
@@ -111,11 +135,11 @@ the S-1 boundary. So the seed serves only subject epochs after S. Seeds
 follow the state format: regenerate every seed after a breaking change to it.
 
 ```bash
-cargo xtask bootstrap-mithril-local --network mainnet --stop-epoch 535 \
+cargo run -p xtask -- bootstrap-mithril-local --network mainnet --stop-epoch 535 \
   --name epoch-seeds-mainnet --skip-seed --verbose
 mkdir -p seeds/mainnet-535
 cp -R <instances_root>/epoch-seeds-mainnet/data/state seeds/mainnet-535/state
-tar -C seeds -cf mainnet-535.tar mainnet-535
+COPYFILE_DISABLE=1 tar --no-xattrs -C seeds -cf mainnet-535.tar mainnet-535
 ```
 
 To take a later seed on the same network, continue that instance rather than
@@ -150,15 +174,15 @@ mkdir -p upstream/mainnet-535-538/immutable
 for n in $(seq -f %05g 6747 6829); do
   cp <snapshot>/immutable/$n.{chunk,primary,secondary} upstream/mainnet-535-538/immutable/
 done
-tar -C upstream -cf mainnet-535-538.tar mainnet-535-538
+COPYFILE_DISABLE=1 tar --no-xattrs -C upstream -cf mainnet-535-538.tar mainnet-535-538
 ```
 
 ### Ground Truth
 
 ```bash
-cargo xtask ground-truth generate --network mainnet --subject-epoch 537 \
+cargo run -p xtask -- ground-truth generate --network mainnet --subject-epoch 537 \
   --output-dir ground-truth/mainnet-537
-tar -C ground-truth -cf mainnet-537.tar mainnet-537
+COPYFILE_DISABLE=1 tar --no-xattrs -C ground-truth -cf mainnet-537.tar mainnet-537
 ```
 
 ### Upload
