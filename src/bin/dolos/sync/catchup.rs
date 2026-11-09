@@ -65,7 +65,7 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         .into());
     }
 
-    crate::common::setup_tracing(&config.logging, config.telemetry.as_ref())?;
+    let _tracing = crate::common::setup_tracing(&config.logging, config.telemetry.as_ref())?;
 
     let domain = crate::common::setup_domain_with_stop_epoch(config, args.stop_epoch)?;
 

@@ -452,20 +452,22 @@ fn seed_wal(config: &RootConfig) -> miette::Result<()> {
     Ok(())
 }
 
-fn setup_tracing(config: &RootConfig, verbose: bool) -> miette::Result<()> {
+fn setup_tracing(
+    config: &RootConfig,
+    verbose: bool,
+) -> miette::Result<crate::common::TracingGuard> {
     if verbose {
-        crate::common::setup_tracing(&config.logging, config.telemetry.as_ref())?;
+        crate::common::setup_tracing(&config.logging, config.telemetry.as_ref())
     } else {
         crate::common::setup_tracing_error_only()?;
+        Ok(crate::common::TracingGuard::default())
     }
-
-    Ok(())
 }
 
 pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     let policy = args.policy().unwrap_or_else(|error| error.exit());
 
-    setup_tracing(config, args.verbose)?;
+    let _tracing = setup_tracing(config, args.verbose)?;
 
     // The decision is the storage lifecycle's rather than any source's: one
     // policy over every managed store, whichever source fills them.
