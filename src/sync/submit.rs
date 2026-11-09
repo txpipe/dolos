@@ -128,6 +128,15 @@ impl Worker {
 #[async_trait::async_trait(?Send)]
 impl gasket::framework::Worker<Stage> for Worker {
     async fn bootstrap(stage: &Stage) -> Result<Self, WorkerError> {
+        // What an earlier session offered may never have reached the peer. This
+        // comes before connecting, since blocks that arrive during an outage would
+        // otherwise count against it and drop it.
+        stage
+            .mempool
+            .requeue_propagated(&[])
+            .inspect_err(|err| warn!(error=%err, "error re-queueing propagated txs"))
+            .or_retry()?;
+
         debug!("connecting to peer");
 
         let mut peer_session = PeerClient::connect(&stage.peer_address, stage.network_magic)
