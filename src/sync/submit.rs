@@ -1,4 +1,5 @@
-use std::collections::VecDeque;
+use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
 
 use gasket::framework::*;
 use itertools::Itertools as _;
@@ -35,6 +36,12 @@ fn to_n2n_body(mempool_tx: MempoolTx) -> EraTxBody {
     EraTxBody(era, bytes)
 }
 
+/// Offers of a transaction that may go unacknowledged before a new session
+/// stops re-queueing it. A session that ended is no fault of what it offered,
+/// but one that keeps ending at the same offer may be, and must not retry
+/// forever.
+const MAX_UNACKNOWLEDGED_OFFERS: u32 = 3;
+
 pub struct Worker {
     peer_session: PeerClient,
     unfulfilled_request: Option<usize>,
@@ -46,13 +53,14 @@ pub struct Worker {
 impl Worker {
     async fn propagate_txs(
         &mut self,
-        mempool: &MempoolBackend,
+        stage: &Stage,
         txs: Vec<MempoolTx>,
     ) -> Result<(), WorkerError> {
         debug!(n = txs.len(), "propagating tx ids");
 
         let hashes: Vec<TxHash> = txs.iter().map(|tx| tx.hash).collect();
-        mempool.mark_inflight(&hashes).or_restart()?;
+        stage.mempool.mark_inflight(&hashes).or_restart()?;
+        stage.count_offers(&hashes);
         self.propagated_hashes.extend(hashes);
 
         let payload = txs.iter().map(to_n2n_reply).collect_vec();
@@ -68,18 +76,15 @@ impl Worker {
     }
 
     /// Drain the first `count` propagated hashes and mark them as acknowledged.
-    fn acknowledge_propagated(
-        &mut self,
-        mempool: &MempoolBackend,
-        count: usize,
-    ) -> Result<(), WorkerError> {
+    fn acknowledge_propagated(&mut self, stage: &Stage, count: usize) -> Result<(), WorkerError> {
         let drain_count = count.min(self.propagated_hashes.len());
         if drain_count == 0 {
             return Ok(());
         }
 
         let acked: Vec<TxHash> = self.propagated_hashes.drain(..drain_count).collect();
-        mempool.mark_acknowledged(&acked).or_restart()?;
+        stage.mempool.mark_acknowledged(&acked).or_restart()?;
+        stage.forget_offers(&acked);
         Ok(())
     }
 
@@ -132,8 +137,7 @@ impl gasket::framework::Worker<Stage> for Worker {
         // comes before connecting, since blocks that arrive during an outage would
         // otherwise count against it and drop it.
         stage
-            .mempool
-            .requeue_propagated(&[])
+            .requeue_unacknowledged()
             .inspect_err(|err| warn!(error=%err, "error re-queueing propagated txs"))
             .or_retry()?;
 
@@ -185,11 +189,11 @@ impl gasket::framework::Worker<Stage> for Worker {
 
                 debug!(req, ack, "blocking tx ids request");
 
-                self.acknowledge_propagated(&stage.mempool, ack)?;
+                self.acknowledge_propagated(stage, ack)?;
 
                 if stage.mempool.has_pending() {
                     let txs: Vec<_> = stage.mempool.peek_pending().into_iter().take(req).collect();
-                    self.propagate_txs(&stage.mempool, txs).await?;
+                    self.propagate_txs(stage, txs).await?;
                 } else {
                     debug!(req, "not enough txs to fulfill request");
                     self.unfulfilled_request = Some(req);
@@ -198,7 +202,7 @@ impl gasket::framework::Worker<Stage> for Worker {
             Request::TxIdsNonBlocking(ack, req) => {
                 debug!(req, ack, "non-blocking tx ids request");
 
-                self.acknowledge_propagated(&stage.mempool, *ack as usize)?;
+                self.acknowledge_propagated(stage, *ack as usize)?;
 
                 let txs: Vec<_> = stage
                     .mempool
@@ -206,7 +210,7 @@ impl gasket::framework::Worker<Stage> for Worker {
                     .into_iter()
                     .take(*req as usize)
                     .collect();
-                self.propagate_txs(&stage.mempool, txs).await?;
+                self.propagate_txs(stage, txs).await?;
             }
             Request::Txs(ids) => {
                 debug!("tx batch request");
@@ -238,6 +242,10 @@ pub struct Stage {
     peer_address: String,
     network_magic: u64,
     mempool: MempoolBackend,
+
+    /// How many times each transaction was offered with no acknowledgement
+    /// yet, across sessions.
+    unacknowledged_offers: RefCell<HashMap<TxHash, u32>>,
 }
 
 impl Stage {
@@ -246,6 +254,158 @@ impl Stage {
             peer_address,
             network_magic,
             mempool,
+            unacknowledged_offers: RefCell::default(),
         }
+    }
+
+    /// Return what no session has left to acknowledge to pending, except what
+    /// was offered too many times, which goes stale and drops.
+    fn requeue_unacknowledged(&self) -> Result<(), MempoolError> {
+        let mut offers = self.unacknowledged_offers.borrow_mut();
+
+        offers.retain(|hash, _| {
+            let stage = self.mempool.check_status(hash).stage;
+            matches!(stage, MempoolTxStage::Pending | MempoolTxStage::Propagated)
+        });
+
+        let exhausted = offers
+            .iter()
+            .filter(|(_, offers)| **offers >= MAX_UNACKNOWLEDGED_OFFERS)
+            .map(|(hash, _)| *hash)
+            .collect_vec();
+
+        if !exhausted.is_empty() {
+            warn!(
+                ?exhausted,
+                "txs offered too many times, no longer re-queued"
+            );
+        }
+
+        self.mempool.requeue_propagated(&exhausted)
+    }
+
+    fn count_offers(&self, hashes: &[TxHash]) {
+        let mut offers = self.unacknowledged_offers.borrow_mut();
+
+        for hash in hashes {
+            *offers.entry(*hash).or_default() += 1;
+        }
+    }
+
+    fn forget_offers(&self, hashes: &[TxHash]) {
+        let mut offers = self.unacknowledged_offers.borrow_mut();
+
+        for hash in hashes {
+            offers.remove(hash);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dolos_testing::mempool::make_test_mempool_tx;
+    use dolos_testing::tx_sequence_to_hash;
+
+    use super::*;
+
+    fn stage() -> Stage {
+        Stage::new(
+            String::new(),
+            0,
+            MempoolBackend::Ephemeral(dolos_core::builtin::EphemeralMempool::new()),
+        )
+    }
+
+    fn hashes(txs: &[MempoolTx]) -> Vec<TxHash> {
+        txs.iter().map(|tx| tx.hash).collect()
+    }
+
+    fn receive_new(stage: &Stage, n: u64) -> TxHash {
+        let tx = make_test_mempool_tx(tx_sequence_to_hash(n));
+        let hash = tx.hash;
+        stage.mempool.receive(tx).unwrap();
+        hash
+    }
+
+    #[test]
+    fn a_tx_offered_without_acknowledgement_returns_to_pending() {
+        let stage = stage();
+        let hash = receive_new(&stage, 1);
+        stage.mempool.mark_inflight(&[hash]).unwrap();
+        stage.count_offers(&[hash]);
+
+        stage.requeue_unacknowledged().unwrap();
+
+        assert_eq!(hashes(&stage.mempool.peek_pending()), [hash]);
+    }
+
+    #[tokio::test]
+    async fn a_new_session_requeues_before_connecting() {
+        // Nothing listens on port 1, so the attempt fails right after re-queueing.
+        let stage = Stage::new(
+            "127.0.0.1:1".into(),
+            0,
+            MempoolBackend::Ephemeral(dolos_core::builtin::EphemeralMempool::new()),
+        );
+        let hash = receive_new(&stage, 1);
+        stage.mempool.mark_inflight(&[hash]).unwrap();
+        stage.count_offers(&[hash]);
+
+        let attempt = <Worker as gasket::framework::Worker<Stage>>::bootstrap(&stage).await;
+
+        assert!(attempt.is_err());
+        assert_eq!(hashes(&stage.mempool.peek_pending()), [hash]);
+    }
+
+    #[test]
+    fn only_a_tx_offered_too_many_times_stays_out_of_the_queue() {
+        let stage = stage();
+        let (spent, again) = (receive_new(&stage, 1), receive_new(&stage, 2));
+        stage.mempool.mark_inflight(&[spent, again]).unwrap();
+
+        stage.count_offers(&[spent, again]);
+        for _ in 1..MAX_UNACKNOWLEDGED_OFFERS {
+            stage.count_offers(&[spent]);
+        }
+
+        stage.requeue_unacknowledged().unwrap();
+
+        assert_eq!(hashes(&stage.mempool.peek_pending()), [again]);
+        assert_eq!(
+            stage.mempool.check_status(&spent).stage,
+            MempoolTxStage::Propagated
+        );
+
+        // A session that ends before the drop must not bring it back.
+        stage.requeue_unacknowledged().unwrap();
+
+        assert_eq!(hashes(&stage.mempool.peek_pending()), [again]);
+        assert_eq!(
+            stage.mempool.check_status(&spent).stage,
+            MempoolTxStage::Propagated
+        );
+    }
+
+    #[test]
+    fn a_count_survives_while_the_tx_is_pending() {
+        let stage = stage();
+        let hash = receive_new(&stage, 1);
+        stage.mempool.mark_inflight(&[hash]).unwrap();
+        stage.count_offers(&[hash]);
+
+        stage.requeue_unacknowledged().unwrap();
+        stage.requeue_unacknowledged().unwrap();
+
+        assert_eq!(stage.unacknowledged_offers.borrow().get(&hash), Some(&1));
+    }
+
+    #[test]
+    fn the_count_of_a_tx_no_longer_tracked_is_forgotten() {
+        let stage = stage();
+        stage.count_offers(&[tx_sequence_to_hash(1)]);
+
+        stage.requeue_unacknowledged().unwrap();
+
+        assert!(stage.unacknowledged_offers.borrow().is_empty());
     }
 }
