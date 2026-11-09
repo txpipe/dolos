@@ -212,6 +212,35 @@ impl Drop for TracingGuard {
     }
 }
 
+/// Builds the batch tracer provider over `exporter`, registers it globally and
+/// returns the guard that flushes it, with the tracer for the tracing layer.
+fn telemetry_pipeline<E>(
+    exporter: E,
+    service_name: String,
+) -> (TracingGuard, opentelemetry_sdk::trace::SdkTracer)
+where
+    E: opentelemetry_sdk::trace::SpanExporter + 'static,
+{
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .with_resource(
+            opentelemetry_sdk::Resource::builder()
+                .with_service_name(service_name)
+                .build(),
+        )
+        .build();
+
+    opentelemetry::global::set_tracer_provider(provider.clone());
+
+    let tracer = provider.tracer("dolos");
+
+    let guard = TracingGuard {
+        provider: Some(provider),
+    };
+
+    (guard, tracer)
+}
+
 pub fn setup_tracing_error_only() -> miette::Result<()> {
     let filter = Targets::new().with_default(tracing::Level::ERROR);
 
@@ -272,9 +301,7 @@ pub fn setup_tracing(
 ) -> miette::Result<TracingGuard> {
     let filter = log_filter(config).into_diagnostic()?;
 
-    let mut guard = TracingGuard::default();
-
-    let otel_layer = if let Some(telemetry) = telemetry {
+    let (otel_layer, guard) = if let Some(telemetry) = telemetry {
         let exporter = opentelemetry_otlp::SpanExporter::builder()
             .with_tonic()
             .with_endpoint(&telemetry.otlp_endpoint)
@@ -282,22 +309,14 @@ pub fn setup_tracing(
             .into_diagnostic()
             .context("building OTLP span exporter")?;
 
-        let tracer = opentelemetry_sdk::trace::SdkTracerProvider::builder()
-            .with_batch_exporter(exporter)
-            .with_resource(
-                opentelemetry_sdk::Resource::builder()
-                    .with_service_name(telemetry.service_name.clone())
-                    .build(),
-            )
-            .build();
+        let (guard, tracer) = telemetry_pipeline(exporter, telemetry.service_name.clone());
 
-        opentelemetry::global::set_tracer_provider(tracer.clone());
-
-        let layer = tracing_opentelemetry::layer().with_tracer(tracer.tracer("dolos"));
-        guard.provider = Some(tracer);
-        Some(layer)
+        (
+            Some(tracing_opentelemetry::layer().with_tracer(tracer)),
+            guard,
+        )
     } else {
-        None
+        (None, TracingGuard::default())
     };
 
     #[cfg(not(feature = "debug"))]
@@ -635,6 +654,27 @@ mod tests {
                 .fetch_add(batch.len(), std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
+    }
+
+    /// The provider `setup_tracing` builds for a telemetry config has to end
+    /// up in the guard it returns, or dropping the guard flushes nothing.
+    #[test]
+    fn the_telemetry_pipeline_guard_flushes_its_provider() {
+        use opentelemetry::trace::{Span as _, Tracer as _};
+
+        let exporter = CountingExporter::default();
+        let (guard, tracer) = telemetry_pipeline(exporter.clone(), "dolos-test".into());
+
+        tracer.start("work").end();
+
+        let exported = || exporter.0.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(exported(), 0, "the span should still be buffered");
+
+        // The globally registered copy is still alive, so only the guard can
+        // trigger this flush.
+        drop(guard);
+
+        assert_eq!(exported(), 1, "dropping the guard should flush the span");
     }
 
     /// The batch exporter holds finished spans until its next scheduled
