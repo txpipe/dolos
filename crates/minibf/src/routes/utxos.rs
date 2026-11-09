@@ -539,7 +539,7 @@ mod tests {
     };
     use dolos_core::{
         async_query::BlockMetaResolver, config::MinibfConfig, import::ImportExt as _,
-        EraCbor, MempoolStore as _, MempoolTx,
+        ArchiveStore as _, ArchiveWriter as _, ChainPoint, EraCbor, MempoolStore as _, MempoolTx,
         StateStore, StateWriter as _, UtxoIndexDelta, UtxoPosition, UtxoSetDelta,
     };
     use dolos_testing::{
@@ -1194,6 +1194,50 @@ mod tests {
             assert!(full.len() > 3, "fixture too small to cut through a block");
 
             for count in [1, 2, 4] {
+                let mut walked = Vec::new();
+                for page in 1.. {
+                    let rows = utxo_page(
+                        &app,
+                        &stake_address,
+                        &format!("order={order}&count={count}&page={page}"),
+                    )
+                    .await;
+                    if rows.is_empty() {
+                        break;
+                    }
+                    walked.extend(rows);
+                }
+
+                assert_eq!(walked, full, "order={order} count={count}");
+            }
+        }
+    }
+
+    /// On a rolling-history node the archive index keeps a pruned block's
+    /// slot until the sweep, but the block's rows have no block data. Pages
+    /// must still slice the same sequence as the single full page.
+    #[tokio::test]
+    async fn pages_concatenate_while_the_index_outlives_pruned_blocks() {
+        let cfg = SyntheticBlockConfig {
+            block_count: 8,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+        // undo drops the bodies and keeps the index, as between two sweeps
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
+            let writer = domain.archive().start_writer().unwrap();
+            for block in vectors.blocks.iter().take(3) {
+                writer.undo(&ChainPoint::Slot(block.slot)).unwrap();
+            }
+            writer.commit().unwrap();
+        });
+        let stake_address = app.vectors().stake_address.clone();
+
+        for order in ["asc", "desc"] {
+            let full = utxo_page(&app, &stake_address, &format!("order={order}&count=100")).await;
+            assert_eq!(full.len(), 24, "the pruned blocks' rows must stay listed");
+
+            for count in [1, 2, 4, 5] {
                 let mut walked = Vec::new();
                 for page in 1.. {
                     let rows = utxo_page(
