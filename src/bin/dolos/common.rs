@@ -656,8 +656,8 @@ mod tests {
         }
     }
 
-    /// The provider `setup_tracing` builds for a telemetry config has to end
-    /// up in the guard it returns, or dropping the guard flushes nothing.
+    /// The provider `telemetry_pipeline` builds has to end up in the guard it
+    /// returns, or dropping the guard flushes nothing.
     #[test]
     fn the_telemetry_pipeline_guard_flushes_its_provider() {
         use opentelemetry::trace::{Span as _, Tracer as _};
@@ -670,8 +670,8 @@ mod tests {
         let exported = || exporter.0.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(exported(), 0, "the span should still be buffered");
 
-        // The globally registered copy is still alive, so only the guard can
-        // trigger this flush.
+        // The tracer and the globally registered copy keep the provider alive,
+        // so only the guard can trigger this flush.
         drop(guard);
 
         assert_eq!(exported(), 1, "dropping the guard should flush the span");
