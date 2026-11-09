@@ -241,9 +241,10 @@ mod tests {
         };
 
         // an account whose only certificate registers it and delegates its
-        // vote in one go
+        // vote in one go; the deposit differs from the genesis key deposit so
+        // the test proves the cert's own coin is reported
         let cred = StakeCredential::AddrKeyhash(Hash::from([0x7c; 28]));
-        let cert = ConwayCert::VoteRegDeleg(cred.clone(), DRep::Abstain, 2_000_000);
+        let cert = ConwayCert::VoteRegDeleg(cred.clone(), DRep::Abstain, 2_500_000);
 
         let cfg = SyntheticBlockConfig {
             block_count: 2,
@@ -271,7 +272,7 @@ mod tests {
 
         assert_eq!(items.len(), 1, "unexpected registrations: {items:?}");
         assert_eq!(items[0].action, Action::Registered);
-        assert_eq!(items[0].deposit.as_deref(), Some("2000000"));
+        assert_eq!(items[0].deposit.as_deref(), Some("2500000"));
         assert_eq!(items[0].tx_hash, block.tx_hashes[0]);
         assert_eq!(items[0].block_height, block.block_number as i32);
     }
