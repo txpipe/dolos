@@ -2904,9 +2904,9 @@ mod tests {
 
     /// A segment is missing when its file is absent or ends before the
     /// frame does. One that runs past the frame, as frames written after the
-    /// newest indexed one leave it, holds the frame. On unix, one whose
-    /// metadata fails to read for another reason, here a path through a file,
-    /// counts as holding the frame; Windows reports that path as not found.
+    /// newest indexed one leave it, holds the frame. One whose metadata fails
+    /// to read for another reason counts as holding the frame: here, on unix,
+    /// a path through a file. Windows reports that path as not found.
     #[test]
     fn a_segment_is_missing_when_absent_or_cut_short() {
         let dir = tempfile::tempdir().unwrap();
