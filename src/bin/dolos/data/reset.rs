@@ -774,6 +774,7 @@ fn written_paths(config: &RootConfig) -> Written {
         Some(root.join(dolos_snapshot::node::STELE_SCRATCH_DIR)),
         Some(root.join(SNAPSHOT_STAGING_DIR)),
         Some(dolos_snapshot::restore::progress_path_in(root)),
+        Some(dolos_snapshot::restore::source_path_in(root)),
         Some(dolos_snapshot::registry::record_path_in(root)),
     ]
     .into_iter()
@@ -1276,6 +1277,7 @@ pub(super) mod tests {
             root.join("cache").join("cache.redb"),
             root.join(SNAPSHOT_STAGING_DIR).join("chunk-0"),
             dolos_snapshot::restore::progress_path_in(root),
+            dolos_snapshot::restore::source_path_in(root),
             dolos_snapshot::registry::record_path_in(root),
         ];
 

@@ -278,10 +278,13 @@ fn unfinished(config: &RootConfig, args: &Args) -> miette::Result<Option<Resumin
 
             agrees(args, &record)?;
 
+            let layers = progress.map_or(0, |progress| progress.completed.len());
+            still_holds(config, layers)?;
+
             Ok(Some(Resuming {
                 record,
                 source,
-                layers: progress.map_or(0, |progress| progress.completed.len()),
+                layers,
             }))
         }
         (None, Some(_)) => Err(refused(ResumeRefusal::Unrecorded {
@@ -304,6 +307,33 @@ fn unfinished(config: &RootConfig, args: &Args) -> miette::Result<Option<Resumin
             )
         }
     }
+}
+
+/// Refuse a resume over stores something else wrote since the restore was
+/// interrupted, as a WAL with entries shows, or, when the progress file
+/// records `layers`, over an archive holding no data: they are all archive
+/// layers. A lost blocks volume whose archive index stays isn't caught. The
+/// library refuses a state cursor other than the stele's.
+fn still_holds(config: &RootConfig, layers: usize) -> miette::Result<()> {
+    let archived = dolos::storage::archive_holds_data(config).into_diagnostic()?;
+
+    if dolos::storage::wal_holds_entries(config) {
+        miette::bail!(
+            "the WAL at {} has entries, which a stele restore never writes, so something else \
+             wrote this node after the restore was interrupted. Use --force to start over",
+            config.wal_path().unwrap_or_default().display(),
+        );
+    }
+
+    if layers > 0 && config.keeps_archive() && !archived {
+        miette::bail!(
+            "the restore progress in {} records {layers} layers, and the archive they were \
+             written to holds no data. Use --force to start over",
+            config.storage.path.display(),
+        );
+    }
+
+    Ok(())
 }
 
 /// Refuse, as a usage error naming the recorded value, a `--source` or an
@@ -468,46 +498,39 @@ fn restore(
     let observer = progress.observer();
     let restoring = node.restoring(&inputs, options.skip_space_check);
 
-    let outcome = match &inputs.reader {
-        Reader::Dir(dir) => {
-            report_resume(&inputs);
+    let mut opened = None;
 
-            snapshot::restore(
-                RestoreInput::Directory(dir),
-                restoring,
-                node.target(),
-                Some(&observer),
-            )
-        }
+    let input = match &inputs.reader {
+        Reader::Dir(dir) => RestoreInput::Directory(dir),
         Reader::Repo(repo, auth) => {
             // Staging resolution remains node policy. The profile facade
             // receives the resolved inputs and never reads configuration or
             // environment on its own.
             let scratch = node::scratch_dir(&config.storage, args.scratch_dir.as_deref());
-            let repository = SnapshotRepository::open(
-                repo,
-                args.insecure,
-                auth.clone(),
-                scratch,
-                registry::Tuning::default(),
-            )
-            .into_diagnostic()
-            .context("opening the repository")?;
+            let repository = opened.insert(
+                SnapshotRepository::open(
+                    repo,
+                    args.insecure,
+                    auth.clone(),
+                    scratch,
+                    registry::Tuning::default(),
+                )
+                .into_diagnostic()
+                .context("opening the repository")?,
+            );
 
             println!("source:   {repo} ({})", inputs.point);
-            report_resume(&inputs);
 
-            snapshot::restore(
-                RestoreInput::Repository {
-                    repository: &repository,
-                    point: inputs.point,
-                },
-                restoring,
-                node.target(),
-                Some(&observer),
-            )
+            RestoreInput::Repository {
+                repository,
+                point: inputs.point,
+            }
         }
     };
+
+    report_resume(&inputs);
+
+    let outcome = snapshot::restore(input, restoring, node.target(), Some(&observer));
 
     let outcome = match outcome {
         Err(dolos_snapshot::Error::Resume(refusal)) => return Err(refused(refusal)),
@@ -808,5 +831,42 @@ mod tests {
         let message = source(&args(None), None).unwrap_err().to_string();
 
         assert!(message.contains("--source"), "{message}");
+    }
+
+    /// A `--continue` over a registry record reads the recorded repository
+    /// at the recorded epoch's tag, never `latest`, which `--point` defaults
+    /// to and the soak chart passes.
+    #[test]
+    fn a_registry_resume_reads_the_recorded_epoch_tag() {
+        let storage = tempfile::tempdir().unwrap();
+
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = storage.path().to_path_buf();
+
+        let record = SourceRecord {
+            source: "oci://127.0.0.1:5000/dolos/preview".to_owned(),
+            sequence: 42,
+            inscription_digest: format!("sha256:{}", "ab".repeat(32)).parse().unwrap(),
+        };
+
+        record
+            .save(&dolos_snapshot::restore::source_path_in(storage.path()))
+            .unwrap();
+
+        let args = Args {
+            resume: true,
+            ..args(None)
+        };
+        assert_eq!(args.point, Point::Latest);
+
+        let inputs = resolve(&config, &args, None, false).unwrap();
+
+        assert_eq!(inputs.point, Point::Epoch(42));
+        assert!(matches!(inputs.reader, Reader::Repo(..)));
+        assert_eq!(inputs.source.to_string(), record.source);
+
+        let resuming = inputs.resuming.expect("nothing to resume");
+        assert_eq!(resuming.record, record);
+        assert_eq!(resuming.layers, 0);
     }
 }

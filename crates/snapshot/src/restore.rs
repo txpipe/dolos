@@ -954,11 +954,10 @@ impl Summary {
 /// Where a node with storage at `storage_path` keeps its progress file.
 ///
 /// The [`Checkpoint`] takes the path it is given — the driver never derives
-/// dolos layout — and this is where dolos derives it. The `resume` flag a
-/// checkpoint is opened with is the caller's, and the driver's
-/// ignore-unless-resuming rule is the reason `--force` is safe: clearing
-/// storage removes this file with the rest of it, and even a progress file
-/// that somehow survived its stores cannot skip layers onto empty ones.
+/// dolos layout — and this is where dolos derives it. Clearing storage removes
+/// this file with the rest of it, and a restore that doesn't resume removes it
+/// before its first write. A resume honours it whatever the stores hold, so
+/// checking that they still hold its layers is the caller's.
 pub fn progress_path_in(storage_path: &Path) -> PathBuf {
     storage_path.join(PROGRESS_FILE)
 }
@@ -1122,6 +1121,17 @@ pub enum ResumeRefusal {
     /// A progress file for another stele than its source record names.
     #[error("the restore progress names stele {progress}, and its source record names {recorded}")]
     Disagrees { progress: Digest, recorded: Digest },
+
+    /// A state cursor other than the stele's point. A restore sets the cursor
+    /// last and only to that point, so something else wrote these stores.
+    #[error(
+        "the state's cursor is at {cursor}, not at {point} where this stele leaves it, so \
+         something other than the restore wrote these stores after it was interrupted"
+    )]
+    Written {
+        cursor: ChainPoint,
+        point: ChainPoint,
+    },
 }
 
 /// The record a restore that resumes against one has to match: `None` when
@@ -1136,7 +1146,14 @@ pub(crate) fn pinned(node: &Restoring<'_>) -> Result<Option<SourceRecord>, Error
 /// Refuse a resume whose records do not name `reading`, the stele it is
 /// about to read: a progress file with no record, a record for another
 /// source or another stele, or a progress file the record disagrees with.
-fn check_resume(storage_path: &Path, reading: &SourceRecord) -> Result<(), Error> {
+/// With a record, a `state` cursor other than `point`, the stele's, is
+/// refused too.
+fn check_resume<S: StateStore>(
+    storage_path: &Path,
+    reading: &SourceRecord,
+    point: &ChainPoint,
+    state: &S,
+) -> Result<(), Error> {
     let Unfinished { record, progress } = unfinished(storage_path)?;
 
     let Some(record) = record else {
@@ -1161,14 +1178,22 @@ fn check_resume(storage_path: &Path, reading: &SourceRecord) -> Result<(), Error
         return Err(ResumeRefusal::Gone(record).into());
     }
 
-    match progress {
-        Some(progress) if progress.inscription_digest != record.inscription_digest => {
-            Err(ResumeRefusal::Disagrees {
+    if let Some(progress) = progress {
+        if progress.inscription_digest != record.inscription_digest {
+            return Err(ResumeRefusal::Disagrees {
                 progress: progress.inscription_digest,
                 recorded: record.inscription_digest,
             }
-            .into())
+            .into());
         }
+    }
+
+    match state.read_cursor()? {
+        Some(cursor) if cursor != *point => Err(ResumeRefusal::Written {
+            cursor,
+            point: point.clone(),
+        }
+        .into()),
         _ => Ok(()),
     }
 }
@@ -1415,7 +1440,12 @@ where
     });
 
     if let (true, Some(record)) = (node.resume, &record) {
-        check_resume(node.storage_path, record)?;
+        check_resume(
+            node.storage_path,
+            record,
+            &plan.position.point,
+            target.state,
+        )?;
     }
 
     let mut checkpoint =
@@ -1442,6 +1472,13 @@ where
     });
 
     check_restore_space(&plan, node, checkpoint.resume(), staging)?;
+
+    // A restore that doesn't resume starts its progress over before it writes
+    // anything, so this run's record is never beside an earlier run's layers.
+    // The record's save syncs the directory, and with it this removal.
+    if !node.resume {
+        checkpoint.clear()?;
+    }
 
     let record_path = source_path_in(node.storage_path);
 

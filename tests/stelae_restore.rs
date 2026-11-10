@@ -917,3 +917,110 @@ fn continue_refuses_another_source_or_point_than_the_record() {
     assert!(stdout.contains("(1 skipped)"), "{stdout}");
     assert_eq!(digest(&node), fixture.control);
 }
+
+/// Every non-hidden entry of `node`'s storage directory removed, as
+/// `rm -rf <storage.path>/*` does: the stores go and the records stay.
+fn remove_the_stores(node: &Node) {
+    for entry in std::fs::read_dir(&node.config.storage.path).unwrap() {
+        let entry = entry.unwrap();
+
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+
+        match entry.file_type().unwrap().is_dir() {
+            true => std::fs::remove_dir_all(entry.path()).unwrap(),
+            false => std::fs::remove_file(entry.path()).unwrap(),
+        }
+    }
+}
+
+/// Recorded layers over an archive that is gone are refused, naming
+/// `--force`, rather than skipped onto empty stores: the archive alone, as a
+/// lost archive volume leaves, and every store. `--force` then starts over.
+#[cfg(unix)]
+#[test]
+fn continue_refuses_recorded_layers_over_stores_that_are_gone() {
+    let fixture = Fixture::new();
+    let (_, _, blobs) = fixture.layers();
+    let k = blobs.len() / 2;
+    assert!(k >= 1, "the fixture needs an epoch layer to record first");
+
+    let node = Node::new();
+    kill_at_layer(&fixture, &node, k);
+
+    let refused = || {
+        let output = node.run(&["bootstrap", "stelae", "--continue"]);
+        assert!(!output.status.success());
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            reports(
+                &output.stderr,
+                &format!("records {k} layers, and the archive they were written to holds no data")
+            ),
+            "{stderr}"
+        );
+        assert!(stderr.contains("--force"), "{stderr}");
+        assert_eq!(recorded_layers(&node), Some(k));
+    };
+
+    std::fs::remove_dir_all(node.config.storage.archive_path().unwrap()).unwrap();
+    refused();
+
+    remove_the_stores(&node);
+    refused();
+
+    assert_ok(&node.run(&["bootstrap", "stelae", "--force", "--source", &fixture.url]));
+    assert_eq!(digest(&node), fixture.control);
+}
+
+/// Stores something else wrote after the restore was interrupted are refused,
+/// naming `--force`: a WAL with entries, which a restore never writes, and a
+/// state cursor other than the stele's, as a daemon syncing from genesis
+/// over them leaves.
+#[cfg(unix)]
+#[test]
+fn continue_refuses_stores_another_writer_touched() {
+    use dolos_core::StateWriter as _;
+
+    let fixture = Fixture::new();
+    let node = Node::new();
+    kill_at_layer(&fixture, &node, 1);
+
+    let theirs = dolos_core::ChainPoint::Specific(1, [7; 32].into());
+
+    let refused = |text: &str| {
+        let output = node.run(&["bootstrap", "stelae", "--continue"]);
+        assert!(!output.status.success());
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(reports(&output.stderr, text), "{stderr}");
+        assert!(stderr.contains("--force"), "{stderr}");
+
+        assert_eq!(recorded_layers(&node), Some(1));
+    };
+
+    let stores =
+        dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&node.config).unwrap();
+    stores.wal.reset_to(&theirs).unwrap();
+    drop(stores);
+
+    refused("has entries, which a stele restore never writes");
+
+    let wal = node.config.wal_path().unwrap();
+    match wal.is_dir() {
+        true => std::fs::remove_dir_all(&wal).unwrap(),
+        false => std::fs::remove_file(&wal).unwrap(),
+    }
+
+    let stores =
+        dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&node.config).unwrap();
+    let writer = stores.state.start_writer().unwrap();
+    writer.set_cursor(theirs).unwrap();
+    writer.commit().unwrap();
+    drop(stores);
+
+    assert_eq!(wal_tip(&node), None);
+    refused("the state's cursor is at");
+}

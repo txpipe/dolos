@@ -627,6 +627,28 @@ pub fn held_data(config: &RootConfig) -> Result<Vec<PathBuf>, Error> {
     Ok(found.held)
 }
 
+/// Whether the archive holds data as [`held_data`] finds it, in its own
+/// directory or in `blocks_path`; `false` for a node that keeps none.
+pub fn archive_holds_data(config: &RootConfig) -> Result<bool, Error> {
+    let archive = [config.storage.archive_path(), config.storage.blocks_path()];
+
+    Ok(held_data(config)?
+        .iter()
+        .any(|held| archive.iter().flatten().any(|path| path == held)))
+}
+
+/// Whether the WAL reads as holding an entry. One that can't be read without
+/// repair, as a process killed while holding it open leaves, can't be told
+/// and reads as `false`.
+pub fn wal_holds_entries(config: &RootConfig) -> bool {
+    use dolos_redb3::wal::WalProbe;
+
+    config
+        .wal_path()
+        .filter(|path| path.exists())
+        .is_some_and(|path| matches!(dolos_redb3::wal::probe(&path), Ok(WalProbe::Entries)))
+}
+
 fn wal_in_use(wal: &Path) -> Error {
     Error::message(format!(
         "the WAL at {} is in use by another process. Stop it, then run the bootstrap again",

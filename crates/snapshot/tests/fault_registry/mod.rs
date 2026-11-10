@@ -54,6 +54,8 @@ struct State {
     config: Option<String>,
     /// Manifest `GET`s still to be answered with a `503`.
     manifest_faults: usize,
+    /// Manifest `GET`s still to be refused with a `403`, ahead of the `503`s.
+    manifest_denials: usize,
     /// Manifest `GET`s received.
     manifest_gets: usize,
     /// Cut-offs keyed by blob digest.
@@ -112,6 +114,12 @@ impl FaultRegistry {
     /// Answer the next `times` manifest `GET`s with a `503`.
     pub fn fail_next_manifest(&self, times: usize) {
         self.state().manifest_faults += times;
+    }
+
+    /// Refuse the next `times` manifest `GET`s with a `403` and a `DENIED`
+    /// error, as a registry turning a token away answers.
+    pub fn deny_next_manifest(&self, times: usize) {
+        self.state().manifest_denials += times;
     }
 
     /// How many manifest `GET`s the registry received.
@@ -353,17 +361,32 @@ fn handle(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
             );
         }
 
-        let (manifest, failed) = {
+        let (manifest, denied, failed) = {
             let mut state = lock();
-            let failed = request.method == "GET" && {
-                state.manifest_gets += 1;
-                let failed = state.manifest_faults > 0;
-                state.manifest_faults = state.manifest_faults.saturating_sub(1);
-                failed
-            };
+            let get = request.method == "GET";
 
-            (state.manifests.get(&reference).cloned(), failed)
+            if get {
+                state.manifest_gets += 1;
+            }
+
+            let denied = get && state.manifest_denials > 0;
+            let failed = get && !denied && state.manifest_faults > 0;
+
+            if denied {
+                state.manifest_denials -= 1;
+            }
+
+            if failed {
+                state.manifest_faults -= 1;
+            }
+
+            (state.manifests.get(&reference).cloned(), denied, failed)
         };
+
+        if denied {
+            let body = br#"{"errors":[{"code":"DENIED","message":"denied"}]}"#;
+            return respond(&stream, 403, &[], body.len(), body);
+        }
 
         if failed {
             return respond(&stream, 503, &[], 0, b"");
