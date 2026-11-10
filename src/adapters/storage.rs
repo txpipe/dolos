@@ -408,6 +408,9 @@ struct Found {
     /// with data or one this release refuses, a WAL or an archive that fails
     /// to open, or block segments.
     held: Vec<PathBuf>,
+    /// The archive's index holds data, or fails to open or to read. Block
+    /// segments alone don't set it.
+    indexed: bool,
 }
 
 /// Open the stores whose directories exist, creating no store directory: a
@@ -466,6 +469,8 @@ fn found_in_storage(config: &RootConfig) -> Result<Found, Error> {
             }
             Err(_) => true,
         };
+
+        found.indexed = holds_data;
 
         if holds_data || holds_segments(&path) {
             found.held.push(path);
@@ -610,31 +615,35 @@ pub fn inspect_existing_data(
 /// refuses, a state that fails to open or to read its cursor, and a WAL
 /// another process holds are errors, as they are there.
 pub fn held_data(config: &RootConfig) -> Result<Vec<PathBuf>, Error> {
-    let found = found_in_storage(config)?;
+    Ok(found_or_refused(config)?.held)
+}
 
-    if let Some(refusal) = found.refused {
+/// Whether the archive's index holds data, with [`held_data`]'s errors. Every
+/// row an epoch layer writes is in the index, so block segments without it,
+/// as a lost archive volume beside a separate `blocks_path` leaves, don't
+/// count; an index that fails to open or to read does. `false` for a node
+/// that keeps no archive on disk.
+pub fn archive_index_holds_data(config: &RootConfig) -> Result<bool, Error> {
+    Ok(found_or_refused(config)?.indexed)
+}
+
+/// What storage holds, or the error [`held_data`] raises for it.
+fn found_or_refused(config: &RootConfig) -> Result<Found, Error> {
+    let mut found = found_in_storage(config)?;
+
+    if let Some(refusal) = found.refused.take() {
         return Err(refusal);
     }
 
-    if let Some(error) = found.unreadable {
+    if let Some(error) = found.unreadable.take() {
         return Err(error);
     }
 
-    if let Some(wal) = found.wal_in_use {
-        return Err(wal_in_use(&wal));
+    if let Some(wal) = &found.wal_in_use {
+        return Err(wal_in_use(wal));
     }
 
-    Ok(found.held)
-}
-
-/// Whether the archive holds data as [`held_data`] finds it, in its own
-/// directory or in `blocks_path`; `false` for a node that keeps none.
-pub fn archive_holds_data(config: &RootConfig) -> Result<bool, Error> {
-    let archive = [config.storage.archive_path(), config.storage.blocks_path()];
-
-    Ok(held_data(config)?
-        .iter()
-        .any(|held| archive.iter().flatten().any(|path| path == held)))
+    Ok(found)
 }
 
 /// Whether the WAL reads as holding an entry. One that can't be read without

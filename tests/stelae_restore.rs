@@ -935,6 +935,26 @@ fn remove_the_stores(node: &Node) {
     }
 }
 
+/// `--continue` over `node` refused, naming `--force`, for its `k` recorded
+/// layers over an archive index holding no data, with the records kept.
+fn refuses_recorded_layers(node: &Node, k: usize) {
+    let output = node.run(&["bootstrap", "stelae", "--continue"]);
+    assert!(!output.status.success());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        reports(
+            &output.stderr,
+            &format!(
+                "records {k} layers, and the archive index they were written to holds no data"
+            )
+        ),
+        "{stderr}"
+    );
+    assert!(stderr.contains("--force"), "{stderr}");
+    assert_eq!(recorded_layers(node), Some(k));
+}
+
 /// Recorded layers over an archive that is gone are refused, naming
 /// `--force`, rather than skipped onto empty stores: the archive alone, as a
 /// lost archive volume leaves, and every store. `--force` then starts over.
@@ -949,30 +969,83 @@ fn continue_refuses_recorded_layers_over_stores_that_are_gone() {
     let node = Node::new();
     kill_at_layer(&fixture, &node, k);
 
-    let refused = || {
-        let output = node.run(&["bootstrap", "stelae", "--continue"]);
-        assert!(!output.status.success());
-
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            reports(
-                &output.stderr,
-                &format!("records {k} layers, and the archive they were written to holds no data")
-            ),
-            "{stderr}"
-        );
-        assert!(stderr.contains("--force"), "{stderr}");
-        assert_eq!(recorded_layers(&node), Some(k));
-    };
-
     std::fs::remove_dir_all(node.config.storage.archive_path().unwrap()).unwrap();
-    refused();
+    refuses_recorded_layers(&node, k);
 
     remove_the_stores(&node);
-    refused();
+    refuses_recorded_layers(&node, k);
 
     assert_ok(&node.run(&["bootstrap", "stelae", "--force", "--source", &fixture.url]));
     assert_eq!(digest(&node), fixture.control);
+}
+
+/// Block segments that outlive their archive index don't hold the recorded
+/// layers, whose rows were all in the index. With a `blocks_path` in the
+/// root and the archive directory gone, and with one outside the root and
+/// every store in the root gone, the resume is refused as it is over the
+/// default layout.
+#[cfg(unix)]
+#[test]
+fn continue_refuses_recorded_layers_over_segments_without_their_index() {
+    let fixture = Fixture::new();
+    let (_, _, blobs) = fixture.layers();
+    let k = blobs.len() / 2;
+    assert!(k >= 1, "the fixture needs an epoch layer to record first");
+
+    let has_segments = |dir: &std::path::Path| {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().ends_with(".segment"))
+    };
+
+    let inside = Node::with_tables("[storage.archive]\nblocks_path = \"blocks\"\n");
+    kill_at_layer(&fixture, &inside, k);
+
+    let blocks = inside.config.storage.blocks_path().unwrap();
+    assert!(has_segments(&blocks), "{}", blocks.display());
+
+    std::fs::remove_dir_all(inside.config.storage.archive_path().unwrap()).unwrap();
+    refuses_recorded_layers(&inside, k);
+    assert!(has_segments(&blocks), "{}", blocks.display());
+
+    let elsewhere = tempfile::tempdir().unwrap();
+    let outside = Node::with_tables(&format!(
+        "[storage.archive]\nblocks_path = {}\n",
+        node::toml_string(elsewhere.path())
+    ));
+    kill_at_layer(&fixture, &outside, k);
+    assert!(has_segments(elsewhere.path()));
+
+    remove_the_stores(&outside);
+    refuses_recorded_layers(&outside, k);
+    assert!(has_segments(elsewhere.path()));
+}
+
+/// A node whose archive is in memory resumes its recorded layers: an
+/// uninterrupted run leaves nothing in that archive either, and the resumed
+/// node is the one an uninterrupted restore builds.
+#[cfg(unix)]
+#[test]
+fn continue_resumes_a_node_whose_archive_is_in_memory() {
+    let fixture = Fixture::new();
+    let (_, _, blobs) = fixture.layers();
+    let k = blobs.len() / 2;
+    assert!(k >= 1, "the fixture needs an epoch layer to record first");
+
+    let tables = "[storage.archive]\ntype = \"ephemeral\"\n";
+
+    let control = Node::with_tables(tables);
+    assert_ok(&control.run(&["bootstrap", "stelae", "--source", &fixture.url]));
+
+    let node = Node::with_tables(tables);
+    kill_at_layer(&fixture, &node, k);
+    assert_eq!(recorded_layers(&node), Some(k));
+
+    let stdout = assert_ok(&node.run(&["bootstrap", "stelae", "--continue"]));
+    assert!(stdout.contains(&format!("({k} skipped)")), "{stdout}");
+
+    assert_eq!(digest(&node), digest(&control));
 }
 
 /// Stores something else wrote after the restore was interrupted are refused,

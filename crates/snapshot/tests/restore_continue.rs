@@ -480,32 +480,38 @@ fn a_restore_that_does_not_resume_starts_its_progress_over() {
 }
 
 /// A state cursor other than the stele's, as a daemon that synced over the
-/// interrupted restore commits, is refused before anything is written.
+/// interrupted restore commits, is refused before anything is written,
+/// whatever its shape: genesis alone leaves `Origin`.
 #[test]
 fn a_cursor_another_writer_committed_is_refused() {
-    use dolos_core::StateWriter as _;
+    use dolos_core::{ChainPoint, StateWriter as _};
 
     let stele = Stele::export();
-    let (storage, blank) = interrupted(&stele);
 
-    let theirs = dolos_core::ChainPoint::Specific(1, [7; 32].into());
+    for theirs in [
+        ChainPoint::Origin,
+        ChainPoint::Slot(1),
+        ChainPoint::Specific(1, [7; 32].into()),
+    ] {
+        let (storage, blank) = interrupted(&stele);
 
-    let writer = blank.state().start_writer().unwrap();
-    writer.set_cursor(theirs.clone()).unwrap();
-    writer.commit().unwrap();
+        let writer = blank.state().start_writer().unwrap();
+        writer.set_cursor(theirs.clone()).unwrap();
+        writer.commit().unwrap();
 
-    let before = snapshot(storage.path(), &blank);
+        let before = snapshot(storage.path(), &blank);
 
-    let error = stele.restore(storage.path(), &blank, true).unwrap_err();
+        let error = stele.restore(storage.path(), &blank, true).unwrap_err();
 
-    let Error::Resume(ResumeRefusal::Written { cursor, point }) = &error else {
-        panic!("not a refusal of the cursor: {error:?}");
-    };
-    assert_eq!(*cursor, theirs);
-    assert_ne!(*point, theirs);
+        let Error::Resume(ResumeRefusal::Written { cursor, point }) = &error else {
+            panic!("{theirs:?} not refused as another writer's cursor: {error:?}");
+        };
+        assert_eq!(*cursor, theirs);
+        assert_ne!(*point, theirs);
 
-    assert_eq!(snapshot(storage.path(), &blank), before);
-    assert_eq!(blank.state().read_cursor().unwrap(), Some(theirs));
+        assert_eq!(snapshot(storage.path(), &blank), before);
+        assert_eq!(blank.state().read_cursor().unwrap(), Some(theirs));
+    }
 }
 
 /// A restore that records nothing still resumes as it did before records:

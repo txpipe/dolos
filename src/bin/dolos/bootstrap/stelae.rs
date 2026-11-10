@@ -311,11 +311,13 @@ fn unfinished(config: &RootConfig, args: &Args) -> miette::Result<Option<Resumin
 
 /// Refuse a resume over stores something else wrote since the restore was
 /// interrupted, as a WAL with entries shows, or, when the progress file
-/// records `layers`, over an archive holding no data: they are all archive
-/// layers. A lost blocks volume whose archive index stays isn't caught. The
-/// library refuses a state cursor other than the stele's.
+/// records `layers`, over an archive index holding no data: every recorded
+/// layer wrote rows there, whatever block segments survive it. A node that
+/// keeps no archive, or keeps it in memory, has none to check. A lost blocks
+/// volume whose archive index stays isn't caught. The library refuses a state
+/// cursor other than the stele's.
 fn still_holds(config: &RootConfig, layers: usize) -> miette::Result<()> {
-    let archived = dolos::storage::archive_holds_data(config).into_diagnostic()?;
+    let indexed = dolos::storage::archive_index_holds_data(config).into_diagnostic()?;
 
     if dolos::storage::wal_holds_entries(config) {
         miette::bail!(
@@ -325,9 +327,11 @@ fn still_holds(config: &RootConfig, layers: usize) -> miette::Result<()> {
         );
     }
 
-    if layers > 0 && config.keeps_archive() && !archived {
+    let on_disk = config.keeps_archive() && config.storage.archive_path().is_some();
+
+    if layers > 0 && on_disk && !indexed {
         miette::bail!(
-            "the restore progress in {} records {layers} layers, and the archive they were \
+            "the restore progress in {} records {layers} layers, and the archive index they were \
              written to holds no data. Use --force to start over",
             config.storage.path.display(),
         );
@@ -868,5 +872,33 @@ mod tests {
         let resuming = inputs.resuming.expect("nothing to resume");
         assert_eq!(resuming.record, record);
         assert_eq!(resuming.layers, 0);
+    }
+
+    /// Recorded layers are checked against an archive index only where one
+    /// is kept on disk. With no archive, the restore itself refuses at its
+    /// first index records, which this check must not pre-empt with `--force`
+    /// advice; an archive in memory is empty after any run.
+    #[test]
+    fn recorded_layers_are_checked_only_against_an_archive_on_disk() {
+        use dolos_core::config::{HistoryMode, StoreType};
+
+        let storage = tempfile::tempdir().unwrap();
+
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = storage.path().to_path_buf();
+
+        still_holds(&config, 0).unwrap();
+
+        let message = still_holds(&config, 3).unwrap_err().to_string();
+        assert!(message.contains("archive index"), "{message}");
+        assert!(message.contains("--force"), "{message}");
+
+        let mut none = config.clone();
+        none.history.mode = HistoryMode::None;
+        still_holds(&none, 3).unwrap();
+
+        let mut in_memory = config.clone();
+        in_memory.storage.archive.kind = StoreType::Ephemeral;
+        still_holds(&in_memory, 3).unwrap();
     }
 }
