@@ -1331,12 +1331,6 @@ impl CoreArchiveStore for ArchiveStore {
         Ok(blocks_done && indexes_done)
     }
 
-    /// Drop everything the archive holds after `after`.
-    ///
-    /// The cut is by slot: the block at `after`'s slot survives (including a
-    /// second block sharing that slot), while log rows *at* the slot go with
-    /// the cut — the exact boundary redb's `remove_after` draws by comparing
-    /// full log keys against the bare 8-byte temporal prefix.
     /// Commits are journaled with [`PersistMode::Buffer`]; this fsyncs the
     /// journal. Block bodies are synced by the commit that appends them, before
     /// the index entries pointing at them. A read-only view committed nothing.
@@ -1350,6 +1344,12 @@ impl CoreArchiveStore for ArchiveStore {
         Ok(())
     }
 
+    /// Drop everything the archive holds after `after`.
+    ///
+    /// The cut is by slot: the block at `after`'s slot survives (including a
+    /// second block sharing that slot), while log rows *at* the slot go with
+    /// the cut — the exact boundary redb's `remove_after` draws by comparing
+    /// full log keys against the bare 8-byte temporal prefix.
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError> {
         self.writable()?;
 
