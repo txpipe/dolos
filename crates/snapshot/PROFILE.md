@@ -28,7 +28,7 @@ transport — and this one for every byte inside it.
   `application/vnd.stelae.snapshot.v1`, set by the protocol rather than this
   profile. A restore refuses the pre-v2 `application/vnd.stelae.stele.v1`
   before it touches a store.
-- One repository per network — e.g. `ghcr.io/txpipe/dolos-snapshots/mainnet`.
+- One repository per network — e.g. `oci.stelae.store/cardano/mainnet`.
 - Tags: immutable `epoch-E` per sequence plus a moving `latest`, where E is
   the newly started epoch — equal to `sequence` and to `position.epoch`; the
   layers cover epochs `0..E-1` complete plus epoch E's boundary sliver (see
