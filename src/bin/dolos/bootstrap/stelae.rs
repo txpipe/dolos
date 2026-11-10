@@ -326,7 +326,10 @@ fn agrees(args: &Args, record: &SourceRecord) -> miette::Result<()> {
                     "--source {given} is not the source of the restore --continue resumes, {}",
                     record.source
                 ),
-                Some("leave --source out, or pass the recorded one".to_owned()),
+                Some(
+                    "leave --source out to resume, or use --force to start over from this one"
+                        .to_owned(),
+                ),
             ))?;
         }
     }
@@ -339,7 +342,10 @@ fn agrees(args: &Args, record: &SourceRecord) -> miette::Result<()> {
                      epoch-{}",
                     record.sequence
                 ),
-                Some("leave --point out, or pass the recorded one".to_owned()),
+                Some(
+                    "leave --point out to resume, or use --force to start over from this one"
+                        .to_owned(),
+                ),
             ))?;
         }
     }

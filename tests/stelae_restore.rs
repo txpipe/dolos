@@ -884,6 +884,7 @@ fn continue_refuses_another_source_or_point_than_the_record() {
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(reports(&output.stderr, &fixture.url), "{stderr}");
+    assert!(stderr.contains("--force"), "{stderr}");
 
     let output = node.run(&[
         "bootstrap",
@@ -899,6 +900,7 @@ fn continue_refuses_another_source_or_point_than_the_record() {
         reports(&output.stderr, &format!("epoch-{sequence}")),
         "{stderr}"
     );
+    assert!(stderr.contains("--force"), "{stderr}");
 
     assert_eq!(recorded_layers(&node), Some(1));
 
