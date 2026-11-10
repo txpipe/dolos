@@ -347,6 +347,30 @@ impl ArchiveStore {
         Ok(())
     }
 
+    /// The newest block the index locates, without reading its frame: its
+    /// slot and the location of that slot's canonical block, as the tip read
+    /// takes them.
+    pub fn newest_block(&self) -> Result<Option<(BlockSlot, BlockLocation)>, ArchiveError> {
+        let snapshot = self.db.snapshot();
+
+        let Some(guard) = snapshot.last_key_value(&self.blocks) else {
+            return Ok(None);
+        };
+
+        let (key, value) = guard.into_inner().map_err(fjall_err)?;
+
+        let slot_bytes: [u8; 8] = key
+            .as_ref()
+            .get(..8)
+            .and_then(|b| b.try_into().ok())
+            .ok_or_else(|| ArchiveError::InternalError("malformed blocks key".to_string()))?;
+
+        Ok(Some((
+            u64::from_be_bytes(slot_bytes),
+            BlockLocation::from_bytes(&value),
+        )))
+    }
+
     /// Whether the index holds any block location, log row or index entry.
     pub fn holds_data(&self) -> Result<bool, Error> {
         for keyspace in [
@@ -1210,22 +1234,10 @@ impl CoreArchiveStore for ArchiveStore {
     }
 
     fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError> {
-        let snapshot = self.db.snapshot();
-
-        let Some(guard) = snapshot.last_key_value(&self.blocks) else {
+        let Some((slot, loc)) = self.newest_block()? else {
             return Ok(None);
         };
 
-        let (key, value) = guard.into_inner().map_err(fjall_err)?;
-
-        let slot_bytes: [u8; 8] = key
-            .as_ref()
-            .get(..8)
-            .and_then(|b| b.try_into().ok())
-            .ok_or_else(|| ArchiveError::InternalError("malformed blocks key".to_string()))?;
-        let slot = u64::from_be_bytes(slot_bytes);
-
-        let loc = BlockLocation::from_bytes(&value);
         let body = self.flatfiles.read(&loc).map_err(io_err)?;
 
         Ok(Some((slot, body)))

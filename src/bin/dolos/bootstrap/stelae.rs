@@ -311,13 +311,15 @@ fn unfinished(config: &RootConfig, args: &Args) -> miette::Result<Option<Resumin
 
 /// Refuse a resume over stores something else wrote since the restore was
 /// interrupted, as a WAL with entries shows, or, when the progress file
-/// records `layers`, over an archive index holding no data: every recorded
-/// layer wrote rows there, whatever block segments survive it. A node that
-/// keeps no archive, or keeps it in memory, has none to check. A lost blocks
-/// volume whose archive index stays isn't caught. The library refuses a state
-/// cursor other than the stele's.
+/// records `layers`, over an archive kept on disk that no longer holds them:
+/// an index holding no data, whatever block segments survive it, or a
+/// segment file missing or cut short before the newest block the index
+/// locates. Recorded layers wrote index rows, save empty leading epochs, so a
+/// stop after only those is refused too. Older segments lost beside the
+/// newest aren't caught. The library refuses a state cursor other than the
+/// stele's.
 fn still_holds(config: &RootConfig, layers: usize) -> miette::Result<()> {
-    let indexed = dolos::storage::archive_index_holds_data(config).into_diagnostic()?;
+    let index = dolos::storage::archive_index(config).into_diagnostic()?;
 
     if dolos::storage::wal_holds_entries(config) {
         miette::bail!(
@@ -329,11 +331,25 @@ fn still_holds(config: &RootConfig, layers: usize) -> miette::Result<()> {
 
     let on_disk = config.keeps_archive() && config.storage.archive_path().is_some();
 
-    if layers > 0 && on_disk && !indexed {
+    if layers == 0 || !on_disk {
+        return Ok(());
+    }
+
+    if !index.holds_data {
         miette::bail!(
             "the restore progress in {} records {layers} layers, and the archive index they were \
              written to holds no data. Use --force to start over",
             config.storage.path.display(),
+        );
+    }
+
+    if let Some(segment) = index.missing_segment {
+        miette::bail!(
+            "the restore progress in {} records {layers} layers, and {}, where the archive index \
+             locates their newest block, is missing or ends before that block. Use --force to \
+             start over",
+            config.storage.path.display(),
+            segment.display(),
         );
     }
 

@@ -408,9 +408,22 @@ struct Found {
     /// with data or one this release refuses, a WAL or an archive that fails
     /// to open, or block segments.
     held: Vec<PathBuf>,
-    /// The archive's index holds data, or fails to open or to read. Block
-    /// segments alone don't set it.
-    indexed: bool,
+    /// What the archive's index holds, for a resume's recorded layers.
+    index: ArchiveIndex,
+}
+
+/// What the archive's index holds, as a resume checks its recorded layers
+/// against it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ArchiveIndex {
+    /// The index holds data, or fails to open or to read. Block segments
+    /// alone, as a lost archive volume beside a separate `blocks_path`
+    /// leaves, don't set it.
+    pub holds_data: bool,
+    /// The segment file the index locates its newest block in, when that
+    /// file is missing or ends before the block does, as a lost or emptied
+    /// blocks volume beside a kept index leaves.
+    pub missing_segment: Option<PathBuf>,
 }
 
 /// Open the stores whose directories exist, creating no store directory: a
@@ -461,16 +474,24 @@ fn found_in_storage(config: &RootConfig) -> Result<Found, Error> {
     if let Some(path) = config.storage.archive_path().filter(|path| path.exists()) {
         // Any failure but the identity's is left to the command that uses the
         // archive, as before stores recorded identities, and counts as data.
-        let holds_data = match open_archive_index(config) {
-            Ok(archive) => archive.holds_data().unwrap_or(true),
+        let (holds_data, newest) = match open_archive_index(config) {
+            Ok(archive) => (
+                archive.holds_data().unwrap_or(true),
+                archive.newest_block_location().ok().flatten(),
+            ),
             Err(refusal @ ArchiveError::IncompatibleStore(_)) => {
                 found.refused.get_or_insert(refusal.into());
-                true
+                (true, None)
             }
-            Err(_) => true,
+            Err(_) => (true, None),
         };
 
-        found.indexed = holds_data;
+        let segments = config.storage.blocks_path().unwrap_or_else(|| path.clone());
+
+        found.index = ArchiveIndex {
+            holds_data,
+            missing_segment: newest.and_then(|location| missing_segment(&segments, location)),
+        };
 
         if holds_data || holds_segments(&path) {
             found.held.push(path);
@@ -497,6 +518,24 @@ fn open_archive_index(config: &RootConfig) -> Result<ArchiveStoreBackend, Archiv
         dolos_cardano::model::build_log_schema(),
         config.storage.archive.kind,
     )
+}
+
+/// The segment file under `dir` that `location` names, when it is missing or
+/// ends before the frame does. Its metadata is read, since opening the
+/// segments would create `dir`; a file whose metadata fails to read for
+/// another reason counts as holding the frame.
+fn missing_segment(dir: &Path, location: dolos_fjall::flatfiles::BlockLocation) -> Option<PathBuf> {
+    let segment = dir.join(dolos_fjall::flatfiles::segment_filename(
+        location.segment_id,
+    ));
+    let end = location.offset + u64::from(location.length);
+
+    match std::fs::metadata(&segment) {
+        Ok(metadata) if metadata.len() >= end => None,
+        Ok(_) => Some(segment),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(segment),
+        Err(_) => None,
+    }
 }
 
 /// Whether `dir` holds a block segment file. Something there that can't be
@@ -618,13 +657,12 @@ pub fn held_data(config: &RootConfig) -> Result<Vec<PathBuf>, Error> {
     Ok(found_or_refused(config)?.held)
 }
 
-/// Whether the archive's index holds data, with [`held_data`]'s errors. Every
-/// row an epoch layer writes is in the index, so block segments without it,
-/// as a lost archive volume beside a separate `blocks_path` leaves, don't
-/// count; an index that fails to open or to read does. `false` for a node
-/// that keeps no archive on disk.
-pub fn archive_index_holds_data(config: &RootConfig) -> Result<bool, Error> {
-    Ok(found_or_refused(config)?.indexed)
+/// What the archive's index holds, with [`held_data`]'s errors: whether it
+/// holds data, and whether the segment file its newest block location names
+/// still holds that block. Holding no data, and no segment to check, for a
+/// node that keeps no archive on disk.
+pub fn archive_index(config: &RootConfig) -> Result<ArchiveIndex, Error> {
+    Ok(found_or_refused(config)?.index)
 }
 
 /// What storage holds, or the error [`held_data`] raises for it.
@@ -1948,6 +1986,18 @@ impl ArchiveStoreBackend {
         }
     }
 
+    /// The location of the newest block the index holds, without reading its
+    /// frame; `None` for the stores that keep no segment files.
+    pub fn newest_block_location(
+        &self,
+    ) -> Result<Option<dolos_fjall::flatfiles::BlockLocation>, ArchiveError> {
+        match self {
+            Self::Fjall(s) => Ok(s.newest_block()?.map(|(_, location)| location)),
+            Self::LogsOnly(inner) => inner.newest_block_location(),
+            Self::Memory(_) | Self::EntityReads(_) | Self::NoOp(_) => Ok(None),
+        }
+    }
+
     pub fn shutdown(&self) -> Result<(), ArchiveError> {
         match self {
             Self::Memory(s) => s.shutdown(),
@@ -2850,6 +2900,30 @@ mod tests {
             | Err(Error::ArchiveError(ArchiveError::IncompatibleStore(refusal))) => Some(refusal),
             Err(error) => panic!("not an identity refusal: {error}"),
         }
+    }
+
+    /// A segment is missing when its file is absent or ends before the
+    /// frame does. One whose metadata fails to read for another reason, here
+    /// a path through a file, counts as holding the frame.
+    #[test]
+    fn a_segment_is_missing_when_absent_or_cut_short() {
+        let dir = tempfile::tempdir().unwrap();
+        let location = dolos_fjall::flatfiles::BlockLocation {
+            segment_id: 3,
+            offset: 10,
+            length: 5,
+        };
+        let segment = dir.path().join("000003.segment");
+
+        assert_eq!(missing_segment(dir.path(), location), Some(segment.clone()));
+
+        std::fs::write(&segment, [0; 14]).unwrap();
+        assert_eq!(missing_segment(dir.path(), location), Some(segment.clone()));
+
+        std::fs::write(&segment, [0; 15]).unwrap();
+        assert_eq!(missing_segment(dir.path(), location), None);
+
+        assert_eq!(missing_segment(&segment, location), None);
     }
 
     #[test]

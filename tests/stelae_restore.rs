@@ -935,29 +935,46 @@ fn remove_the_stores(node: &Node) {
     }
 }
 
-/// `--continue` over `node` refused, naming `--force`, for its `k` recorded
-/// layers over an archive index holding no data, with the records kept.
-fn refuses_recorded_layers(node: &Node, k: usize) {
+/// `--continue` over `node` refused, naming `--force`, with a report holding
+/// `why` and the `k` recorded layers kept.
+fn refuses_resume(node: &Node, k: usize, why: &str) {
     let output = node.run(&["bootstrap", "stelae", "--continue"]);
     assert!(!output.status.success());
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        reports(
-            &output.stderr,
-            &format!(
-                "records {k} layers, and the archive index they were written to holds no data"
-            )
-        ),
-        "{stderr}"
-    );
+    assert!(reports(&output.stderr, why), "{stderr}");
     assert!(stderr.contains("--force"), "{stderr}");
     assert_eq!(recorded_layers(node), Some(k));
 }
 
+/// `--continue` over `node` refused, naming `--force`, for its `k` recorded
+/// layers over an archive index holding no data, with the records kept.
+fn refuses_recorded_layers(node: &Node, k: usize) {
+    refuses_resume(
+        node,
+        k,
+        &format!("records {k} layers, and the archive index they were written to holds no data"),
+    );
+}
+
+/// The block segment files in `dir`, oldest first.
+fn segments_in(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut segments: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "segment"))
+        .collect();
+
+    segments.sort();
+    segments
+}
+
 /// Recorded layers over an archive that is gone are refused, naming
-/// `--force`, rather than skipped onto empty stores: the archive alone, as a
-/// lost archive volume leaves, and every store. `--force` then starts over.
+/// `--force`, rather than skipped onto empty stores: its index alone, with
+/// the segments kept beside it, an empty archive directory, as a lost
+/// volume's mount point leaves, the archive directory itself, and every
+/// store. `--force` then starts over.
 #[cfg(unix)]
 #[test]
 fn continue_refuses_recorded_layers_over_stores_that_are_gone() {
@@ -969,7 +986,17 @@ fn continue_refuses_recorded_layers_over_stores_that_are_gone() {
     let node = Node::new();
     kill_at_layer(&fixture, &node, k);
 
-    std::fs::remove_dir_all(node.config.storage.archive_path().unwrap()).unwrap();
+    let archive = node.config.storage.archive_path().unwrap();
+
+    std::fs::remove_dir_all(archive.join("index")).unwrap();
+    assert!(!segments_in(&archive).is_empty(), "{}", archive.display());
+    refuses_recorded_layers(&node, k);
+
+    std::fs::remove_dir_all(&archive).unwrap();
+    std::fs::create_dir_all(&archive).unwrap();
+    refuses_recorded_layers(&node, k);
+
+    std::fs::remove_dir_all(&archive).unwrap();
     refuses_recorded_layers(&node, k);
 
     remove_the_stores(&node);
@@ -1020,6 +1047,82 @@ fn continue_refuses_recorded_layers_over_segments_without_their_index() {
     remove_the_stores(&outside);
     refuses_recorded_layers(&outside, k);
     assert!(has_segments(elsewhere.path()));
+}
+
+/// An archive index whose block segments are gone or cut short doesn't hold
+/// the recorded layers either. With a `blocks_path` outside the root whose
+/// segments are moved away, and with the default layout's newest segment
+/// removed, then cut short by a byte, the resume is refused, naming that
+/// segment and `--force`. With the segments back whole, it resumes.
+#[cfg(unix)]
+#[test]
+fn continue_refuses_recorded_layers_over_an_index_whose_segments_are_gone() {
+    let fixture = Fixture::new();
+    let (_, _, blobs) = fixture.layers();
+    let k = blobs.len() / 2;
+    assert!(k >= 1, "the fixture needs an epoch layer to record first");
+
+    let missing = |node: &Node, segment: &std::path::Path| {
+        refuses_resume(
+            node,
+            k,
+            &format!(
+                "records {k} layers, and {}, where the archive index locates their newest block, \
+                 is missing or ends before that block",
+                segment.display()
+            ),
+        );
+    };
+
+    let resumes = |node: &Node| {
+        let stdout = assert_ok(&node.run(&["bootstrap", "stelae", "--continue"]));
+        assert!(stdout.contains(&format!("({k} skipped)")), "{stdout}");
+        assert_eq!(digest(node), fixture.control);
+    };
+
+    let elsewhere = tempfile::tempdir().unwrap();
+    let outside = Node::with_tables(&format!(
+        "[storage.archive]\nblocks_path = {}\n",
+        node::toml_string(elsewhere.path())
+    ));
+    kill_at_layer(&fixture, &outside, k);
+
+    let segments = segments_in(elsewhere.path());
+    let newest = segments
+        .last()
+        .expect("no recorded layer wrote blocks")
+        .clone();
+    let aside = tempfile::tempdir().unwrap();
+    let away = |segment: &std::path::Path| aside.path().join(segment.file_name().unwrap());
+
+    for segment in &segments {
+        std::fs::rename(segment, away(segment)).unwrap();
+    }
+    missing(&outside, &newest);
+
+    for segment in &segments {
+        std::fs::rename(away(segment), segment).unwrap();
+    }
+    resumes(&outside);
+
+    let node = Node::new();
+    kill_at_layer(&fixture, &node, k);
+
+    let segments = segments_in(&node.config.storage.archive_path().unwrap());
+    let newest = segments
+        .last()
+        .expect("no recorded layer wrote blocks")
+        .clone();
+    let whole = std::fs::read(&newest).unwrap();
+
+    std::fs::remove_file(&newest).unwrap();
+    missing(&node, &newest);
+
+    std::fs::write(&newest, &whole[..whole.len() - 1]).unwrap();
+    missing(&node, &newest);
+
+    std::fs::write(&newest, &whole).unwrap();
+    resumes(&node);
 }
 
 /// A node whose archive is in memory resumes its recorded layers: an
