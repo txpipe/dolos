@@ -268,6 +268,10 @@ where
     A: ArchiveStore,
     S: StateStore,
 {
+    // Attached before the pull, so a retried manifest or config read reaches
+    // the operator too; the stele shares this connection's observer.
+    registry.observe(observer.clone());
+
     let stele = point.pull(registry)?;
 
     crate::restore::restore_stele(&stele, node, registry.scratch_dir(), target, observer)
