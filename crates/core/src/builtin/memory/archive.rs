@@ -720,6 +720,10 @@ impl ArchiveStore for MemoryArchiveStore {
         Ok(())
     }
 
+    fn persist(&self) -> Result<(), ArchiveError> {
+        Ok(())
+    }
+
     fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
         // A key that could not have been stored cannot be found, so a
         // wrong-width query is a miss rather than an error.

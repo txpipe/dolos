@@ -1717,6 +1717,14 @@ impl CoreStateStore for StateStoreBackend {
             Self::Memory(s) => s.iter_utxos().map(StateUtxoIterBackend::Memory),
         }
     }
+
+    fn persist(&self) -> Result<(), StateError> {
+        match self {
+            Self::Redb(s) => s.persist(),
+            Self::Fjall(s) => s.persist(),
+            Self::Memory(s) => s.persist(),
+        }
+    }
 }
 
 // ============================================================================
@@ -2306,6 +2314,16 @@ impl CoreArchiveStore for ArchiveStoreBackend {
             Self::Fjall(s) => CoreArchiveStore::truncate_front(s, after),
             Self::EntityReads(_) => CoreArchiveStore::truncate_front(&NoOpArchiveStore, after),
             Self::NoOp(s) => CoreArchiveStore::truncate_front(s, after),
+        }
+    }
+
+    fn persist(&self) -> Result<(), ArchiveError> {
+        match self {
+            Self::Memory(s) => CoreArchiveStore::persist(s),
+            Self::LogsOnly(inner) => CoreArchiveStore::persist(inner.as_ref()),
+            Self::Fjall(s) => CoreArchiveStore::persist(s),
+            Self::EntityReads(_) => CoreArchiveStore::persist(&NoOpArchiveStore),
+            Self::NoOp(s) => CoreArchiveStore::persist(s),
         }
     }
 
