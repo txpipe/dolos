@@ -1763,6 +1763,7 @@ dependencies = [
  "hex",
  "libc",
  "minicbor 0.26.4",
+ "oci-client",
  "pallas",
  "rustls",
  "serde",

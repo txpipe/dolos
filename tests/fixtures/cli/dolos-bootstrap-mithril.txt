@@ -7,15 +7,16 @@ Options:
           the Mithril aggregator to download from; defaults to the configured network's, and is
           required for a custom network [env: DOLOS_MITHRIL_AGGREGATOR=]
       --force
-          Replace any data already in storage
+          Replace any data already in storage, and with it what an interrupted bootstrap left for
+          `--continue`
       --genesis-vkey <KEY>
           the aggregator's genesis verification key, JSON-hex encoded; defaults to the configured
           network's, and is required for a custom network [env: DOLOS_MITHRIL_GENESIS_VKEY=]
       --skip-if-data
           Exit 0 without bootstrapping when storage already holds a node, as an interrupted replay
-          that has committed leaves one for `--continue` to resume; data without one, as a bootstrap
-          interrupted before it commits a cursor leaves, and a store this release refuses are errors
-          instead
+          that has committed leaves one for `--continue` to resume; data without one, as an
+          interrupted stele restore or a bootstrap interrupted before it commits a cursor leaves,
+          and a store this release refuses are errors instead
       --download-dir <DOWNLOAD_DIR>
           [default: ./snapshot]
       --verbose

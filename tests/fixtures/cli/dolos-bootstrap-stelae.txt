@@ -4,7 +4,8 @@ Usage: dolos bootstrap stelae [OPTIONS]
 
 Options:
       --force
-          Replace any data already in storage
+          Replace any data already in storage, and with it what an interrupted bootstrap left for
+          `--continue`
       --source <SOURCE>
           Where to restore from, as a URL: `file://DIR` naming a stele directory, or
           `oci://HOST/PATH` naming a repository in a registry. Defaults to the configured network's
@@ -14,9 +15,9 @@ Options:
           at the end of epoch N. Registry sources only [default: latest]
       --skip-if-data
           Exit 0 without bootstrapping when storage already holds a node, as an interrupted replay
-          that has committed leaves one for `--continue` to resume; data without one, as a bootstrap
-          interrupted before it commits a cursor leaves, and a store this release refuses are errors
-          instead
+          that has committed leaves one for `--continue` to resume; data without one, as an
+          interrupted stele restore or a bootstrap interrupted before it commits a cursor leaves,
+          and a store this release refuses are errors instead
       --insecure
           talk to the repository over plaintext HTTP rather than HTTPS; for a registry on a loopback
           address or a mirror inside a cluster, and for nothing reachable from outside one
@@ -28,6 +29,10 @@ Options:
       --skip-space-check
           skip the restore disk-space preflight and continue even when the stele's declared sizes
           exceed the available space
+      --continue
+          Resume an interrupted restore from the layers it recorded, reading the stele it started
+          from again; with nothing to resume, restore as without the flag into storage that holds no
+          data
       --registry-user <USER>
           the user to read the registry as; defaults to the published read-only user when the
           repository is the configured network's official one. The password comes from

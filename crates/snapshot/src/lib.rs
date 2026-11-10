@@ -847,6 +847,11 @@ pub enum Error {
     #[error("not enough space: {0}")]
     NotEnoughSpace(String),
 
+    /// A restore asked to resume whose records do not name the stele it
+    /// would read, refused before anything is written.
+    #[error(transparent)]
+    Resume(#[from] restore::ResumeRefusal),
+
     /// A publish that would not extend the repository's chain.
     ///
     /// Both sequences are in the message because the fix depends on which of

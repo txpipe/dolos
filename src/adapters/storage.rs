@@ -386,7 +386,9 @@ pub struct ExistingDataPolicy {
     /// `--skip-if-data`: leave a node alone and exit zero. Data without a
     /// node, and a store this release refuses, are not skipped.
     pub skip_if_data: bool,
-    /// `--continue`: go ahead, resuming a replay from its committed position.
+    /// `--continue`: go ahead and resume, a replay from its committed
+    /// position and a stele restore from its records. The source decides
+    /// whether there is anything to resume.
     pub r#continue: bool,
 }
 
@@ -561,10 +563,7 @@ pub fn inspect_existing_data(
     }
 
     if let Some(wal) = found.wal_in_use {
-        return Err(Error::message(format!(
-            "the WAL at {} is in use by another process. Stop it, then run the bootstrap again",
-            wal.display()
-        )));
+        return Err(wal_in_use(&wal));
     }
 
     if found.held.is_empty() {
@@ -604,6 +603,35 @@ pub fn inspect_existing_data(
     Err(Error::message(format!(
         "{detected}. Use --force to replace it, or --skip-if-data to leave it and exit 0"
     )))
+}
+
+/// The managed stores holding data, as [`inspect_existing_data`] finds them
+/// with no flag given: empty when it would go ahead. A store this release
+/// refuses, a state that fails to open or to read its cursor, and a WAL
+/// another process holds are errors, as they are there.
+pub fn held_data(config: &RootConfig) -> Result<Vec<PathBuf>, Error> {
+    let found = found_in_storage(config)?;
+
+    if let Some(refusal) = found.refused {
+        return Err(refusal);
+    }
+
+    if let Some(error) = found.unreadable {
+        return Err(error);
+    }
+
+    if let Some(wal) = found.wal_in_use {
+        return Err(wal_in_use(&wal));
+    }
+
+    Ok(found.held)
+}
+
+fn wal_in_use(wal: &Path) -> Error {
+    Error::message(format!(
+        "the WAL at {} is in use by another process. Stop it, then run the bootstrap again",
+        wal.display()
+    ))
 }
 
 /// The decision on storage holding a store this release refuses: `--force`
@@ -4168,6 +4196,9 @@ mod lifecycle_tests {
         let progress = progress_path_in(&storage);
         std::fs::write(&progress, b"{}").unwrap();
 
+        let record = dolos_snapshot::restore::source_path_in(&storage);
+        std::fs::write(&record, b"{}").unwrap();
+
         // A stand-in for the stores the progress file describes, so the
         // assertion is about a directory that had a node in it.
         std::fs::write(storage.join("state"), b"a store").unwrap();
@@ -4179,6 +4210,10 @@ mod lifecycle_tests {
         assert!(
             !progress.exists(),
             "a progress file outlived the stores it describes"
+        );
+        assert!(
+            !record.exists(),
+            "a source record outlived the stores it describes"
         );
 
         assert!(
@@ -4203,5 +4238,6 @@ mod lifecycle_tests {
         let storage = std::path::Path::new("/var/lib/dolos/data");
 
         assert!(progress_path_in(storage).starts_with(storage));
+        assert!(dolos_snapshot::restore::source_path_in(storage).starts_with(storage));
     }
 }

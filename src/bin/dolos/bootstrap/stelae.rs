@@ -14,13 +14,16 @@
 //! which names which stele in a repository to read, and `--insecure`, which is
 //! for a registry on a loopback address.
 //!
-//! ## A restore has no resume
+//! ## `--continue` resumes the stele a restore started from
 //!
-//! An interrupted restore leaves data in storage, which `bootstrap` refuses
-//! until `--force` clears it, so a restore always starts from empty stores. The
-//! progress file it writes as it goes is overwritten rather than obeyed:
-//! `dolos_snapshot::restore::Checkpoint` states why a progress file that
-//! outlived the stores it describes would otherwise skip layers onto nothing.
+//! A restore records, beside its progress file, the source it reads and the
+//! stele's sequence and digest. `--continue` reads that stele again, by its
+//! epoch tag in a registry and never `latest`, and skips the layers the
+//! progress file names, refusing when the stele is gone or the records can't
+//! be trusted. With no records it restores as without the flag, over storage
+//! that holds no data. Without the flag a restore refuses partial data until
+//! `--force` clears it, and overwrites any progress file rather than obey it:
+//! `dolos_snapshot::restore::Checkpoint` states why.
 
 use std::path::{Path, PathBuf};
 
@@ -32,11 +35,12 @@ use dolos_snapshot::{
     facade::{self as snapshot, RestoreInput, SnapshotRepository},
     node,
     registry::{self, Auth, Point, Repository},
-    restore::Source,
+    restore::{ResumeRefusal, Source, SourceRecord},
 };
 
 use crate::{
     feedback::{Feedback, RestoreProgress},
+    output::Usage,
     registry::CredentialArgs,
 };
 
@@ -70,6 +74,12 @@ pub struct Args {
     /// stele's declared sizes exceed the available space
     #[arg(long, action)]
     pub skip_space_check: bool,
+
+    /// Resume an interrupted restore from the layers it recorded, reading the
+    /// stele it started from again; with nothing to resume, restore as
+    /// without the flag into storage that holds no data
+    #[arg(long = "continue")]
+    pub resume: bool,
 
     #[command(flatten)]
     pub credentials: CredentialArgs,
@@ -141,6 +151,7 @@ impl Args {
             insecure: false,
             scratch_dir: None,
             skip_space_check: false,
+            resume: false,
             credentials: super::from_environment()?,
         })
     }
@@ -166,29 +177,187 @@ pub(super) fn source(args: &Args, network: Option<&KnownNetwork>) -> miette::Res
 
 /// Where a restore reads from, with the credentials a repository is read
 /// with.
-pub(super) enum Inputs {
+enum Reader {
     Dir(PathBuf),
     Repo(Repository, Auth),
+}
+
+/// A restore's resolved inputs.
+pub(super) struct Inputs {
+    reader: Reader,
+    /// The source as read, a directory by its resolved path, for the record.
+    source: Source,
+    /// The stele to read in a repository.
+    point: Point,
+    resuming: Option<Resuming>,
+}
+
+/// What a `--continue` resumes.
+struct Resuming {
+    record: SourceRecord,
+    /// The record's source, parsed.
+    source: Source,
+    /// The layers the progress file records.
+    layers: usize,
 }
 
 /// Resolves the source and, for a repository, the credentials, so that
 /// `--force`, which `clears` says is to clear storage, clears nothing for a
 /// restore that would refuse them, and the restore reads with the credentials
-/// that were checked.
+/// that were checked. A `--continue` with records takes the recorded source
+/// and stele.
 pub(super) fn resolve(
     config: &RootConfig,
     args: &Args,
     network: Option<&KnownNetwork>,
     clears: bool,
 ) -> miette::Result<Inputs> {
-    match source(args, network)? {
-        Source::Dir(dir) => Ok(Inputs::Dir(check_dir(config, &dir, clears)?)),
+    let resuming = match args.resume {
+        true => unfinished(config, args)?,
+        false => None,
+    };
+
+    let (source, point) = match &resuming {
+        Some(resuming) => (
+            resuming.source.clone(),
+            Point::Epoch(resuming.record.sequence),
+        ),
+        None => (source(args, network)?, args.point),
+    };
+
+    let reader = match source {
+        Source::Dir(dir) => Reader::Dir(match &resuming {
+            Some(resuming) => reopen_dir(&dir, &resuming.record)?,
+            None => check_dir(config, &dir, clears)?,
+        }),
         Source::Repo(repo) => {
             let auth = args.credentials.auth(&repo, network)?;
 
-            Ok(Inputs::Repo(repo, auth))
+            Reader::Repo(repo, auth)
+        }
+    };
+
+    let source = match &reader {
+        Reader::Dir(dir) => Source::Dir(dir.clone()),
+        Reader::Repo(repo, _) => Source::Repo(repo.clone()),
+    };
+
+    Ok(Inputs {
+        reader,
+        source,
+        point,
+        resuming,
+    })
+}
+
+/// What `--continue` resumes: the source record an interrupted restore left,
+/// with the layers its progress file records, once the invocation agrees
+/// with it. `None` over storage holding no data and no records, which
+/// restores as without the flag.
+fn unfinished(config: &RootConfig, args: &Args) -> miette::Result<Option<Resuming>> {
+    let root = &config.storage.path;
+
+    let unfinished = match dolos_snapshot::restore::unfinished(root) {
+        Ok(unfinished) => unfinished,
+        Err(dolos_snapshot::Error::Resume(refusal)) => return Err(refused(refusal)),
+        Err(other) => {
+            return Err(other)
+                .into_diagnostic()
+                .context("reading the records of an interrupted restore")
+        }
+    };
+
+    match (unfinished.record, unfinished.progress) {
+        (Some(record), progress) => {
+            let source = record.source.parse().map_err(|reason: String| {
+                refused(ResumeRefusal::Unreadable {
+                    path: dolos_snapshot::restore::source_path_in(root),
+                    reason,
+                })
+            })?;
+
+            agrees(args, &record)?;
+
+            Ok(Some(Resuming {
+                record,
+                source,
+                layers: progress.map_or(0, |progress| progress.completed.len()),
+            }))
+        }
+        (None, Some(_)) => Err(refused(ResumeRefusal::Unrecorded {
+            storage: root.clone(),
+        })),
+        (None, None) => {
+            let held = dolos::storage::held_data(config).into_diagnostic()?;
+
+            if held.is_empty() {
+                return Ok(None);
+            }
+
+            let held: Vec<_> = held.iter().map(|path| path.display().to_string()).collect();
+
+            miette::bail!(
+                "nothing to resume: no stele restore left its records in {}, and storage holds \
+                 data ({}). Use --force to replace it",
+                root.display(),
+                held.join(", "),
+            )
         }
     }
+}
+
+/// Refuse, as a usage error naming the recorded value, a `--source` or an
+/// `--point epoch-N` other than the record's. `--point latest`, the default,
+/// always agrees: the record pins the stele, and the moving tag isn't read.
+fn agrees(args: &Args, record: &SourceRecord) -> miette::Result<()> {
+    if let Some(given) = &args.source {
+        let given = match given {
+            Source::Dir(dir) => Source::Dir(
+                dolos::storage::resolve_parent_dirs(dir)
+                    .into_diagnostic()
+                    .context("resolving --source")?,
+            ),
+            repo => repo.clone(),
+        };
+
+        if given.to_string() != record.source {
+            Err(Usage::new(
+                format!(
+                    "--source {given} is not the source of the restore --continue resumes, {}",
+                    record.source
+                ),
+                Some("leave --source out, or pass the recorded one".to_owned()),
+            ))?;
+        }
+    }
+
+    if let Point::Epoch(epoch) = args.point {
+        if epoch != record.sequence {
+            Err(Usage::new(
+                format!(
+                    "--point epoch-{epoch} is not the stele the restore --continue resumes, \
+                     epoch-{}",
+                    record.sequence
+                ),
+                Some("leave --point out, or pass the recorded one".to_owned()),
+            ))?;
+        }
+    }
+
+    Ok(())
+}
+
+/// The recorded stele directory, refused as gone when it holds no stele.
+fn reopen_dir(dir: &Path, record: &SourceRecord) -> miette::Result<PathBuf> {
+    match dolos_snapshot::dir::SteleDir::open(dir) {
+        Ok(_) => Ok(dir.to_path_buf()),
+        Err(_) => Err(refused(ResumeRefusal::Gone(record.clone()))),
+    }
+}
+
+/// A resume refused, with the flag that starts over.
+fn refused(refusal: ResumeRefusal) -> miette::Report {
+    miette::miette!("{refusal}. Use --force to start over")
 }
 
 /// The stele directory `dir`, once it is known to hold a stele and, when
@@ -255,13 +424,18 @@ impl Node {
     }
 
     /// What this node knows about itself, as the restore driver takes it.
-    fn restoring(&self, skip_space_check: bool) -> dolos_snapshot::restore::Restoring<'_> {
+    fn restoring<'a>(
+        &'a self,
+        inputs: &'a Inputs,
+        skip_space_check: bool,
+    ) -> dolos_snapshot::restore::Restoring<'a> {
         dolos_snapshot::restore::Restoring {
             network_magic: self.magic,
             max_history: self.max_history,
             storage_path: &self.root,
-            resume: false,
+            resume: inputs.resuming.is_some(),
             skip_space_check,
+            source: Some(&inputs.source),
         }
     }
 
@@ -286,51 +460,69 @@ fn restore(
     let node = Node::open(config)?;
     let progress = RestoreProgress::for_stderr(options.feedback);
     let observer = progress.observer();
-    let restoring = node.restoring(options.skip_space_check);
+    let restoring = node.restoring(&inputs, options.skip_space_check);
 
-    let outcome = match inputs {
-        Inputs::Dir(dir) => snapshot::restore(
-            RestoreInput::Directory(&dir),
-            restoring,
-            node.target(),
-            Some(&observer),
-        ),
-        Inputs::Repo(repo, auth) => {
+    let outcome = match &inputs.reader {
+        Reader::Dir(dir) => {
+            report_resume(&inputs);
+
+            snapshot::restore(
+                RestoreInput::Directory(dir),
+                restoring,
+                node.target(),
+                Some(&observer),
+            )
+        }
+        Reader::Repo(repo, auth) => {
             // Staging resolution remains node policy. The profile facade
             // receives the resolved inputs and never reads configuration or
             // environment on its own.
             let scratch = node::scratch_dir(&config.storage, args.scratch_dir.as_deref());
             let repository = SnapshotRepository::open(
-                &repo,
+                repo,
                 args.insecure,
-                auth,
+                auth.clone(),
                 scratch,
                 registry::Tuning::default(),
             )
             .into_diagnostic()
             .context("opening the repository")?;
 
-            println!("source:   {repo} ({})", args.point);
+            println!("source:   {repo} ({})", inputs.point);
+            report_resume(&inputs);
 
             snapshot::restore(
                 RestoreInput::Repository {
                     repository: &repository,
-                    point: args.point,
+                    point: inputs.point,
                 },
                 restoring,
                 node.target(),
                 Some(&observer),
             )
         }
-    }
-    .into_diagnostic()
-    .context("restoring the stele")?;
+    };
+
+    let outcome = match outcome {
+        Err(dolos_snapshot::Error::Resume(refusal)) => return Err(refused(refusal)),
+        outcome => outcome.into_diagnostic().context("restoring the stele")?,
+    };
 
     progress.finish();
 
     report(&outcome.plan, &outcome.outlook, &outcome.summary);
 
     Ok(())
+}
+
+/// The line a resumed restore starts with, before its first layer.
+fn report_resume(inputs: &Inputs) {
+    if let Some(Resuming { record, layers, .. }) = &inputs.resuming {
+        println!(
+            "resuming: {} epoch-{} ({}), {layers} layers recorded",
+            record.source, record.sequence, record.inscription_digest,
+        );
+    }
 }
 
 /// What the run did, in the numbers an operator checks.
@@ -549,6 +741,7 @@ mod tests {
             insecure: false,
             scratch_dir: None,
             skip_space_check: false,
+            resume: false,
             credentials: CredentialArgs::default(),
         }
     }

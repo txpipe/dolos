@@ -21,6 +21,9 @@ stelae = { git = "https://github.com/txpipe/stelae", rev = "55d5270eb3fc45f921dc
 stelae-driver = { git = "https://github.com/txpipe/stelae", rev = "55d5270eb3fc45f921dc56aec5a67f49d415596d", features = ["oci"] }
 dolos-core = { path = "../core" }
 dolos-cardano = { path = "../cardano" }
+# The registry client `stelae::oci` is built on, the version it takes, named
+# only to tell a resume's missing tag from a registry that did not answer.
+oci-client = { version = "0.17", default-features = false }
 
 hex.workspace = true
 minicbor.workspace = true

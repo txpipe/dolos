@@ -491,3 +491,427 @@ fn a_restored_node_has_a_wal_seeded_from_its_own_cursor() {
         "the restored WAL does not stand where the restored cursor does"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `--continue`
+// ---------------------------------------------------------------------------
+
+/// One digest over what a restore writes into a node: the cursor, every
+/// namespace's entities, the UTxO set, the blocks, every log namespace, the
+/// archive tags, the exact records and the entity index.
+fn digest(node: &Node) -> String {
+    use dolos_cardano::indexes::archive_dimensions;
+    use dolos_core::KeyRange;
+    use dolos_snapshot::{ENTITY_INDEX_KINDS, LOG_NAMESPACES, NAMESPACES, UTXOS};
+
+    let stores =
+        dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&node.config).unwrap();
+    let (state, archive) = (&stores.state, &stores.archive);
+
+    let mut seen = vec![format!("cursor {:?}", state.read_cursor().unwrap())];
+
+    for ns in NAMESPACES.iter().filter(|ns| **ns != UTXOS) {
+        let entities: Vec<_> = state
+            .iter_entities(ns, KeyRange::all())
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        seen.push(format!("{ns} {entities:?}"));
+    }
+
+    let utxos: std::collections::BTreeMap<_, _> =
+        state.iter_utxos().unwrap().map(Result::unwrap).collect();
+    seen.push(format!("utxos {utxos:?}"));
+
+    let blocks: Vec<_> = archive.get_range(None, None).unwrap().collect();
+    seen.push(format!("blocks {blocks:?}"));
+
+    for ns in LOG_NAMESPACES {
+        let logs: Vec<_> = archive
+            .iter_logs(ns, KeyRange::all())
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        seen.push(format!("{ns} {logs:?}"));
+    }
+
+    let mut tags: Vec<_> = archive
+        .iter_archive_tags(&archive_dimensions::ALL, 0..u64::MAX)
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    tags.sort();
+    seen.push(format!("tags {tags:?}"));
+
+    let mut exact: Vec<_> = archive
+        .iter_exact_records(0..u64::MAX)
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    exact.sort_by_key(|record| (record.kind, record.key().to_vec()));
+    seen.push(format!("exact {exact:?}"));
+
+    let entity_index: Vec<_> = archive
+        .iter_entity_records(&ENTITY_INDEX_KINDS, 0..u64::MAX)
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    seen.push(format!("entity index {entity_index:?}"));
+
+    drop(stores);
+
+    seen.sort();
+
+    pallas::crypto::hash::Hasher::<256>::hash(seen.join("\n").as_bytes()).to_string()
+}
+
+/// A stele directory cut from a synced node, and the node an uninterrupted
+/// restore of it builds.
+struct Fixture {
+    _origin: Node,
+    stele: std::path::PathBuf,
+    url: String,
+    control: String,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let origin = Node::new();
+        origin.sync();
+        origin.stand_at_boundary();
+
+        let stele = origin.root.path().join("stele");
+        origin.write_stele(&stele);
+        let url = format!("file://{}", stele.display());
+
+        let control = Node::new();
+        assert_ok(&control.run(&["bootstrap", "stelae", "--source", &url]));
+
+        Self {
+            control: digest(&control),
+            _origin: origin,
+            stele,
+            url,
+        }
+    }
+
+    /// The stele's digest and sequence, and the epoch layers in the order the
+    /// restore reads them.
+    fn layers(&self) -> (String, u64, Vec<std::path::PathBuf>) {
+        use dolos_snapshot::{dir::SteleDir, SteleReader as _};
+
+        let stele = SteleDir::open(&self.stele).unwrap();
+        let inscription = stele.read_inscription().unwrap();
+        let plan = dolos_snapshot::restore::plan(&stele, 2, None).unwrap();
+        let index = stele.blob_index().unwrap();
+
+        let blobs = plan
+            .immutable_layers()
+            .map(|layer| stele.blob_path(&index.blob_for(&layer.diff_id).unwrap()))
+            .collect();
+
+        (
+            inscription.digest().unwrap().to_string(),
+            inscription.sequence,
+            blobs,
+        )
+    }
+}
+
+/// Whether a report holds `text`, however it was wrapped: the report's
+/// gutters and all whitespace are dropped from both.
+fn reports(stderr: &[u8], text: &str) -> bool {
+    let squash = |text: &str| -> String {
+        text.chars()
+            .filter(|c| !c.is_whitespace() && !matches!(c, '│' | '×'))
+            .collect()
+    };
+
+    squash(&String::from_utf8_lossy(stderr)).contains(&squash(text))
+}
+
+fn storage_file(node: &Node, name: &str) -> std::path::PathBuf {
+    node.config.storage.path.join(name)
+}
+
+fn recorded_layers(node: &Node) -> Option<usize> {
+    let path = storage_file(node, dolos_snapshot::restore::PROGRESS_FILE);
+
+    dolos_snapshot::restore::RestoreProgress::load(&path)
+        .ok()
+        .flatten()
+        .map(|progress| progress.completed.len())
+}
+
+/// SIGKILL a restore of `fixture` into `node` while it waits on the blob of
+/// the `k`-th epoch layer, with the `k` before it recorded.
+///
+/// The blob is a FIFO while the restore runs, so it blocks opening it at a
+/// layer the test chose, and the kill lands on a process that is mid-run.
+#[cfg(unix)]
+fn kill_at_layer(fixture: &Fixture, node: &Node, k: usize) {
+    let (_, _, blobs) = fixture.layers();
+    let blob = &blobs[k];
+    let aside = blob.with_extension("aside");
+
+    std::fs::rename(blob, &aside).unwrap();
+    let made = std::process::Command::new("mkfifo")
+        .arg(blob)
+        .status()
+        .unwrap();
+    assert!(made.success());
+
+    let mut child = node
+        .command()
+        .args(["bootstrap", "stelae", "--source", &fixture.url])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+
+    while recorded_layers(node) != Some(k) {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "the restore ended before the layer"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the restore never reached layer {k}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "the restore ended at the layer"
+    );
+
+    // `kill` is SIGKILL on unix.
+    child.kill().unwrap();
+    let status = child.wait().unwrap();
+    assert!(!status.success());
+
+    std::fs::remove_file(blob).unwrap();
+    std::fs::rename(&aside, blob).unwrap();
+}
+
+/// Killed mid-run with a layer recorded, and `--continue` resumes it: the
+/// recorded stele read again, its recorded layers skipped, and the node an
+/// uninterrupted restore builds.
+#[cfg(unix)]
+#[test]
+fn a_killed_restore_resumes_with_continue() {
+    let fixture = Fixture::new();
+    let (digest_of_stele, sequence, blobs) = fixture.layers();
+    let k = blobs.len() / 2;
+    assert!(k >= 1, "the fixture needs an epoch layer to record first");
+
+    let node = Node::new();
+    kill_at_layer(&fixture, &node, k);
+
+    assert_eq!(recorded_layers(&node), Some(k));
+    assert!(storage_file(&node, ".snapshot-restore-source.json").exists());
+
+    // Partial data is refused without the flag.
+    let refused = node.run(&["bootstrap", "stelae", "--source", &fixture.url]);
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("--force"), "{stderr}");
+
+    let output = node.run(&["bootstrap", "stelae", "--continue"]);
+    let stdout = assert_ok(&output);
+
+    assert!(
+        stdout.contains(&format!(
+            "resuming: {} epoch-{sequence} ({digest_of_stele}), {k} layers recorded",
+            fixture.url
+        )),
+        "{stdout}"
+    );
+    assert!(stdout.contains(&format!("({k} skipped)")), "{stdout}");
+
+    assert_eq!(digest(&node), fixture.control);
+    assert!(!storage_file(&node, ".snapshot-restore-source.json").exists());
+    assert_eq!(recorded_layers(&node), None);
+}
+
+/// With nothing to resume, `--continue` on empty storage restores as a run
+/// without it does, and on populated storage refuses, naming `--force`.
+#[test]
+fn continue_with_nothing_to_resume_restores_into_empty_storage_only() {
+    let fixture = Fixture::new();
+
+    let empty = Node::new();
+    let stdout = assert_ok(&empty.run(&[
+        "bootstrap",
+        "stelae",
+        "--continue",
+        "--source",
+        &fixture.url,
+    ]));
+
+    assert!(!stdout.contains("resuming:"), "{stdout}");
+    assert!(stdout.contains("(0 skipped)"), "{stdout}");
+    assert_eq!(digest(&empty), fixture.control);
+
+    // The restored node is data, and nothing is left to resume.
+    let output = empty.run(&[
+        "bootstrap",
+        "stelae",
+        "--continue",
+        "--source",
+        &fixture.url,
+    ]);
+    assert!(!output.status.success());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(reports(&output.stderr, "nothing to resume"), "{stderr}");
+    assert!(stderr.contains("--force"), "{stderr}");
+
+    assert_eq!(digest(&empty), fixture.control);
+}
+
+/// A progress file with no source record, as an earlier release leaves, is
+/// refused, naming `--force`.
+#[test]
+fn continue_refuses_progress_without_a_source_record() {
+    let fixture = Fixture::new();
+    let (digest_of_stele, _, _) = fixture.layers();
+
+    let node = Node::new();
+    std::fs::create_dir_all(&node.config.storage.path).unwrap();
+
+    dolos_snapshot::restore::RestoreProgress::new(digest_of_stele.parse().unwrap())
+        .save(&storage_file(&node, dolos_snapshot::restore::PROGRESS_FILE))
+        .unwrap();
+
+    let output = node.run(&[
+        "bootstrap",
+        "stelae",
+        "--continue",
+        "--source",
+        &fixture.url,
+    ]);
+    assert!(!output.status.success());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(reports(&output.stderr, "no source record"), "{stderr}");
+    assert!(stderr.contains("--force"), "{stderr}");
+}
+
+/// The recorded stele gone from its directory, or another one under it, is
+/// refused, naming the recorded stele and `--force`.
+#[cfg(unix)]
+#[test]
+fn continue_refuses_a_stele_no_longer_in_its_source() {
+    let fixture = Fixture::new();
+    let (digest_of_stele, sequence, _) = fixture.layers();
+
+    let node = Node::new();
+    kill_at_layer(&fixture, &node, 1);
+
+    let expected = format!(
+        "the stele this restore started from ({digest_of_stele}, epoch-{sequence}) is no longer \
+         in {}",
+        fixture.url
+    );
+
+    // Another stele under the same path.
+    let original = fixture.stele.with_extension("original");
+    std::fs::rename(&fixture.stele, &original).unwrap();
+
+    let other = Node::new();
+    other.sync_chain(
+        std::sync::Arc::new(dolos_cardano::include::preview::load()),
+        dolos_core::config::GenesisConfig::in_dir(other.root.path()),
+        dolos_testing::synthetic::SyntheticBlockConfig {
+            block_count: 4,
+            txs_per_block: 1,
+            slot: 100,
+            ..Default::default()
+        },
+    );
+    other.stand_at_boundary();
+    other.write_stele(&fixture.stele);
+
+    let refused = || {
+        let output = node.run(&["bootstrap", "stelae", "--continue"]);
+        assert!(!output.status.success());
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(reports(&output.stderr, &expected), "{stderr}");
+        assert!(stderr.contains("--force"), "{stderr}");
+
+        assert_eq!(recorded_layers(&node), Some(1));
+    };
+
+    refused();
+
+    // And no stele there at all.
+    std::fs::remove_dir_all(&fixture.stele).unwrap();
+    refused();
+
+    // `--force` starts over from what `--source` names.
+    std::fs::rename(&original, &fixture.stele).unwrap();
+    assert_ok(&node.run(&["bootstrap", "stelae", "--force", "--source", &fixture.url]));
+    assert_eq!(digest(&node), fixture.control);
+}
+
+/// With records, a `--source` or an `--point epoch-N` other than the
+/// recorded one is a usage error naming it; `--point latest` and the
+/// recorded epoch agree.
+#[cfg(unix)]
+#[test]
+fn continue_refuses_another_source_or_point_than_the_record() {
+    let fixture = Fixture::new();
+    let (_, sequence, _) = fixture.layers();
+
+    let node = Node::new();
+    kill_at_layer(&fixture, &node, 1);
+
+    let elsewhere = node.root.path().join("elsewhere");
+    let output = node.run(&[
+        "bootstrap",
+        "stelae",
+        "--continue",
+        "--source",
+        &format!("file://{}", elsewhere.display()),
+    ]);
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(reports(&output.stderr, &fixture.url), "{stderr}");
+
+    let output = node.run(&[
+        "bootstrap",
+        "stelae",
+        "--continue",
+        "--point",
+        &format!("epoch-{}", sequence + 7),
+    ]);
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        reports(&output.stderr, &format!("epoch-{sequence}")),
+        "{stderr}"
+    );
+
+    assert_eq!(recorded_layers(&node), Some(1));
+
+    let stdout = assert_ok(&node.run(&[
+        "bootstrap",
+        "stelae",
+        "--continue",
+        "--source",
+        &fixture.url,
+        "--point",
+        &format!("epoch-{sequence}"),
+    ]));
+
+    assert!(stdout.contains("(1 skipped)"), "{stdout}");
+    assert_eq!(digest(&node), fixture.control);
+}
