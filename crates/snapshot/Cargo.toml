@@ -20,7 +20,7 @@ edition.workspace = true
 #
 # Pinned at 7b18c6f, the stelae main commit after v0.5.2 that retries failed
 # and truncated registry reads (txpipe/stelae#23).
-stelae ={ git = "https://github.com/txpipe/stelae", rev = "7b18c6f3e3166cef48d5c569b5908f85a82dd1e8", features = ["oci"] }
+stelae = { git = "https://github.com/txpipe/stelae", rev = "7b18c6f3e3166cef48d5c569b5908f85a82dd1e8", features = ["oci"] }
 stelae-driver = { git = "https://github.com/txpipe/stelae", rev = "7b18c6f3e3166cef48d5c569b5908f85a82dd1e8", features = ["oci"] }
 dolos-core = { path = "../core" }
 dolos-cardano = { path = "../cardano" }
