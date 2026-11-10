@@ -102,11 +102,19 @@ fn a_directory_stele_restores_the_node_that_encoded_it() {
     let stele = node.root.path().join("stele");
     node.write_stele(&stele);
 
-    let stdout = assert_ok(&node.bootstrap_stelae(&format!("file://{}", stele.display())));
+    let output = node.bootstrap_stelae(&format!("file://{}", stele.display()));
+    let stdout = assert_ok(&output);
 
     // The name comes from the magic, the same on both sides of the roundtrip.
     assert!(stdout.contains("preview (2)"), "{stdout}");
     assert!(stdout.contains("restored:"), "{stdout}");
+
+    // Stderr is a pipe here, not a terminal, so progress comes as plain lines.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let start = stderr.find(" progress: restoring ");
+    let end = stderr.find(" progress: done, ");
+    assert!(start.is_some() && end.is_some(), "{stderr}");
+    assert!(start < end, "{stderr}");
 
     assert_eq!(Contents::read(&node), before);
 

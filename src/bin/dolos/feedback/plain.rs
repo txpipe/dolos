@@ -8,7 +8,8 @@
 //! the end.
 
 use std::{
-    sync::{Arc, Condvar, Mutex},
+    io::Write,
+    sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError},
     thread::JoinHandle,
     time::{Duration, Instant},
 };
@@ -34,6 +35,7 @@ const TICK: Duration = Duration::from_secs(1);
 /// with a fake clock.
 pub struct Report {
     began: DateTime<Utc>,
+    period: Duration,
     started: Option<Duration>,
     total: usize,
     done: usize,
@@ -45,9 +47,11 @@ pub struct Report {
 }
 
 impl Report {
-    pub fn new(began: DateTime<Utc>) -> Self {
+    /// A report whose periodic lines come every `period`.
+    pub fn new(began: DateTime<Utc>, period: Duration) -> Self {
         Self {
             began,
+            period,
             started: None,
             total: 0,
             done: 0,
@@ -55,7 +59,7 @@ impl Report {
             open: Vec::new(),
             bytes: 0,
             last: (Duration::ZERO, 0),
-            next: PERIOD,
+            next: period,
         }
     }
 
@@ -75,7 +79,7 @@ impl Report {
                 if self.started.is_none() {
                     self.started = Some(at);
                     self.last = (at, self.bytes);
-                    self.next = at + PERIOD;
+                    self.next = at + self.period;
 
                     return Some(self.line(at, format!("restoring {total} layers")));
                 }
@@ -120,7 +124,7 @@ impl Report {
 
     /// The periodic line, when one is due at `at`.
     ///
-    /// Due every [`PERIOD`] from the first layer's start, events or not, so
+    /// Due every period from the first layer's start, events or not, so
     /// that a transfer that stalled still shows. A late tick writes one line
     /// and keeps the schedule rather than catching up.
     pub fn tick(&mut self, at: Duration) -> Option<String> {
@@ -131,7 +135,7 @@ impl Report {
         }
 
         while self.next <= at {
-            self.next += PERIOD;
+            self.next += self.period;
         }
 
         let (since, before) = self.last;
@@ -217,17 +221,36 @@ fn human(duration: Duration) -> String {
     }
 }
 
+/// Locks a mutex whether or not a panic poisoned it: the guarded state stays
+/// coherent across every write here, and a progress line is not worth
+/// aborting a restore over.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Where the lines go.
+pub type Sink = Box<dyn Write + Send>;
+
+struct Lines {
+    report: Report,
+    sink: Sink,
+}
+
+impl Lines {
+    /// Writes one line, ignoring a failed write: a log reader that went away
+    /// must not take the restore with it.
+    fn write(&mut self, line: &str) {
+        if writeln!(self.sink, "{line}").is_err() {
+            // Nothing to report it on: the sink is where it would go.
+        }
+    }
+}
+
 struct Shared {
-    report: Mutex<Report>,
+    lines: Mutex<Lines>,
     stopped: Mutex<bool>,
     wake: Condvar,
     began: Instant,
-}
-
-impl Shared {
-    fn write(line: &str) {
-        eprintln!("{line}");
-    }
 }
 
 /// The plain renderer as `bootstrap stelae` runs it: [`Report`] on the
@@ -238,9 +261,19 @@ pub struct PlainProgress {
 }
 
 impl PlainProgress {
+    /// The renderer on stderr, a periodic line every [`PERIOD`].
     pub fn start() -> Arc<Self> {
+        Self::start_with(PERIOD, TICK, Box::new(std::io::stderr()))
+    }
+
+    /// The renderer writing to `sink`, a periodic line every `period`, with a
+    /// ticker that checks every `tick` whether one is due.
+    pub fn start_with(period: Duration, tick: Duration, sink: Sink) -> Arc<Self> {
         let shared = Arc::new(Shared {
-            report: Mutex::new(Report::new(Utc::now())),
+            lines: Mutex::new(Lines {
+                report: Report::new(Utc::now(), period),
+                sink,
+            }),
             stopped: Mutex::new(false),
             wake: Condvar::new(),
             began: Instant::now(),
@@ -249,19 +282,24 @@ impl PlainProgress {
         let ticking = shared.clone();
 
         let ticker = std::thread::spawn(move || {
-            let mut stopped = ticking.stopped.lock().unwrap();
+            let mut stopped = lock(&ticking.stopped);
 
             while !*stopped {
-                stopped = ticking.wake.wait_timeout(stopped, TICK).unwrap().0;
+                stopped = ticking
+                    .wake
+                    .wait_timeout(stopped, tick)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
 
                 if *stopped {
                     break;
                 }
 
                 let at = ticking.began.elapsed();
+                let mut lines = lock(&ticking.lines);
 
-                if let Some(line) = ticking.report.lock().unwrap().tick(at) {
-                    Shared::write(&line);
+                if let Some(line) = lines.report.tick(at) {
+                    lines.write(&line);
                 }
             }
         });
@@ -280,18 +318,20 @@ impl PlainProgress {
     pub fn finish(&self) {
         if self.stop() {
             let at = self.shared.began.elapsed();
+            let mut lines = lock(&self.shared.lines);
+            let end = lines.report.end(at);
 
-            Shared::write(&self.shared.report.lock().unwrap().end(at));
+            lines.write(&end);
         }
     }
 
     /// Stops the ticker; true the first time only.
     fn stop(&self) -> bool {
-        let Some(ticker) = self.ticker.lock().unwrap().take() else {
+        let Some(ticker) = lock(&self.ticker).take() else {
             return false;
         };
 
-        *self.shared.stopped.lock().unwrap() = true;
+        *lock(&self.shared.stopped) = true;
         self.shared.wake.notify_all();
         if ticker.join().is_err() {
             tracing::warn!("the progress ticker panicked");
@@ -310,9 +350,10 @@ impl Drop for PlainProgress {
 impl Progress for PlainProgress {
     fn on(&self, event: Event<'_>) {
         let at = self.shared.began.elapsed();
+        let mut lines = lock(&self.shared.lines);
 
-        if let Some(line) = self.shared.report.lock().unwrap().on(event, at) {
-            Shared::write(&line);
+        if let Some(line) = lines.report.on(event, at) {
+            lines.write(&line);
         }
     }
 }
@@ -334,7 +375,7 @@ mod tests {
     /// arrives at all.
     #[test]
     fn the_plain_renderer_reports_a_resumed_run_on_a_fake_clock() {
-        let mut report = Report::new(began());
+        let mut report = Report::new(began(), PERIOD);
         let epoch = serde_json::json!({"networkMagic": 2, "epoch": 7});
         let shard = serde_json::json!({"networkMagic": 2, "epoch": 7, "shard": 3});
 
@@ -365,7 +406,7 @@ mod tests {
         );
         assert_eq!(finished, None);
 
-        report.on(
+        let second = report.on(
             Event::LayerStarted {
                 index: 1,
                 total: 4,
@@ -374,6 +415,7 @@ mod tests {
             },
             secs(12),
         );
+        assert_eq!(second, None, "the start line comes once");
         report.on(
             Event::Blob {
                 moved: true,
@@ -461,7 +503,7 @@ mod tests {
     /// than writing every line it missed.
     #[test]
     fn a_late_tick_writes_one_line_and_keeps_the_schedule() {
-        let mut report = Report::new(began());
+        let mut report = Report::new(began(), PERIOD);
         let scope = serde_json::json!({"epoch": 1});
 
         report.on(
@@ -478,6 +520,150 @@ mod tests {
         assert_eq!(report.tick(secs(96)), None);
         assert_eq!(report.tick(secs(119)), None);
         assert!(report.tick(secs(120)).is_some());
+    }
+
+    /// With two layers open, finishing the later one puts the periodic line
+    /// back at the earlier one.
+    #[test]
+    fn the_current_layer_is_the_latest_still_open() {
+        let mut report = Report::new(began(), PERIOD);
+        let first = serde_json::json!({"epoch": 1});
+        let second = serde_json::json!({"epoch": 2});
+
+        for (index, scope) in [(0, &first), (1, &second)] {
+            report.on(
+                Event::LayerStarted {
+                    index,
+                    total: 2,
+                    kind: "blocks",
+                    scope,
+                },
+                secs(0),
+            );
+        }
+
+        report.on(
+            Event::LayerFinished {
+                index: 1,
+                total: 2,
+                kind: "blocks",
+                outcome: Outcome::Transferred,
+            },
+            secs(1),
+        );
+
+        let line = report.tick(PERIOD).unwrap();
+        assert!(line.contains("1/2 layers"), "{line}");
+        assert!(line.ends_with(", at blocks epoch 1"), "{line}");
+    }
+
+    /// A sink the test reads back.
+    #[derive(Clone, Default)]
+    struct Buffer(Arc<Mutex<Vec<u8>>>);
+
+    impl Buffer {
+        fn lines(&self) -> Vec<String> {
+            String::from_utf8(self.0.lock().unwrap().clone())
+                .unwrap()
+                .lines()
+                .map(str::to_owned)
+                .collect()
+        }
+    }
+
+    impl Write for Buffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().write(buf)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A sink whose reader went away.
+    struct Closed;
+
+    impl Write for Closed {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+    }
+
+    fn layer_started(scope: &serde_json::Value) -> Event<'_> {
+        Event::LayerStarted {
+            index: 0,
+            total: 1,
+            kind: "blocks",
+            scope,
+        }
+    }
+
+    /// The ticker thread writes the periodic lines with no event arriving,
+    /// and `finish` stops it and writes the end line last, once.
+    #[test]
+    fn the_ticker_writes_periodic_lines_and_finish_ends_them() {
+        let buffer = Buffer::default();
+        let period = Duration::from_millis(40);
+        let progress =
+            PlainProgress::start_with(period, Duration::from_millis(5), Box::new(buffer.clone()));
+        let scope = serde_json::json!({"epoch": 1});
+
+        progress.on(layer_started(&scope));
+
+        // Waits for the ticker rather than for a fixed time, so a loaded
+        // machine slows the test down instead of failing it.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !buffer
+            .lines()
+            .iter()
+            .any(|line| line.contains(" over the last "))
+        {
+            assert!(Instant::now() < deadline, "no periodic line was written");
+            std::thread::sleep(period);
+        }
+
+        progress.finish();
+        progress.finish();
+        drop(progress);
+
+        let lines = buffer.lines();
+        let count = |needle: &str| lines.iter().filter(|line| line.contains(needle)).count();
+
+        assert_eq!(count(" progress: restoring 1 layers"), 1, "{lines:#?}");
+        assert!(count(" over the last ") >= 1, "{lines:#?}");
+        assert_eq!(count(" progress: done, "), 1, "{lines:#?}");
+        assert!(
+            lines.last().unwrap().contains(" progress: done, "),
+            "{lines:#?}"
+        );
+    }
+
+    /// A failed write loses the line and nothing else: the events, the ticker
+    /// and the end line carry on as if it had been read.
+    #[test]
+    fn a_sink_that_fails_does_not_stop_the_restore() {
+        let period = Duration::from_millis(10);
+        let progress =
+            PlainProgress::start_with(period, Duration::from_millis(2), Box::new(Closed));
+        let scope = serde_json::json!({"epoch": 1});
+
+        progress.on(layer_started(&scope));
+        std::thread::sleep(period * 3);
+        progress.on(Event::Retry {
+            attempt: 1,
+            remaining: 2,
+            reason: "reset",
+        });
+        progress.finish();
+
+        let lines = lock(&progress.shared.lines);
+        assert_eq!(lines.report.done, 0);
+        assert!(lines.report.started.is_some());
     }
 
     #[test]
