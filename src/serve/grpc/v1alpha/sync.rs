@@ -9,6 +9,7 @@ use std::pin::Pin;
 use tonic::{Request, Response, Status};
 
 use crate::prelude::*;
+use crate::serve::grpc::convert::chain_stream_status;
 use crate::serve::grpc::masking::BlockMask;
 
 const MAX_DUMP_HISTORY_ITEMS: u32 = 100;
@@ -287,7 +288,7 @@ where
             intersect.clone(),
             self.cancel.clone(),
         )
-        .map_err(|e| Status::internal(format!("failed to start chain stream: {e}")))?
+        .map_err(|e| chain_stream_status("failed to start chain stream", &e))?
         .ok_or_else(|| {
             Status::not_found(format!(
                 "none of the requested points intersect with local history: {intersect:?}"
@@ -296,7 +297,10 @@ where
 
         let mapper = self.mapper.clone();
 
-        let stream = stream.map(move |log| Ok(tip_event_to_response(&mapper, &log, mask)));
+        let stream = stream.map(move |log| match log {
+            Ok(log) => Ok(tip_event_to_response(&mapper, &log, mask)),
+            Err(e) => Err(chain_stream_status("chain stream failed", &e)),
+        });
 
         Ok(Response::new(Box::pin(stream)))
     }
@@ -331,6 +335,55 @@ mod tests {
     use pallas::interop::utxorpc::v1alpha::spec::sync::sync_service_server::SyncService as _;
 
     use super::*;
+
+    fn follow_tip_from(point: &ChainPoint) -> Request<u5c::sync::FollowTipRequest> {
+        Request::new(u5c::sync::FollowTipRequest {
+            intersect: vec![u5c::sync::BlockRef {
+                slot: point.slot(),
+                hash: point.hash().unwrap().to_vec().into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+    }
+
+    #[tokio::test]
+    async fn follow_tip_tells_the_client_to_retry_when_it_loses_the_overlap() {
+        let domain = ToyDomain::new(None, None);
+        let chain = crate::serve::grpc::stream::tests::archived_chain(&domain, &[100, 110, 120]);
+
+        let service = SyncServiceImpl::new(domain, CancelTokenImpl::default());
+
+        let response = service
+            .follow_tip(follow_tip_from(&chain[0].0))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let items: Vec<_> = response.collect().await;
+
+        // The intersection and the two archived blocks after it, then the failure.
+        assert_eq!(items.len(), 4);
+        assert_eq!(
+            items.last().unwrap().as_ref().unwrap_err().code(),
+            tonic::Code::Unavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn follow_tip_tells_the_client_to_retry_when_it_starts_without_overlap() {
+        let domain = ToyDomain::new(None, None);
+        let chain = crate::serve::grpc::stream::tests::archived_chain(&domain, &[100]);
+
+        let service = SyncServiceImpl::new(domain, CancelTokenImpl::default());
+
+        let status = match service.follow_tip(follow_tip_from(&chain[0].0)).await {
+            Ok(_) => panic!("expected the start to fail"),
+            Err(status) => status,
+        };
+
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+    }
 
     #[tokio::test]
     async fn test_dump_history_pagination() {

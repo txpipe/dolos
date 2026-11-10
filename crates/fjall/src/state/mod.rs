@@ -456,6 +456,20 @@ impl CoreStateStore for StateStore {
 
         Ok(Viewed::new(iter, self.view.as_ref()))
     }
+
+    /// Commits are journaled with [`PersistMode::Buffer`]; this fsyncs the
+    /// journal. A read-only view committed nothing, so it has nothing to sync.
+    fn persist(&self) -> Result<(), StateError> {
+        if self.view.is_some() {
+            return Ok(());
+        }
+
+        self.db
+            .persist(PersistMode::SyncAll)
+            .map_err(Error::Fjall)?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -566,12 +580,36 @@ mod tests {
 
             let error = store.record_identity("other").unwrap_err();
             assert!(matches!(error, Error::ReadOnly), "{error:?}");
+
+            // Nothing was committed through the view, so there is nothing to sync.
+            store.persist().unwrap();
         }
 
         assert!(
             files(dir.path()) == before,
             "a read-only store changed a file"
         );
+    }
+
+    /// A cursor committed and persisted is there when the store is reopened
+    /// without a shutdown. The fsync itself shows only after a power loss, so
+    /// this pins that `persist` succeeds on a writable store.
+    #[test]
+    fn a_persisted_commit_survives_a_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state");
+        let point = ChainPoint::Specific(100, pallas::crypto::hash::Hash::new([7; 32]));
+
+        {
+            let store = StateStore::open(&path, Preset::Standard).unwrap();
+            let writer = store.start_writer().unwrap();
+            writer.set_cursor(point.clone()).unwrap();
+            writer.commit().unwrap();
+            store.persist().unwrap();
+        }
+
+        let store = StateStore::open(&path, Preset::Standard).unwrap();
+        assert_eq!(store.read_cursor().unwrap(), Some(point));
     }
 
     /// An iterator drained after its read-only store is dropped reads every

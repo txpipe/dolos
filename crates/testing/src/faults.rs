@@ -355,6 +355,13 @@ impl StateStore for FaultyStateStore {
         }
         self.inner.iter_utxos()
     }
+
+    fn persist(&self) -> Result<(), StateError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.persist()
+    }
 }
 
 pub struct FaultyStateWriter {
@@ -551,6 +558,13 @@ impl ArchiveStore for FaultyArchiveStore {
             return Err(self.fault_err());
         }
         self.inner.truncate_front(after)
+    }
+
+    fn persist(&self) -> Result<(), ArchiveError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.persist()
     }
 
     fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {

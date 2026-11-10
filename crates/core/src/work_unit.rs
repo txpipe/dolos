@@ -5,7 +5,7 @@
 //! allows the core crate to remain chain-agnostic while supporting different
 //! blockchain implementations.
 
-use crate::{ChainPoint, Domain, DomainError, TipEvent, TxHash};
+use crate::{ArchiveIndexDelta, ChainPoint, Domain, DomainError, TipEvent, TxHash};
 
 /// An update for the mempool based on a confirmed block.
 pub struct MempoolUpdate {
@@ -210,5 +210,14 @@ pub trait WorkUnit<D: Domain>: Send {
     /// which is appropriate for work units that don't process blocks.
     fn mempool_updates(&self) -> Vec<MempoolUpdate> {
         Vec::new()
+    }
+
+    /// The archive index entries this unit committed, one per block.
+    ///
+    /// The stores keep only the hashed form, and neither archive traversal can
+    /// seek to a slot, so this is the one narrow source of what a block wrote.
+    /// The default is empty, for the units that index no block.
+    fn archive_index_deltas(&self) -> &[ArchiveIndexDelta] {
+        &[]
     }
 }

@@ -202,6 +202,91 @@ fn configured_boundary_survives_inspection_and_requires_explicit_advancement() {
     session.finish().unwrap();
 }
 
+/// What the replay committed for the boundary block is the boundary's index
+/// tail: a capture from that delta, with its transaction and input-derived
+/// tags, holds the layer a traversal of the stores standing there finds.
+#[test]
+fn the_boundary_delta_is_the_index_tail_a_traversal_finds() {
+    use dolos_snapshot::prepare::{IndexTail, Request, Store};
+
+    let mut node = node::Node::new();
+    let mut genesis = dolos_cardano::include::preview::load();
+    genesis.force_protocol = Some(9);
+    let epoch_one = genesis.shelley.epoch_length.unwrap() as u64;
+    let genesis = Arc::new(genesis);
+    let magic = u64::from(genesis.network_magic());
+
+    // Plain txs, each seed paying exactly the fee of 7, so the pots hold across
+    // the boundary.
+    let (blocks, _, chain) = build_synthetic_blocks(SyntheticBlockConfig {
+        block_count: 3,
+        slot: epoch_one - 1,
+        plain_txs: true,
+        seed_amount: dolos_testing::MIN_UTXO_AMOUNT + 7,
+        ..Default::default()
+    });
+    node.config.chain = node.custom_chain(2, chain.custom_utxos);
+
+    let mut session = BulkReplaySession::open(&node.config, genesis.clone(), Some(1)).unwrap();
+
+    assert!(session.boundary_index_delta().is_none());
+
+    let progress = session.import_blocks(blocks).unwrap();
+
+    assert!(progress.is_boundary());
+    assert_eq!(progress.position().slot(), epoch_one);
+
+    let delta = session.boundary_index_delta().unwrap().clone();
+
+    assert_eq!(delta.slot, epoch_one);
+    assert!(!delta.tx_hashes.is_empty());
+    assert!(!delta.tags.is_empty());
+
+    let snapshot = session.snapshot();
+    let plan = snapshot
+        .plan(
+            magic,
+            dolos_snapshot::planning::retained_epochs(&[]).unwrap(),
+        )
+        .unwrap();
+    let silent = dolos_snapshot::progress::Observer::silent();
+    let scratch = tempfile::tempdir().unwrap();
+
+    let prepare = |name: &str, tail| {
+        let store = Store::open(scratch.path().join(name), "test").unwrap();
+
+        snapshot
+            .prepare_boundary(
+                &store,
+                &plan,
+                &Request {
+                    store_contract: dolos::core::compat::SUPPORTED_CONTRACTS[0].to_owned(),
+                    mutable_slots: dolos_cardano::mutable_slots(&genesis),
+                    tail,
+                },
+                &silent,
+            )
+            .unwrap()
+    };
+
+    let from_delta = prepare("delta", IndexTail::Delta(&delta));
+    let from_traversal = prepare("traversal", IndexTail::Traverse);
+
+    let tail = |bundle: &dolos_snapshot::prepare::Bundle| {
+        bundle
+            .layers()
+            .find(|layer| layer.kind == dolos_snapshot::INDEXES)
+            .unwrap()
+            .clone()
+    };
+
+    assert!(tail(&from_delta).records > 3);
+    assert_eq!(tail(&from_delta), tail(&from_traversal));
+
+    drop(snapshot);
+    session.finish().unwrap();
+}
+
 /// The automated cut is the one the boundary check accepts: a replay stopped by
 /// `stop_epoch = 1` stands on epoch 1's first block, with epoch 0's last block
 /// as its parent, and publishes. One block further, the same stores are

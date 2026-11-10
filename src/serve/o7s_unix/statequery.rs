@@ -1,5 +1,5 @@
 use chrono::{Datelike, Timelike};
-use dolos_cardano::{load_era_summary, EraState as DolosEraState};
+use dolos_cardano::load_era_summary;
 use dolos_core::StateStore;
 use pallas::codec::utils::AnyCbor;
 use pallas::ledger::traverse::MultiEraBlock;
@@ -11,9 +11,9 @@ use tracing::{debug, info, warn};
 use crate::prelude::*;
 use crate::serve::o7s_unix::utils;
 use utils::{
-    build_account_state_response, build_era_history_response, build_pool_state_response,
-    build_protocol_params, build_stake_pool_params_response, build_stake_pools_response,
-    build_stake_snapshots_response, build_utxo_by_address_response,
+    build_account_state_response, build_pool_state_response, build_protocol_params,
+    build_stake_pool_params_response, build_stake_pools_response, build_stake_snapshots_response,
+    build_utxo_by_address_response, load_era_history_response,
 };
 
 pub struct Session<D: Domain> {
@@ -33,12 +33,19 @@ impl<D: Domain> Session<D> {
 
         match point {
             ChainPoint::Slot(slot) => {
-                let body = self
-                    .domain
-                    .archive()
-                    .get_block_by_slot(&slot)
-                    .map_err(Error::server)?
-                    .ok_or_else(|| Error::server("block not found for slot"))?;
+                let archive = self.domain.archive();
+
+                // An epoch boundary commits this cursor before its block is
+                // applied, so until then the tip is the last archived block.
+                let found = archive.get_block_by_slot(&slot).map_err(Error::server)?;
+                let tip = match found {
+                    Some(body) => Some((slot, body)),
+                    None => archive.get_tip().map_err(Error::server)?,
+                };
+
+                let Some((slot, body)) = tip else {
+                    return Ok(ChainPoint::Origin);
+                };
 
                 let block =
                     MultiEraBlock::decode(&body).map_err(|e| Error::server(e.to_string()))?;
@@ -67,10 +74,13 @@ impl<D: Domain> Session<D> {
         Ok(())
     }
 
+    /// Answer an Acquire or ReAcquire, returning whether the point was
+    /// acquired. A failure puts the protocol back in Idle, whichever one
+    /// was asked.
     async fn handle_acquire(
         &mut self,
         point: Option<pallas::network::miniprotocols::Point>,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         debug!(?point, "handling acquire request");
 
         let chain_point = match point {
@@ -104,11 +114,12 @@ impl<D: Domain> Session<D> {
             self.acquired_point = Some(chain_point);
             self.send_acquired().await?;
         } else {
+            self.acquired_point = None;
             self.send_failure(localstate::AcquireFailure::PointNotOnChain)
                 .await?;
         }
 
-        Ok(())
+        Ok(exists)
     }
 
     /// Decode cardano-cli tagged query format.
@@ -224,13 +235,7 @@ impl<D: Domain> Session<D> {
             ))) => {
                 debug!("GetInterpreter query");
 
-                let chain_summary = load_era_summary::<D>(self.domain.state())
-                    .map_err(|e| Error::server(format!("failed to load era summary: {}", e)))?;
-
-                let eras: Vec<DolosEraState> = chain_summary.iter_all().cloned().collect();
-
-                let genesis = self.domain.genesis();
-                build_era_history_response(&eras, &genesis)?
+                load_era_history_response(&self.domain)?
             }
             Ok(q16::Request::LedgerQuery(q16::LedgerQuery::HardForkQuery(
                 q16::HardForkQuery::GetCurrentEra,
@@ -351,7 +356,7 @@ impl<D: Domain> Session<D> {
     async fn handle_reacquire(
         &mut self,
         point: Option<pallas::network::miniprotocols::Point>,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         debug!(?point, "handling reacquire request");
         self.handle_acquire(point).await
     }
@@ -370,7 +375,9 @@ impl<D: Domain> Session<D> {
                 .await
                 .map_err(Error::server)?
             {
-                self.handle_acquire(req.0).await?;
+                if !self.handle_acquire(req.0).await? {
+                    continue;
+                }
             } else {
                 break;
             }
@@ -386,9 +393,11 @@ impl<D: Domain> Session<D> {
                         self.handle_query(query).await?;
                     }
                     localstate::ClientQueryRequest::ReAcquire(point) => {
-                        self.handle_reacquire(point).await?;
                         // After reacquire, we stay in acquired state but with
-                        // new point
+                        // new point, unless it failed
+                        if !self.handle_reacquire(point).await? {
+                            break;
+                        }
                     }
                     localstate::ClientQueryRequest::Release => {
                         self.handle_release().await?;
