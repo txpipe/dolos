@@ -228,6 +228,8 @@ Restores a Stelae snapshot (a stele), then starts the WAL at the restored point.
 | `--registry-user USER` | `DOLOS_STELAE_USER` | the registry user; defaults to the published read-only user on the official repository |
 | `--registry-credentials-file PATH` | | a TOML file naming `password` or `token`, instead of `DOLOS_STELAE_PASSWORD` / `DOLOS_STELAE_TOKEN` |
 
+A registry read that drops partway, arrives short or fails its digest is made again: each read gets six attempts, waiting 2 s before the second and doubling each time. When the last one fails, the restore exits with an error naming the blob or manifest, the attempt count and the cause.
+
 With `--continue`, the recorded source and epoch are read again: `--source` and `--point` may be left out, a different one is refused (exit `2`), and `--point latest` always agrees. A stele no longer in its source, or a progress file with no source record, is refused, naming `--force`. A secret is never a command-line argument.
 
 ### `dolos bootstrap immutabledb`

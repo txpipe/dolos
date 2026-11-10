@@ -268,6 +268,10 @@ where
     A: ArchiveStore,
     S: StateStore,
 {
+    // Attached before the pull, so a retried manifest or config read reaches
+    // the operator too; the stele shares this connection's observer.
+    registry.observe(observer.clone());
+
     let stele = match point.pull(registry) {
         Ok(stele) => stele,
         Err(error) => {
@@ -281,28 +285,10 @@ where
     crate::restore::restore_stele(&stele, node, registry.scratch_dir(), target, observer)
 }
 
-/// Whether a pull failed because the repository has no manifest under the
-/// tag: the three shapes `oci-client` reports a 404 in, as
-/// `stelae::oci::Registry::latest` reads them. Any other failure is the
-/// registry not answering, which says nothing about whether the stele is
-/// there.
+/// Whether a pull failed because the repository holds no manifest under the
+/// tag, rather than because the registry did not answer.
 fn is_absent(error: &Error) -> bool {
-    use oci_client::errors::{OciDistributionError as E, OciErrorCode};
-
-    match error {
-        Error::Stelae(stelae::Error::Registry(error)) => match error {
-            E::ImageManifestNotFoundError(_) => true,
-            E::ServerError { code: 404, .. } => true,
-            E::RegistryError { envelope, .. } => envelope.errors.iter().any(|e| {
-                matches!(
-                    e.code,
-                    OciErrorCode::ManifestUnknown | OciErrorCode::NameUnknown
-                )
-            }),
-            _ => false,
-        },
-        _ => false,
-    }
+    matches!(error, Error::Stelae(error) if error.is_absent())
 }
 
 /// Open a repository in a registry, which is [`stelae_driver::publish::open`]:
