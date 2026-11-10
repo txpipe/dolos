@@ -255,10 +255,12 @@ impl<'a> IntoModel<BlockContent> for BlockModelBuilder<'a> {
             .map(|x| Some(x as i32))
             .unwrap_or_default();
 
+        // a block read after the tip, or a tip rolled back since the block was
+        // read, has no confirmations rather than a count below zero
         let confirmations = self
             .tip
             .as_ref()
-            .map(|x| x.number() - block.number())
+            .map(|x| x.number().saturating_sub(block.number()))
             .map(|x| x as i32)
             .unwrap_or_default();
 
@@ -428,6 +430,29 @@ pub fn decode_block_header(body: &[u8]) -> Result<Option<MultiEraHeader<'_>>, St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn confirmations_stop_at_zero_for_a_block_past_the_tip() {
+        use dolos_testing::blocks::make_conway_block_with_prev;
+
+        let (_, older) = make_conway_block_with_prev(10, None, 5);
+        let (_, newer) = make_conway_block_with_prev(20, None, 7);
+
+        let confirmations = |block: &[u8], tip: &[u8]| {
+            let model: BlockContent = BlockModelBuilder::new(block)
+                .unwrap()
+                .with_tip(tip)
+                .unwrap()
+                .into_model()
+                .unwrap();
+
+            model.confirmations
+        };
+
+        assert_eq!(confirmations(&older, &newer), 2);
+        assert_eq!(confirmations(&newer, &newer), 0);
+        assert_eq!(confirmations(&newer, &older), 0);
+    }
 
     #[test]
     fn decode_block_header_matches_full_decode() {

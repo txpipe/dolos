@@ -37,7 +37,6 @@ where
         false => Some(load_block_by_hash_or_number(&domain, &hash_or_number).await?),
     };
 
-    let tip = tip_block(&domain)?;
     let chain = domain.get_chain_summary()?;
 
     let bodies = {
@@ -46,6 +45,10 @@ where
             .map(MultiEraBlock::decode)
             .transpose()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        // the tip the bound is taken against; the models read theirs after
+        // the page
+        let tip = tip_block(&domain)?;
         let tip = MultiEraBlock::decode(&tip).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         // an impossible page is empty without a walk
@@ -69,6 +72,10 @@ where
                 .collect::<Vec<_>>()
         }
     };
+
+    // read after the page: a block that rolled in during the walk is in the
+    // page, so the tip its confirmations count from must not be older than it
+    let tip = tip_block(&domain)?;
 
     let futures = bodies
         .iter()

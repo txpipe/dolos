@@ -33,7 +33,6 @@ where
 
     let curr = load_block_by_hash_or_number(&domain, &hash_or_number).await?;
 
-    let tip = tip_block(&domain)?;
     let chain = domain.get_chain_summary()?;
 
     // walking back, the page starts `from` blocks before the reference block
@@ -82,6 +81,9 @@ where
             false => (Vec::new(), false),
         }
     };
+
+    // read after the page, like `/next`
+    let tip = tip_block(&domain)?;
 
     let futures = bodies
         .iter()
