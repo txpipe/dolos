@@ -2,8 +2,9 @@
 //!
 //! Enough of the distribution API for a publish and a restore over plaintext
 //! HTTP: monolithic blob uploads, blob `HEAD`/`GET`, manifest `PUT`/`GET`. A
-//! scripted fault cuts a blob `GET` off partway. No container, so the suites
-//! using it run under plain `cargo test`.
+//! scripted fault cuts a blob `GET` off partway, or answers a manifest `GET`
+//! with a `503`. No container, so the suites using it run under plain
+//! `cargo test`.
 //!
 //! **A trimmed copy of `stelae/tests/fault_registry`**, for the reason
 //! `registry_fixture` gives: `stelae` must never depend on a `dolos-*` package,
@@ -49,6 +50,12 @@ struct State {
     manifests: HashMap<String, (String, Vec<u8>)>,
     /// Layer digests of the last manifest stored, in manifest order.
     layers: Vec<String>,
+    /// Config blob digest of the last manifest stored.
+    config: Option<String>,
+    /// Manifest `GET`s still to be answered with a `503`.
+    manifest_faults: usize,
+    /// Manifest `GET`s received.
+    manifest_gets: usize,
     /// Cut-offs keyed by blob digest.
     faults: HashMap<String, Script>,
     /// `GET`s per blob digest.
@@ -95,6 +102,21 @@ impl FaultRegistry {
     /// The layer blob digests of the manifest last pushed.
     pub fn layers(&self) -> Vec<String> {
         self.state().layers.clone()
+    }
+
+    /// The config blob digest of the manifest last pushed.
+    pub fn config(&self) -> String {
+        self.state().config.clone().expect("nothing was published")
+    }
+
+    /// Answer the next `times` manifest `GET`s with a `503`.
+    pub fn fail_next_manifest(&self, times: usize) {
+        self.state().manifest_faults += times;
+    }
+
+    /// How many manifest `GET`s the registry received.
+    pub fn manifest_gets(&self) -> usize {
+        self.state().manifest_gets
     }
 
     /// The largest layer blob of the manifest last pushed: the one a cut-off
@@ -315,6 +337,7 @@ fn handle(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                 .flatten()
                 .map(|layer| layer["digest"].as_str().unwrap().to_owned())
                 .collect();
+            state.config = parsed["config"]["digest"].as_str().map(str::to_owned);
             let entry = (media_type, request.body);
             state.manifests.insert(digest.clone(), entry.clone());
             state.manifests.insert(reference, entry);
@@ -330,7 +353,21 @@ fn handle(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
             );
         }
 
-        let manifest = lock().manifests.get(&reference).cloned();
+        let (manifest, failed) = {
+            let mut state = lock();
+            let failed = request.method == "GET" && {
+                state.manifest_gets += 1;
+                let failed = state.manifest_faults > 0;
+                state.manifest_faults = state.manifest_faults.saturating_sub(1);
+                failed
+            };
+
+            (state.manifests.get(&reference).cloned(), failed)
+        };
+
+        if failed {
+            return respond(&stream, 503, &[], 0, b"");
+        }
 
         return match manifest {
             None => {

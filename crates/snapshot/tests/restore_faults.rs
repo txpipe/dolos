@@ -217,3 +217,71 @@ fn an_exhausted_layer_read_names_the_blob_and_the_attempts() {
         "every attempt fetched the layer again"
     );
 }
+
+/// Restore with `fault` armed, and return what the observer saw retried.
+///
+/// The reads before the first layer (the manifest and the config blob) run
+/// before the restore has a stele to watch, so this is what shows the
+/// observer is attached to the registry, not only to the stele it yields.
+fn retries_seen_with(fault: impl FnOnce(&FaultRegistry)) -> (FaultRegistry, usize) {
+    let registry = FaultRegistry::spawn();
+    let scratch = tempfile::tempdir().unwrap();
+    let (_, magic) = published(&registry, scratch.path());
+
+    fault(&registry);
+
+    let blank = Blank::<MemoryStores>::open();
+    let storage = tempfile::tempdir().unwrap();
+    let watcher = Arc::new(Watcher::default());
+
+    let summary = restore_into(
+        &opened(&registry, scratch.path()),
+        &blank,
+        storage.path(),
+        magic,
+        &watcher.observer(),
+    )
+    .unwrap_or_else(|e| panic!("the restore gave up on one failed read: {e}"));
+
+    assert_eq!(summary.layers_fetched, registry.layers().len());
+
+    let retries = watcher.retries();
+
+    (registry, retries)
+}
+
+/// A config blob cut off once is fetched again, and the retry is announced to
+/// the restore's observer.
+#[test]
+fn a_retried_config_read_is_announced() {
+    let (registry, retries) = retries_seen_with(|registry| {
+        registry.cut_next(&registry.config(), 1);
+    });
+
+    assert_eq!(
+        registry.gets(&registry.config()),
+        2,
+        "the config is fetched twice"
+    );
+    assert_eq!(retries, 1, "the config retry reaches the observer");
+}
+
+/// A manifest the registry fails once is fetched again, and the retry is
+/// announced to the restore's observer.
+#[test]
+fn a_retried_manifest_read_is_announced() {
+    // The publish reads the moving tag too, so only the restore's are counted.
+    let published = std::cell::Cell::new(0);
+
+    let (registry, retries) = retries_seen_with(|registry| {
+        published.set(registry.manifest_gets());
+        registry.fail_next_manifest(1);
+    });
+
+    assert_eq!(
+        registry.manifest_gets() - published.get(),
+        2,
+        "the manifest is fetched twice"
+    );
+    assert_eq!(retries, 1, "the manifest retry reaches the observer");
+}
