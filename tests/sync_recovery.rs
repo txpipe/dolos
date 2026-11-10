@@ -4,15 +4,20 @@
 
 mod node;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::Arc;
 
 use dolos::engine::DomainBuilder;
-use dolos_cardano::CardanoDelta;
+use dolos_cardano::{
+    indexes::{archive_dimensions, utxo_tags},
+    CardanoDelta, CardanoEntity, CardanoLogic,
+};
 use dolos_core::{
-    ChainPoint, Domain as _, Genesis, LogValue, RawBlock, SyncExt as _, WalStore as _,
+    ArchiveStore, ArchiveWriter as _, ChainLogic as _, ChainPoint, Domain, EntityKey, EntityMap,
+    ExactRecord, Genesis, KeyRange, LogValue, RawBlock, StateStore, StateWriter as _, SyncExt as _,
+    TagEntry, TagOrder, TagRecord, TagStart, UtxoEntry, WalStore as _,
 };
 use node::{feed_until_crash, fixture, point, start, store_positions, CrashAfter, Node};
 
@@ -305,6 +310,436 @@ fn a_missing_dataset_is_refused_and_left_missing() {
             stderr_words(&output)
         );
         assert!(!data.exists(), "{args:?} created {}", data.display());
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RollbackInterruption {
+    State,
+    Indexes,
+    Archive,
+}
+
+fn interrupt_rollback<D>(domain: &D, to: &ChainPoint, after: RollbackInterruption)
+where
+    D: Domain<Entity = CardanoEntity, EntityDelta = CardanoDelta, Chain = CardanoLogic>,
+{
+    let writer = domain.state().start_writer().unwrap();
+    let archive = domain.archive().start_writer().unwrap();
+    let mut entities = EntityMap::default();
+
+    for (at, log) in domain
+        .wal()
+        .iter_logs(Some(to.clone()), None)
+        .unwrap()
+        .rev()
+    {
+        if at == *to {
+            writer.set_cursor(at).unwrap();
+            break;
+        }
+
+        dolos_core::state::undo_delta_chunk::<D>(&mut entities, domain.state(), &log.delta)
+            .unwrap();
+        let undo = CardanoLogic::compute_undo(&log.block, &log.inputs, at).unwrap();
+        writer.apply_utxoset(&undo.utxo_delta).unwrap();
+        writer.undo_utxo_tags(&undo.utxo_index_delta).unwrap();
+        archive.undo_index(&undo.archive_index_deltas).unwrap();
+    }
+
+    CardanoLogic::settle_undo(domain.state(), &mut entities).unwrap();
+    dolos_core::state::save_entities::<D>(&writer, &entities).unwrap();
+    writer.commit().unwrap();
+
+    if matches!(after, RollbackInterruption::State) {
+        return;
+    }
+
+    archive.commit().unwrap();
+
+    if matches!(after, RollbackInterruption::Archive) {
+        domain.archive().truncate_front(to).unwrap();
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ReplayContents {
+    cursor: Option<ChainPoint>,
+    entities: BTreeMap<&'static str, Vec<(EntityKey, Vec<u8>)>>,
+    utxos: Vec<UtxoEntry>,
+    utxo_tags: BTreeMap<(&'static str, Vec<u8>), Vec<TagEntry>>,
+    blocks: Vec<(u64, Vec<u8>)>,
+    tags: Vec<TagRecord>,
+    exact: Vec<ExactRecord>,
+}
+
+impl ReplayContents {
+    fn read<D>(domain: &D) -> Self
+    where
+        D: Domain<Entity = CardanoEntity, EntityDelta = CardanoDelta, Chain = CardanoLogic>,
+    {
+        let entities = dolos_cardano::model::build_schema()
+            .keys()
+            .map(|ns| {
+                let rows = domain
+                    .state()
+                    .iter_entities(ns, KeyRange::all())
+                    .unwrap()
+                    .collect::<Result<_, _>>()
+                    .unwrap();
+                (*ns, rows)
+            })
+            .collect();
+        let mut utxos: Vec<_> = domain
+            .state()
+            .iter_utxos()
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        utxos.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut probes = BTreeSet::new();
+        for (_, value) in &utxos {
+            let output = (&value.output).try_into().unwrap();
+            probes.extend(
+                utxo_tags(&output)
+                    .into_iter()
+                    .map(|tag| (tag.dimension, tag.key)),
+            );
+        }
+        for (at, log) in domain.wal().iter_logs(None, None).unwrap() {
+            if log.block.is_empty() {
+                continue;
+            }
+            let catchup = CardanoLogic::compute_catchup(&log.block, &log.inputs, at).unwrap();
+            for (_, _, tags) in catchup
+                .utxo_index_delta
+                .produced
+                .into_iter()
+                .chain(catchup.utxo_index_delta.consumed)
+            {
+                probes.extend(tags.into_iter().map(|tag| (tag.dimension, tag.key)));
+            }
+        }
+        let utxo_tags = probes
+            .into_iter()
+            .map(|(dimension, key)| {
+                let entries = domain
+                    .state()
+                    .utxos_by_tag_page(
+                        dimension,
+                        &key,
+                        TagOrder::Asc,
+                        TagStart::Skip(0),
+                        usize::MAX,
+                    )
+                    .unwrap();
+                let refs = domain.state().utxos_by_tag(dimension, &key).unwrap();
+                assert_eq!(
+                    refs,
+                    entries.iter().map(|entry| entry.txo.clone()).collect()
+                );
+                ((dimension, key), entries)
+            })
+            .filter(|(_, entries)| !entries.is_empty())
+            .collect();
+
+        Self {
+            cursor: domain.state().read_cursor().unwrap(),
+            entities,
+            utxos,
+            utxo_tags,
+            blocks: domain
+                .archive()
+                .get_range(None, None)
+                .unwrap()
+                .map(|(slot, body)| (slot, body.to_vec()))
+                .collect(),
+            tags: domain
+                .archive()
+                .iter_archive_tags(&archive_dimensions::ALL, 0..u64::MAX)
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap(),
+            exact: domain
+                .archive()
+                .iter_exact_records(0..u64::MAX)
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap(),
+        }
+    }
+
+    fn read_node(node: &Node, genesis: &Arc<Genesis>) -> Self {
+        let stores = dolos::storage::open_data_stores::<CardanoDelta>(&node.config).unwrap();
+        let domain = DomainBuilder::new(&node.config, genesis.clone())
+            .assemble(&stores)
+            .unwrap();
+        let contents = Self::read(&domain);
+        domain.shutdown().unwrap();
+        contents
+    }
+}
+
+fn wal_bytes(node: &Node) -> Vec<(ChainPoint, Vec<u8>)> {
+    use dolos_redb3::{
+        redb::{ReadOnlyDatabase, ReadableDatabase as _, ReadableTable as _, TableDefinition},
+        wal::{DbChainPoint, DbLogValue},
+    };
+
+    let db = ReadOnlyDatabase::open(node.config.wal_path().unwrap()).unwrap();
+    let tx = db.begin_read().unwrap();
+    let table = tx
+        .open_table(TableDefinition::<DbChainPoint, DbLogValue>::new("wal"))
+        .unwrap();
+    table
+        .iter()
+        .unwrap()
+        .map(|row| {
+            let (key, value) = row.unwrap();
+            (key.value().into(), value.value())
+        })
+        .collect()
+}
+
+fn segment_bytes(node: &Node) -> BTreeMap<PathBuf, Vec<u8>> {
+    let segments: BTreeMap<_, _> = files(&node.config.storage.archive_path().unwrap())
+        .into_iter()
+        .filter(|(path, _)| {
+            path.extension()
+                .is_some_and(|extension| extension == "segment")
+        })
+        .collect();
+    assert!(!segments.is_empty());
+    segments
+}
+
+#[test]
+fn interrupted_rollback_reconciles_existing_and_missing_archive_blocks() {
+    for after in [
+        RollbackInterruption::State,
+        RollbackInterruption::Indexes,
+        RollbackInterruption::Archive,
+    ] {
+        let (node, genesis, blocks) = fixture("");
+        let to = point(&blocks[1]);
+        let expected_rollback;
+        {
+            let domain = start(&node, &genesis);
+            domain.roll_forward_batch(blocks[..2].to_vec()).unwrap();
+            expected_rollback = ReplayContents::read(&domain);
+            domain.roll_forward_batch(blocks[2..].to_vec()).unwrap();
+            domain.shutdown().unwrap();
+        }
+        let expected = ReplayContents::read_node(&node, &genesis);
+        assert!(!expected.utxos.is_empty());
+        assert!(!expected.tags.is_empty());
+        assert!(dolos_core::ExactKind::ALL
+            .iter()
+            .all(|kind| expected.exact.iter().any(|record| record.kind == *kind)));
+        let wal = wal_bytes(&node);
+        let segments = segment_bytes(&node);
+
+        {
+            let stores = dolos::storage::open_data_stores::<CardanoDelta>(&node.config).unwrap();
+            assert!(matches!(
+                stores.state,
+                dolos::storage::StateStoreBackend::Fjall(_)
+            ));
+            assert!(matches!(
+                stores.archive,
+                dolos::storage::ArchiveStoreBackend::Fjall(_)
+            ));
+            let domain = DomainBuilder::new(&node.config, genesis.clone())
+                .assemble(&stores)
+                .unwrap();
+            interrupt_rollback(&domain, &to, after);
+            domain.shutdown().unwrap();
+        }
+
+        let interrupted = ReplayContents::read_node(&node, &genesis);
+        assert_eq!(interrupted.cursor, Some(to.clone()));
+        assert_eq!(interrupted.entities, expected_rollback.entities);
+        assert_eq!(interrupted.utxos, expected_rollback.utxos);
+        assert_eq!(interrupted.utxo_tags, expected_rollback.utxo_tags);
+        if matches!(after, RollbackInterruption::State) {
+            assert_eq!(interrupted.tags, expected.tags);
+            assert_eq!(interrupted.exact, expected.exact);
+        } else {
+            assert_eq!(interrupted.tags, expected_rollback.tags);
+            assert_eq!(interrupted.exact, expected_rollback.exact);
+            assert_ne!(interrupted.tags, expected.tags);
+            assert_ne!(interrupted.exact, expected.exact);
+        }
+        assert_eq!(wal_bytes(&node), wal, "{after:?}");
+        let before_recovery_segments = segment_bytes(&node);
+        if !matches!(after, RollbackInterruption::Archive) {
+            assert_eq!(before_recovery_segments, segments, "{after:?}");
+        }
+        let output = node.run(&["sync", "recover"]);
+        assert_eq!(
+            code(&output),
+            Some(0),
+            "{after:?}: {}",
+            stderr_words(&output)
+        );
+        assert_eq!(
+            ReplayContents::read_node(&node, &genesis),
+            expected,
+            "{after:?}"
+        );
+        assert_eq!(wal_bytes(&node), wal, "{after:?}");
+        if !matches!(after, RollbackInterruption::Archive) {
+            assert_eq!(segment_bytes(&node), before_recovery_segments, "{after:?}");
+        }
+        assert_eq!(segment_bytes(&node), segments, "{after:?}");
+
+        let output = node.run(&["sync", "recover"]);
+        assert_eq!(code(&output), Some(0), "{}", stderr_words(&output));
+        assert_eq!(ReplayContents::read_node(&node, &genesis), expected);
+        assert_eq!(wal_bytes(&node), wal);
+        assert_eq!(segment_bytes(&node), segments);
+
+        let slot = to.slot().to_string();
+        let hash = hash_of(&to);
+        let output = node.run(&[
+            "sync", "rollback", "--slot", &slot, "--hash", &hash, "--yes",
+        ]);
+        assert_eq!(code(&output), Some(0), "{}", stderr_words(&output));
+        assert_eq!(
+            ReplayContents::read_node(&node, &genesis),
+            expected_rollback
+        );
+    }
+}
+
+#[test]
+fn archive_reconciliation_commits_before_state_and_survives_retries() {
+    use dolos_testing::{
+        faults::{FaultyToyDomain, TestFault},
+        synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
+        toy_domain::ToyDomain,
+    };
+
+    for commits in 0..4 {
+        let (blocks, _, config) = build_synthetic_blocks(SyntheticBlockConfig {
+            block_count: 4,
+            slot: 100,
+            ..Default::default()
+        });
+        let domain = ToyDomain::new_with_genesis_and_config(
+            Arc::new(dolos_cardano::include::preview::load()),
+            config,
+            None,
+            None,
+        );
+        domain.roll_forward_batch(blocks.clone()).unwrap();
+        let expected = ReplayContents::read(&domain);
+        let to = point(&blocks[1]);
+        interrupt_rollback(&domain, &to, RollbackInterruption::Indexes);
+        let before = ReplayContents::read(&domain);
+        let faulty = FaultyToyDomain::new(domain.clone(), TestFault::CrashAfterCommits(commits));
+        assert!(dolos_core::bootstrap::catch_up_stores(&faulty).is_err());
+        let interrupted = ReplayContents::read(&domain);
+        let state_tip = if commits < 2 {
+            to.clone()
+        } else {
+            point(&blocks[2])
+        };
+        assert_eq!(interrupted.cursor, Some(state_tip), "{commits}");
+        if commits < 2 {
+            assert_eq!(interrupted.entities, before.entities, "{commits}");
+            assert_eq!(interrupted.utxos, before.utxos, "{commits}");
+            assert_eq!(interrupted.utxo_tags, before.utxo_tags, "{commits}");
+        }
+        for (index, block) in blocks.iter().enumerate().skip(2) {
+            let at = point(block).slot();
+            let applied = commits > 2 * (index as u32 - 2);
+            let expected_tags: Vec<_> = expected.tags.iter().filter(|tag| tag.slot == at).collect();
+            let expected_exact: Vec<_> = expected
+                .exact
+                .iter()
+                .filter(|entry| entry.slot == at)
+                .collect();
+            let tags: Vec<_> = interrupted
+                .tags
+                .iter()
+                .filter(|tag| tag.slot == at)
+                .collect();
+            let exact: Vec<_> = interrupted
+                .exact
+                .iter()
+                .filter(|entry| entry.slot == at)
+                .collect();
+            if applied {
+                assert_eq!(tags, expected_tags, "{commits}");
+                assert_eq!(exact, expected_exact, "{commits}");
+            } else {
+                assert!(tags.is_empty(), "{commits}");
+                assert!(exact.is_empty(), "{commits}");
+            }
+        }
+        dolos_core::bootstrap::catch_up_stores(&domain).unwrap();
+        assert_eq!(ReplayContents::read(&domain), expected, "{commits}");
+        domain.rollback(&to).unwrap();
+        let rolled_back = ReplayContents::read(&domain);
+        assert_eq!(rolled_back.entities, before.entities);
+        assert_eq!(rolled_back.utxos, before.utxos);
+        assert_eq!(rolled_back.utxo_tags, before.utxo_tags);
+        assert_eq!(rolled_back.tags, before.tags);
+        assert_eq!(rolled_back.exact, before.exact);
+    }
+}
+
+#[test]
+fn a_conflicting_archived_suffix_is_refused_before_any_state_replay() {
+    let (node, genesis, blocks) = synced_on("");
+    let to = point(&blocks[1]);
+    {
+        let stores = dolos::storage::open_data_stores::<CardanoDelta>(&node.config).unwrap();
+        let domain = DomainBuilder::new(&node.config, genesis.clone())
+            .assemble(&stores)
+            .unwrap();
+        interrupt_rollback(&domain, &to, RollbackInterruption::Indexes);
+        let slot = point(&blocks[3]).slot();
+        let (conflict, body) = dolos_testing::blocks::make_conway_block(slot);
+        let writer = domain.archive().start_writer().unwrap();
+        writer.undo(&point(&blocks[3])).unwrap();
+        writer.apply(&conflict, &body).unwrap();
+        writer.commit().unwrap();
+        domain.shutdown().unwrap();
+    }
+    let before = ReplayContents::read_node(&node, &genesis);
+    let wal = wal_bytes(&node);
+    let segments = segment_bytes(&node);
+    let output = node.run(&["sync", "recover"]);
+    assert!(!output.status.success(), "{}", stdout(&output));
+    assert_eq!(ReplayContents::read_node(&node, &genesis), before);
+    assert_eq!(wal_bytes(&node), wal);
+    assert_eq!(segment_bytes(&node), segments);
+}
+
+#[test]
+fn an_uncovered_state_replay_is_refused_before_any_commit() {
+    let (node, genesis, blocks) = synced_on("");
+    let to = point(&blocks[1]);
+    {
+        let stores = dolos::storage::open_data_stores::<CardanoDelta>(&node.config).unwrap();
+        let domain = DomainBuilder::new(&node.config, genesis.clone())
+            .assemble(&stores)
+            .unwrap();
+        interrupt_rollback(&domain, &to, RollbackInterruption::Indexes);
+        domain
+            .wal()
+            .append_entries(vec![(point(&blocks[3]), LogValue::origin())])
+            .unwrap();
+        let before = ReplayContents::read(&domain);
+        assert!(matches!(
+            dolos_core::bootstrap::catch_up_stores(&domain),
+            Err(dolos_core::DomainError::WalGap { .. })
+        ));
+        assert_eq!(ReplayContents::read(&domain), before);
+        domain.shutdown().unwrap();
     }
 }
 
