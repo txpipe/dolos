@@ -17,8 +17,11 @@ edition.workspace = true
 # parties; this profile publishes into registries as a matter of course, so
 # it turns the transport on unconditionally rather than forwarding a feature
 # nothing in dolos ever left off.
-stelae = { git = "https://github.com/txpipe/stelae", rev = "55d5270eb3fc45f921dc56aec5a67f49d415596d", features = ["oci"] }
-stelae-driver = { git = "https://github.com/txpipe/stelae", rev = "55d5270eb3fc45f921dc56aec5a67f49d415596d", features = ["oci"] }
+#
+# Pinned at 7b18c6f, the stelae main commit after v0.5.2 that retries failed
+# and truncated registry reads (txpipe/stelae#23).
+stelae ={ git = "https://github.com/txpipe/stelae", rev = "7b18c6f3e3166cef48d5c569b5908f85a82dd1e8", features = ["oci"] }
+stelae-driver = { git = "https://github.com/txpipe/stelae", rev = "7b18c6f3e3166cef48d5c569b5908f85a82dd1e8", features = ["oci"] }
 dolos-core = { path = "../core" }
 dolos-cardano = { path = "../cardano" }
 
