@@ -61,6 +61,10 @@ impl From<FjallPreset> for Preset {
 pub struct DatabaseTuning {
     /// Block cache, in MiB.
     pub cache_mb: u64,
+    /// The maximum number of table files that the database keeps open. Dolos
+    /// sets the value so that the startup check of `RLIMIT_NOFILE` can
+    /// calculate the minimum from it.
+    pub max_cached_files: usize,
     /// Journal size across all keyspaces before memtables are flushed, in MiB.
     pub journal_mb: u64,
     /// Background flush and compaction workers: one per core, at most this
@@ -82,6 +86,7 @@ impl DatabaseTuning {
     pub(crate) fn builder(&self, path: &Path) -> DatabaseBuilder<Database> {
         Database::builder(path)
             .cache_size(self.cache_mb * MIB)
+            .max_cached_files(Some(self.max_cached_files))
             .max_journaling_size(self.journal_mb * MIB)
             .worker_threads(self.workers())
     }
@@ -188,6 +193,12 @@ impl DatabaseTuning {
     /// The store's own 500 MiB cache over Fjall 3.1's other defaults.
     const STANDARD: Self = Self {
         cache_mb: 500,
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        max_cached_files: 900,
+        #[cfg(target_os = "windows")]
+        max_cached_files: 400,
+        #[cfg(target_os = "macos")]
+        max_cached_files: 150,
         journal_mb: 512,
         max_workers: 4,
         flush_on_commit: false,
@@ -199,6 +210,7 @@ impl DatabaseTuning {
 pub struct Tuning {
     pub preset: Preset,
     pub cache_mb: u64,
+    pub max_cached_files: usize,
     pub journal_mb: u64,
     pub workers: usize,
     pub flush_on_commit: bool,
@@ -215,6 +227,7 @@ impl Tuning {
         Self {
             preset,
             cache_mb: database.cache_mb,
+            max_cached_files: database.max_cached_files,
             journal_mb: database.journal_mb,
             workers: database.workers(),
             flush_on_commit: database.flush_on_commit,
@@ -227,9 +240,10 @@ impl Display for Tuning {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "preset {}: cache {} MiB, journal {} MiB, {} workers, flush on commit {}",
+            "preset {}: cache {} MiB, {} cached files, journal {} MiB, {} workers, flush on commit {}",
             self.preset.name(),
             self.cache_mb,
+            self.max_cached_files,
             self.journal_mb,
             self.workers,
             self.flush_on_commit
@@ -360,6 +374,12 @@ mod tests {
 
     const DATABASE: DatabaseTuning = DatabaseTuning {
         cache_mb: 500,
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        max_cached_files: 900,
+        #[cfg(target_os = "windows")]
+        max_cached_files: 400,
+        #[cfg(target_os = "macos")]
+        max_cached_files: 150,
         journal_mb: 512,
         max_workers: 4,
         flush_on_commit: false,
@@ -401,6 +421,27 @@ mod tests {
         assert_eq!(exact, INDEX);
         assert_eq!(entity, INDEX);
         assert_eq!(meta, PRIMARY);
+    }
+
+    #[test]
+    fn tuning_reports_cached_files() {
+        let tuning = Tuning::new(Preset::Standard, &StatePreset::STANDARD.database, vec![]);
+        let cores = std::thread::available_parallelism().map_or(1, usize::from);
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        let expected = 900;
+        #[cfg(target_os = "windows")]
+        let expected = 400;
+        #[cfg(target_os = "macos")]
+        let expected = 150;
+
+        assert_eq!(tuning.max_cached_files, expected);
+        assert_eq!(
+            tuning.to_string(),
+            format!(
+                "preset standard: cache 500 MiB, {expected} cached files, journal 512 MiB, {} workers, flush on commit false",
+                cores.min(4)
+            )
+        );
     }
 
     #[test]

@@ -501,6 +501,155 @@ fn assert_refused_with_stores_intact(dir: &Path, markers: &[PathBuf], message: &
     }
 }
 
+#[cfg(unix)]
+mod limits {
+    use super::*;
+    use nix::sys::resource::{getrlimit, setrlimit, Resource, RLIM_INFINITY};
+    use std::os::unix::process::CommandExt;
+
+    fn run_with_low_hard_limit(cwd: &Path, args: &[&str]) -> Option<std::process::Output> {
+        let (_, hard) = getrlimit(Resource::RLIMIT_NOFILE).unwrap();
+        if hard != RLIM_INFINITY && hard < 2048 {
+            eprintln!(
+                "The low hard limit test did not run. The inherited hard limit {hard} is less \
+                 than 2048."
+            );
+            return None;
+        }
+        let inherited =
+            std::env::vars_os().filter(|(key, _)| !key.to_string_lossy().starts_with("DOLOS_"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_dolos"));
+        command
+            .current_dir(cwd)
+            .args(args)
+            .env_clear()
+            .envs(inherited);
+        unsafe {
+            command.pre_exec(|| {
+                setrlimit(Resource::RLIMIT_NOFILE, 1024, 2048).map_err(std::io::Error::from)
+            });
+        }
+        Some(command.output().unwrap())
+    }
+
+    fn commands() -> Vec<&'static [&'static str]> {
+        STORE_COMMANDS
+            .into_iter()
+            .filter(|args| cfg!(feature = "utils") || args[0] != "data")
+            .chain([
+                &["daemon"][..],
+                &["serve"][..],
+                &["cache", "stats"][..],
+                &["cache", "clear", "--all"][..],
+            ])
+            .collect()
+    }
+
+    fn assert_limit_refusal(output: &std::process::Output, args: &[&str]) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{args:?}: {stderr}");
+        for expected in [
+            "RLIMIT_NOFILE",
+            "inherited soft=1024 hard=2048",
+            "required soft >= 4096",
+            "ulimit -Sn",
+            "LimitNOFILE=4096",
+            "supervisor",
+        ] {
+            assert!(stderr.contains(expected), "{args:?}: {stderr}");
+        }
+        assert!(output.stdout.is_empty(), "{args:?}: {:?}", output.stdout);
+    }
+
+    #[test]
+    fn a_low_hard_limit_stops_storage_commands_with_marker_bytes_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::copy(fixture("minimal.toml"), dir.path().join("dolos.toml")).unwrap();
+        let mut markers = plant_store_markers(dir.path());
+        let cache = dir.path().join("data/cache/marker");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(&cache, "kept").unwrap();
+        markers.push(cache);
+
+        for args in commands() {
+            let Some(output) = run_with_low_hard_limit(dir.path(), args) else {
+                return;
+            };
+            assert_limit_refusal(&output, args);
+            for marker in &markers {
+                assert_eq!(
+                    std::fs::read(marker).unwrap(),
+                    b"kept",
+                    "{args:?}: {}",
+                    marker.display()
+                );
+            }
+            assert_eq!(
+                entries(&dir.path().join("data")),
+                ["archive", "cache", "state", "wal"]
+            );
+            for store in ["archive", "cache", "state", "wal"] {
+                assert_eq!(entries(&dir.path().join("data").join(store)), ["marker"]);
+            }
+        }
+    }
+
+    #[test]
+    fn a_low_hard_limit_creates_no_missing_data_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::copy(fixture("minimal.toml"), dir.path().join("dolos.toml")).unwrap();
+
+        for args in commands() {
+            let Some(output) = run_with_low_hard_limit(dir.path(), args) else {
+                return;
+            };
+            assert_limit_refusal(&output, args);
+            assert_eq!(entries(dir.path()), ["dolos.toml"], "{args:?}");
+        }
+    }
+
+    #[test]
+    fn a_low_hard_limit_exempts_help_version_and_config_check() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::copy(fixture("minimal.toml"), dir.path().join("dolos.toml")).unwrap();
+
+        for args in [
+            &["--help"][..],
+            &["--version"][..],
+            &["sync", "status", "--help"][..],
+            &["config", "check"][..],
+        ] {
+            let Some(output) = run_with_low_hard_limit(dir.path(), args) else {
+                return;
+            };
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{args:?}: {stderr}");
+            assert!(!output.stdout.is_empty(), "{args:?}");
+            assert!(!stderr.contains("RLIMIT_NOFILE"), "{args:?}: {stderr}");
+            assert_eq!(entries(dir.path()), ["dolos.toml"], "{args:?}");
+        }
+    }
+
+    #[test]
+    fn a_low_hard_limit_does_not_hide_invalid_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = std::fs::read_to_string(fixture("minimal.toml")).unwrap()
+            + "\n[logging]\nfilter = \"dolos=loud\"\n";
+        std::fs::write(dir.path().join("dolos.toml"), config).unwrap();
+
+        for args in commands() {
+            let Some(output) = run_with_low_hard_limit(dir.path(), args) else {
+                return;
+            };
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(!output.status.success(), "{args:?}: {stderr}");
+            assert!(stderr.contains("logging.filter"), "{args:?}: {stderr}");
+            assert!(!stderr.contains("RLIMIT_NOFILE"), "{args:?}: {stderr}");
+            assert_eq!(entries(dir.path()), ["dolos.toml"], "{args:?}");
+        }
+    }
+}
+
 #[test]
 fn a_mismatched_custom_magic_stops_every_command_before_its_stores() {
     let (dir, _) = beside_genesis("reject/magic-mismatch.toml", 42);

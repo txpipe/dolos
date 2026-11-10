@@ -368,7 +368,9 @@ A preset is a resource class: one fixed, complete set of Fjall tuning for each s
 | state | 500 MiB | 512 MiB | the number of cores, at most 4 | no |
 | archive | 500 MiB | 512 MiB | the number of cores, at most 4 | no |
 
-and for each keyspace, all with leveled compaction, a 64 MiB table target and a level ratio of 10:
+Each database also keeps a cache of open table files. The maximum size of this cache is 900 files on Linux and on the other Unix systems, 150 on macOS, and 400 on Windows. These are the defaults of Fjall 3.1. The block cache does not include these files. The database and the process also use descriptors that are not in this cache. On Unix, Dolos makes sure that the open-file limit of the process is sufficient before it opens a store. For more information, see [Open-file limits](../operations/performance#open-file-limits).
+
+Each keyspace uses leveled compaction, a 64 MiB table target, and a level ratio of 10. The other settings of each keyspace are:
 
 | keyspace | memtable | L0 threshold |
 | -------- | -------- | ------------ |
