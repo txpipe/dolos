@@ -1717,6 +1717,14 @@ impl CoreStateStore for StateStoreBackend {
             Self::Memory(s) => s.iter_utxos().map(StateUtxoIterBackend::Memory),
         }
     }
+
+    fn persist(&self) -> Result<(), StateError> {
+        match self {
+            Self::Redb(s) => s.persist(),
+            Self::Fjall(s) => s.persist(),
+            Self::Memory(s) => s.persist(),
+        }
+    }
 }
 
 // ============================================================================
@@ -2309,6 +2317,16 @@ impl CoreArchiveStore for ArchiveStoreBackend {
         }
     }
 
+    fn persist(&self) -> Result<(), ArchiveError> {
+        match self {
+            Self::Memory(s) => CoreArchiveStore::persist(s),
+            Self::LogsOnly(inner) => CoreArchiveStore::persist(inner.as_ref()),
+            Self::Fjall(s) => CoreArchiveStore::persist(s),
+            Self::EntityReads(_) => CoreArchiveStore::persist(&NoOpArchiveStore),
+            Self::NoOp(s) => CoreArchiveStore::persist(s),
+        }
+    }
+
     fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
         match self {
             Self::Memory(s) => CoreArchiveStore::slot_by_block_hash(s, hash),
@@ -2503,6 +2521,13 @@ impl MempoolStore for MempoolBackend {
         match self {
             Self::Ephemeral(s) => s.mark_acknowledged(hashes),
             Self::Redb(s) => s.mark_acknowledged(hashes),
+        }
+    }
+
+    fn requeue_propagated(&self, except: &[TxHash]) -> Result<(), MempoolError> {
+        match self {
+            Self::Ephemeral(s) => s.requeue_propagated(except),
+            Self::Redb(s) => s.requeue_propagated(except),
         }
     }
 

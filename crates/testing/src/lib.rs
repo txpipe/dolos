@@ -23,6 +23,7 @@ use dolos_core::*;
 pub mod archive;
 pub mod blocks;
 pub mod cip151;
+pub mod era_fixtures;
 pub mod faults;
 pub mod measured;
 pub mod peer;

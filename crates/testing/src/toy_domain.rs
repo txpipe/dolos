@@ -85,6 +85,10 @@ impl dolos_core::MempoolStore for Mempool {
         Ok(())
     }
 
+    fn requeue_propagated(&self, _except: &[TxHash]) -> Result<(), MempoolError> {
+        Ok(())
+    }
+
     fn find_inflight(&self, _tx_hash: &TxHash) -> Option<MempoolTx> {
         None
     }
@@ -420,6 +424,13 @@ impl<B: ToyStores> ToyDomain<B> {
         }
 
         domain
+    }
+
+    /// Swap the genesis the domain serves under, keeping its stores as genesis
+    /// left them: a node restarted under an edited config.
+    pub fn with_genesis(mut self, genesis: Arc<dolos_core::Genesis>) -> Self {
+        self.genesis = genesis;
+        self
     }
 
     /// Override the history policy so tests can exercise archive pruning;

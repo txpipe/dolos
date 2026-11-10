@@ -246,6 +246,13 @@ where
         }
     }
 
+    fn archive_index_deltas(&self) -> &[dolos_core::ArchiveIndexDelta] {
+        match self {
+            Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::archive_index_deltas(w),
+            _ => &[],
+        }
+    }
+
     fn tip_events(&self) -> Vec<TipEvent> {
         match self {
             Self::Genesis(w) => <genesis::GenesisWorkUnit as WorkUnit<D>>::tip_events(w),

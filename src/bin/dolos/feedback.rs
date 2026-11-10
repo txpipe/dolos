@@ -1,10 +1,14 @@
 pub use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use std::sync::Arc;
+use std::{io::IsTerminal as _, sync::Arc};
 
 use dolos_snapshot::progress::{Event, Observer, Outcome, Progress};
 
 #[cfg(feature = "mithril")]
 use dolos_mithril::mithril_client;
+
+mod plain;
+
+pub use plain::PlainProgress;
 
 pub struct Feedback {
     multi: Arc<MultiProgress>,
@@ -61,6 +65,37 @@ impl Default for Feedback {
         let multi = Arc::new(MultiProgress::new());
 
         Self { multi }
+    }
+}
+
+/// How `bootstrap stelae` reports a restore: bars on a terminal, plain
+/// timestamped lines anywhere else, such as a container's init log.
+pub enum RestoreProgress {
+    Bars(Arc<SteleProgress>),
+    Plain(Arc<PlainProgress>),
+}
+
+impl RestoreProgress {
+    /// The renderer for wherever stderr goes.
+    pub fn for_stderr(feedback: &Feedback) -> Self {
+        match std::io::stderr().is_terminal() {
+            true => Self::Bars(SteleProgress::restoring(feedback)),
+            false => Self::Plain(PlainProgress::start()),
+        }
+    }
+
+    pub fn observer(&self) -> Observer {
+        match self {
+            Self::Bars(bars) => bars.observer(),
+            Self::Plain(plain) => plain.observer(),
+        }
+    }
+
+    pub fn finish(&self) {
+        match self {
+            Self::Bars(bars) => bars.finish(),
+            Self::Plain(plain) => plain.finish(),
+        }
     }
 }
 

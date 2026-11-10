@@ -80,6 +80,16 @@
 //! ADR-004 draws: the file's shape is protocol, and what counts as *complete*
 //! is this profile's commit boundary.
 //!
+//! **A layer is recorded only once it is durable.** The stores commit to
+//! buffered journals, so a commit that returned survives a killed process but
+//! can still be lost to a power loss or an OS crash. Each epoch layer therefore
+//! ends with [`ArchiveStore::persist`] before the checkpoint records its
+//! `diffId`: anything the progress file names is on disk, and a stop between a
+//! layer's writes and its record refetches that layer rather than skipping it.
+//! The same rule holds at the end: the state and the archive are persisted
+//! after the cursor commit and before the progress file is removed, so a stop
+//! leaves a durable cursor or a progress file.
+//!
 //! ### A redone layer is rewritten, not appended
 //!
 //! The layer that was in flight when a restore stopped is not recorded, so a
@@ -1046,8 +1056,9 @@ where
         if let Some(descriptor) = &epoch.blocks {
             let at = cursor.open(BLOCKS, &descriptor.scope);
 
-            let (count, outcome) =
-                checkpoint.fetch(descriptor, || restore_blocks(&reader, descriptor, archive))?;
+            let (count, outcome) = fetch_durable(checkpoint, descriptor, archive, || {
+                restore_blocks(&reader, descriptor, archive)
+            })?;
 
             cursor.close(at, BLOCKS, outcome);
             summary.count(outcome);
@@ -1058,7 +1069,7 @@ where
             let kind = descriptor.kind.as_str();
             let at = cursor.open(kind, &descriptor.scope);
 
-            let (count, outcome) = checkpoint.fetch(descriptor, || {
+            let (count, outcome) = fetch_durable(checkpoint, descriptor, archive, || {
                 restore_logs(&reader, descriptor, archive, ns)
             })?;
 
@@ -1071,7 +1082,7 @@ where
             let kind = descriptor.kind.as_str();
             let at = cursor.open(kind, &descriptor.scope);
 
-            let (count, outcome) = checkpoint.fetch(descriptor, || {
+            let (count, outcome) = fetch_durable(checkpoint, descriptor, archive, || {
                 restore_entities(&reader, descriptor, archive, *entity)
             })?;
 
@@ -1083,8 +1094,9 @@ where
         if let Some(descriptor) = &epoch.indexes {
             let at = cursor.open(INDEXES, &descriptor.scope);
 
-            let (count, outcome) =
-                checkpoint.fetch(descriptor, || restore_indexes(&reader, descriptor, archive))?;
+            let (count, outcome) = fetch_durable(checkpoint, descriptor, archive, || {
+                restore_indexes(&reader, descriptor, archive)
+            })?;
 
             cursor.close(at, INDEXES, outcome);
             summary.count(outcome);
@@ -1119,12 +1131,35 @@ where
     writer.set_cursor(plan.position.point.clone())?;
     writer.commit()?;
 
+    // The progress file goes only once the cursor and the tip are durable: a
+    // hard stop must leave one or the other on disk.
+    state.persist()?;
+    archive.persist()?;
+
     // After the cursor, because the cursor is what says the restore finished.
     // A progress file deleted before it would take away the resume that makes
     // an interruption cheap.
     checkpoint.clear()?;
 
     Ok(summary)
+}
+
+/// [`Checkpoint::fetch`] one epoch layer, syncing the archive after its writes.
+///
+/// The persist runs inside the closure, so the progress file records a layer's
+/// `diffId` only after everything the layer wrote is on disk.
+fn fetch_durable<A: ArchiveStore>(
+    checkpoint: &mut Checkpoint,
+    descriptor: &LayerDescriptor,
+    archive: &A,
+    write: impl FnOnce() -> Result<u64, Error>,
+) -> Result<(u64, Outcome), Error> {
+    checkpoint.fetch(descriptor, || {
+        let count = write()?;
+        archive.persist()?;
+
+        Ok(count)
+    })
 }
 
 /// Open, verify and read a stele into the stores, in one call.

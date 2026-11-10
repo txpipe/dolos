@@ -7,6 +7,7 @@ use tracing::info;
 
 use crate::feedback::Feedback;
 use dolos::storage::{Existing, ExistingDataPolicy, Removal};
+use dolos_cardano::networks::KnownNetwork;
 use dolos_core::config::RootConfig;
 use dolos_core::{seed_wal_from_state, WalSeed};
 
@@ -49,16 +50,16 @@ impl Command {
     /// script will never send. Checking here is what makes "a machine with no
     /// terminal" the same clean refusal on every platform, which is what
     /// `inspect_existing_data` below is written to assume.
-    pub fn inquire() -> miette::Result<Self> {
+    pub fn inquire(network: Option<&KnownNetwork>) -> miette::Result<Self> {
         if !std::io::stdin().is_terminal() {
             bail!("no bootstrap method given and no terminal to ask on; pass a subcommand instead (see `dolos bootstrap --help`)");
         }
 
-        Self::prompt()
+        Self::prompt(network)
     }
 
     #[cfg(feature = "utils")]
-    fn prompt() -> miette::Result<Self> {
+    fn prompt(network: Option<&KnownNetwork>) -> miette::Result<Self> {
         let mut methods = vec![Method::Stelae];
         #[cfg(feature = "mithril")]
         methods.push(Method::Mithril);
@@ -69,7 +70,7 @@ impl Command {
             .into_diagnostic()?;
 
         match method {
-            Method::Stelae => Ok(Command::Stelae(stelae::Args::inquire()?)),
+            Method::Stelae => Ok(Command::Stelae(stelae::Args::inquire(network)?)),
             #[cfg(feature = "mithril")]
             Method::Mithril => Ok(Command::Mithril(from_environment()?)),
             Method::Immutabledb => Ok(Command::Immutabledb(immutabledb::Args::inquire()?)),
@@ -77,7 +78,7 @@ impl Command {
     }
 
     #[cfg(not(feature = "utils"))]
-    fn prompt() -> miette::Result<Self> {
+    fn prompt(_network: Option<&KnownNetwork>) -> miette::Result<Self> {
         bail!("no bootstrap method given and this build has no prompt; pass a subcommand instead (see `dolos bootstrap --help`)");
     }
 }
@@ -196,7 +197,7 @@ fn resolve<'a>(
     command: &'a Command,
     clears: bool,
 ) -> miette::Result<Resolved<'a>> {
-    let network = dolos_cardano::networks::KnownNetwork::by_name(&config.chain.network);
+    let network = KnownNetwork::by_name(&config.chain.network);
 
     let resolved = match command {
         #[cfg(feature = "mithril")]
@@ -452,20 +453,22 @@ fn seed_wal(config: &RootConfig) -> miette::Result<()> {
     Ok(())
 }
 
-fn setup_tracing(config: &RootConfig, verbose: bool) -> miette::Result<()> {
+fn setup_tracing(
+    config: &RootConfig,
+    verbose: bool,
+) -> miette::Result<crate::common::TracingGuard> {
     if verbose {
-        crate::common::setup_tracing(&config.logging, config.telemetry.as_ref())?;
+        crate::common::setup_tracing(&config.logging, config.telemetry.as_ref())
     } else {
         crate::common::setup_tracing_error_only()?;
+        Ok(crate::common::TracingGuard::default())
     }
-
-    Ok(())
 }
 
 pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     let policy = args.policy().unwrap_or_else(|error| error.exit());
 
-    setup_tracing(config, args.verbose)?;
+    let _tracing = setup_tracing(config, args.verbose)?;
 
     // The decision is the storage lifecycle's rather than any source's: one
     // policy over every managed store, whichever source fills them.
@@ -478,7 +481,7 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
 
     let command = match args.command.clone() {
         Some(x) => x,
-        None => Command::inquire()?,
+        None => Command::inquire(KnownNetwork::by_name(&config.chain.network))?,
     };
 
     let clears = matches!(existing, Existing::Clear);
