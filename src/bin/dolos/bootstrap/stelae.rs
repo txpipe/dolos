@@ -36,7 +36,7 @@ use dolos_snapshot::{
 };
 
 use crate::{
-    feedback::{Feedback, SteleProgress},
+    feedback::{Feedback, RestoreProgress},
     registry::CredentialArgs,
 };
 
@@ -75,16 +75,65 @@ pub struct Args {
     pub credentials: CredentialArgs,
 }
 
+/// What the prompt offers as the stele's source.
+#[cfg(feature = "utils")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceChoice {
+    /// The configured network's official repository.
+    Official(&'static str),
+    /// A URL the operator types.
+    Custom,
+}
+
+#[cfg(feature = "utils")]
+impl std::fmt::Display for SourceChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SourceChoice::Official(url) => write!(f, "the official repository ({url})"),
+            SourceChoice::Custom => {
+                f.write_str("another source (an OCI repository or a file:// stele directory)")
+            }
+        }
+    }
+}
+
+/// The placeholder the custom source's question shows.
+#[cfg(feature = "utils")]
+fn custom_placeholder() -> &'static str {
+    dolos_cardano::networks::MAINNET.stelae.registry
+}
+
+/// The prompt's choices, default first: a known network's official
+/// repository, then a custom source. A custom network has only the latter.
+#[cfg(feature = "utils")]
+fn source_choices(network: Option<&KnownNetwork>) -> Vec<SourceChoice> {
+    network
+        .map(|network| SourceChoice::Official(network.stelae.registry))
+        .into_iter()
+        .chain([SourceChoice::Custom])
+        .collect()
+}
+
 impl Args {
     #[cfg(feature = "utils")]
-    pub fn inquire() -> miette::Result<Self> {
-        let source = inquire::Text::new("where is the stele?")
-            .with_help_message(
-                "a directory stele written by the profile encoder, or an OCI repository",
-            )
-            .with_placeholder("oci://ghcr.io/txpipe/dolos-snapshots/mainnet")
-            .prompt()
-            .into_diagnostic()?;
+    pub fn inquire(network: Option<&KnownNetwork>) -> miette::Result<Self> {
+        let choice = match source_choices(network).as_slice() {
+            [only] => *only,
+            choices => inquire::Select::new("where is the stele?", choices.to_vec())
+                .prompt()
+                .into_diagnostic()?,
+        };
+
+        let source = match choice {
+            SourceChoice::Official(url) => url.to_string(),
+            SourceChoice::Custom => inquire::Text::new("where is the stele?")
+                .with_help_message(
+                    "oci://HOST/PATH for a repository in a registry, or file://DIR for a stele directory",
+                )
+                .with_placeholder(custom_placeholder())
+                .prompt()
+                .into_diagnostic()?,
+        };
 
         Ok(Self {
             source: Some(source.parse().map_err(|e: String| miette::miette!("{e}"))?),
@@ -235,7 +284,7 @@ fn restore(
     options: RestoreOptions<'_>,
 ) -> miette::Result<()> {
     let node = Node::open(config)?;
-    let progress = SteleProgress::restoring(options.feedback);
+    let progress = RestoreProgress::for_stderr(options.feedback);
     let observer = progress.observer();
     let restoring = node.restoring(options.skip_space_check);
 
@@ -535,6 +584,24 @@ mod tests {
             repository(resolved),
             "ghcr.io/txpipe/dolos-snapshots/preview"
         );
+    }
+
+    #[cfg(feature = "utils")]
+    #[test]
+    fn the_prompt_defaults_to_the_networks_official_repository() {
+        assert_eq!(
+            source_choices(Some(&networks::PREPROD)),
+            [
+                SourceChoice::Official(networks::PREPROD.stelae.registry),
+                SourceChoice::Custom,
+            ]
+        );
+
+        assert_eq!(source_choices(None), [SourceChoice::Custom]);
+
+        let placeholder = custom_placeholder();
+        assert!(placeholder.contains("oci.stelae.store"), "{placeholder}");
+        assert!(placeholder.parse::<Source>().is_ok(), "{placeholder}");
     }
 
     #[test]
