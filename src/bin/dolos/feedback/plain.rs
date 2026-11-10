@@ -44,6 +44,7 @@ pub struct Report {
     bytes: u64,
     last: (Duration, u64),
     next: Duration,
+    ended: bool,
 }
 
 impl Report {
@@ -60,11 +61,16 @@ impl Report {
             bytes: 0,
             last: (Duration::ZERO, 0),
             next: period,
+            ended: false,
         }
     }
 
     /// Takes one event in; returns the line it earns, if any.
     pub fn on(&mut self, event: Event<'_>, at: Duration) -> Option<String> {
+        if self.ended {
+            return None;
+        }
+
         match event {
             Event::LayerStarted {
                 index,
@@ -130,7 +136,7 @@ impl Report {
     pub fn tick(&mut self, at: Duration) -> Option<String> {
         self.started?;
 
-        if at < self.next {
+        if self.ended || at < self.next {
             return None;
         }
 
@@ -164,8 +170,11 @@ impl Report {
         Some(self.line(at, text))
     }
 
-    /// The closing line: totals and how long the restore took.
-    pub fn end(&self, at: Duration) -> String {
+    /// The closing line: totals and how long the restore took. Nothing
+    /// earns a line after it.
+    pub fn end(&mut self, at: Duration) -> String {
+        self.ended = true;
+
         let text = format!(
             "done, {}, {} received in {}, {} overall",
             self.layers(),
@@ -237,10 +246,12 @@ struct Lines {
 }
 
 impl Lines {
-    /// Writes one line, ignoring a failed write: a log reader that went away
-    /// must not take the restore with it.
+    /// Writes one line with its newline in a single write, ignoring a failed
+    /// write: a log reader that went away must not take the restore with it.
     fn write(&mut self, line: &str) {
-        if writeln!(self.sink, "{line}").is_err() {
+        let line = format!("{line}\n");
+
+        if self.sink.write_all(line.as_bytes()).is_err() {
             // Nothing to report it on: the sink is where it would go.
         }
     }
@@ -497,6 +508,21 @@ mod tests {
             "2025-11-10T12:02:10Z progress: done, 4/4 layers (1 skipped), 5.00 MiB received in 2m10s, \
              42.67 KiB/s overall"
         );
+
+        // Nothing earns a line after the end one, however late it comes.
+        assert_eq!(report.tick(secs(300)), None);
+        let retry = Event::Retry {
+            attempt: 1,
+            remaining: 2,
+            reason: "reset",
+        };
+        assert_eq!(report.on(retry, secs(300)), None);
+    }
+
+    /// The ticker checks often enough for a line to come close to its time.
+    #[test]
+    fn the_ticker_checks_well_within_a_period() {
+        assert!(TICK <= PERIOD / 10, "{TICK:?}");
     }
 
     /// A tick that comes late writes one line and keeps to the schedule rather
@@ -557,40 +583,76 @@ mod tests {
         assert!(line.ends_with(", at blocks epoch 1"), "{line}");
     }
 
-    /// A sink the test reads back.
+    /// A sink the test reads back, one entry per write call. With `fails`,
+    /// it records each attempt and refuses it, as a pipe whose reader went
+    /// away does.
     #[derive(Clone, Default)]
-    struct Buffer(Arc<Mutex<Vec<u8>>>);
+    struct Buffer {
+        writes: Arc<Mutex<Vec<String>>>,
+        fails: bool,
+    }
 
     impl Buffer {
-        fn lines(&self) -> Vec<String> {
-            String::from_utf8(self.0.lock().unwrap().clone())
-                .unwrap()
-                .lines()
-                .map(str::to_owned)
-                .collect()
+        fn closed() -> Self {
+            Self {
+                fails: true,
+                ..Self::default()
+            }
+        }
+
+        fn writes(&self) -> Vec<String> {
+            self.writes.lock().unwrap().clone()
+        }
+
+        fn count(&self, needle: &str) -> usize {
+            self.writes()
+                .iter()
+                .filter(|write| write.contains(needle))
+                .count()
+        }
+
+        /// Waits for the ticker rather than for a fixed time, so a loaded
+        /// machine slows the test down instead of failing it.
+        fn wait_for(&self, needle: &str, count: usize) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+
+            while self.count(needle) < count {
+                assert!(
+                    Instant::now() < deadline,
+                    "fewer than {count} writes of {needle:?}: {:#?}",
+                    self.writes()
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        /// Every write is one whole report: a single line ending in its
+        /// newline, so a log reader splitting on newlines sees each one as
+        /// it is written.
+        fn assert_one_line_per_write(&self) {
+            for write in self.writes() {
+                assert!(write.ends_with('\n'), "{write:?}");
+                assert_eq!(write.matches('\n').count(), 1, "{write:?}");
+                assert_eq!(write.matches(" progress: ").count(), 1, "{write:?}");
+            }
         }
     }
 
     impl Write for Buffer {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().write(buf)
+            self.writes
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(buf).into_owned());
+
+            match self.fails {
+                true => Err(std::io::ErrorKind::BrokenPipe.into()),
+                false => Ok(buf.len()),
+            }
         }
 
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
-        }
-    }
-
-    /// A sink whose reader went away.
-    struct Closed;
-
-    impl Write for Closed {
-        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::ErrorKind::BrokenPipe.into())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Err(std::io::ErrorKind::BrokenPipe.into())
         }
     }
 
@@ -603,8 +665,9 @@ mod tests {
         }
     }
 
-    /// The ticker thread writes the periodic lines with no event arriving,
-    /// and `finish` stops it and writes the end line last, once.
+    /// The ticker thread keeps writing periodic lines with no event arriving,
+    /// one whole line per write, and `finish` stops it and writes the end
+    /// line last, once.
     #[test]
     fn the_ticker_writes_periodic_lines_and_finish_ends_them() {
         let buffer = Buffer::default();
@@ -614,32 +677,21 @@ mod tests {
         let scope = serde_json::json!({"epoch": 1});
 
         progress.on(layer_started(&scope));
-
-        // Waits for the ticker rather than for a fixed time, so a loaded
-        // machine slows the test down instead of failing it.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !buffer
-            .lines()
-            .iter()
-            .any(|line| line.contains(" over the last "))
-        {
-            assert!(Instant::now() < deadline, "no periodic line was written");
-            std::thread::sleep(period);
-        }
+        buffer.wait_for(" over the last ", 2);
 
         progress.finish();
         progress.finish();
         drop(progress);
 
-        let lines = buffer.lines();
-        let count = |needle: &str| lines.iter().filter(|line| line.contains(needle)).count();
+        buffer.assert_one_line_per_write();
+        assert_eq!(buffer.count(" progress: restoring 1 layers"), 1);
+        assert!(buffer.count(" over the last ") >= 2);
+        assert_eq!(buffer.count(" progress: done, "), 1);
 
-        assert_eq!(count(" progress: restoring 1 layers"), 1, "{lines:#?}");
-        assert!(count(" over the last ") >= 1, "{lines:#?}");
-        assert_eq!(count(" progress: done, "), 1, "{lines:#?}");
+        let writes = buffer.writes();
         assert!(
-            lines.last().unwrap().contains(" progress: done, "),
-            "{lines:#?}"
+            writes.last().unwrap().contains(" progress: done, "),
+            "{writes:#?}"
         );
     }
 
@@ -647,13 +699,19 @@ mod tests {
     /// and the end line carry on as if it had been read.
     #[test]
     fn a_sink_that_fails_does_not_stop_the_restore() {
-        let period = Duration::from_millis(10);
-        let progress =
-            PlainProgress::start_with(period, Duration::from_millis(2), Box::new(Closed));
+        let buffer = Buffer::closed();
+        let progress = PlainProgress::start_with(
+            Duration::from_millis(10),
+            Duration::from_millis(2),
+            Box::new(buffer.clone()),
+        );
         let scope = serde_json::json!({"epoch": 1});
 
         progress.on(layer_started(&scope));
-        std::thread::sleep(period * 3);
+
+        // The ticker tries again after its own failed write.
+        buffer.wait_for(" over the last ", 2);
+
         progress.on(Event::Retry {
             attempt: 1,
             remaining: 2,
@@ -661,9 +719,14 @@ mod tests {
         });
         progress.finish();
 
-        let lines = lock(&progress.shared.lines);
-        assert_eq!(lines.report.done, 0);
-        assert!(lines.report.started.is_some());
+        assert_eq!(buffer.count(" progress: restoring 1 layers"), 1);
+        assert_eq!(buffer.count(" progress: retry 1 (2 remaining): reset"), 1);
+
+        let writes = buffer.writes();
+        assert!(
+            writes.last().unwrap().contains(" progress: done, "),
+            "{writes:#?}"
+        );
     }
 
     #[test]

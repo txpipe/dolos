@@ -109,12 +109,21 @@ fn a_directory_stele_restores_the_node_that_encoded_it() {
     assert!(stdout.contains("preview (2)"), "{stdout}");
     assert!(stdout.contains("restored:"), "{stdout}");
 
-    // Stderr is a pipe here, not a terminal, so progress comes as plain lines.
+    // Stderr is a pipe here, not a terminal, so progress comes as plain lines,
+    // one report to a line.
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let start = stderr.find(" progress: restoring ");
-    let end = stderr.find(" progress: done, ");
+    let lines: Vec<&str> = stderr.lines().collect();
+    let line_of = |needle: &str| lines.iter().position(|line| line.contains(needle));
+    let start = line_of(" progress: restoring ");
+    let end = line_of(" progress: done, ");
     assert!(start.is_some() && end.is_some(), "{stderr}");
     assert!(start < end, "{stderr}");
+    assert!(
+        lines
+            .iter()
+            .all(|line| line.matches(" progress: ").count() <= 1),
+        "{stderr}"
+    );
 
     assert_eq!(Contents::read(&node), before);
 
