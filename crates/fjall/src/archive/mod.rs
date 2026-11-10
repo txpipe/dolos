@@ -1337,6 +1337,19 @@ impl CoreArchiveStore for ArchiveStore {
     /// second block sharing that slot), while log rows *at* the slot go with
     /// the cut — the exact boundary redb's `remove_after` draws by comparing
     /// full log keys against the bare 8-byte temporal prefix.
+    /// Commits are journaled with [`PersistMode::Buffer`]; this fsyncs the
+    /// journal. Block bodies are synced by the commit that appends them, before
+    /// the index entries pointing at them. A read-only view committed nothing.
+    fn persist(&self) -> Result<(), ArchiveError> {
+        if self.view.is_some() {
+            return Ok(());
+        }
+
+        self.db.persist(PersistMode::SyncAll).map_err(fjall_err)?;
+
+        Ok(())
+    }
+
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError> {
         self.writable()?;
 
@@ -1847,6 +1860,9 @@ mod tests {
                 assert!(error.to_string().contains("read-only"), "{error:?}");
             }
 
+            // Nothing was committed through the view, so there is nothing to sync.
+            store.persist().unwrap();
+
             for error in [
                 store.compact().unwrap_err(),
                 store.record_identity("other").unwrap_err(),
@@ -1862,6 +1878,28 @@ mod tests {
 
         let store = ArchiveStore::open(schema(), &path, None, Preset::Standard).unwrap();
         assert_eq!(store.get_tip().unwrap().unwrap().0, 102);
+    }
+
+    /// Blocks committed and persisted are there when the archive is reopened
+    /// without a shutdown. The fsync itself shows only after a power loss, so
+    /// this pins that `persist` succeeds on a writable archive.
+    #[test]
+    fn a_persisted_commit_survives_a_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive");
+
+        {
+            let store = ArchiveStore::open(schema(), &path, None, Preset::Standard).unwrap();
+            write(&store, &[(100, body(100, 0)), (101, body(101, 0))]);
+            store.persist().unwrap();
+        }
+
+        let store = ArchiveStore::open(schema(), &path, None, Preset::Standard).unwrap();
+        assert_eq!(store.get_tip().unwrap().unwrap().0, 101);
+        assert_eq!(
+            store.get_block_by_slot(&100).unwrap(),
+            Some(body(100, 0).to_vec())
+        );
     }
 
     /// An archive a stopped removal marked refuses every open, its views'

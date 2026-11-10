@@ -2428,6 +2428,10 @@ impl<S: ArchiveStore> ArchiveStore for Counted<S> {
         self.inner.truncate_front(after)
     }
 
+    fn persist(&self) -> Result<(), ArchiveError> {
+        self.inner.persist()
+    }
+
     fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
         self.inner.slot_by_block_hash(hash)
     }
@@ -8610,6 +8614,10 @@ mod boundary_preparation {
 
         fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError> {
             self.inner.truncate_front(after)
+        }
+
+        fn persist(&self) -> Result<(), ArchiveError> {
+            self.inner.persist()
         }
 
         fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
