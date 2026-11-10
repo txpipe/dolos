@@ -382,7 +382,7 @@ impl dolos_core::StateStore for StateStore {
 
     /// An empty [`Durability::Immediate`] commit, which redb guarantees also
     /// makes every earlier commit durable, whatever durability it used. It
-    /// keeps quick repair, as every other commit here does, so a hard stop
+    /// keeps quick repair, as the schema and writer commits do, so a hard stop
     /// right after it does not cost a full repair on the next open.
     fn persist(&self) -> Result<(), StateError> {
         let mut wx = self.db().begin_write().map_err(Error::from)?;
@@ -395,7 +395,9 @@ impl dolos_core::StateStore for StateStore {
     }
 }
 
-#[cfg(test)]
+// Unix only: the test copies an open file, and Windows file locks are
+// mandatory, so the open store's lock refuses the copy's read.
+#[cfg(all(test, unix))]
 mod tests {
     use dolos_core::StateStore as _;
 
@@ -408,9 +410,6 @@ mod tests {
     /// A commit redb was told need not be durable is durable once `persist`
     /// returns. The file is copied while the store is still open, so the copy
     /// holds only what reached the disk, not what a clean close would add.
-    /// Unix only: Windows file locks are mandatory, so the open store's lock
-    /// refuses the copy's read.
-    #[cfg(unix)]
     #[test]
     fn persist_makes_a_non_durable_commit_durable() {
         let dir = tempfile::tempdir().unwrap();
