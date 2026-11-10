@@ -31,12 +31,12 @@ pub enum Command {
 }
 
 impl Command {
-    /// `--continue`, which only the replays take.
+    /// `--continue`, which every source takes.
     fn resumes(&self) -> bool {
         match self {
             #[cfg(feature = "mithril")]
             Command::Mithril(args) => args.replay.resume,
-            Command::Stelae(_) => false,
+            Command::Stelae(args) => args.resume,
             Command::Immutabledb(args) => args.replay.resume,
         }
     }
@@ -124,14 +124,16 @@ fn from_environment<T: clap::Args>() -> miette::Result<T> {
 
 #[derive(Debug, Parser, Default)]
 pub struct Args {
-    /// Replace any data already in storage
+    /// Replace any data already in storage, and with it what an interrupted
+    /// bootstrap left for `--continue`
     #[arg(long, global = true)]
     force: bool,
 
     /// Exit 0 without bootstrapping when storage already holds a node, as an
     /// interrupted replay that has committed leaves one for `--continue` to
-    /// resume; data without one, as a bootstrap interrupted before it commits
-    /// a cursor leaves, and a store this release refuses are errors instead
+    /// resume; data without one, as an interrupted stele restore or a
+    /// bootstrap interrupted before it commits a cursor leaves, and a store
+    /// this release refuses are errors instead
     #[arg(long, global = true)]
     skip_if_data: bool,
 
@@ -186,7 +188,7 @@ impl Args {
 enum Resolved<'a> {
     #[cfg(feature = "mithril")]
     Mithril(&'a mithril::Args, dolos_mithril::MithrilSource, PathBuf),
-    Stelae(&'a stelae::Args, stelae::Inputs),
+    Stelae(&'a stelae::Args, Box<stelae::Inputs>),
     Immutabledb(&'a immutabledb::Args, PathBuf),
 }
 
@@ -205,9 +207,10 @@ fn resolve<'a>(
             let (source, download_dir) = mithril::resolve(config, args, network, clears)?;
             Resolved::Mithril(args, source, download_dir)
         }
-        Command::Stelae(args) => {
-            Resolved::Stelae(args, stelae::resolve(config, args, network, clears)?)
-        }
+        Command::Stelae(args) => Resolved::Stelae(
+            args,
+            Box::new(stelae::resolve(config, args, network, clears)?),
+        ),
         Command::Immutabledb(args) => {
             Resolved::Immutabledb(args, immutabledb::resolve(config, args, clears)?)
         }
@@ -227,7 +230,7 @@ fn dispatch(
             mithril::run(config, args, &source, &download_dir, feedback)
         }
         Resolved::Stelae(args, inputs) => {
-            stelae::run(config, args, inputs, feedback)?;
+            stelae::run(config, args, *inputs, feedback)?;
 
             // A restore writes the state and the archive, never the WAL, so
             // the WAL is seeded at the restored cursor for `find_intersect`.
@@ -509,23 +512,21 @@ mod tests {
     }
 
     #[test]
-    fn continue_belongs_to_the_replays() {
-        let replays = [
+    fn continue_belongs_to_each_source() {
+        let sources = [
             #[cfg(feature = "mithril")]
             &["mithril", "--continue"][..],
             &["immutabledb", "--source", "db", "--continue"][..],
+            &["stelae", "--continue"][..],
         ];
 
-        for flags in replays {
+        for flags in sources {
             let policy = parsed(flags).unwrap().policy().unwrap();
             assert!(policy.r#continue, "{flags:?}");
         }
 
-        for flags in [
-            &["--continue", "stelae"][..],
-            &["stelae", "--continue"][..],
-            &["--continue"][..],
-        ] {
+        // A source's flag, not the group's.
+        for flags in [&["--continue", "stelae"][..], &["--continue"][..]] {
             assert_eq!(parsed(flags).unwrap_err().exit_code(), 2, "{flags:?}");
         }
     }
@@ -543,6 +544,9 @@ mod tests {
                 "--continue",
                 "--skip-if-data",
             ][..],
+            &["--force", "stelae", "--continue"][..],
+            &["stelae", "--continue", "--force"][..],
+            &["stelae", "--skip-if-data", "--continue"][..],
         ] {
             let error = parsed(flags).unwrap().policy().unwrap_err();
             assert_eq!(error.exit_code(), 2, "{flags:?}");
@@ -551,6 +555,7 @@ mod tests {
         for flags in [
             &["--force", "stelae"][..],
             &["stelae", "--skip-if-data"][..],
+            &["stelae", "--continue"][..],
             &["immutabledb", "--source", "db"][..],
         ] {
             assert!(parsed(flags).unwrap().policy().is_ok(), "{flags:?}");

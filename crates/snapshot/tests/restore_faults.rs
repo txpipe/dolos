@@ -84,6 +84,7 @@ fn restoring(storage: &std::path::Path, magic: u64) -> restore::Restoring<'_> {
         storage_path: storage,
         resume: false,
         skip_space_check: false,
+        source: None,
     }
 }
 
@@ -284,4 +285,54 @@ fn a_retried_manifest_read_is_announced() {
         "the manifest is fetched twice"
     );
     assert_eq!(retries, 1, "the manifest retry reaches the observer");
+}
+
+/// A resume whose recorded stele the registry won't serve is refused as gone
+/// only when the registry says the tag is absent. Any other failure, here a
+/// refused read, is reported as itself, since starting over with `--force`
+/// is not the fix for it.
+#[test]
+fn a_recorded_resume_is_gone_only_when_its_tag_is_absent() {
+    let registry = FaultRegistry::spawn();
+    let scratch = tempfile::tempdir().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let source = restore::Source::Repo(registry.repository(REPOSITORY));
+
+    restore::SourceRecord {
+        source: source.to_string(),
+        sequence: 7,
+        inscription_digest: stelae::Digest::from_bytes([7; 32]),
+    }
+    .save(&restore::source_path_in(storage.path()))
+    .unwrap();
+
+    let resume = || {
+        let blank = Blank::<MemoryStores>::open();
+
+        registry::restore_registry(
+            &opened(&registry, scratch.path()),
+            Point::Epoch(7),
+            restore::Restoring {
+                resume: true,
+                source: Some(&source),
+                ..restoring(storage.path(), 0)
+            },
+            restore::Target::new(&blank.archive, blank.state()),
+            &Observer::silent(),
+        )
+        .unwrap_err()
+    };
+
+    // Nothing is published, so the registry answers the tag is unknown.
+    let error = resume();
+    assert!(
+        matches!(error, Error::Resume(restore::ResumeRefusal::Gone(_))),
+        "{error:?}"
+    );
+
+    registry.deny_next_manifest(1);
+
+    let error = resume();
+    assert!(!matches!(error, Error::Resume(_)), "{error:?}");
+    assert!(error.to_string().contains("denied"), "{error}");
 }

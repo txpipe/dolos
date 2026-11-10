@@ -272,9 +272,23 @@ where
     // the operator too; the stele shares this connection's observer.
     registry.observe(observer.clone());
 
-    let stele = point.pull(registry)?;
+    let stele = match point.pull(registry) {
+        Ok(stele) => stele,
+        Err(error) => {
+            return Err(match crate::restore::pinned(&node)? {
+                Some(record) if is_absent(&error) => crate::restore::gone(record),
+                _ => error,
+            })
+        }
+    };
 
     crate::restore::restore_stele(&stele, node, registry.scratch_dir(), target, observer)
+}
+
+/// Whether a pull failed because the repository holds no manifest under the
+/// tag, rather than because the registry did not answer.
+fn is_absent(error: &Error) -> bool {
+    matches!(error, Error::Stelae(error) if error.is_absent())
 }
 
 /// Open a repository in a registry, which is [`stelae_driver::publish::open`]:

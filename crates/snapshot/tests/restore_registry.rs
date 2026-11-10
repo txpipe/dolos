@@ -47,6 +47,7 @@
 //! registry — the fixture stele is kilobytes — and pass for the wrong reason.
 
 mod node;
+mod recorder;
 mod registry_fixture;
 mod watcher;
 
@@ -62,8 +63,9 @@ use dolos_snapshot::{
     restore::{self, default_budget, progress_path_in, Checkpoint},
     state_layer_count, Error, LOG_NAMESPACES, NAMESPACES, UTXOS,
 };
-use dolos_testing::toy_domain::{MemoryStores, ToyDomain, ToyStores};
+use dolos_testing::toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores};
 use node::{harness, plan_at_boundary, Blank};
+use recorder::{contents_digest, Journal, Op, RecordedArchive, RecordedState};
 use registry_fixture::{Distribution, Fixture};
 use stelae::{
     frame::Limits,
@@ -204,6 +206,7 @@ fn restoring(storage: &std::path::Path, magic: u64, resume: bool) -> restore::Re
         storage_path: storage,
         resume,
         skip_space_check: false,
+        source: None,
     }
 }
 
@@ -1174,4 +1177,267 @@ fn a_resumed_registry_restore_reports_what_it_skipped() {
         outlook.remaining.compressed_bytes,
         "a resumed run reports the bytes it still had to move, not the original total"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Resuming through the source record
+// ---------------------------------------------------------------------------
+
+/// A repository in the fixture, opened for a restore, with the source a
+/// restore records for it.
+struct Recorded {
+    repository: registry::SnapshotRepository,
+    source: restore::Source,
+    magic: u64,
+}
+
+impl Recorded {
+    fn open(fixture: &Fixture, name: &str, magic: u64) -> Self {
+        Self {
+            repository: fixture.snapshot_repository(name),
+            source: restore::Source::Repo(
+                format!("oci://{}/{name}", fixture.address())
+                    .parse()
+                    .unwrap(),
+            ),
+            magic,
+        }
+    }
+
+    fn restoring<'a>(
+        &'a self,
+        storage: &'a std::path::Path,
+        resume: bool,
+    ) -> restore::Restoring<'a> {
+        restore::Restoring {
+            source: Some(&self.source),
+            ..restoring(storage, self.magic, resume)
+        }
+    }
+
+    fn restore<B: ToyStores>(
+        &self,
+        point: Point,
+        storage: &std::path::Path,
+        blank: &Blank<B>,
+        resume: bool,
+    ) -> Result<restore::RestoreOutcome, Error> {
+        restore::execute(
+            RestoreInput::Repository {
+                repository: &self.repository,
+                point,
+            },
+            self.restoring(storage, resume),
+            target(blank),
+            None,
+        )
+    }
+
+    /// A recorded restore of `point` into `blank` through stores that stop at
+    /// the `call`-th commit or persist; `None` runs it through, and returns
+    /// the calls it made.
+    fn stopped_at(
+        &self,
+        point: Point,
+        storage: &std::path::Path,
+        blank: &Blank<FjallStores>,
+        call: Option<usize>,
+    ) -> Vec<Op> {
+        let journal = match call {
+            Some(call) => Journal::crashing_at(progress_path_in(storage), call),
+            None => Journal::new(progress_path_in(storage)),
+        };
+
+        let archive = RecordedArchive {
+            inner: blank.archive.clone(),
+            journal: journal.clone(),
+        };
+        let state = RecordedState {
+            inner: blank.state().clone(),
+            journal: journal.clone(),
+        };
+
+        let outcome = restore::execute(
+            RestoreInput::Repository {
+                repository: &self.repository,
+                point,
+            },
+            self.restoring(storage, false),
+            restore::Target::new(&archive, &state),
+            None,
+        );
+
+        assert_eq!(outcome.is_ok(), call.is_none(), "{:?}", outcome.err());
+
+        journal.take().into_iter().map(|entry| entry.op).collect()
+    }
+}
+
+fn source_record(storage: &std::path::Path) -> Option<restore::SourceRecord> {
+    restore::SourceRecord::load(&restore::source_path_in(storage)).unwrap()
+}
+
+/// Stopped over the wire at an epoch layer, in the tip and at the cursor
+/// commit, and resumed through the record into the node an uninterrupted
+/// restore builds, on the fjall pair. The resume reads the recorded epoch
+/// although `latest` has moved on, and refuses to read `latest` instead.
+#[test]
+#[ignore]
+fn a_stopped_registry_restore_resumes_through_its_record() {
+    let fixture = Fixture::spawn();
+    let node = Node::build();
+    let name = "dolos/record-resume";
+
+    node.publish(&fixture.repository(name), &node.first);
+    let source = Recorded::open(&fixture, name, node.magic);
+
+    let control = Blank::<FjallStores>::open();
+    let ops = source.stopped_at(
+        Point::Latest,
+        tempfile::tempdir().unwrap().path(),
+        &control,
+        None,
+    );
+    let control = contents_digest(&control.archive, control.state());
+
+    let first = |op: Op| ops.iter().position(|at| *at == op).unwrap() + 1;
+    let cursor_commit = ops.iter().rposition(|at| *at == Op::StateCommit).unwrap() + 1;
+    let stops = [
+        first(Op::ArchivePersist) + 1,
+        first(Op::StateCommit),
+        cursor_commit,
+    ];
+
+    for (index, stop) in stops.into_iter().enumerate() {
+        let storage = tempfile::tempdir().unwrap();
+        let blank = Blank::<FjallStores>::open();
+
+        // `latest` names the first stele until the first stop has moved it.
+        let point = match index {
+            0 => Point::Latest,
+            _ => Point::Epoch(node.first.sequence),
+        };
+
+        source.stopped_at(point, storage.path(), &blank, Some(stop));
+
+        let record = source_record(storage.path()).expect("no source record");
+        assert_eq!(record.source, source.source.to_string());
+        assert_eq!(record.sequence, node.first.sequence);
+
+        if index == 0 {
+            // `latest` moves to the next stele.
+            node.publish(&fixture.repository(name), &node.second);
+
+            let error = source
+                .restore(Point::Latest, storage.path(), &blank, true)
+                .unwrap_err();
+
+            assert!(
+                matches!(error, Error::Resume(restore::ResumeRefusal::Gone(_))),
+                "{error:?}"
+            );
+        }
+
+        let recorded = RestoreProgress::load(&progress_path_in(storage.path()))
+            .unwrap()
+            .map_or(0, |progress| progress.completed.len());
+
+        let resumed = source
+            .restore(Point::Epoch(record.sequence), storage.path(), &blank, true)
+            .unwrap();
+
+        assert_eq!(
+            resumed.summary.layers_skipped, recorded,
+            "stopped at {stop}"
+        );
+        assert_eq!(source_record(storage.path()), None);
+        assert_eq!(
+            contents_digest(&blank.archive, blank.state()),
+            control,
+            "stopped at call {stop}"
+        );
+    }
+}
+
+/// Interrupt a recorded restore of the repository's first stele at its tip,
+/// returning the records it left.
+fn interrupted_over_the_wire(source: &Recorded, blank: &Blank<FjallStores>) -> tempfile::TempDir {
+    let ops = source.stopped_at(
+        Point::Epoch(1),
+        tempfile::tempdir().unwrap().path(),
+        &Blank::<FjallStores>::open(),
+        None,
+    );
+    let tip = ops.iter().position(|at| *at == Op::StateCommit).unwrap() + 1;
+
+    let storage = tempfile::tempdir().unwrap();
+    source.stopped_at(Point::Epoch(1), storage.path(), blank, Some(tip));
+
+    assert!(source_record(storage.path()).is_some());
+
+    storage
+}
+
+/// The recorded epoch tag taken out of the repository is refused, before a
+/// store is touched.
+#[test]
+#[ignore]
+fn a_resume_whose_epoch_tag_is_gone_is_refused() {
+    let fixture = Fixture::spawn();
+    let node = Node::build();
+    let name = "dolos/record-untagged";
+
+    node.publish(&fixture.repository(name), &node.first);
+    let source = Recorded::open(&fixture, name, node.magic);
+
+    let blank = Blank::<FjallStores>::open();
+    let storage = interrupted_over_the_wire(&source, &blank);
+    let before = contents_digest(&blank.archive, blank.state());
+
+    Distribution::new(&fixture).delete_manifest(name, &Point::Epoch(1).to_string());
+
+    let error = source
+        .restore(Point::Epoch(1), storage.path(), &blank, true)
+        .unwrap_err();
+
+    let Error::Resume(restore::ResumeRefusal::Gone(record)) = &error else {
+        panic!("{error:?}");
+    };
+
+    assert_eq!(Some(record.clone()), source_record(storage.path()));
+    assert!(error.to_string().contains("is no longer in"), "{error}");
+    assert_eq!(contents_digest(&blank.archive, blank.state()), before);
+}
+
+/// Another stele under the recorded epoch tag is refused, before a store is
+/// touched.
+#[test]
+#[ignore]
+fn a_resume_with_another_stele_under_its_tag_is_refused() {
+    let fixture = Fixture::spawn();
+    let node = Node::build();
+    let name = "dolos/record-retagged";
+
+    node.publish(&fixture.repository(name), &node.first);
+    let source = Recorded::open(&fixture, name, node.magic);
+
+    let blank = Blank::<FjallStores>::open();
+    let storage = interrupted_over_the_wire(&source, &blank);
+    let before = contents_digest(&blank.archive, blank.state());
+
+    node.publish(&fixture.repository(name), &node.second);
+
+    let distribution = Distribution::new(&fixture);
+    let second = distribution.manifest(name, &Point::Epoch(2).to_string());
+    distribution.put_manifest(name, &Point::Epoch(1).to_string(), &second);
+
+    let error = source
+        .restore(Point::Epoch(1), storage.path(), &blank, true)
+        .unwrap_err();
+
+    assert!(
+        matches!(error, Error::Resume(restore::ResumeRefusal::Gone(_))),
+        "{error:?}"
+    );
+    assert_eq!(contents_digest(&blank.archive, blank.state()), before);
 }

@@ -386,7 +386,9 @@ pub struct ExistingDataPolicy {
     /// `--skip-if-data`: leave a node alone and exit zero. Data without a
     /// node, and a store this release refuses, are not skipped.
     pub skip_if_data: bool,
-    /// `--continue`: go ahead, resuming a replay from its committed position.
+    /// `--continue`: go ahead and resume, a replay from its committed
+    /// position and a stele restore from its records. The source decides
+    /// whether there is anything to resume.
     pub r#continue: bool,
 }
 
@@ -406,6 +408,22 @@ struct Found {
     /// with data or one this release refuses, a WAL or an archive that fails
     /// to open, or block segments.
     held: Vec<PathBuf>,
+    /// What the archive's index holds, for a resume's recorded layers.
+    index: ArchiveIndex,
+}
+
+/// What the archive's index holds, as a resume checks its recorded layers
+/// against it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ArchiveIndex {
+    /// The index holds data, or fails to open or to read. Block segments
+    /// alone, as a lost archive volume beside a separate `blocks_path`
+    /// leaves, don't set it.
+    pub holds_data: bool,
+    /// The segment file the index locates its newest block in, when that
+    /// file is missing or ends before the block does, as a lost or emptied
+    /// blocks volume beside a kept index leaves.
+    pub missing_segment: Option<PathBuf>,
 }
 
 /// Open the stores whose directories exist, creating no store directory: a
@@ -456,13 +474,23 @@ fn found_in_storage(config: &RootConfig) -> Result<Found, Error> {
     if let Some(path) = config.storage.archive_path().filter(|path| path.exists()) {
         // Any failure but the identity's is left to the command that uses the
         // archive, as before stores recorded identities, and counts as data.
-        let holds_data = match open_archive_index(config) {
-            Ok(archive) => archive.holds_data().unwrap_or(true),
+        let (holds_data, newest) = match open_archive_index(config) {
+            Ok(archive) => (
+                archive.holds_data().unwrap_or(true),
+                archive.newest_block_location().ok().flatten(),
+            ),
             Err(refusal @ ArchiveError::IncompatibleStore(_)) => {
                 found.refused.get_or_insert(refusal.into());
-                true
+                (true, None)
             }
-            Err(_) => true,
+            Err(_) => (true, None),
+        };
+
+        let segments = config.storage.blocks_path().unwrap_or_else(|| path.clone());
+
+        found.index = ArchiveIndex {
+            holds_data,
+            missing_segment: newest.and_then(|location| missing_segment(&segments, location)),
         };
 
         if holds_data || holds_segments(&path) {
@@ -490,6 +518,24 @@ fn open_archive_index(config: &RootConfig) -> Result<ArchiveStoreBackend, Archiv
         dolos_cardano::model::build_log_schema(),
         config.storage.archive.kind,
     )
+}
+
+/// The segment file under `dir` that `location` names, when it is missing or
+/// ends before the frame does. Its metadata is read, since opening the
+/// segments would create `dir`; a file whose metadata fails to read for
+/// another reason counts as holding the frame.
+fn missing_segment(dir: &Path, location: dolos_fjall::flatfiles::BlockLocation) -> Option<PathBuf> {
+    let segment = dir.join(dolos_fjall::flatfiles::segment_filename(
+        location.segment_id,
+    ));
+    let end = location.offset + u64::from(location.length);
+
+    match std::fs::metadata(&segment) {
+        Ok(metadata) if metadata.len() >= end => None,
+        Ok(_) => Some(segment),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(segment),
+        Err(_) => None,
+    }
 }
 
 /// Whether `dir` holds a block segment file. Something there that can't be
@@ -561,10 +607,7 @@ pub fn inspect_existing_data(
     }
 
     if let Some(wal) = found.wal_in_use {
-        return Err(Error::message(format!(
-            "the WAL at {} is in use by another process. Stop it, then run the bootstrap again",
-            wal.display()
-        )));
+        return Err(wal_in_use(&wal));
     }
 
     if found.held.is_empty() {
@@ -604,6 +647,60 @@ pub fn inspect_existing_data(
     Err(Error::message(format!(
         "{detected}. Use --force to replace it, or --skip-if-data to leave it and exit 0"
     )))
+}
+
+/// The managed stores holding data, as [`inspect_existing_data`] finds them
+/// with no flag given: empty when it would go ahead. A store this release
+/// refuses, a state that fails to open or to read its cursor, and a WAL
+/// another process holds are errors, as they are there.
+pub fn held_data(config: &RootConfig) -> Result<Vec<PathBuf>, Error> {
+    Ok(found_or_refused(config)?.held)
+}
+
+/// What the archive's index holds, with [`held_data`]'s errors: whether it
+/// holds data, and whether the segment file its newest block location names
+/// still holds that block. Holding no data, and no segment to check, for a
+/// node that keeps no archive on disk.
+pub fn archive_index(config: &RootConfig) -> Result<ArchiveIndex, Error> {
+    Ok(found_or_refused(config)?.index)
+}
+
+/// What storage holds, or the error [`held_data`] raises for it.
+fn found_or_refused(config: &RootConfig) -> Result<Found, Error> {
+    let mut found = found_in_storage(config)?;
+
+    if let Some(refusal) = found.refused.take() {
+        return Err(refusal);
+    }
+
+    if let Some(error) = found.unreadable.take() {
+        return Err(error);
+    }
+
+    if let Some(wal) = &found.wal_in_use {
+        return Err(wal_in_use(wal));
+    }
+
+    Ok(found)
+}
+
+/// Whether the WAL reads as holding an entry. One that can't be read without
+/// repair, as a process killed while holding it open leaves, can't be told
+/// and reads as `false`.
+pub fn wal_holds_entries(config: &RootConfig) -> bool {
+    use dolos_redb3::wal::WalProbe;
+
+    config
+        .wal_path()
+        .filter(|path| path.exists())
+        .is_some_and(|path| matches!(dolos_redb3::wal::probe(&path), Ok(WalProbe::Entries)))
+}
+
+fn wal_in_use(wal: &Path) -> Error {
+    Error::message(format!(
+        "the WAL at {} is in use by another process. Stop it, then run the bootstrap again",
+        wal.display()
+    ))
 }
 
 /// The decision on storage holding a store this release refuses: `--force`
@@ -1889,6 +1986,18 @@ impl ArchiveStoreBackend {
         }
     }
 
+    /// The location of the newest block the index holds, without reading its
+    /// frame; `None` for the stores that keep no segment files.
+    pub fn newest_block_location(
+        &self,
+    ) -> Result<Option<dolos_fjall::flatfiles::BlockLocation>, ArchiveError> {
+        match self {
+            Self::Fjall(s) => Ok(s.newest_block()?.map(|(_, location)| location)),
+            Self::LogsOnly(inner) => inner.newest_block_location(),
+            Self::Memory(_) | Self::EntityReads(_) | Self::NoOp(_) => Ok(None),
+        }
+    }
+
     pub fn shutdown(&self) -> Result<(), ArchiveError> {
         match self {
             Self::Memory(s) => s.shutdown(),
@@ -2791,6 +2900,36 @@ mod tests {
             | Err(Error::ArchiveError(ArchiveError::IncompatibleStore(refusal))) => Some(refusal),
             Err(error) => panic!("not an identity refusal: {error}"),
         }
+    }
+
+    /// A segment is missing when its file is absent or ends before the
+    /// frame does. One that runs past the frame, as frames written after the
+    /// newest indexed one leave it, holds the frame. One whose metadata fails
+    /// to read for another reason counts as holding the frame: here, on unix,
+    /// a path through a file. Windows reports that path as not found.
+    #[test]
+    fn a_segment_is_missing_when_absent_or_cut_short() {
+        let dir = tempfile::tempdir().unwrap();
+        let location = dolos_fjall::flatfiles::BlockLocation {
+            segment_id: 3,
+            offset: 10,
+            length: 5,
+        };
+        let segment = dir.path().join("000003.segment");
+
+        assert_eq!(missing_segment(dir.path(), location), Some(segment.clone()));
+
+        std::fs::write(&segment, [0; 14]).unwrap();
+        assert_eq!(missing_segment(dir.path(), location), Some(segment.clone()));
+
+        std::fs::write(&segment, [0; 15]).unwrap();
+        assert_eq!(missing_segment(dir.path(), location), None);
+
+        std::fs::write(&segment, [0; 16]).unwrap();
+        assert_eq!(missing_segment(dir.path(), location), None);
+
+        #[cfg(unix)]
+        assert_eq!(missing_segment(&segment, location), None);
     }
 
     #[test]
@@ -4168,6 +4307,9 @@ mod lifecycle_tests {
         let progress = progress_path_in(&storage);
         std::fs::write(&progress, b"{}").unwrap();
 
+        let record = dolos_snapshot::restore::source_path_in(&storage);
+        std::fs::write(&record, b"{}").unwrap();
+
         // A stand-in for the stores the progress file describes, so the
         // assertion is about a directory that had a node in it.
         std::fs::write(storage.join("state"), b"a store").unwrap();
@@ -4179,6 +4321,10 @@ mod lifecycle_tests {
         assert!(
             !progress.exists(),
             "a progress file outlived the stores it describes"
+        );
+        assert!(
+            !record.exists(),
+            "a source record outlived the stores it describes"
         );
 
         assert!(
@@ -4203,5 +4349,6 @@ mod lifecycle_tests {
         let storage = std::path::Path::new("/var/lib/dolos/data");
 
         assert!(progress_path_in(storage).starts_with(storage));
+        assert!(dolos_snapshot::restore::source_path_in(storage).starts_with(storage));
     }
 }

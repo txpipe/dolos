@@ -157,7 +157,7 @@ use stelae::{
     plan::{Remaining, Resume},
     progress::{Event, Observer, Outcome},
     transport::{BlobIndex, SteleReader},
-    LayerHeader,
+    Digest, LayerHeader,
 };
 use tracing::info;
 
@@ -954,13 +954,248 @@ impl Summary {
 /// Where a node with storage at `storage_path` keeps its progress file.
 ///
 /// The [`Checkpoint`] takes the path it is given — the driver never derives
-/// dolos layout — and this is where dolos derives it. The `resume` flag a
-/// checkpoint is opened with is the caller's, and the driver's
-/// ignore-unless-resuming rule is the reason `--force` is safe: clearing
-/// storage removes this file with the rest of it, and even a progress file
-/// that somehow survived its stores cannot skip layers onto empty ones.
+/// dolos layout — and this is where dolos derives it. Clearing storage removes
+/// this file with the rest of it, and a restore that doesn't resume removes it
+/// before its first write. A resume honours it whatever the stores hold, so
+/// checking that they still hold its layers is the caller's.
 pub fn progress_path_in(storage_path: &Path) -> PathBuf {
     storage_path.join(PROGRESS_FILE)
+}
+
+pub use stelae::RestoreProgress;
+
+/// Name of the source record inside a node's storage directory.
+///
+/// Beside [`PROGRESS_FILE`] and inside `storage.path` for the same reason:
+/// clearing a node's storage clears it too. The progress file's shape is
+/// protocol and names only the stele's digest, so where that stele is read
+/// from is this record's, and Dolos layout.
+pub const SOURCE_FILE: &str = ".snapshot-restore-source.json";
+
+/// Where a node with storage at `storage_path` keeps its source record.
+pub fn source_path_in(storage_path: &Path) -> PathBuf {
+    storage_path.join(SOURCE_FILE)
+}
+
+/// Which stele a restore in flight reads, and from where.
+///
+/// Durable before the first layer is fetched and removed after the progress
+/// file, so every progress file it leaves has one beside it. A resume reads
+/// the stele it names, by sequence, and only if its digest is still the one
+/// recorded.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceRecord {
+    /// The source as a URL: `oci://HOST/PATH`, or `file://DIR` with `DIR`
+    /// absolute.
+    pub source: String,
+    /// The stele's sequence, which names its immutable tag in a registry.
+    pub sequence: u64,
+    pub inscription_digest: Digest,
+}
+
+impl SourceRecord {
+    /// The record at `path`, or `None` if there is none. A file that does not
+    /// parse is an error, as a progress file that does not parse is.
+    pub fn load(path: &Path) -> Result<Option<Self>, Error> {
+        let raw = match std::fs::read(path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(stelae::Error::Io(error).into()),
+        };
+
+        serde_json::from_slice(&raw).map(Some).map_err(|error| {
+            ResumeRefusal::Unreadable {
+                path: path.to_path_buf(),
+                reason: error.to_string(),
+            }
+            .into()
+        })
+    }
+
+    /// Write the record at `path` through a synced temporary file, a rename
+    /// and a sync of the directory, so a hard stop leaves the old file or the
+    /// new one and a resume after a power loss still finds it.
+    pub fn save(&self, path: &Path) -> Result<(), Error> {
+        use std::io::Write as _;
+
+        let staging = path.with_file_name(format!(".{SOURCE_FILE}.{}.tmp", std::process::id()));
+        let bytes = serde_json::to_vec(self).map_err(stelae::Error::Json)?;
+
+        let write = || -> std::io::Result<()> {
+            // Closed before the rename: Windows refuses to rename an open file.
+            {
+                let mut file = std::fs::File::create(&staging)?;
+                file.write_all(&bytes)?;
+                file.sync_all()?;
+            }
+
+            std::fs::rename(&staging, path)?;
+
+            sync_dir(path.parent().unwrap_or(Path::new(".")))
+        };
+
+        write().map_err(|error| stelae::Error::Io(error).into())
+    }
+
+    /// Delete the record at `path`; one that is not there is not an error.
+    pub fn remove(path: &Path) -> Result<(), Error> {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(stelae::Error::Io(error).into()),
+        }
+    }
+}
+
+/// Make a rename in `dir` durable. Windows can't open a directory to sync
+/// it, and there the rename itself is the durability point.
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    if cfg!(unix) {
+        std::fs::File::open(dir)?.sync_all()
+    } else {
+        Ok(())
+    }
+}
+
+/// What an interrupted restore left in a node's storage directory.
+#[derive(Debug, Clone, Default)]
+pub struct Unfinished {
+    pub record: Option<SourceRecord>,
+    pub progress: Option<RestoreProgress>,
+}
+
+/// Read the source record and the progress file in `storage_path`, writing
+/// nothing.
+pub fn unfinished(storage_path: &Path) -> Result<Unfinished, Error> {
+    let progress_path = progress_path_in(storage_path);
+
+    let progress = match RestoreProgress::load(&progress_path) {
+        Ok(progress) => progress,
+        Err(stelae::Error::Json(error)) => {
+            return Err(ResumeRefusal::Unreadable {
+                path: progress_path,
+                reason: error.to_string(),
+            }
+            .into())
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    Ok(Unfinished {
+        record: SourceRecord::load(&source_path_in(storage_path))?,
+        progress,
+    })
+}
+
+/// Why a restore asked to resume won't, before it writes anything.
+#[derive(Debug, thiserror::Error)]
+pub enum ResumeRefusal {
+    /// A progress file with no source record beside it, as a release that
+    /// wrote none leaves: nothing says which stele its layers came from.
+    #[error(
+        "the restore progress in {} has no source record beside it, so which stele its layers \
+         came from is unknown",
+        .storage.display()
+    )]
+    Unrecorded { storage: PathBuf },
+
+    /// A record that does not parse.
+    #[error("the restore record at {} can't be read: {reason}", .path.display())]
+    Unreadable { path: PathBuf, reason: String },
+
+    /// A source other than the recorded one.
+    #[error("the restore being resumed reads {recorded}, not {given}")]
+    OtherSource { recorded: String, given: String },
+
+    /// The recorded stele is not in its source any more: its tag or directory
+    /// is gone, or names another stele now.
+    #[error(
+        "the stele this restore started from ({}, epoch-{}) is no longer in {}",
+        .0.inscription_digest,
+        .0.sequence,
+        .0.source
+    )]
+    Gone(SourceRecord),
+
+    /// A progress file for another stele than its source record names.
+    #[error("the restore progress names stele {progress}, and its source record names {recorded}")]
+    Disagrees { progress: Digest, recorded: Digest },
+
+    /// A state cursor other than the stele's point. A restore sets the cursor
+    /// last and only to that point, so something else wrote these stores.
+    #[error(
+        "the state's cursor is at {cursor}, not at {point} where this stele leaves it, so \
+         something other than the restore wrote these stores after it was interrupted"
+    )]
+    Written {
+        cursor: ChainPoint,
+        point: ChainPoint,
+    },
+}
+
+/// The record a restore that resumes against one has to match: `None` when
+/// the restore isn't resuming, records nothing, or finds no record.
+pub(crate) fn pinned(node: &Restoring<'_>) -> Result<Option<SourceRecord>, Error> {
+    match (node.resume, node.source) {
+        (true, Some(_)) => SourceRecord::load(&source_path_in(node.storage_path)),
+        _ => Ok(None),
+    }
+}
+
+/// Refuse a resume whose records do not name `reading`, the stele it is
+/// about to read: a progress file with no record, a record for another
+/// source or another stele, or a progress file the record disagrees with.
+/// With a record, a `state` cursor other than `point`, the stele's, is
+/// refused too.
+fn check_resume<S: StateStore>(
+    storage_path: &Path,
+    reading: &SourceRecord,
+    point: &ChainPoint,
+    state: &S,
+) -> Result<(), Error> {
+    let Unfinished { record, progress } = unfinished(storage_path)?;
+
+    let Some(record) = record else {
+        return match progress {
+            Some(_) => Err(ResumeRefusal::Unrecorded {
+                storage: storage_path.to_path_buf(),
+            }
+            .into()),
+            None => Ok(()),
+        };
+    };
+
+    if record.source != reading.source {
+        return Err(ResumeRefusal::OtherSource {
+            recorded: record.source,
+            given: reading.source.clone(),
+        }
+        .into());
+    }
+
+    if record.inscription_digest != reading.inscription_digest {
+        return Err(ResumeRefusal::Gone(record).into());
+    }
+
+    if let Some(progress) = progress {
+        if progress.inscription_digest != record.inscription_digest {
+            return Err(ResumeRefusal::Disagrees {
+                progress: progress.inscription_digest,
+                recorded: record.inscription_digest,
+            }
+            .into());
+        }
+    }
+
+    match state.read_cursor()? {
+        Some(cursor) if cursor != *point => Err(ResumeRefusal::Written {
+            cursor,
+            point: point.clone(),
+        }
+        .into()),
+        _ => Ok(()),
+    }
 }
 
 /// The two stores a restore writes into.
@@ -1002,6 +1237,11 @@ pub struct Restoring<'a> {
     /// The operator explicitly accepted the risk of restoring without checking
     /// the destination and staging volumes against the stele's declared sizes.
     pub skip_space_check: bool,
+    /// Where the stele is read from, for the [`SourceRecord`]: recorded
+    /// before the first layer and, on a resume, the record the stele has to
+    /// match. `None` records and checks nothing, so a resume honours any
+    /// progress file whatever stele it was written for.
+    pub source: Option<&'a Source>,
 }
 
 /// Restore `plan`'s layers into a store set.
@@ -1192,6 +1432,22 @@ where
     let plan = plan(stele, node.network_magic, node.max_history)?;
 
     let identity = stele.read_inscription()?.digest()?;
+
+    let record = node.source.map(|source| SourceRecord {
+        source: source.to_string(),
+        sequence: plan.sequence,
+        inscription_digest: identity,
+    });
+
+    if let (true, Some(record)) = (node.resume, &record) {
+        check_resume(
+            node.storage_path,
+            record,
+            &plan.position.point,
+            target.state,
+        )?;
+    }
+
     let mut checkpoint =
         Checkpoint::open(progress_path_in(node.storage_path), identity, node.resume)?;
 
@@ -1217,6 +1473,19 @@ where
 
     check_restore_space(&plan, node, checkpoint.resume(), staging)?;
 
+    // A restore that doesn't resume starts its progress over before it writes
+    // anything, so this run's record is never beside an earlier run's layers.
+    // The record's save syncs the directory, and with it this removal.
+    if !node.resume {
+        checkpoint.clear()?;
+    }
+
+    let record_path = source_path_in(node.storage_path);
+
+    if let Some(record) = &record {
+        record.save(&record_path)?;
+    }
+
     let summary = restore(
         stele,
         &index,
@@ -1226,6 +1495,13 @@ where
         &mut checkpoint,
         observer,
     )?;
+
+    // After the progress file: a stop between the two leaves a record over a
+    // finished node, which a resume reads again in full, rather than progress
+    // with no record, which it refuses.
+    if record.is_some() {
+        SourceRecord::remove(&record_path)?;
+    }
 
     Ok((plan, outlook, summary))
 }
@@ -1262,9 +1538,17 @@ where
     A: ArchiveStore,
     S: StateStore,
 {
-    let stele = stelae::dir::SteleDir::open(root)?;
+    let stele = match stelae::dir::SteleDir::open(root) {
+        Ok(stele) => stele,
+        Err(error) => return Err(pinned(&node)?.map_or(error.into(), gone)),
+    };
 
     restore_stele(&stele, node, None, target, observer)
+}
+
+/// The refusal for a resume whose recorded stele its source no longer has.
+pub(crate) fn gone(record: SourceRecord) -> Error {
+    ResumeRefusal::Gone(record).into()
 }
 
 /// A fully resolved restore input.
@@ -1623,6 +1907,16 @@ pub enum Source {
     Dir(std::path::PathBuf),
     /// A stele repository in an OCI registry.
     Repo(crate::registry::Repository),
+}
+
+/// The URL [`FromStr`](std::str::FromStr) reads back.
+impl std::fmt::Display for Source {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dir(dir) => write!(f, "file://{}", dir.display()),
+            Self::Repo(repo) => write!(f, "{repo}"),
+        }
+    }
 }
 
 impl std::str::FromStr for Source {
@@ -2503,6 +2797,7 @@ mod tests {
                 storage_path: temp.path(),
                 resume: false,
                 skip_space_check: true,
+                source: None,
             },
             &Resume::none(),
             None,

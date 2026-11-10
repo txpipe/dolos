@@ -321,7 +321,8 @@ impl Node {
             .unwrap()
     }
 
-    fn command(&self) -> Command {
+    /// `dolos` against the node's `dolos.toml`, to run or spawn.
+    pub fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_dolos"));
 
         command.arg("--config").arg(self.config_path());
