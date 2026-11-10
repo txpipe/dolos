@@ -81,13 +81,14 @@
 //! is this profile's commit boundary.
 //!
 //! **A layer is recorded only once it is durable.** The stores commit to
-//! buffered journals, so a commit that returned can still be lost to a hard
-//! stop. Each epoch layer therefore ends with [`ArchiveStore::persist`] before
-//! the checkpoint records its `diffId`: anything the progress file names is on
-//! disk, and a stop between a layer's writes and its record refetches that
-//! layer rather than skipping it. The same rule holds at the end: the state and
-//! the archive are persisted after the cursor commit and before the progress
-//! file is removed, so a stop leaves a durable cursor or a progress file.
+//! buffered journals, so a commit that returned survives a killed process but
+//! can still be lost to a power loss or an OS crash. Each epoch layer therefore
+//! ends with [`ArchiveStore::persist`] before the checkpoint records its
+//! `diffId`: anything the progress file names is on disk, and a stop between a
+//! layer's writes and its record refetches that layer rather than skipping it.
+//! The same rule holds at the end: the state and the archive are persisted
+//! after the cursor commit and before the progress file is removed, so a stop
+//! leaves a durable cursor or a progress file.
 //!
 //! ### A redone layer is rewritten, not appended
 //!

@@ -1,9 +1,10 @@
 //! A restore records a layer only once what it wrote is durable.
 //!
-//! The stores commit to buffered journals, so a commit that returned can be
-//! lost to a hard stop. The progress file must therefore never name a layer
-//! whose writes were not yet synced, or a resume after a power loss would skip
-//! a layer the stores no longer hold.
+//! The stores commit to buffered journals, so a commit that returned survives
+//! a killed process but can be lost to a power loss or an OS crash. The
+//! progress file must therefore never name a layer whose writes were not yet
+//! synced, or a resume after a power loss would skip a layer the stores no
+//! longer hold.
 //!
 //! The stores here are the real fjall pair, each wrapped by a recorder that
 //! logs every commit and persist in order, with the progress file as it stood
@@ -23,7 +24,10 @@ use dolos_core::{
     StateError, StateStore, StateWriter, TagDimension, TagEntry, TagOrder, TagStart, TxoRef,
     UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta,
 };
-use dolos_snapshot::restore::{self, default_budget, progress_path_in, Checkpoint, Target};
+use dolos_snapshot::{
+    restore::{self, default_budget, progress_path_in, Checkpoint, Target},
+    ENTITY_KINDS,
+};
 use dolos_testing::toy_domain::{FjallStores, ToyDomain};
 use node::{export_to, harness, Blank};
 use stelae::{dir::SteleDir, plan::RestoreProgress, progress::Observer, Digest, SteleReader as _};
@@ -429,6 +433,19 @@ fn recorded_restore(root: &Path, storage: &Path, magic: u64) -> (Vec<Entry>, Vec
     (journal.take(), epoch_layers)
 }
 
+/// Entries as a seal writes them, straight into `domain`'s archive, so the
+/// stele carries entity layers beside the blocks, logs and indexes.
+fn seed_entities(domain: &ToyDomain<FjallStores>) {
+    let writer = dolos_core::Domain::archive(domain).start_writer().unwrap();
+
+    for (byte, (slot, (_, kind))) in [100, 200].into_iter().zip(&ENTITY_KINDS).enumerate() {
+        let key = vec![byte as u8 + 1; kind.key_len()];
+        writer.write_entity(*kind, &key, slot).unwrap();
+    }
+
+    writer.commit().unwrap();
+}
+
 /// Ruling 12: each epoch layer's `diffId` first appears in the progress file
 /// only after an archive persist that returned after that layer's last archive
 /// commit; and the state and archive are persisted after the cursor commit and
@@ -437,10 +454,19 @@ fn recorded_restore(root: &Path, storage: &Path, magic: u64) -> (Vec<Entry>, Vec
 fn a_layer_is_recorded_only_after_its_writes_are_persisted() {
     let domain: ToyDomain<FjallStores> = harness();
     let magic = u64::from(dolos_core::Domain::genesis(&domain).network_magic());
+    seed_entities(&domain);
 
     let stele = tempfile::tempdir().unwrap();
-    export_to(stele.path(), &domain);
+    let inscription = export_to(stele.path(), &domain);
     let storage = tempfile::tempdir().unwrap();
+
+    assert!(
+        inscription
+            .layers
+            .iter()
+            .any(|layer| layer.kind.starts_with("entity-")),
+        "the fixture needs an entity layer, or one layer family goes unchecked"
+    );
 
     let (entries, epoch_layers) = recorded_restore(stele.path(), storage.path(), magic);
 

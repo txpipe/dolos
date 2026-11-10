@@ -381,11 +381,14 @@ impl dolos_core::StateStore for StateStore {
     }
 
     /// An empty [`Durability::Immediate`] commit, which redb guarantees also
-    /// makes every earlier commit durable, whatever durability it used.
+    /// makes every earlier commit durable, whatever durability it used. It
+    /// keeps quick repair, as every other commit here does, so a hard stop
+    /// right after it does not cost a full repair on the next open.
     fn persist(&self) -> Result<(), StateError> {
         let mut wx = self.db().begin_write().map_err(Error::from)?;
         wx.set_durability(Durability::Immediate)
             .map_err(Error::from)?;
+        wx.set_quick_repair(true);
         wx.commit().map_err(Error::from)?;
 
         Ok(())
@@ -405,6 +408,9 @@ mod tests {
     /// A commit redb was told need not be durable is durable once `persist`
     /// returns. The file is copied while the store is still open, so the copy
     /// holds only what reached the disk, not what a clean close would add.
+    /// Unix only: Windows file locks are mandatory, so the open store's lock
+    /// refuses the copy's read.
+    #[cfg(unix)]
     #[test]
     fn persist_makes_a_non_durable_commit_durable() {
         let dir = tempfile::tempdir().unwrap();
@@ -426,6 +432,15 @@ mod tests {
         store.persist().unwrap();
         std::fs::copy(&path, &copy).unwrap();
         drop(store);
+
+        // The copy was not closed cleanly, so opening it repairs it. Refusing a
+        // full repair pins that `persist` saved the allocator state a quick
+        // repair loads.
+        let quick = redb::Database::builder()
+            .set_repair_callback(|session| session.abort())
+            .open(&copy);
+        assert!(quick.is_ok(), "{:?}", quick.err());
+        drop(quick);
 
         let store = StateStore::open(StateSchema::default(), &copy, &config).unwrap();
         assert_eq!(
