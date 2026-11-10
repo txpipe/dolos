@@ -14,7 +14,9 @@ use crate::{
     export::{self, Document, Plan, Predecessor},
     inscription::Inscription,
     planning::{self, EpochRange},
+    prepare::{self, Bundle, Finalizing},
     registry::{self, Preview, Published, Publishing},
+    staging::{Budget, Staged},
     Error, RetainedEpochs,
 };
 
@@ -25,7 +27,6 @@ use crate::{
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Selection {
     pub epochs: Option<EpochRange>,
-    pub index_band: Option<NonZeroUsize>,
     pub producers: Option<NonZeroUsize>,
 }
 
@@ -34,7 +35,6 @@ impl Selection {
     /// functions. The order is shared by all hosts and commands.
     pub fn apply(self, plan: Plan) -> Plan {
         let plan = planning::restrict(plan, self.epochs);
-        let plan = planning::banded(plan, self.index_band);
         planning::produced(plan, self.producers)
     }
 }
@@ -57,8 +57,10 @@ pub trait SnapshotSource {
 
     /// Establish that `plan` stands on the first block of its sequence epoch.
     ///
-    /// Every operation below asks this itself; a host asks it first to refuse
-    /// before doing anything slow.
+    /// Publication, digest, reproduction and `prepare_boundary` each ask this
+    /// themselves, and a host asks it first to refuse before doing anything
+    /// slow. `stage_batch` and the `finalize_*` operations run on stores past
+    /// the boundary and do not.
     fn boundary(&self, plan: &Plan) -> Result<Boundary, Error>;
 
     /// Write a directory stele through the same profile encoder publication
@@ -89,6 +91,42 @@ pub trait SnapshotSource {
         &self,
         publishing: Publishing<'_>,
         plan: &Plan,
+        observer: &Observer,
+    ) -> Result<Published, Error>;
+
+    /// Durably capture what this boundary alone holds, before replay advances.
+    fn prepare_boundary(
+        &self,
+        store: &prepare::Store,
+        plan: &Plan,
+        request: &prepare::Request<'_>,
+        observer: &Observer,
+    ) -> Result<Bundle, Error>;
+
+    /// Stage the closed windows `bundles` need from this frozen view, once.
+    /// `previous` is what the first of them follows.
+    fn stage_batch(
+        &self,
+        root: &Path,
+        bundles: &[Bundle],
+        previous: &dyn Predecessor,
+        budget: Budget,
+        observer: &Observer,
+    ) -> Result<Staged, Error>;
+
+    /// Reproduce a prepared boundary's canonical inscription without writing
+    /// it.
+    fn finalize_document(
+        &self,
+        finalizing: &Finalizing<'_>,
+        previous: &dyn Predecessor,
+    ) -> Result<Document, Error>;
+
+    /// Publish a prepared boundary into a repository, chained to what is there.
+    fn finalize_repository(
+        &self,
+        publishing: Publishing<'_>,
+        finalizing: &Finalizing<'_>,
         observer: &Observer,
     ) -> Result<Published, Error>;
 }
@@ -168,5 +206,60 @@ impl<A: ArchiveStore, S: StateStore> SnapshotSource for StoreSnapshot<'_, A, S> 
         observer: &Observer,
     ) -> Result<Published, Error> {
         registry::publish(publishing, plan, self.archive, self.state, None, observer)
+    }
+
+    fn prepare_boundary(
+        &self,
+        store: &prepare::Store,
+        plan: &Plan,
+        request: &prepare::Request<'_>,
+        observer: &Observer,
+    ) -> Result<Bundle, Error> {
+        prepare::prepare(store, plan, self.archive, self.state, request, observer)
+    }
+
+    fn stage_batch(
+        &self,
+        root: &Path,
+        bundles: &[Bundle],
+        previous: &dyn Predecessor,
+        budget: Budget,
+        observer: &Observer,
+    ) -> Result<Staged, Error> {
+        prepare::stage_batch(
+            root,
+            self.archive,
+            self.state,
+            bundles,
+            previous,
+            budget,
+            observer,
+        )
+    }
+
+    fn finalize_document(
+        &self,
+        finalizing: &Finalizing<'_>,
+        previous: &dyn Predecessor,
+    ) -> Result<Document, Error> {
+        let inscription = prepare::finalize(
+            &stelae::Discarding,
+            finalizing,
+            self.archive,
+            None,
+            previous,
+            &Observer::silent(),
+        )?;
+
+        Document::of(inscription)
+    }
+
+    fn finalize_repository(
+        &self,
+        publishing: Publishing<'_>,
+        finalizing: &Finalizing<'_>,
+        observer: &Observer,
+    ) -> Result<Published, Error> {
+        registry::publish_prepared(publishing, finalizing, self.archive, None, observer)
     }
 }

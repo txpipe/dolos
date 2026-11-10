@@ -385,6 +385,13 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
 
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError>;
 
+    /// Sync every write committed before this call to durable storage.
+    ///
+    /// When it returns `Ok`, a hard stop (power loss, `SIGKILL`) can no longer
+    /// lose a commit that returned before the call. A backend whose commits
+    /// are already durable, or that holds nothing on disk, returns `Ok`.
+    fn persist(&self) -> Result<(), ArchiveError>;
+
     /// Get the slot for a block by its hash (exact lookup).
     fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError>;
 

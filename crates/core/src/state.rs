@@ -464,6 +464,13 @@ pub trait StateStore: Sized + Send + Sync + Clone {
     /// Backends that do not implement this return
     /// [`StateError::Unsupported`].
     fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError>;
+
+    /// Sync every write committed before this call to durable storage.
+    ///
+    /// When it returns `Ok`, a hard stop (power loss, `SIGKILL`) can no longer
+    /// lose a commit that returned before the call. A backend whose commits
+    /// are already durable, or that holds nothing on disk, returns `Ok`.
+    fn persist(&self) -> Result<(), StateError>;
 }
 
 pub fn load_entity_chunk<D: Domain>(

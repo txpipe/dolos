@@ -568,22 +568,23 @@ impl Genesis {
     /// above 2 means a fast-forwarded start, since Shelley's own band is
     /// `[2, 2]`. `None` is a Byron start that climbs the hard-fork ladder.
     pub fn starting_protocol(&self) -> Result<Option<u16>, ChainError> {
-        let major = match self.force_protocol {
-            Some(forced) => forced as u64,
-            None => {
-                let major = self.shelley.protocol_params.protocol_version.major;
+        let forced = self.force_protocol.map(|forced| forced as u64);
 
-                if major <= 2 {
-                    return Ok(None);
-                }
-
-                major
-            }
+        let Some(major) = forced.or_else(|| self.derived_starting_major()) else {
+            return Ok(None);
         };
 
         u16::try_from(major)
             .map(Some)
             .map_err(|_| ChainError::UnsupportedStartingProtocol(major))
+    }
+
+    /// The start the Shelley genesis alone gives, ignoring `force_protocol`.
+    /// `None` is a Byron start.
+    pub fn derived_starting_major(&self) -> Option<u64> {
+        let major = self.shelley.protocol_params.protocol_version.major;
+
+        (major > 2).then_some(major)
     }
 
     pub fn from_file_paths(
@@ -900,6 +901,9 @@ pub enum DomainError {
 
     #[error("wal is empty")]
     WalIsEmpty,
+
+    #[error("no chain overlap at slot {0}")]
+    NoOverlap(BlockSlot),
 
     #[error("forced stop epoch reached")]
     StopEpochReached,
