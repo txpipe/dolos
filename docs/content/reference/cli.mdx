@@ -224,6 +224,7 @@ Restores a Stelae snapshot (a stele), then starts the WAL at the restored point.
 | `--insecure` | | plaintext HTTP to the registry, for a loopback or in-cluster mirror only |
 | `--scratch-dir DIR` | | where pulled layers are staged, default `<storage.path>/scratch`; registry sources only |
 | `--skip-space-check` | | skip the disk-space preflight |
+| `--read-ahead N` | | layers read ahead of the one being written, default `8`; a registry restore stages each in the scratch directory until its turn, so the preflight sizes it for the `N + 1` largest layers left; `0` or `1` reads one layer at a time |
 | `--continue` | | resume an interrupted restore from the layers it recorded, reading the stele it started from again; with nothing recorded, restore into storage that holds no data |
 | `--registry-user USER` | `DOLOS_STELAE_USER` | the registry user; defaults to the published read-only user on the official repository |
 | `--registry-credentials-file PATH` | | a TOML file naming `password` or `token`, instead of `DOLOS_STELAE_PASSWORD` / `DOLOS_STELAE_TOKEN` |

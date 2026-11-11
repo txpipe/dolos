@@ -84,6 +84,7 @@ fn restoring(storage: &std::path::Path, magic: u64) -> restore::Restoring<'_> {
         storage_path: storage,
         resume: false,
         skip_space_check: false,
+        read_ahead: restore::DEFAULT_READ_AHEAD,
         source: None,
     }
 }

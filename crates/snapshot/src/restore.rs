@@ -27,6 +27,21 @@
 //! Nothing is added for the WAL: `bootstrap::run` reseeds it from the state
 //! cursor after a Stelae restore.
 //!
+//! ## Read-ahead keeps that order
+//!
+//! A registry transport downloads a layer's whole blob before it yields a
+//! record, so read one at a time a restore waits on the network once per
+//! layer. With a read-ahead depth `K` of 2 or more, worker threads read the
+//! next `K` layers of the plan that the checkpoint has not recorded, in plan
+//! order, while the writer drains the current one. The writer still takes
+//! each layer at its turn and drains it as above, so the writes, each layer's
+//! persist and record, the state tip and the cursor keep the order of steps 3
+//! to 5. A layer whose read failed, after the transport's own retries, fails
+//! the restore at its turn, once every layer before it is recorded. Whenever
+//! the restore returns, the workers have stopped and been joined and what
+//! they read ahead has been dropped, which removes its staged files. A depth
+//! of 0 or 1 reads each layer on the writer's thread when its turn comes.
+//!
 //! ## Why `set_cursor` is the last write
 //!
 //! `has_existing_data()` reads the state cursor and nothing else, so a node
@@ -113,7 +128,8 @@
 //! [`stelae::dir::SteleDir::stream_layer`] under [`Limits`] and drained into
 //! bounded chunks — a mainnet state shard is 402 MB and one epoch of blocks
 //! runs past a gigabyte, so [`stelae::dir::SteleDir::read_layer`] is never on
-//! this path.
+//! this path. Read-ahead holds at most `K` layers open beside the one being
+//! drained, each a staged blob and its decoder, not its records.
 //!
 //! Tags are derived from the incoming UTxO chunks, without scanning the state
 //! store. Holding `iter_utxos()` open while writing tags to the same Fjall
@@ -171,7 +187,15 @@ use crate::{
 };
 use stelae_driver::preflight;
 
+mod read_ahead;
+
+use read_ahead::ReadAhead;
+
 pub use stelae_driver::restore::{Budget, Checkpoint, Outlook};
+
+/// How many layers a restore reads ahead of the one it drains, unless its
+/// caller says otherwise.
+pub const DEFAULT_READ_AHEAD: usize = 8;
 
 /// This profile's restore [`Budget`].
 ///
@@ -436,11 +460,36 @@ impl Plan {
             .sum()
     }
 
+    /// Compressed bytes a run with `resume` behind it stages at once at
+    /// `read_ahead`: its [`Staging::at_once`] largest remaining layers, summed.
+    ///
+    /// `None` when the transport can size none of them. Layers it cannot size
+    /// are left out, as [`Remaining`] leaves them out of its total.
+    pub fn staging_peak<R: SteleReader>(
+        &self,
+        stele: &R,
+        index: &BlobIndex,
+        resume: &Resume,
+        read_ahead: usize,
+    ) -> Result<Option<u64>, Error> {
+        let mut sizes = Vec::new();
+
+        for descriptor in self.remaining_layers(resume) {
+            sizes.extend(stele.compressed_size(index, descriptor)?);
+        }
+
+        sizes.sort_unstable_by(|a, b| b.cmp(a));
+
+        let staged = sizes.iter().take(Staging::at_once(read_ahead)).sum();
+
+        Ok((!sizes.is_empty()).then_some(staged))
+    }
+
     /// Refuse a restore that cannot fit, before it starts writing.
     ///
     /// Two needs, one policy ([`stelae_driver::preflight`]): the stores this
-    /// restore will write, and — for a transport that stages — the one
-    /// layer it holds on disk while it drains it. Both are handed to the
+    /// restore will write, and — for a transport that stages — the layers it
+    /// holds on disk at once while it drains them. Both are handed to the
     /// same check rather than compared separately, because whenever the
     /// scratch directory sits on the storage filesystem they are two claims
     /// on one pool of free bytes, and the default `<storage.path>/scratch`
@@ -449,7 +498,7 @@ impl Plan {
     /// Both needs are resume-aware, and for the same reason: what a run has to
     /// fit is what *this* run will move, not what the plan describes. The
     /// destination's is [`Plan::remaining_uncompressed_size`], the staging
-    /// volume's is the largest layer the caller's [`Remaining`] names.
+    /// volume's is [`Plan::staging_peak`] of the layers still to pull.
     ///
     /// The destination comparison is deliberately against the *uncompressed*
     /// size of those layers rather than against a prediction of what the
@@ -478,10 +527,18 @@ impl Plan {
                 );
             }
 
+            let what = match Staging::at_once(staging.read_ahead) {
+                1 => "staging the layers it pulls, one at a time".to_owned(),
+                at_once => format!(
+                    "staging the layers it pulls, {at_once} at once at read-ahead {}",
+                    staging.read_ahead
+                ),
+            };
+
             needs.push(preflight::Need::or_unsized(
-                "staging the layers it pulls",
+                what,
                 staging.dir,
-                staging.largest_layer,
+                staging.peak,
                 "this stele's transport states no compressed size for the layers it would pull",
             ));
         }
@@ -490,28 +547,41 @@ impl Plan {
     }
 }
 
-/// Where a restore stages a pulled layer, and how big the biggest one is.
+/// Where a restore stages pulled layers, and how much it stages at once.
 ///
 /// Absent for a directory restore, which stages nothing: a `SteleDir` reads
 /// its blobs where they already are. A registry restore pulls each layer to a
-/// file first, one at a time — layers are pulled, staged, drained and dropped
-/// in sequence — so the peak it has to fit is the single largest layer and not
-/// the download.
+/// file first and drops it once drained, so the peak it has to fit is the
+/// layers it holds at once ([`Staging::at_once`]) and not the download.
 #[derive(Debug, Clone, Copy)]
 pub struct Staging<'a> {
     /// The transport's scratch directory, as the operator or the default named
     /// it. Need not exist yet; the transport creates it lazily.
     pub dir: &'a Path,
-    /// The largest layer this run will stage, compressed. `None` when the
-    /// transport could size none of them, which warns rather than refuses.
-    pub largest_layer: Option<u64>,
+    /// The restore's read-ahead depth.
+    pub read_ahead: usize,
+    /// What this run stages at once, compressed: [`Plan::staging_peak`].
+    /// `None` when the transport could size none of its layers, which warns
+    /// rather than refuses.
+    pub peak: Option<u64>,
     /// How many of the layers it will stage the transport could not size.
     ///
-    /// Carried beside `largest_layer` rather than folded into it: a run where
-    /// one layer is sized and another is not has a `largest_layer` that is a
-    /// floor, and a floor that says so is worth more than a `None` that
-    /// abandons the check. The count is what makes it say so.
+    /// Carried beside `peak` rather than folded into it: a run where one
+    /// layer is sized and another is not has a `peak` that is a floor, and a
+    /// floor that says so is worth more than a `None` that abandons the check.
+    /// The count is what makes it say so.
     pub unsized_layers: usize,
+}
+
+impl Staging<'_> {
+    /// How many layers a restore at `read_ahead` holds staged at once: the one
+    /// it drains and the ones read ahead of it.
+    pub fn at_once(read_ahead: usize) -> usize {
+        match read_ahead {
+            0 | 1 => 1,
+            depth => depth + 1,
+        }
+    }
 }
 
 /// Read a stele's inscription and decide what restoring it into this node
@@ -1237,6 +1307,9 @@ pub struct Restoring<'a> {
     /// The operator explicitly accepted the risk of restoring without checking
     /// the destination and staging volumes against the stele's declared sizes.
     pub skip_space_check: bool,
+    /// How many layers to read ahead of the one being drained; 0 and 1 read
+    /// one layer at a time. [`DEFAULT_READ_AHEAD`] unless the operator says.
+    pub read_ahead: usize,
     /// Where the stele is read from, for the [`SourceRecord`]: recorded
     /// before the first layer and, on a resume, the record the stele has to
     /// match. `None` records and checks nothing, so a resume honours any
@@ -1257,14 +1330,60 @@ pub struct Restoring<'a> {
 /// while the download that dominates a registry restore is only visible to the
 /// transport. [`Observer::silent`] is what a caller with nothing to render
 /// passes, and a silent run is byte-for-byte the run this was before the seam.
+///
+/// `read_ahead` layers are read ahead of the one being drained, as the module
+/// documentation describes; 0 and 1 read each layer at its turn.
+#[allow(clippy::too_many_arguments)]
 pub fn restore<R, A, S>(
     stele: &R,
     index: &BlobIndex,
     plan: &Plan,
     target: Target<'_, A, S>,
     budget: Budget,
+    read_ahead: usize,
     checkpoint: &mut Checkpoint,
     observer: &Observer,
+) -> Result<Summary, Error>
+where
+    R: SteleReader + Sync,
+    R::Blob: Send,
+    A: ArchiveStore,
+    S: StateStore,
+{
+    stele.observe(observer.clone());
+
+    // Exactly the layers the writer will drain, in its order: the checkpoint
+    // decides on the same `Resume`, which no record changes during the run.
+    let ahead = (read_ahead > 1).then(|| {
+        let order = plan
+            .remaining_layers(checkpoint.resume())
+            .cloned()
+            .collect();
+
+        ReadAhead::new(stele, index, budget.limits, order, read_ahead)
+    });
+
+    let reader = Reader {
+        stele,
+        index,
+        magic: plan.position.network.magic(),
+        budget,
+        observer,
+        ahead: ahead.as_ref(),
+    };
+
+    match &ahead {
+        Some(ahead) => ahead.run(|| write_layers(&reader, plan, target, checkpoint)),
+        None => write_layers(&reader, plan, target, checkpoint),
+    }
+}
+
+/// Drain `plan`'s layers into `target` in order, then set the cursor.
+fn write_layers<R, A, S>(
+    reader: &Reader<'_, R>,
+    plan: &Plan,
+    target: Target<'_, A, S>,
+    checkpoint: &mut Checkpoint,
 ) -> Result<Summary, Error>
 where
     R: SteleReader,
@@ -1273,17 +1392,7 @@ where
 {
     let Target { archive, state } = target;
 
-    stele.observe(observer.clone());
-
-    let reader = Reader {
-        stele,
-        index,
-        magic: plan.position.network.magic(),
-        budget,
-        observer,
-    };
-
-    let cursor = Cursor::new(observer, plan.layers().count());
+    let cursor = Cursor::new(reader.observer, plan.layers().count());
     let mut summary = Summary::default();
 
     for epoch in &plan.epochs {
@@ -1297,7 +1406,7 @@ where
             let at = cursor.open(BLOCKS, &descriptor.scope);
 
             let (count, outcome) = fetch_durable(checkpoint, descriptor, archive, || {
-                restore_blocks(&reader, descriptor, archive)
+                restore_blocks(reader, descriptor, archive)
             })?;
 
             cursor.close(at, BLOCKS, outcome);
@@ -1310,7 +1419,7 @@ where
             let at = cursor.open(kind, &descriptor.scope);
 
             let (count, outcome) = fetch_durable(checkpoint, descriptor, archive, || {
-                restore_logs(&reader, descriptor, archive, ns)
+                restore_logs(reader, descriptor, archive, ns)
             })?;
 
             cursor.close(at, kind, outcome);
@@ -1323,7 +1432,7 @@ where
             let at = cursor.open(kind, &descriptor.scope);
 
             let (count, outcome) = fetch_durable(checkpoint, descriptor, archive, || {
-                restore_entities(&reader, descriptor, archive, *entity)
+                restore_entities(reader, descriptor, archive, *entity)
             })?;
 
             cursor.close(at, kind, outcome);
@@ -1335,7 +1444,7 @@ where
             let at = cursor.open(INDEXES, &descriptor.scope);
 
             let (count, outcome) = fetch_durable(checkpoint, descriptor, archive, || {
-                restore_indexes(&reader, descriptor, archive)
+                restore_indexes(reader, descriptor, archive)
             })?;
 
             cursor.close(at, INDEXES, outcome);
@@ -1354,7 +1463,7 @@ where
             let kind = descriptor.kind.as_str();
             let at = cursor.open(kind, &descriptor.scope);
 
-            let (entities, utxos) = restore_state(&reader, descriptor, state, ns)?;
+            let (entities, utxos) = restore_state(reader, descriptor, state, ns)?;
 
             cursor.close(at, kind, Outcome::Transferred);
 
@@ -1425,7 +1534,8 @@ pub(crate) fn restore_stele<R, A, S>(
     observer: &Observer,
 ) -> Result<(Plan, Outlook, Summary), Error>
 where
-    R: SteleReader,
+    R: SteleReader + Sync,
+    R::Blob: Send,
     A: ArchiveStore,
     S: StateStore,
 {
@@ -1460,16 +1570,20 @@ where
 
     // Below the checkpoint rather than above it, and still ADR-004's step 2:
     // both needs are questions about what this run will actually move — the
-    // largest layer it will pull, and the layers it still has to write — so
+    // largest layers it will pull, and the layers it still has to write — so
     // neither can be asked before the resume is known. Nothing between the plan
     // and here writes — `Checkpoint::open` only reads the progress file and
     // `blob_index` only reads the stele — so the preflight still refuses before
     // the first byte is written, which is the whole of its promise.
-    let staging = scratch_dir.map(|dir| Staging {
-        dir,
-        largest_layer: outlook.remaining.largest_compressed,
-        unsized_layers: outlook.remaining.unsized_layers,
-    });
+    let staging = match scratch_dir {
+        Some(dir) => Some(Staging {
+            dir,
+            read_ahead: node.read_ahead,
+            peak: plan.staging_peak(stele, &index, checkpoint.resume(), node.read_ahead)?,
+            unsized_layers: outlook.remaining.unsized_layers,
+        }),
+        None => None,
+    };
 
     check_restore_space(&plan, node, checkpoint.resume(), staging)?;
 
@@ -1492,6 +1606,7 @@ where
         &plan,
         target,
         default_budget(),
+        node.read_ahead,
         &mut checkpoint,
         observer,
     )?;
@@ -1618,6 +1733,8 @@ struct Reader<'a, R: SteleReader> {
     magic: u64,
     budget: Budget,
     observer: &'a Observer,
+    /// The layers read ahead of this one, if the restore reads ahead.
+    ahead: Option<&'a ReadAhead<'a, R>>,
 }
 
 impl<R: SteleReader> Reader<'_, R> {
@@ -1635,9 +1752,15 @@ impl<R: SteleReader> Reader<'_, R> {
         size: impl Fn(&T) -> usize,
         mut flush: impl FnMut(Vec<T>) -> Result<(), Error>,
     ) -> Result<u64, Error> {
-        let mut layer =
-            self.stele
-                .stream_layer(self.index, &DolosProfile, descriptor, self.budget.limits)?;
+        let mut layer = match self.ahead.and_then(|ahead| ahead.take(descriptor)) {
+            Some(read) => read?,
+            None => self.stele.stream_layer(
+                self.index,
+                &DolosProfile,
+                descriptor,
+                self.budget.limits,
+            )?,
+        };
 
         check_layer_magic(descriptor, layer.header(), self.magic)?;
 
@@ -2797,6 +2920,7 @@ mod tests {
                 storage_path: temp.path(),
                 resume: false,
                 skip_space_check: true,
+                read_ahead: DEFAULT_READ_AHEAD,
                 source: None,
             },
             &Resume::none(),
@@ -2911,37 +3035,61 @@ mod tests {
             skipped_unknown: Vec::new(),
         };
 
-        let staging = |largest_layer, unsized_layers| {
+        let staging = |read_ahead, peak, unsized_layers| {
             plan.preflight(
                 temp.path(),
                 &Resume::none(),
                 Some(Staging {
                     dir: &scratch,
-                    largest_layer,
+                    read_ahead,
+                    peak,
                     unsized_layers,
                 }),
             )
         };
 
-        staging(Some(0), 0).unwrap();
+        staging(1, Some(0), 0).unwrap();
 
         // Nothing could size the layers, so nothing refuses: what cannot be
         // measured warns and proceeds. Nor does a partial sizing, where the
         // number is a floor and the warning says so.
-        staging(None, 3).unwrap();
-        staging(Some(0), 1).unwrap();
+        staging(1, None, 3).unwrap();
+        staging(1, Some(0), 1).unwrap();
 
-        let err = staging(Some(u64::MAX), 0).unwrap_err();
+        let refusal = |read_ahead| {
+            let err = staging(read_ahead, Some(u64::MAX), 0).unwrap_err();
 
-        let Error::NotEnoughSpace(message) = &err else {
-            panic!("{err:?}");
+            let Error::NotEnoughSpace(message) = err else {
+                panic!("{err:?}");
+            };
+
+            assert!(
+                message.contains(&scratch.display().to_string()),
+                "{message}"
+            );
+            assert!(message.contains("short"), "{message}");
+
+            message
         };
 
-        assert!(message.contains("staging the layers it pulls"), "{message}");
+        let serial = refusal(1);
         assert!(
-            message.contains(&scratch.display().to_string()),
-            "{message}"
+            serial.contains("staging the layers it pulls, one at a time"),
+            "{serial}"
         );
-        assert!(message.contains("short"), "{message}");
+
+        let ahead = refusal(DEFAULT_READ_AHEAD);
+        assert!(
+            ahead.contains("staging the layers it pulls, 9 at once at read-ahead 8"),
+            "{ahead}"
+        );
+    }
+
+    #[test]
+    fn a_restore_stages_the_layer_it_drains_and_its_read_ahead() {
+        assert_eq!(Staging::at_once(0), 1);
+        assert_eq!(Staging::at_once(1), 1);
+        assert_eq!(Staging::at_once(2), 3);
+        assert_eq!(Staging::at_once(DEFAULT_READ_AHEAD), 9);
     }
 }

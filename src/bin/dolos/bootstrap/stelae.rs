@@ -75,6 +75,12 @@ pub struct Args {
     #[arg(long, action)]
     pub skip_space_check: bool,
 
+    /// how many layers to read ahead of the one being written; a registry
+    /// restore stages each in the scratch directory until its turn. 0 or 1
+    /// reads one layer at a time
+    #[arg(long, value_name = "LAYERS", default_value_t = dolos_snapshot::restore::DEFAULT_READ_AHEAD)]
+    pub read_ahead: usize,
+
     /// Resume an interrupted restore from the layers it recorded, reading the
     /// stele it started from again; with nothing to resume, restore as
     /// without the flag into storage that holds no data
@@ -151,6 +157,7 @@ impl Args {
             insecure: false,
             scratch_dir: None,
             skip_space_check: false,
+            read_ahead: dolos_snapshot::restore::DEFAULT_READ_AHEAD,
             resume: false,
             credentials: super::from_environment()?,
         })
@@ -457,6 +464,7 @@ struct Node {
 struct RestoreOptions<'a> {
     feedback: &'a Feedback,
     skip_space_check: bool,
+    read_ahead: usize,
 }
 
 impl Node {
@@ -483,14 +491,15 @@ impl Node {
     fn restoring<'a>(
         &'a self,
         inputs: &'a Inputs,
-        skip_space_check: bool,
+        options: RestoreOptions<'_>,
     ) -> dolos_snapshot::restore::Restoring<'a> {
         dolos_snapshot::restore::Restoring {
             network_magic: self.magic,
             max_history: self.max_history,
             storage_path: &self.root,
             resume: inputs.resuming.is_some(),
-            skip_space_check,
+            skip_space_check: options.skip_space_check,
+            read_ahead: options.read_ahead,
             source: Some(&inputs.source),
         }
     }
@@ -516,7 +525,7 @@ fn restore(
     let node = Node::open(config)?;
     let progress = RestoreProgress::for_stderr(options.feedback);
     let observer = progress.observer();
-    let restoring = node.restoring(&inputs, options.skip_space_check);
+    let restoring = node.restoring(&inputs, options);
 
     let mut opened = None;
 
@@ -674,6 +683,7 @@ pub(super) fn run(
     let options = RestoreOptions {
         feedback,
         skip_space_check: args.skip_space_check,
+        read_ahead: args.read_ahead,
     };
 
     restore(config, args, inputs, options)
@@ -790,6 +800,7 @@ mod tests {
             insecure: false,
             scratch_dir: None,
             skip_space_check: false,
+            read_ahead: dolos_snapshot::restore::DEFAULT_READ_AHEAD,
             resume: false,
             credentials: CredentialArgs::default(),
         }

@@ -45,6 +45,7 @@ fn restoring<'a>(
         storage_path: storage,
         resume,
         skip_space_check: false,
+        read_ahead: restore::DEFAULT_READ_AHEAD,
         source,
     }
 }

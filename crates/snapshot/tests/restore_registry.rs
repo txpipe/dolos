@@ -206,6 +206,7 @@ fn restoring(storage: &std::path::Path, magic: u64, resume: bool) -> restore::Re
         storage_path: storage,
         resume,
         skip_space_check: false,
+        read_ahead: restore::DEFAULT_READ_AHEAD,
         source: None,
     }
 }
@@ -371,6 +372,7 @@ fn a_killed_registry_restore_resumes_where_it_stopped() {
         &plan,
         target(&blank),
         default_budget(),
+        restore::DEFAULT_READ_AHEAD,
         &mut checkpoint,
         &Observer::silent(),
     )
@@ -483,6 +485,7 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
         &plan,
         target(&blank),
         default_budget(),
+        restore::DEFAULT_READ_AHEAD,
         &mut checkpoint,
         &Observer::silent(),
     )
@@ -1139,6 +1142,7 @@ fn a_resumed_registry_restore_reports_what_it_skipped() {
             &plan,
             target(&blank),
             default_budget(),
+            restore::DEFAULT_READ_AHEAD,
             &mut checkpoint,
             &Observer::silent(),
         )
