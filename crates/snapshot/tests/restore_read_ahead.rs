@@ -305,7 +305,9 @@ fn a_failed_layer_fails_the_restore_at_its_turn() {
 
 /// A restore that fails on its own side, a store refusing a commit, while
 /// layers are still being read ahead of it ends those reads before it
-/// returns: nothing it started moves another byte afterwards.
+/// returns: nothing it started moves another byte afterwards. Nor did it take
+/// a layer before its turn, so nothing past the first layer's read-ahead was
+/// requested.
 #[test]
 fn a_restore_that_fails_ends_the_reads_it_started() {
     let published = Published::new();
@@ -314,6 +316,10 @@ fn a_restore_that_fails_ends_the_reads_it_started() {
     // The first layer arrives once the sixth has been requested, and the
     // sixth is still arriving when the first layer's commit fails.
     let order = published.blobs(published.plan.layers());
+    assert!(
+        order.len() > DEFAULT_READ_AHEAD,
+        "the fixture needs more layers than the depth"
+    );
     let slow = order.get(5).expect("the fixture needs a sixth layer");
     registry.hold(&order[0], slow);
     registry.delay(std::slice::from_ref(slow), Duration::from_millis(2_000));
@@ -346,6 +352,16 @@ fn a_restore_that_fails_ends_the_reads_it_started() {
     assert!(
         registry.arrived().contains(slow),
         "the slow layer was not read ahead"
+    );
+
+    // The commit failed while the first layer was being written, so only its
+    // read-ahead had been asked of the stream.
+    let arrived = registry.arrived();
+    assert!(
+        arrived
+            .iter()
+            .all(|blob| order[..DEFAULT_READ_AHEAD].contains(blob)),
+        "layers past the first {DEFAULT_READ_AHEAD} were read before their turn: {arrived:?}"
     );
 
     // Its answer comes after the restore returned; a pull still running
