@@ -27,20 +27,24 @@
 //! Nothing is added for the WAL: `bootstrap::run` reseeds it from the state
 //! cursor after a Stelae restore.
 //!
-//! ## Read-ahead keeps that order
+//! ## The transport reads ahead, and the restore keeps that order
 //!
 //! A registry transport downloads a layer's whole blob before it yields a
 //! record, so read one at a time a restore waits on the network once per
-//! layer. With a read-ahead depth `K` of 2 or more, worker threads read the
-//! next `K` layers of the plan that the checkpoint has not recorded, in plan
-//! order, while the writer drains the current one. The writer still takes
-//! each layer at its turn and drains it as above, so the writes, each layer's
-//! persist and record, the state tip and the cursor keep the order of steps 3
-//! to 5. A layer whose read failed, after the transport's own retries, fails
-//! the restore at its turn, once every layer before it is recorded. Whenever
-//! the restore returns, the workers have stopped and been joined and what
-//! they read ahead has been dropped, which removes its staged files. A depth
-//! of 0 or 1 reads each layer on the writer's thread when its turn comes.
+//! layer. A restore therefore reads through one
+//! [`SteleReader::stream_layers`], opened over the layers it will drain (every
+//! layer of the plan the checkpoint has not recorded, in plan order) at its
+//! read-ahead depth `K`. A registry downloads up to `K` of them on its own
+//! runtime while the restore drains the current one; a directory, whose blobs
+//! are already local, reads each when it is taken. The restore takes each
+//! layer from the stream at its turn, refuses one that is not the layer whose
+//! turn it is, and drains it as above, so the writes, each layer's persist and
+//! record, the state tip and the cursor keep the order of steps 3 to 5. A layer
+//! whose read failed, after the transport's own retries, fails the restore at
+//! its turn, once every layer before it is recorded. The stream is dropped
+//! before the restore returns, however it returns, which cancels the reads
+//! still in flight and drops what they staged. A depth of 0 or 1 reads one
+//! layer at a time.
 //!
 //! ## Why `set_cursor` is the last write
 //!
@@ -125,11 +129,12 @@
 //! ## Memory
 //!
 //! Nothing here holds a layer. Every layer is read through
-//! [`stelae::dir::SteleDir::stream_layer`] under [`Limits`] and drained into
-//! bounded chunks — a mainnet state shard is 402 MB and one epoch of blocks
-//! runs past a gigabyte, so [`stelae::dir::SteleDir::read_layer`] is never on
-//! this path. Read-ahead holds at most `K` layers open beside the one being
-//! drained, each a staged blob and its decoder, not its records.
+//! [`SteleReader::stream_layers`] under [`Limits`] and drained into bounded
+//! chunks — a mainnet state shard is 402 MB and one epoch of blocks runs past
+//! a gigabyte, so [`stelae::dir::SteleDir::read_layer`] is never on this path.
+//! A registry reading ahead holds at most `K` staged blobs beside the layer
+//! being drained, each a scratch file and nothing more: a layer's header is
+//! read and its decoder built only when the restore takes it.
 //!
 //! Tags are derived from the incoming UTxO chunks, without scanning the state
 //! store. Holding `iter_utxos()` open while writing tags to the same Fjall
@@ -157,6 +162,7 @@
 //! remain explicit at that boundary.
 
 use std::{
+    cell::RefCell,
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::Arc,
@@ -172,8 +178,8 @@ use stelae::{
     inscription::{Inscription, LayerDescriptor},
     plan::{Remaining, Resume},
     progress::{Event, Observer, Outcome},
-    transport::{BlobIndex, SteleReader},
-    Digest, LayerHeader,
+    transport::{BlobIndex, LayerStream, SteleReader},
+    Digest, LayerHeader, LayerReader,
 };
 use tracing::info;
 
@@ -186,10 +192,6 @@ use crate::{
     RETIRED_SCHEMA_REV, SCOPE_REQUIRED, STATE_KINDS, UTXOS,
 };
 use stelae_driver::preflight;
-
-mod read_ahead;
-
-use read_ahead::ReadAhead;
 
 pub use stelae_driver::restore::{Budget, Checkpoint, Outlook};
 
@@ -1309,6 +1311,7 @@ pub struct Restoring<'a> {
     pub skip_space_check: bool,
     /// How many layers to read ahead of the one being drained; 0 and 1 read
     /// one layer at a time. [`DEFAULT_READ_AHEAD`] unless the operator says.
+    /// A transport whose blobs are local reads one at a time whatever it says.
     pub read_ahead: usize,
     /// Where the stele is read from, for the [`SourceRecord`]: recorded
     /// before the first layer and, on a resume, the record the stele has to
@@ -1331,8 +1334,9 @@ pub struct Restoring<'a> {
 /// transport. [`Observer::silent`] is what a caller with nothing to render
 /// passes, and a silent run is byte-for-byte the run this was before the seam.
 ///
-/// `read_ahead` layers are read ahead of the one being drained, as the module
-/// documentation describes; 0 and 1 read each layer at its turn.
+/// `read_ahead` is the depth of the layer stream the transport reads ahead
+/// on, as the module documentation describes; 0 and 1 read one layer at a
+/// time.
 #[allow(clippy::too_many_arguments)]
 pub fn restore<R, A, S>(
     stele: &R,
@@ -1345,54 +1349,34 @@ pub fn restore<R, A, S>(
     observer: &Observer,
 ) -> Result<Summary, Error>
 where
-    R: SteleReader + Sync,
-    R::Blob: Send,
-    A: ArchiveStore,
-    S: StateStore,
-{
-    stele.observe(observer.clone());
-
-    // Exactly the layers the writer will drain, in its order: the checkpoint
-    // decides on the same `Resume`, which no record changes during the run.
-    let ahead = (read_ahead > 1).then(|| {
-        let order = plan
-            .remaining_layers(checkpoint.resume())
-            .cloned()
-            .collect();
-
-        ReadAhead::new(stele, index, budget.limits, order, read_ahead)
-    });
-
-    let reader = Reader {
-        stele,
-        index,
-        magic: plan.position.network.magic(),
-        budget,
-        observer,
-        ahead: ahead.as_ref(),
-    };
-
-    match &ahead {
-        Some(ahead) => ahead.run(|| write_layers(&reader, plan, target, checkpoint)),
-        None => write_layers(&reader, plan, target, checkpoint),
-    }
-}
-
-/// Drain `plan`'s layers into `target` in order, then set the cursor.
-fn write_layers<R, A, S>(
-    reader: &Reader<'_, R>,
-    plan: &Plan,
-    target: Target<'_, A, S>,
-    checkpoint: &mut Checkpoint,
-) -> Result<Summary, Error>
-where
     R: SteleReader,
     A: ArchiveStore,
     S: StateStore,
 {
     let Target { archive, state } = target;
 
-    let cursor = Cursor::new(reader.observer, plan.layers().count());
+    stele.observe(observer.clone());
+
+    // Exactly the layers the loop below drains, in its order: the checkpoint
+    // skips on the same `Resume`, which no record changes during the run.
+    let layers = plan
+        .remaining_layers(checkpoint.resume())
+        .cloned()
+        .collect();
+
+    // Dropped on every return, which ends the reads its stream has in flight
+    // before this function hands back.
+    let reader = Reader::new(
+        stele,
+        index,
+        layers,
+        plan.position.network.magic(),
+        budget,
+        read_ahead,
+        observer,
+    );
+
+    let cursor = Cursor::new(observer, plan.layers().count());
     let mut summary = Summary::default();
 
     for epoch in &plan.epochs {
@@ -1406,7 +1390,7 @@ where
             let at = cursor.open(BLOCKS, &descriptor.scope);
 
             let (count, outcome) = fetch_durable(checkpoint, descriptor, archive, || {
-                restore_blocks(reader, descriptor, archive)
+                restore_blocks(&reader, descriptor, archive)
             })?;
 
             cursor.close(at, BLOCKS, outcome);
@@ -1419,7 +1403,7 @@ where
             let at = cursor.open(kind, &descriptor.scope);
 
             let (count, outcome) = fetch_durable(checkpoint, descriptor, archive, || {
-                restore_logs(reader, descriptor, archive, ns)
+                restore_logs(&reader, descriptor, archive, ns)
             })?;
 
             cursor.close(at, kind, outcome);
@@ -1432,7 +1416,7 @@ where
             let at = cursor.open(kind, &descriptor.scope);
 
             let (count, outcome) = fetch_durable(checkpoint, descriptor, archive, || {
-                restore_entities(reader, descriptor, archive, *entity)
+                restore_entities(&reader, descriptor, archive, *entity)
             })?;
 
             cursor.close(at, kind, outcome);
@@ -1444,7 +1428,7 @@ where
             let at = cursor.open(INDEXES, &descriptor.scope);
 
             let (count, outcome) = fetch_durable(checkpoint, descriptor, archive, || {
-                restore_indexes(reader, descriptor, archive)
+                restore_indexes(&reader, descriptor, archive)
             })?;
 
             cursor.close(at, INDEXES, outcome);
@@ -1463,7 +1447,7 @@ where
             let kind = descriptor.kind.as_str();
             let at = cursor.open(kind, &descriptor.scope);
 
-            let (entities, utxos) = restore_state(reader, descriptor, state, ns)?;
+            let (entities, utxos) = restore_state(&reader, descriptor, state, ns)?;
 
             cursor.close(at, kind, Outcome::Transferred);
 
@@ -1534,8 +1518,7 @@ pub(crate) fn restore_stele<R, A, S>(
     observer: &Observer,
 ) -> Result<(Plan, Outlook, Summary), Error>
 where
-    R: SteleReader + Sync,
-    R::Blob: Send,
+    R: SteleReader,
     A: ArchiveStore,
     S: StateStore,
 {
@@ -1722,29 +1705,64 @@ where
 /// The stele a restore is reading, and the terms it reads under.
 ///
 /// Carried as one value because every layer is read the same way, and because
-/// the alternative is threading four unchanging arguments through each of the
-/// four per-kind drivers.
+/// the alternative is threading the stream and three unchanging arguments
+/// through each of the four per-kind drivers.
 struct Reader<'a, R: SteleReader> {
-    stele: &'a R,
-    index: &'a BlobIndex,
     /// The magic every layer's header has to name. Taken from the stele's
     /// `position`, which [`plan`] has already held against the node's — so
     /// checking a layer against it checks the layer against the node.
     magic: u64,
     budget: Budget,
     observer: &'a Observer,
-    /// The layers read ahead of this one, if the restore reads ahead.
-    ahead: Option<&'a ReadAhead<'a, R>>,
+    turns: RefCell<Turns<'a, R::Blob>>,
 }
 
-impl<R: SteleReader> Reader<'_, R> {
+/// The layers a restore still has to drain, and the stream they come from.
+struct Turns<'a, B: std::io::Read> {
+    /// The layers `stream` was opened over, in its order.
+    order: std::vec::IntoIter<LayerDescriptor>,
+    stream: LayerStream<'a, B>,
+}
+
+impl<'a, R: SteleReader> Reader<'a, R> {
+    /// A reader of `layers`, in that order, through one stream that reads
+    /// `read_ahead` of them ahead where the transport can.
+    fn new(
+        stele: &'a R,
+        index: &'a BlobIndex,
+        layers: Vec<LayerDescriptor>,
+        magic: u64,
+        budget: Budget,
+        read_ahead: usize,
+        observer: &'a Observer,
+    ) -> Self {
+        let stream = stele.stream_layers(
+            index,
+            &DolosProfile,
+            layers.clone(),
+            budget.limits,
+            read_ahead,
+        );
+
+        Self {
+            magic,
+            budget,
+            observer,
+            turns: RefCell::new(Turns {
+                order: layers.into_iter(),
+                stream,
+            }),
+        }
+    }
+
     /// Stream one layer's records into `flush`, one bounded chunk at a time.
     ///
     /// The single read path for every kind, so the verification discipline is
-    /// stated once: the header's network magic is checked against the node's
-    /// before a record is handed out, and the layer's own `finish` — which is
-    /// what proves its identity digest, its size and its record count — runs
-    /// *before* the final chunk is written.
+    /// stated once: the layer is the stream's next ([`Reader::take`]), the
+    /// header's network magic is checked against the node's before a record
+    /// is handed out, and the layer's own `finish` — which is what proves its
+    /// identity digest, its size and its record count — runs *before* the
+    /// final chunk is written.
     fn drain<T>(
         &self,
         descriptor: &LayerDescriptor,
@@ -1752,15 +1770,7 @@ impl<R: SteleReader> Reader<'_, R> {
         size: impl Fn(&T) -> usize,
         mut flush: impl FnMut(Vec<T>) -> Result<(), Error>,
     ) -> Result<u64, Error> {
-        let mut layer = match self.ahead.and_then(|ahead| ahead.take(descriptor)) {
-            Some(read) => read?,
-            None => self.stele.stream_layer(
-                self.index,
-                &DolosProfile,
-                descriptor,
-                self.budget.limits,
-            )?,
-        };
+        let mut layer = self.take(descriptor)?;
 
         check_layer_magic(descriptor, layer.header(), self.magic)?;
 
@@ -1798,6 +1808,39 @@ impl<R: SteleReader> Reader<'_, R> {
         }
 
         Ok(count)
+    }
+
+    /// Take `descriptor`'s layer from the stream, refusing it unless its turn
+    /// has come.
+    ///
+    /// The stream hands layers back in the order it was opened over, that of
+    /// [`Plan::remaining_layers`], and the restore loop drains them in its
+    /// own. Were the two to drift, the next reader would hold another layer's
+    /// records, so the order is checked here rather than trusted.
+    fn take(&self, descriptor: &LayerDescriptor) -> Result<LayerReader<R::Blob>, Error> {
+        let mut turns = self.turns.borrow_mut();
+
+        let out_of_turn = |reason: String| Error::LayerOutOfTurn {
+            kind: descriptor.kind.clone(),
+            scope: descriptor.scope.to_string(),
+            reason,
+        };
+
+        match turns.order.next() {
+            Some(next) if next.diff_id == descriptor.diff_id => {}
+            Some(next) => {
+                return Err(out_of_turn(format!(
+                    "the {} layer at {} is next",
+                    next.kind, next.scope
+                )))
+            }
+            None => return Err(out_of_turn("no layer is left to read".into())),
+        }
+
+        match turns.stream.next() {
+            Some(layer) => Ok(layer?),
+            None => Err(out_of_turn("the layer stream has already ended".into())),
+        }
     }
 }
 
@@ -3091,5 +3134,86 @@ mod tests {
         assert_eq!(Staging::at_once(1), 1);
         assert_eq!(Staging::at_once(2), 3);
         assert_eq!(Staging::at_once(DEFAULT_READ_AHEAD), 9);
+    }
+
+    /// A stele none of whose layers opens: each read fails naming the layer
+    /// it was asked for, and nothing else is ever asked of it.
+    struct Unopenable;
+
+    impl SteleReader for Unopenable {
+        type Blob = std::io::Empty;
+
+        fn read_inscription(&self) -> Result<Inscription, stelae::Error> {
+            unreachable!("a reader reads no inscription")
+        }
+
+        fn blob_index(&self) -> Result<BlobIndex, stelae::Error> {
+            unreachable!("a reader reads no blob index")
+        }
+
+        fn compressed_size(
+            &self,
+            _: &BlobIndex,
+            _: &LayerDescriptor,
+        ) -> Result<Option<u64>, stelae::Error> {
+            unreachable!("a reader sizes no layer")
+        }
+
+        fn stream_layer(
+            &self,
+            _: &BlobIndex,
+            _: &dyn stelae::profile::Profile,
+            descriptor: &LayerDescriptor,
+            _: Limits,
+        ) -> Result<LayerReader<Self::Blob>, stelae::Error> {
+            Err(stelae::Error::Io(std::io::Error::other(format!(
+                "read {}",
+                descriptor.diff_id
+            ))))
+        }
+    }
+
+    #[test]
+    fn a_layer_is_taken_from_the_stream_only_at_its_turn() {
+        let blocks = epoch_descriptor(BLOCKS, 1, 1);
+        let indexes = epoch_descriptor(INDEXES, 1, 2);
+        let index: BlobIndex = std::iter::empty().collect();
+        let observer = Observer::silent();
+
+        let reader = |layers: &[LayerDescriptor]| {
+            Reader::new(
+                &Unopenable,
+                &index,
+                layers.to_vec(),
+                MAINNET_MAGIC,
+                default_budget(),
+                DEFAULT_READ_AHEAD,
+                &observer,
+            )
+        };
+
+        let out_of_turn = |err: Error| match err {
+            Error::LayerOutOfTurn { kind, reason, .. } => (kind, reason),
+            other => panic!("{other:?}"),
+        };
+
+        let both = [blocks.clone(), indexes.clone()];
+
+        // Its turn has come: the stream reads it, and its error is the take's.
+        let err = reader(&both).take(&blocks).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&format!("read {}", blocks.diff_id)),
+            "{err}"
+        );
+
+        // Its turn has not: refused before the stream reads anything.
+        let (kind, reason) = out_of_turn(reader(&both).take(&indexes).unwrap_err());
+        assert_eq!(kind, INDEXES);
+        assert!(reason.contains("the blocks layer at"), "{reason}");
+
+        // No turn is left.
+        let (_, reason) = out_of_turn(reader(&[]).take(&blocks).unwrap_err());
+        assert!(reason.contains("no layer is left"), "{reason}");
     }
 }

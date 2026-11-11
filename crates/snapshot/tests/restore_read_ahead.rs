@@ -1,278 +1,177 @@
-//! A restore reads layers ahead of the one it writes, and writes them in plan
-//! order.
+//! A registry restore reads layers ahead of the one it writes, through the
+//! transport's ordered layer stream, and writes them in plan order.
 //!
-//! The reader here serves a stele directory the way a registry does, on a
-//! script: how long each layer takes to arrive and which one fails. Its blobs
-//! count themselves while they are open, so a test can see how many layers a
-//! restore holds at once and that none is left behind.
+//! Against the in-process fault registry, which can hold a layer's first byte
+//! back, cut a layer off, and log each layer `GET`. No container, so these run
+//! under plain `cargo test`. That the stream hands layers back in order, keeps
+//! to its depth and opens a layer only when it is taken are stelae's own tests;
+//! these hold the restore to what it does with the stream.
 
+mod fault_registry;
 mod node;
 mod recorder;
+mod watcher;
 
-use std::{
-    collections::BTreeSet,
-    fs::File,
-    io::Read,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex, MutexGuard,
-    },
-    time::Duration,
-};
+use std::{collections::BTreeSet, path::Path, sync::Arc, time::Duration};
 
+use dolos_core::Domain as _;
 use dolos_snapshot::{
-    restore::{self, default_budget, progress_path_in, Checkpoint, Plan, Summary, Target},
+    registry::{self, Point},
+    restore::{
+        self, default_budget, progress_path_in, Checkpoint, Plan, Summary, Target,
+        DEFAULT_READ_AHEAD,
+    },
     Error,
 };
 use dolos_testing::toy_domain::{FjallStores, MemoryStores, ToyDomain};
-use node::{export_to, harness, Blank};
+use fault_registry::FaultRegistry;
+use node::{export_to, harness, plan_at_boundary, Blank};
 use recorder::{contents_digest, Journal, Op, RecordedArchive, RecordedState};
 use stelae::{
     dir::SteleDir,
-    frame::Limits,
-    inscription::{Inscription, LayerDescriptor},
+    inscription::LayerDescriptor,
+    oci::{Options, Registry, Stele, DEFAULT_READ_ATTEMPTS},
     plan::{RestoreProgress, Resume},
-    profile::Profile,
     progress::Observer,
     transport::{BlobIndex, SteleReader},
-    Digest, LayerReader,
+    Digest,
 };
+use watcher::Watcher;
 
-/// What the scripted registry answers with when a layer fails.
-const FAILURE: &str = "the registry went away";
+const REPOSITORY: &str = "dolos/read-ahead";
 
-/// How many of something are live at once, and the most there ever were.
-#[derive(Default)]
-struct Gauge {
-    now: AtomicUsize,
-    peak: AtomicUsize,
+/// Install `ring` as the process-default crypto provider, which `stelae::oci`
+/// asks of whatever process opens a `Registry`.
+fn install_crypto_provider() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+
+    ONCE.call_once(|| {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .expect("nothing else installed a provider first");
+    });
 }
 
-impl Gauge {
-    fn up(&self) {
-        let now = self.now.fetch_add(1, Ordering::SeqCst) + 1;
-        self.peak.fetch_max(now, Ordering::SeqCst);
-    }
+/// The repository, staging into `scratch`, its reads retried after a
+/// millisecond rather than the node's seconds so an exhausted layer fails fast.
+fn opened(registry: &FaultRegistry, scratch: &Path) -> Registry {
+    install_crypto_provider();
 
-    fn down(&self) {
-        self.now.fetch_sub(1, Ordering::SeqCst);
-    }
-
-    fn now(&self) -> usize {
-        self.now.load(Ordering::SeqCst)
-    }
-
-    fn peak(&self) -> usize {
-        self.peak.load(Ordering::SeqCst)
-    }
+    Registry::open(
+        &registry.repository(REPOSITORY),
+        Options {
+            insecure: true,
+            scratch_dir: Some(scratch.to_path_buf()),
+            read_delay: Duration::from_millis(1),
+            ..Options::default()
+        },
+    )
+    .unwrap()
 }
 
-/// A layer's blob, counted from when it is opened until it is dropped. Every
-/// read after its first waits `slow`, which slows the writer and not the
-/// worker that opened it.
-struct Blob {
-    file: File,
-    open: Arc<Gauge>,
-    reads: usize,
-    slow: Duration,
+/// The harness node published into a fresh registry, and the stele a restore
+/// reads it back from.
+struct Published {
+    registry: FaultRegistry,
+    /// Where the restore's registry stages its pulls.
+    scratch: tempfile::TempDir,
+    stele: Stele,
+    index: BlobIndex,
+    plan: Plan,
+    identity: Digest,
 }
 
-impl Read for Blob {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.reads > 0 {
-            std::thread::sleep(self.slow);
-        }
+impl Published {
+    fn new() -> Self {
+        let registry = FaultRegistry::spawn();
+        let domain = harness::<MemoryStores>();
+        let magic = u64::from(domain.genesis().network_magic());
 
-        self.reads += 1;
-        self.file.read(buf)
-    }
-}
+        let publishing = tempfile::tempdir().unwrap();
+        registry::publish(
+            registry::Publishing::new(&opened(&registry, publishing.path())),
+            &plan_at_boundary(&domain, 1, Default::default()),
+            domain.archive(),
+            domain.state(),
+            None,
+            &Observer::silent(),
+        )
+        .unwrap();
 
-impl Drop for Blob {
-    fn drop(&mut self) {
-        self.open.down();
-    }
-}
-
-/// One answered `stream_layer`.
-struct Answer {
-    layer: Digest,
-    thread: Option<String>,
-    ok: bool,
-}
-
-/// A stele directory served on a script.
-struct Scripted<'a> {
-    inner: &'a SteleDir,
-    /// Every layer of the plan, in plan order.
-    order: Vec<Digest>,
-    /// How long the layer at a position of `order` takes to arrive.
-    delay: fn(usize) -> Duration,
-    fail_at: Option<Digest>,
-    slow_reads: Duration,
-    open: Arc<Gauge>,
-    in_flight: Gauge,
-    answers: Mutex<Vec<Answer>>,
-}
-
-impl<'a> Scripted<'a> {
-    fn new(inner: &'a SteleDir, magic: u64, delay: fn(usize) -> Duration) -> Self {
-        let plan = restore::plan(inner, magic, None).unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let stele = Point::Latest
+            .pull(&opened(&registry, scratch.path()))
+            .unwrap();
+        let index = stele.blob_index().unwrap();
+        let plan = restore::plan(&stele, magic, None).unwrap();
+        let identity = stele.read_inscription().unwrap().digest().unwrap();
 
         Self {
-            inner,
-            order: plan.layers().map(|layer| layer.diff_id).collect(),
-            delay,
-            fail_at: None,
-            slow_reads: Duration::ZERO,
-            open: Arc::default(),
-            in_flight: Gauge::default(),
-            answers: Mutex::default(),
+            registry,
+            scratch,
+            stele,
+            index,
+            plan,
+            identity,
         }
     }
 
-    /// The answers in the order they were given.
-    fn answers(&self) -> MutexGuard<'_, Vec<Answer>> {
-        self.answers.lock().unwrap()
+    /// The blob of each layer in `layers`, as the registry names it.
+    fn blobs<'a>(&self, layers: impl Iterator<Item = &'a LayerDescriptor>) -> Vec<String> {
+        layers
+            .map(|layer| self.index.blob_for(&layer.diff_id).unwrap().to_string())
+            .collect()
     }
 
-    fn open_layer(
+    fn restore<A, S>(
         &self,
-        index: &BlobIndex,
-        profile: &dyn Profile,
-        descriptor: &LayerDescriptor,
-        limits: Limits,
-    ) -> Result<LayerReader<Blob>, stelae::Error> {
-        if self.fail_at == Some(descriptor.diff_id) {
-            return Err(stelae::Error::Io(std::io::Error::other(FAILURE)));
-        }
-
-        let blob = index.blob_for(&descriptor.diff_id).unwrap();
-        let file = File::open(self.inner.blob_path(&blob)).map_err(stelae::Error::Io)?;
-
-        self.open.up();
-
-        let blob = Blob {
-            file,
-            open: self.open.clone(),
-            reads: 0,
-            slow: self.slow_reads,
-        };
-
-        LayerReader::new(blob, profile, descriptor, limits)
-    }
-}
-
-impl SteleReader for Scripted<'_> {
-    type Blob = Blob;
-
-    fn read_inscription(&self) -> Result<Inscription, stelae::Error> {
-        self.inner.read_inscription()
+        target: Target<'_, A, S>,
+        read_ahead: usize,
+        checkpoint: &mut Checkpoint,
+        observer: &Observer,
+    ) -> Result<Summary, Error>
+    where
+        A: dolos_core::ArchiveStore,
+        S: dolos_core::StateStore,
+    {
+        restore::restore(
+            &self.stele,
+            &self.index,
+            &self.plan,
+            target,
+            default_budget(),
+            read_ahead,
+            checkpoint,
+            observer,
+        )
     }
 
-    fn blob_index(&self) -> Result<BlobIndex, stelae::Error> {
-        self.inner.blob_index()
+    /// A checkpoint in `storage`, honouring what is recorded there if `resume`.
+    fn checkpoint(&self, storage: &Path, resume: bool) -> Checkpoint {
+        Checkpoint::open(progress_path_in(storage), self.identity, resume).unwrap()
     }
 
-    fn compressed_size(
-        &self,
-        index: &BlobIndex,
-        descriptor: &LayerDescriptor,
-    ) -> Result<Option<u64>, stelae::Error> {
-        self.inner.compressed_size(index, descriptor)
+    /// Whether the restore's scratch directory holds nothing.
+    fn scratch_is_empty(&self) -> bool {
+        std::fs::read_dir(self.scratch.path())
+            .map(|entries| entries.count() == 0)
+            .unwrap_or(true)
     }
-
-    fn stream_layer(
-        &self,
-        index: &BlobIndex,
-        profile: &dyn Profile,
-        descriptor: &LayerDescriptor,
-        limits: Limits,
-    ) -> Result<LayerReader<Self::Blob>, stelae::Error> {
-        self.in_flight.up();
-
-        let position = self
-            .order
-            .iter()
-            .position(|layer| *layer == descriptor.diff_id)
-            .expect("a layer the plan names");
-
-        std::thread::sleep((self.delay)(position));
-
-        let read = self.open_layer(index, profile, descriptor, limits);
-
-        self.in_flight.down();
-
-        self.answers().push(Answer {
-            layer: descriptor.diff_id,
-            thread: std::thread::current().name().map(str::to_owned),
-            ok: read.is_ok(),
-        });
-
-        read
-    }
-}
-
-fn no_delay(_: usize) -> Duration {
-    Duration::ZERO
-}
-
-/// The harness node, exported into a fresh directory, and its magic.
-fn exported() -> (tempfile::TempDir, u64) {
-    let domain: ToyDomain<MemoryStores> = harness();
-    let magic = u64::from(dolos_core::Domain::genesis(&domain).network_magic());
-
-    let root = tempfile::tempdir().unwrap();
-    export_to(root.path(), &domain);
-
-    (root, magic)
-}
-
-fn restore_with<R, A, S>(
-    stele: &R,
-    plan: &Plan,
-    target: Target<'_, A, S>,
-    read_ahead: usize,
-    checkpoint: &mut Checkpoint,
-) -> Result<Summary, Error>
-where
-    R: SteleReader + Sync,
-    R::Blob: Send,
-    A: dolos_core::ArchiveStore,
-    S: dolos_core::StateStore,
-{
-    let index = stele.blob_index().unwrap();
-
-    restore::restore(
-        stele,
-        &index,
-        plan,
-        target,
-        default_budget(),
-        read_ahead,
-        checkpoint,
-        &Observer::silent(),
-    )
 }
 
 /// Each commit and persist of a restore, with the layers the progress file
 /// recorded when it returned.
 type Journaled = Vec<(Op, Option<Vec<Digest>>)>;
 
-/// Restore `stele` at `read_ahead` into the recorded fjall pair, checkpointing
-/// into a fresh directory. Returns every commit and persist in order, each with
-/// the layers the progress file recorded when it returned, and a digest of the
+/// Restore at `read_ahead` into the recorded fjall pair, checkpointing into a
+/// fresh directory. Returns every commit and persist in order, each with the
+/// layers the progress file recorded when it returned, and a digest of the
 /// node it built.
-fn journaled<R>(stele: &R, magic: u64, read_ahead: usize) -> (Journaled, Digest)
-where
-    R: SteleReader + Sync,
-    R::Blob: Send,
-{
+fn journaled(published: &Published, read_ahead: usize) -> (Journaled, Digest) {
     let storage = tempfile::tempdir().unwrap();
-    let progress = progress_path_in(storage.path());
 
     let blank = Blank::<FjallStores>::open();
-    let journal = Journal::new(progress.clone());
+    let journal = Journal::new(progress_path_in(storage.path()));
 
     let archive = RecordedArchive {
         inner: blank.archive.clone(),
@@ -283,18 +182,14 @@ where
         journal: journal.clone(),
     };
 
-    let identity = stele.read_inscription().unwrap().digest().unwrap();
-    let plan = restore::plan(stele, magic, None).unwrap();
-    let mut checkpoint = Checkpoint::open(progress, identity, false).unwrap();
-
-    restore_with(
-        stele,
-        &plan,
-        Target::new(&archive, &state),
-        read_ahead,
-        &mut checkpoint,
-    )
-    .unwrap();
+    published
+        .restore(
+            Target::new(&archive, &state),
+            read_ahead,
+            &mut published.checkpoint(storage.path(), false),
+            &Observer::silent(),
+        )
+        .unwrap();
 
     let entries = journal
         .take()
@@ -306,210 +201,231 @@ where
 }
 
 /// The layers the progress file in `storage` records.
-fn recorded(storage: &std::path::Path) -> BTreeSet<Digest> {
+fn recorded(storage: &Path) -> BTreeSet<Digest> {
     RestoreProgress::load(&progress_path_in(storage))
         .unwrap()
         .map(|progress| progress.completed)
         .unwrap_or_default()
 }
 
-/// Layers that arrive in reverse order within each window of the read-ahead
-/// are committed, persisted and recorded exactly as a serial restore does it,
-/// and build the same node.
+/// Layers whose downloads finish in another order than the plan's are
+/// committed, persisted and recorded exactly as a restore reading one at a
+/// time does it, and build the same node.
 #[test]
 fn layers_that_arrive_out_of_order_are_written_and_recorded_in_plan_order() {
-    let (root, magic) = exported();
-    let dir = SteleDir::open(root.path()).unwrap();
+    let published = Published::new();
+    let registry = &published.registry;
+    let order = published.blobs(published.plan.layers());
 
-    let (serial, serial_node) = journaled(&dir, magic, 1);
+    let (serial, serial_node) = journaled(&published, 1);
 
-    // The first layer of each window of four arrives last.
-    let scripted = Scripted::new(&dir, magic, |position| {
-        Duration::from_millis(15 * (4 - position as u64 % 4))
-    });
+    // The earlier of the first four layers wait longer, so the ones after
+    // them finish first.
+    for (position, blob) in order.iter().take(4).enumerate() {
+        registry.delay(
+            std::slice::from_ref(blob),
+            Duration::from_millis(50 * (4 - position as u64)),
+        );
+    }
+    registry.forget();
 
-    let (ahead, ahead_node) = journaled(&scripted, magic, 4);
-
-    let arrived: Vec<Digest> = scripted.answers().iter().map(|a| a.layer).collect();
+    let (ahead, ahead_node) = journaled(&published, DEFAULT_READ_AHEAD);
 
     assert_ne!(
-        arrived, scripted.order,
+        registry.served(),
+        order,
         "the layers arrived in plan order, so the order of the writes proves nothing"
     );
+    assert!(registry.peak() > 1, "nothing was read ahead");
     assert!(
-        scripted
-            .answers()
-            .iter()
-            .all(|a| a.thread.as_deref() == Some("restore-read-ahead")),
-        "every layer is read ahead of the writer"
+        registry.peak() <= DEFAULT_READ_AHEAD,
+        "{} layers were fetched at once",
+        registry.peak()
     );
 
     assert_eq!(ahead, serial, "the writes and records left plan order");
     assert_eq!(ahead_node, serial_node);
 }
 
-/// A layer that fails while later ones are already staged fails the restore
-/// at its turn: the layers before it are recorded, it and the later ones are
-/// not, and by the time the restore returns every worker has stopped and no
-/// layer is held open.
+/// A layer that never arrives whole fails the restore at its turn, while
+/// later layers are already being read: the layers before it are recorded,
+/// it and the later ones are not, and nothing is left staged.
 #[test]
-fn a_failed_layer_fails_the_restore_at_its_turn_and_leaves_nothing_staged() {
-    let (root, magic) = exported();
-    let dir = SteleDir::open(root.path()).unwrap();
-    let plan = restore::plan(&dir, magic, None).unwrap();
+fn a_failed_layer_fails_the_restore_at_its_turn() {
+    let published = Published::new();
+    let registry = &published.registry;
+    let plan = &published.plan;
 
-    let epoch: Vec<Digest> = plan.immutable_layers().map(|l| l.diff_id).collect();
+    let epoch: Vec<&LayerDescriptor> = plan.immutable_layers().collect();
     assert!(
         epoch.len() >= 3,
         "the fixture needs epoch layers after the fault"
     );
 
-    // The second layer fails late, after the third and fourth are staged; the
-    // fifth is still arriving when the restore fails.
-    let mut scripted = Scripted::new(&dir, magic, |position| match position {
-        1 => Duration::from_millis(100),
-        4 => Duration::from_millis(400),
-        _ => Duration::ZERO,
-    });
-    scripted.fail_at = Some(epoch[1]);
+    let order = published.blobs(plan.layers());
+    let failed = &order[1];
+    let later = order.get(5).expect("the fixture needs a sixth layer");
+
+    // The second layer fails only once a later one has been requested.
+    registry.cut_always(failed);
+    registry.hold(failed, later);
 
     let storage = tempfile::tempdir().unwrap();
-    let identity = dir.read_inscription().unwrap().digest().unwrap();
-    let mut checkpoint =
-        Checkpoint::open(progress_path_in(storage.path()), identity, false).unwrap();
-
     let blank = Blank::<MemoryStores>::open();
-    let error = restore_with(
-        &scripted,
-        &plan,
-        Target::new(&blank.archive, blank.state()),
-        4,
-        &mut checkpoint,
-    )
-    .unwrap_err();
 
-    assert!(error.to_string().contains(FAILURE), "{error}");
-
-    assert_eq!(scripted.in_flight.now(), 0, "a worker outlived the restore");
-    assert_eq!(
-        scripted.open.now(),
-        0,
-        "a staged layer outlived the restore"
-    );
-
-    let staged_after: Vec<Digest> = scripted
-        .answers()
-        .iter()
-        .filter(|a| a.ok && plan.layers().position(|l| l.diff_id == a.layer) > Some(1))
-        .map(|a| a.layer)
-        .collect();
+    let error = published
+        .restore(
+            Target::new(&blank.archive, blank.state()),
+            DEFAULT_READ_AHEAD,
+            &mut published.checkpoint(storage.path(), false),
+            &Observer::silent(),
+        )
+        .unwrap_err();
 
     assert!(
-        staged_after.len() >= 2,
-        "the layers after the fault were not staged before it surfaced"
+        matches!(
+            &error,
+            Error::Stelae(stelae::Error::RetriesExhausted { .. })
+        ),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains(failed.as_str()), "{error}");
+
+    assert!(
+        registry.arrived().contains(later),
+        "the layers after the failed one were not read ahead of it"
     );
 
-    assert_eq!(recorded(storage.path()), BTreeSet::from([epoch[0]]));
+    assert_eq!(recorded(storage.path()), BTreeSet::from([epoch[0].diff_id]));
+    assert!(
+        published.scratch_is_empty(),
+        "a staged layer was left behind"
+    );
 }
 
-/// However much faster the downloads are than the writer, a restore holds
-/// at most its depth of layers beside the one it drains.
+/// A restore that fails on its own side, a store refusing a commit, while
+/// layers are still being read ahead of it ends those reads before it
+/// returns: nothing it started moves another byte afterwards.
 #[test]
-fn a_restore_holds_no_more_layers_than_its_read_ahead_allows() {
-    const DEPTH: usize = 3;
+fn a_restore_that_fails_ends_the_reads_it_started() {
+    let published = Published::new();
+    let registry = &published.registry;
 
-    let (root, magic) = exported();
-    let dir = SteleDir::open(root.path()).unwrap();
-    let plan = restore::plan(&dir, magic, None).unwrap();
+    // The first layer arrives once the sixth has been requested, and the
+    // sixth is still arriving when the first layer's commit fails.
+    let order = published.blobs(published.plan.layers());
+    let slow = order.get(5).expect("the fixture needs a sixth layer");
+    registry.hold(&order[0], slow);
+    registry.delay(std::slice::from_ref(slow), Duration::from_millis(2_000));
 
-    let mut scripted = Scripted::new(&dir, magic, no_delay);
-    scripted.slow_reads = Duration::from_millis(5);
+    let storage = tempfile::tempdir().unwrap();
+    let blank = Blank::<FjallStores>::open();
+    let journal = Journal::crashing_at(progress_path_in(storage.path()), 1);
+    let watcher = Arc::new(Watcher::default());
+
+    published
+        .restore(
+            Target::new(
+                &RecordedArchive {
+                    inner: blank.archive.clone(),
+                    journal: journal.clone(),
+                },
+                &RecordedState {
+                    inner: blank.state().clone(),
+                    journal,
+                },
+            ),
+            DEFAULT_READ_AHEAD,
+            &mut published.checkpoint(storage.path(), false),
+            &watcher.observer(),
+        )
+        .unwrap_err();
+
+    let bytes_at_return = watcher.bytes();
 
     assert!(
-        scripted.order.len() > 2 * (DEPTH + 1),
-        "the fixture needs more layers than a read-ahead holds"
+        registry.arrived().contains(slow),
+        "the slow layer was not read ahead"
     );
 
-    let blank = Blank::<MemoryStores>::open();
-    restore_with(
-        &scripted,
-        &plan,
-        Target::new(&blank.archive, blank.state()),
-        DEPTH,
-        &mut Checkpoint::none(),
-    )
-    .unwrap();
+    // Its answer comes after the restore returned; a pull still running
+    // would report the bytes.
+    std::thread::sleep(Duration::from_millis(2_500));
 
-    assert!(scripted.open.peak() >= 2, "nothing was read ahead");
+    assert_eq!(
+        watcher.bytes(),
+        bytes_at_return,
+        "a pull outlived the restore"
+    );
     assert!(
-        scripted.open.peak() <= DEPTH + 1,
-        "{} layers were open at once",
-        scripted.open.peak()
+        published.scratch_is_empty(),
+        "a staged layer was left behind"
     );
-    assert!(scripted.in_flight.peak() <= DEPTH);
-    assert_eq!(scripted.open.now(), 0);
 }
 
-/// A resumed restore reading ahead never reads a layer the interrupted one
+/// A resumed restore reading ahead never fetches a layer the interrupted one
 /// recorded, and builds the node an uninterrupted restore builds.
 #[test]
-fn a_resumed_restore_reads_no_recorded_layer_again() {
-    let (root, magic) = exported();
-    let dir = SteleDir::open(root.path()).unwrap();
-    let plan = restore::plan(&dir, magic, None).unwrap();
-    let identity = dir.read_inscription().unwrap().digest().unwrap();
+fn a_resumed_restore_fetches_no_recorded_layer_again() {
+    let published = Published::new();
+    let registry = &published.registry;
+    let plan = &published.plan;
 
-    let epoch: Vec<Digest> = plan.immutable_layers().map(|l| l.diff_id).collect();
+    let epoch: Vec<&LayerDescriptor> = plan.immutable_layers().collect();
     assert!(
         epoch.len() >= 3,
         "the fixture needs epoch layers after the fault"
     );
 
     let storage = tempfile::tempdir().unwrap();
-    let progress = progress_path_in(storage.path());
     let blank = Blank::<MemoryStores>::open();
 
-    let mut interrupted = Scripted::new(&dir, magic, no_delay);
-    interrupted.fail_at = Some(epoch[2]);
+    // The third layer fails every attempt of the first run, then arrives.
+    let interrupted = published.blobs(epoch[2..3].iter().copied()).remove(0);
+    registry.cut_next(&interrupted, DEFAULT_READ_ATTEMPTS as usize);
 
-    restore_with(
-        &interrupted,
-        &plan,
-        Target::new(&blank.archive, blank.state()),
-        4,
-        &mut Checkpoint::open(progress.clone(), identity, false).unwrap(),
-    )
-    .unwrap_err();
+    published
+        .restore(
+            Target::new(&blank.archive, blank.state()),
+            DEFAULT_READ_AHEAD,
+            &mut published.checkpoint(storage.path(), false),
+            &Observer::silent(),
+        )
+        .unwrap_err();
 
     let done = recorded(storage.path());
-    assert_eq!(done, BTreeSet::from([epoch[0], epoch[1]]));
+    assert_eq!(done, BTreeSet::from([epoch[0].diff_id, epoch[1].diff_id]));
 
-    let resumed = Scripted::new(&dir, magic, no_delay);
+    let recorded_blobs = published.blobs(epoch[..2].iter().copied());
+    let gets_before: Vec<usize> = recorded_blobs.iter().map(|b| registry.gets(b)).collect();
 
-    let summary = restore_with(
-        &resumed,
-        &plan,
-        Target::new(&blank.archive, blank.state()),
-        4,
-        &mut Checkpoint::open(progress, identity, true).unwrap(),
-    )
-    .unwrap();
+    let summary = published
+        .restore(
+            Target::new(&blank.archive, blank.state()),
+            DEFAULT_READ_AHEAD,
+            &mut published.checkpoint(storage.path(), true),
+            &Observer::silent(),
+        )
+        .unwrap();
 
-    assert!(
-        resumed.answers().iter().all(|a| !done.contains(&a.layer)),
-        "a recorded layer was read again"
+    let gets_after: Vec<usize> = recorded_blobs.iter().map(|b| registry.gets(b)).collect();
+
+    assert_eq!(
+        gets_after, gets_before,
+        "a recorded layer was fetched again"
     );
+    assert_eq!(gets_before, vec![1, 1]);
     assert_eq!(summary.layers_skipped, done.len());
 
     let whole = Blank::<MemoryStores>::open();
-    restore_with(
-        &dir,
-        &plan,
-        Target::new(&whole.archive, whole.state()),
-        1,
-        &mut Checkpoint::none(),
-    )
-    .unwrap();
+    published
+        .restore(
+            Target::new(&whole.archive, whole.state()),
+            1,
+            &mut Checkpoint::none(),
+            &Observer::silent(),
+        )
+        .unwrap();
 
     assert_eq!(
         contents_digest(&blank.archive, blank.state()),
@@ -517,37 +433,41 @@ fn a_resumed_restore_reads_no_recorded_layer_again() {
     );
 }
 
-/// A depth of 0 or 1 is the serial restore: every layer is read on the
-/// writer's thread, at its turn, one at a time.
+/// A depth of 0 or 1 is the serial restore: one layer `GET` at a time, in
+/// plan order.
 #[test]
-fn a_depth_of_zero_or_one_reads_each_layer_at_its_turn() {
-    let (root, magic) = exported();
-    let dir = SteleDir::open(root.path()).unwrap();
-    let plan = restore::plan(&dir, magic, None).unwrap();
-    let writer = std::thread::current().name().map(str::to_owned);
+fn a_depth_of_zero_or_one_fetches_one_layer_at_a_time() {
+    let published = Published::new();
+    let registry = &published.registry;
+    let order = published.blobs(published.plan.layers());
 
     for depth in [0, 1] {
-        let scripted = Scripted::new(&dir, magic, no_delay);
+        registry.forget();
+
         let blank = Blank::<MemoryStores>::open();
+        published
+            .restore(
+                Target::new(&blank.archive, blank.state()),
+                depth,
+                &mut Checkpoint::none(),
+                &Observer::silent(),
+            )
+            .unwrap();
 
-        restore_with(
-            &scripted,
-            &plan,
-            Target::new(&blank.archive, blank.state()),
-            depth,
-            &mut Checkpoint::none(),
-        )
-        .unwrap();
-
-        let read: Vec<Digest> = scripted.answers().iter().map(|a| a.layer).collect();
-
-        assert_eq!(read, scripted.order, "depth {depth}");
-        assert!(
-            scripted.answers().iter().all(|a| a.thread == writer),
-            "depth {depth} read a layer off the writer's thread"
-        );
-        assert_eq!(scripted.open.peak(), 1, "depth {depth}");
+        assert_eq!(registry.arrived(), order, "depth {depth}");
+        assert_eq!(registry.peak(), 1, "depth {depth}");
     }
+}
+
+/// The harness node, exported into a fresh directory, and its magic.
+fn exported() -> (tempfile::TempDir, u64) {
+    let domain: ToyDomain<MemoryStores> = harness();
+    let magic = u64::from(domain.genesis().network_magic());
+
+    let root = tempfile::tempdir().unwrap();
+    export_to(root.path(), &domain);
+
+    (root, magic)
 }
 
 /// The staging need is the compressed size of the layers a restore holds at
@@ -577,7 +497,7 @@ fn the_staging_preflight_charges_the_largest_layers_a_read_ahead_holds() {
     let peak = |resume: &Resume, depth| plan.staging_peak(&dir, &index, resume, depth).unwrap();
 
     assert_eq!(
-        peak(&Resume::none(), 8),
+        peak(&Resume::none(), DEFAULT_READ_AHEAD),
         Some(largest(&mut plan.layers(), 9))
     );
     assert_eq!(
@@ -593,5 +513,8 @@ fn the_staging_preflight_charges_the_largest_layers_a_read_ahead_holds() {
 
     let resume = Resume::from_progress(Some(&progress));
 
-    assert_eq!(peak(&resume, 8), Some(largest(&mut plan.tip_layers(), 9)));
+    assert_eq!(
+        peak(&resume, DEFAULT_READ_AHEAD),
+        Some(largest(&mut plan.tip_layers(), 9))
+    );
 }

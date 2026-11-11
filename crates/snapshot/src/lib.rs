@@ -887,6 +887,20 @@ pub enum Error {
     #[error("the reproduction does not match the published stele — {subject}: {reason}")]
     ReproductionMismatch { subject: String, reason: String },
 
+    /// A restore reached a layer that is not the next one its layer stream
+    /// holds.
+    ///
+    /// The stream is opened over the layers the restore will drain, in plan
+    /// order, so this is a defect in the restore and never in the stele: the
+    /// layer it would have read is another layer's, and is refused before a
+    /// record of it is written.
+    #[error("the restore reached the {kind} layer at {scope} out of turn: {reason}")]
+    LayerOutOfTurn {
+        kind: String,
+        scope: String,
+        reason: String,
+    },
+
     /// A layer that failed its transport verification, named.
     ///
     /// The wrapper exists because the protocol's refusals name a layer by kind
