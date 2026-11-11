@@ -324,6 +324,12 @@ fn a_restore_that_fails_ends_the_reads_it_started() {
     registry.hold(&order[0], slow);
     registry.delay(std::slice::from_ref(slow), Duration::from_millis(2_000));
 
+    // A restore that took the second layer before the first was written
+    // would wait on it, and it arrives only once a layer past the first
+    // layer's read-ahead has been requested: an early take cannot finish
+    // before the check below sees that request.
+    registry.hold(&order[1], &order[DEFAULT_READ_AHEAD]);
+
     let storage = tempfile::tempdir().unwrap();
     let blank = Blank::<FjallStores>::open();
     let journal = Journal::crashing_at(progress_path_in(storage.path()), 1);
