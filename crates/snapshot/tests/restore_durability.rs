@@ -58,6 +58,7 @@ fn recorded_restore(root: &Path, storage: &Path, magic: u64) -> (Vec<Entry>, Vec
         &plan,
         Target::new(&archive, &state),
         default_budget(),
+        restore::DEFAULT_READ_AHEAD,
         &mut checkpoint,
         &Observer::silent(),
     )

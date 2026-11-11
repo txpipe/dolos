@@ -3,8 +3,9 @@
 //! Enough of the distribution API for a publish and a restore over plaintext
 //! HTTP: monolithic blob uploads, blob `HEAD`/`GET`, manifest `PUT`/`GET`. A
 //! scripted fault cuts a blob `GET` off partway, or answers a manifest `GET`
-//! with a `503`. No container, so the suites using it run under plain
-//! `cargo test`.
+//! with a `503`, and a layer blob can wait before its first byte, for a time
+//! or for another layer's `GET`. No container, so the suites using it run
+//! under plain `cargo test`.
 //!
 //! **A trimmed copy of `stelae/tests/fault_registry`**, for the reason
 //! `registry_fixture` gives: `stelae` must never depend on a `dolos-*` package,
@@ -22,6 +23,7 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use stelae::Digest;
@@ -63,6 +65,17 @@ struct State {
     /// `GET`s per blob digest.
     gets: HashMap<String, usize>,
     uploads: usize,
+    /// The wait before a layer blob's first byte, by digest.
+    delays: HashMap<String, Duration>,
+    /// Layer blobs whose first byte waits for another layer's `GET` to arrive.
+    holds: HashMap<String, String>,
+    /// Layer blob `GET`s in the order they arrived, and in the order their
+    /// answers were done.
+    arrived: Vec<String>,
+    served: Vec<String>,
+    /// Layer blob `GET`s being answered now, and the most there were at once.
+    active: usize,
+    peak: usize,
 }
 
 pub struct FaultRegistry {
@@ -161,6 +174,46 @@ impl FaultRegistry {
     /// How many `GET`s the blob `digest` received.
     pub fn gets(&self, digest: &str) -> usize {
         self.state().gets.get(digest).copied().unwrap_or(0)
+    }
+
+    /// Wait `delay` before the first byte of every `GET` of these blobs.
+    pub fn delay(&self, digests: &[String], delay: Duration) {
+        let mut state = self.state();
+        for digest in digests {
+            state.delays.insert(digest.clone(), delay);
+        }
+    }
+
+    /// Hold the first byte of every `GET` of the blob `digest` until a `GET`
+    /// of the layer blob `until` has arrived: an order between two requests a
+    /// test needs, rather than a wait it hopes is long enough.
+    pub fn hold(&self, digest: &str, until: &str) {
+        self.state()
+            .holds
+            .insert(digest.to_owned(), until.to_owned());
+    }
+
+    /// Layer blob `GET`s in the order they arrived.
+    pub fn arrived(&self) -> Vec<String> {
+        self.state().arrived.clone()
+    }
+
+    /// Layer blob `GET`s in the order their answers were done.
+    pub fn served(&self) -> Vec<String> {
+        self.state().served.clone()
+    }
+
+    /// The most layer blob `GET`s answered at once.
+    pub fn peak(&self) -> usize {
+        self.state().peak
+    }
+
+    /// Forget the layer `GET`s logged so far, and the peak.
+    pub fn forget(&self) {
+        let mut state = self.state();
+        state.arrived.clear();
+        state.served.clear();
+        state.peak = state.active;
     }
 }
 
@@ -308,7 +361,36 @@ fn handle(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
             (blob, cut)
         };
 
-        return match blob {
+        // Only layer `GET`s are logged and delayed, so a test reads the order a
+        // restore fetched its layers in without the config blob in it.
+        let layer = !head && lock().layers.contains(&digest);
+        if layer {
+            let (delay, hold) = {
+                let mut state = lock();
+                state.arrived.push(digest.clone());
+                state.active += 1;
+                state.peak = state.peak.max(state.active);
+                (
+                    state.delays.get(&digest).copied(),
+                    state.holds.get(&digest).cloned(),
+                )
+            };
+
+            // Bounded, so a test whose other request never comes fails on its
+            // own assertion rather than hanging.
+            if let Some(until) = hold {
+                let deadline = Instant::now() + Duration::from_secs(30);
+                while !lock().arrived.contains(&until) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+
+            if let Some(delay) = delay {
+                std::thread::sleep(delay);
+            }
+        }
+
+        let answered = match blob {
             None => respond(&stream, 404, &[], 0, b""),
             Some(blob) if head => {
                 let mut stream = &stream;
@@ -324,6 +406,14 @@ fn handle(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
             Some(blob) if cut => respond(&stream, 200, &[], blob.len(), &blob[..blob.len() / 2]),
             Some(blob) => respond(&stream, 200, &[], blob.len(), &blob),
         };
+
+        if layer {
+            let mut state = lock();
+            state.active -= 1;
+            state.served.push(digest);
+        }
+
+        return answered;
     }
 
     if let Some(index) = rest.find("/manifests/") {

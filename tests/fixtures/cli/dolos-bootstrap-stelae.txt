@@ -29,6 +29,9 @@ Options:
       --skip-space-check
           skip the restore disk-space preflight and continue even when the stele's declared sizes
           exceed the available space
+      --read-ahead <LAYERS>
+          how many layers to read ahead of the one being written; a registry restore stages each in
+          the scratch directory until its turn. 0 or 1 reads one layer at a time [default: 8]
       --continue
           Resume an interrupted restore from the layers it recorded, reading the stele it started
           from again; with nothing to resume, restore as without the flag into storage that holds no
