@@ -63,8 +63,8 @@ pub(super) fn fetch(dbsync_url: &str, max_epoch: u64, network: &Network) -> Resu
 
     for (protocol, epoch) in &era_starts {
         let epoch_length = match network {
-            Network::Mainnet => 432000,
-            Network::Preview | Network::Preprod => 86400,
+            Network::Mainnet | Network::Preprod => 432000,
+            Network::Preview => 86400,
         };
         let (epoch_length, slot_length) = (epoch_length, 1);
 
