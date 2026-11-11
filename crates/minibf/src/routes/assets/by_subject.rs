@@ -7,7 +7,7 @@ use dolos_core::Domain;
 
 use crate::{
     error::Error,
-    mapping::{assets::load_asset_builder, sorted_json},
+    mapping::assets::{asset_json, load_asset_builder},
     Facade,
 };
 
@@ -22,7 +22,7 @@ where
     let model = load_asset_builder(&domain, unit, &budget).await?;
 
     // `onchain_metadata` is a `HashMap`: its key order changes per instance
-    Ok(sorted_json(model.into_model(&domain).await?)?)
+    Ok(asset_json(model.into_model(&domain).await?)?)
 }
 
 #[cfg(test)]

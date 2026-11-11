@@ -4,7 +4,7 @@
 
 use std::{collections::HashMap, ops::Deref, sync::OnceLock, time::Duration};
 
-use axum::http::StatusCode;
+use axum::{http::StatusCode, Json};
 use blockfrost_openapi::models::{
     asset::{Asset, OnchainMetadataStandard},
     asset_metadata::AssetMetadata as OffchainMetadata,
@@ -23,7 +23,7 @@ use dolos_core::{BlockSlot, Domain, EraCbor};
 use futures_util::{StreamExt as _, TryStreamExt as _};
 
 use pallas::{
-    codec::minicbor,
+    codec::{minicbor, tree::fold_tree},
     crypto::hash::Hash,
     ledger::{
         primitives::{BigInt, Epoch, Metadatum, PlutusData},
@@ -35,7 +35,7 @@ use serde::Deserialize;
 
 use crate::{
     error::Error,
-    mapping::{asset_fingerprint, IntoModel},
+    mapping::{asset_fingerprint, sorted_json, IntoModel},
     Facade,
 };
 
@@ -113,7 +113,7 @@ impl OnchainMetadata {
         let value = CIP25Metadata(metadatum).into_model()?;
 
         let (metadata, version) = match value {
-            serde_json::Value::Object(map) => {
+            serde_json::Value::Object(mut map) => {
                 let policy_id = &unit[..56];
                 let asset_name_raw = &unit[56..];
 
@@ -122,18 +122,24 @@ impl OnchainMetadata {
                     .and_then(|v| String::from_utf8(v).ok())
                     .unwrap_or_else(|| asset_name_raw.to_string());
 
-                let metadata = map
-                    .get(policy_id)
-                    .and_then(|policy_metadata| policy_metadata.get(&asset_name))
-                    .and_then(|asset_metadata| asset_metadata.as_object())
-                    .map(|obj| obj.clone().into_iter().collect())
-                    .unwrap_or_default();
-
                 let version = map.get("version").and_then(|v| match v {
                     serde_json::Value::Number(num) => num.as_i64(),
                     serde_json::Value::String(s) => s.parse::<f64>().ok().map(|f| f as i64),
                     _ => None,
                 });
+
+                // moves the asset's properties out instead of copying them
+                let metadata = match map.remove(policy_id) {
+                    Some(serde_json::Value::Object(mut policy_metadata)) => {
+                        match policy_metadata.remove(&asset_name) {
+                            Some(serde_json::Value::Object(asset_metadata)) => {
+                                asset_metadata.into_iter().collect()
+                            }
+                            _ => HashMap::new(),
+                        }
+                    }
+                    _ => HashMap::new(),
+                };
 
                 (metadata, version)
             }
@@ -224,40 +230,52 @@ impl From<TokenRegistryMetadata> for OffchainMetadata {
 
 struct CIP25Metadata(Metadatum);
 
+/// Returns the CIP-25 text of a byte string: UTF-8, or hex without a prefix.
+fn cip25_bytes(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text.to_string(),
+        Err(_) => hex::encode(bytes),
+    }
+}
+
+/// Returns the CIP-25 JSON object key of a metadatum, or `None` when the key
+/// does not convert to a JSON string.
+fn cip25_key(key: &Metadatum) -> Option<String> {
+    match key {
+        Metadatum::Text(x) => Some(x.clone()),
+        Metadatum::Bytes(x) => Some(cip25_bytes(x)),
+        // only an integer outside the JSON number range converts to a string
+        Metadatum::Int(x) => serde_json::Number::from_i128(i128::from(*x))
+            .is_none()
+            .then(|| x.to_string()),
+        Metadatum::Array(_) | Metadatum::Map(_) => None,
+    }
+}
+
 impl IntoModel<serde_json::Value> for CIP25Metadata {
     type SortKey = ();
 
     fn into_model(self) -> Result<serde_json::Value, StatusCode> {
-        Ok(match self.0 {
-            Metadatum::Int(x) => serde_json::Number::from_i128(x.into())
-                .map(serde_json::Value::Number)
-                .unwrap_or(serde_json::Value::String(x.to_string())),
-
-            Metadatum::Text(x) => serde_json::Value::String(x),
-
-            Metadatum::Bytes(x) => match String::from_utf8(x.to_vec().clone()) {
-                Ok(s) => serde_json::Value::String(s),
-                Err(_) => serde_json::Value::String(hex::encode(x.to_vec())),
+        let json = fold_tree(
+            &self.0,
+            |node, children: Vec<serde_json::Value>| match node {
+                Metadatum::Int(x) => serde_json::Number::from_i128(i128::from(*x))
+                    .map(serde_json::Value::Number)
+                    .unwrap_or_else(|| serde_json::Value::String(x.to_string())),
+                Metadatum::Text(x) => serde_json::Value::String(x.clone()),
+                Metadatum::Bytes(x) => serde_json::Value::String(cip25_bytes(x)),
+                Metadatum::Array(_) => serde_json::Value::Array(children),
+                // children alternate key and value; a key's JSON is not used
+                Metadatum::Map(kvs) => serde_json::Value::Object(
+                    kvs.iter()
+                        .zip(children.into_iter().skip(1).step_by(2))
+                        .filter_map(|((key, _), value)| cip25_key(key).map(|key| (key, value)))
+                        .collect(),
+                ),
             },
+        );
 
-            Metadatum::Array(x) => {
-                let values = x
-                    .into_iter()
-                    .map(|d| CIP25Metadata(d).into_model())
-                    .collect::<Result<Vec<_>, _>>()?;
-                serde_json::Value::Array(values)
-            }
-
-            Metadatum::Map(x) => {
-                let mut map = serde_json::Map::new();
-                for (k, v) in x.iter() {
-                    if let Some(key) = CIP25Metadata(k.clone()).into_model()?.as_str() {
-                        map.insert(key.to_string(), CIP25Metadata(v.clone()).into_model()?);
-                    }
-                }
-                serde_json::Value::Object(map)
-            }
-        })
+        Ok(json)
     }
 }
 
@@ -521,9 +539,11 @@ impl AssetModelBuilder {
 
         let metadata = self.onchain_metadata(domain).await?;
 
-        let onchain_metadata_standard = Some(metadata.as_ref().and_then(|m| m.version));
-        let onchain_metadata = metadata.as_ref().map(|m| m.metadata.clone());
-        let onchain_metadata_extra = Some(metadata.as_ref().and_then(|m| m.extra.clone()));
+        // moves the on-chain metadata instead of copying it
+        let (onchain_metadata, onchain_metadata_standard, onchain_metadata_extra) = match metadata {
+            Some(m) => (Some(m.metadata), Some(m.version), Some(m.extra)),
+            None => (None, Some(None), Some(None)),
+        };
 
         let metadata = self.offchain_metadata(&self.unit).await?.map(Box::new);
 
@@ -551,6 +571,25 @@ impl AssetModelBuilder {
 
         Ok(out)
     }
+}
+
+/// Serializes an asset with sorted keys at every level. The on-chain metadata
+/// moves into the sorted map without a copy.
+pub(crate) fn asset_json(mut asset: Asset) -> Result<Json<serde_json::Value>, StatusCode> {
+    let onchain_metadata = asset.onchain_metadata.take();
+
+    let Json(mut json) = sorted_json(asset)?;
+
+    if let (Some(onchain_metadata), serde_json::Value::Object(fields)) =
+        (onchain_metadata, &mut json)
+    {
+        fields.insert(
+            "onchain_metadata".to_string(),
+            serde_json::Value::Object(onchain_metadata.into_iter().collect()),
+        );
+    }
+
+    Ok(Json(json))
 }
 
 /// The facts that an amount entry reports about its unit, in addition to the
@@ -832,7 +871,6 @@ mod tests {
     };
 
     use super::*;
-    use crate::mapping::sorted_json;
 
     const POLICY: &str = "f0ff48bbb7bbe9d59a40f1ce90e9e9d0ff5002ec48f232b49ca0fb9a";
 
@@ -864,7 +902,7 @@ mod tests {
             metadata: None,
         };
 
-        serde_json::to_vec(&sorted_json(asset).unwrap().0).unwrap()
+        serde_json::to_vec(&asset_json(asset).unwrap().0).unwrap()
     }
 
     fn assert_identical_and_sorted(mut next: impl FnMut() -> Vec<u8>) {
@@ -891,6 +929,46 @@ mod tests {
         assert_eq!(keys.len(), KEYS.len());
         // the parsed keys come sorted: the body must list them in that order
         assert!(positions.windows(2).all(|w| w[0] < w[1]), "{body}");
+    }
+
+    /// The CIP-25 JSON of a metadatum with every variant. CIP-25 drops keys
+    /// that are not text or bytes, and writes bytes as UTF-8 or bare hex.
+    #[test]
+    fn cip25_metadata_json_keeps_its_output() {
+        let json = CIP25Metadata(crate::test_support::mixed_metadatum())
+            .into_model()
+            .unwrap();
+
+        assert_eq!(
+            serde_json::to_string(&json).unwrap(),
+            r#"{"-18446744073709551616":"huge key","a":[1,"x","ok"],"b":"second","ff00":"ff00","name":"-18446744073709551616"}"#
+        );
+    }
+
+    /// A nested CIP-25 property renders in full, through the same steps as
+    /// the route.
+    #[test]
+    fn cip25_metadata_renders_nested_properties() {
+        use crate::test_support::{nested_metadatum, NESTING};
+
+        let text = |x: &str| Metadatum::Text(x.to_string());
+        let unit = format!("{POLICY}{}", hex::encode("james"));
+
+        let properties = vec![
+            (text("name"), text("james")),
+            (text("nested"), nested_metadatum(NESTING)),
+        ];
+        let asset = vec![(text("james"), Metadatum::Map(properties.into()))];
+        let policy = vec![(text(POLICY), Metadatum::Map(asset.into()))];
+
+        let metadata = OnchainMetadata::from_metadatum(&unit, Metadatum::Map(policy.into()))
+            .unwrap()
+            .unwrap();
+        let body = asset_bytes(metadata);
+
+        let arrays = NESTING - 1;
+        let nested = format!(r#""nested":{}0{}"#, "[".repeat(arrays), "]".repeat(arrays));
+        assert!(std::str::from_utf8(&body).unwrap().contains(&nested));
     }
 
     #[test]
