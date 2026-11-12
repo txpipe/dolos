@@ -16,7 +16,10 @@ use pallas::{
     },
 };
 
-use super::IntoModel;
+use super::{
+    direct_json::{drop_value, write_str, write_value, WriteJson},
+    IntoModel,
+};
 
 /// The labels in the CIP-10 registry. Each label has the description that
 /// Blockfrost shows for it.
@@ -125,6 +128,44 @@ impl IntoModel<Vec<TxMetadataLabelJsonInner>> for MetadataHistoryModelBuilder {
             .collect::<Result<_, _>>()?;
 
         Ok(mapped)
+    }
+}
+
+/// The body of `/metadata/txs/labels/{label}`, byte for byte what
+/// `serde_json` encodes for its entries. It writes and frees the metadata with
+/// a heap stack.
+pub struct MetadataLabelJsonBody(pub Vec<TxMetadataLabelJsonInner>);
+
+impl WriteJson for MetadataLabelJsonBody {
+    fn write_json(&self, out: &mut Vec<u8>) {
+        out.push(b'[');
+
+        for (i, item) in self.0.iter().enumerate() {
+            if i > 0 {
+                out.push(b',');
+            }
+
+            out.extend_from_slice(b"{\"tx_hash\":");
+            write_str(out, &item.tx_hash);
+            out.extend_from_slice(b",\"json_metadata\":");
+            match &item.json_metadata {
+                Some(value) => write_value(out, value),
+                None => out.extend_from_slice(b"null"),
+            }
+            out.push(b'}');
+        }
+
+        out.push(b']');
+    }
+}
+
+impl Drop for MetadataLabelJsonBody {
+    fn drop(&mut self) {
+        for item in self.0.drain(..) {
+            if let Some(value) = item.json_metadata {
+                drop_value(value);
+            }
+        }
     }
 }
 

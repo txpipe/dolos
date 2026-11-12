@@ -2260,7 +2260,10 @@ impl IntoModel<HashMap<String, serde_json::Value>> for PlutusDataWrapper {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{mixed_metadatum, nested_metadatum, NESTING};
+    use crate::{
+        mapping::direct_json::WriteJson,
+        test_support::{mixed_metadatum, nested_metadatum, NESTING},
+    };
 
     /// The JSON of a metadatum with every variant, structured and duplicate
     /// keys, and an integer outside the `i64` range.
@@ -2281,7 +2284,7 @@ mod tests {
 
         let arrays = NESTING - 1;
         assert_eq!(
-            serde_json::to_string(&json).unwrap(),
+            String::from_utf8(direct_json::ValueBody(json).to_json_vec()).unwrap(),
             format!("{}0{}", "[".repeat(arrays), "]".repeat(arrays))
         );
     }

@@ -35,7 +35,11 @@ use serde::Deserialize;
 
 use crate::{
     error::Error,
-    mapping::{asset_fingerprint, sorted_json, IntoModel},
+    mapping::{
+        asset_fingerprint,
+        direct_json::{drop_value, ValueBody},
+        sorted_json, IntoModel,
+    },
     Facade,
 };
 
@@ -129,21 +133,24 @@ impl OnchainMetadata {
                 });
 
                 // moves the asset's properties out instead of copying them
-                let metadata = match map.remove(policy_id) {
-                    Some(serde_json::Value::Object(mut policy_metadata)) => {
-                        match policy_metadata.remove(&asset_name) {
-                            Some(serde_json::Value::Object(asset_metadata)) => {
-                                asset_metadata.into_iter().collect()
-                            }
-                            _ => HashMap::new(),
-                        }
-                    }
-                    _ => HashMap::new(),
-                };
+                let metadata = take_object(map.remove(policy_id))
+                    .and_then(|mut policy_metadata| {
+                        let asset_metadata = take_object(policy_metadata.remove(&asset_name));
+                        drop_value(serde_json::Value::Object(policy_metadata));
+                        asset_metadata
+                    })
+                    .map(|asset_metadata| asset_metadata.into_iter().collect())
+                    .unwrap_or_default();
+
+                // the metadata of the other policies and assets
+                drop_value(serde_json::Value::Object(map));
 
                 (metadata, version)
             }
-            _ => (HashMap::new(), None),
+            other => {
+                drop_value(other);
+                (HashMap::new(), None)
+            }
         };
 
         let version = match version {
@@ -229,6 +236,20 @@ impl From<TokenRegistryMetadata> for OffchainMetadata {
 }
 
 struct CIP25Metadata(Metadatum);
+
+/// Returns the object in `value`. A value of another kind is freed with
+/// [`drop_value`].
+fn take_object(
+    value: Option<serde_json::Value>,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    match value? {
+        serde_json::Value::Object(fields) => Some(fields),
+        other => {
+            drop_value(other);
+            None
+        }
+    }
+}
 
 /// Returns the CIP-25 text of a byte string: UTF-8, or hex without a prefix.
 fn cip25_bytes(bytes: &[u8]) -> String {
@@ -575,7 +596,7 @@ impl AssetModelBuilder {
 
 /// Serializes an asset with sorted keys at every level. The on-chain metadata
 /// moves into the sorted map without a copy.
-pub(crate) fn asset_json(mut asset: Asset) -> Result<Json<serde_json::Value>, StatusCode> {
+pub(crate) fn asset_json(mut asset: Asset) -> Result<ValueBody, StatusCode> {
     let onchain_metadata = asset.onchain_metadata.take();
 
     let Json(mut json) = sorted_json(asset)?;
@@ -589,7 +610,7 @@ pub(crate) fn asset_json(mut asset: Asset) -> Result<Json<serde_json::Value>, St
         );
     }
 
-    Ok(Json(json))
+    Ok(ValueBody(json))
 }
 
 /// The facts that an amount entry reports about its unit, in addition to the
@@ -871,6 +892,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::mapping::direct_json::WriteJson;
 
     const POLICY: &str = "f0ff48bbb7bbe9d59a40f1ce90e9e9d0ff5002ec48f232b49ca0fb9a";
 
@@ -902,7 +924,33 @@ mod tests {
             metadata: None,
         };
 
-        serde_json::to_vec(&asset_json(asset).unwrap().0).unwrap()
+        asset_json(asset).unwrap().to_json_vec()
+    }
+
+    /// The asset body has the bytes that `serde_json` encodes for the sorted
+    /// asset.
+    #[test]
+    fn asset_body_matches_serde() {
+        let unit = format!("{POLICY}{}", hex::encode("james"));
+        let text = |x: &str| Metadatum::Text(x.to_string());
+
+        let asset = vec![(text("james"), crate::test_support::mixed_metadatum())];
+        let policy = vec![(text(POLICY), Metadatum::Map(asset.into()))];
+        let metadata = OnchainMetadata::from_metadatum(&unit, Metadatum::Map(policy.into()))
+            .unwrap()
+            .unwrap();
+
+        let asset = Asset {
+            policy_id: POLICY.to_string(),
+            onchain_metadata: Some(metadata.metadata),
+            onchain_metadata_standard: Some(metadata.version),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            asset_json(asset.clone()).unwrap().to_json_vec(),
+            serde_json::to_vec(&sorted_json(asset).unwrap().0).unwrap()
+        );
     }
 
     fn assert_identical_and_sorted(mut next: impl FnMut() -> Vec<u8>) {

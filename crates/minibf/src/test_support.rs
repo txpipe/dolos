@@ -1041,8 +1041,9 @@ impl TestAppBuilder {
     }
 }
 
-/// The nesting depth that the conversion tests use.
-pub const NESTING: usize = 2_000;
+/// The nesting depth that the conversion and route tests use. A route that
+/// serializes this depth with `serde_json` fails its test in a debug build.
+pub const NESTING: usize = 6_000;
 
 /// A metadatum of `depth` nodes on its longest path: arrays around an integer.
 pub fn nested_metadatum(depth: usize) -> pallas::ledger::primitives::Metadatum {
@@ -1055,11 +1056,13 @@ pub fn nested_metadatum(depth: usize) -> pallas::ledger::primitives::Metadatum {
     node
 }
 
-/// A Conway block with one tx. The tx holds `metadata` as its auxiliary data.
+/// A Conway block with one tx. The tx holds `metadata` as its auxiliary data
+/// and mints `mint`.
 pub fn block_with_metadata(
     slot: u64,
+    mint: Option<pallas::ledger::primitives::conway::Mint>,
     metadata: Vec<(u64, pallas::ledger::primitives::Metadatum)>,
-) -> Vec<u8> {
+) -> dolos_core::RawBlock {
     use pallas::{
         codec::utils::Set,
         ledger::primitives::{alonzo::AuxiliaryData, conway::TransactionBody},
@@ -1074,7 +1077,7 @@ pub fn block_with_metadata(
         withdrawals: None,
         auxiliary_data_hash: None,
         validity_interval_start: None,
-        mint: None,
+        mint,
         script_data_hash: None,
         collateral: None,
         required_signers: None,
@@ -1089,9 +1092,15 @@ pub fn block_with_metadata(
     };
 
     let aux = AuxiliaryData::Shelley(metadata.into_iter().collect());
-    let (_, raw) = dolos_testing::blocks::make_conway_block_with_tx(slot, body, Some(aux), true);
+    let (_, raw) = dolos_testing::blocks::make_conway_block_with_txs_at(
+        slot,
+        slot,
+        None,
+        vec![(body, true)],
+        Some(aux),
+    );
 
-    (*raw).clone()
+    raw
 }
 
 /// A metadatum with every variant, structured and duplicate keys, an integer

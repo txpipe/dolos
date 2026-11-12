@@ -47,9 +47,11 @@ use dolos_cardano::{
 use dolos_core::{ArchiveStore as _, Domain, EraCbor, TxHash, TxOrder, TxoRef};
 
 use super::{
-    bech32_pool, list_assets, metadatum_to_json, pool_offchain_metadata, rational_to_f64,
-    redeemer_fee, redeemer_script_hash, stake_cred_to_address, try_into_or_500,
-    vkey_to_stake_address, IntoModel, PoolOffchainMetadata, UtxoOutputModelBuilder,
+    bech32_pool,
+    direct_json::{drop_value, write_str, write_value, WriteJson},
+    list_assets, metadatum_to_json, pool_offchain_metadata, rational_to_f64, redeemer_fee,
+    redeemer_script_hash, stake_cred_to_address, try_into_or_500, vkey_to_stake_address, IntoModel,
+    PoolOffchainMetadata, UtxoOutputModelBuilder,
 };
 use crate::Facade;
 
@@ -720,6 +722,38 @@ fn tx_metadatum_to_json(metadatum: &alonzo::Metadatum) -> serde_json::Value {
 pub struct TxMetadataJsonInner {
     pub json_metadata: serde_json::Value,
     pub label: String,
+}
+
+/// The body of `/txs/{hash}/metadata`, byte for byte what `serde_json`
+/// encodes for its entries. It writes and frees the metadata with a heap stack.
+pub struct TxMetadataJsonBody(pub Vec<TxMetadataJsonInner>);
+
+impl WriteJson for TxMetadataJsonBody {
+    fn write_json(&self, out: &mut Vec<u8>) {
+        out.push(b'[');
+
+        for (i, item) in self.0.iter().enumerate() {
+            if i > 0 {
+                out.push(b',');
+            }
+
+            out.extend_from_slice(b"{\"json_metadata\":");
+            write_value(out, &item.json_metadata);
+            out.extend_from_slice(b",\"label\":");
+            write_str(out, &item.label);
+            out.push(b'}');
+        }
+
+        out.push(b']');
+    }
+}
+
+impl Drop for TxMetadataJsonBody {
+    fn drop(&mut self) {
+        for item in self.0.drain(..) {
+            drop_value(item.json_metadata);
+        }
+    }
 }
 
 impl IntoModel<Vec<TxMetadataJsonInner>> for TxModelBuilder<'_> {
