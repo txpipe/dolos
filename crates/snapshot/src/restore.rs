@@ -3428,7 +3428,9 @@ mod tests {
     }
 
     /// The estimate sizes each epoch layer from the compressed size the
-    /// transport states for it, and falls back only where none is stated.
+    /// transport states for it, and falls back only where none is stated. It
+    /// charges nothing for a layer the resume records, and the journals it is
+    /// handed.
     #[test]
     fn the_estimate_sizes_layers_from_the_transport() {
         let (entity_kind, _) = ENTITY_KINDS[0];
@@ -3446,14 +3448,30 @@ mod tests {
             sized(INDEXES, 0, 0xa3, 3_000),
             // Stated without a compressed size.
             sized(BLOCKS, 1, 0xb0, 20_000),
+            // Recorded by the resume below, so never charged.
+            sized(BLOCKS, 2, 0xc0, 1_000_000),
         ]);
 
         let plan = plan_of(&inscription(layers));
-        let stele = Stated([(0xa0, 2_000), (0xa1, 1_000), (0xa2, 500), (0xa3, 1_000)].into());
+        let stele = Stated(
+            [
+                (0xa0, 2_000),
+                (0xa1, 1_000),
+                (0xa2, 500),
+                (0xa3, 1_000),
+                (0xc0, 500_000),
+            ]
+            .into(),
+        );
         let index: BlobIndex = std::iter::empty().collect();
 
-        let estimate = plan.estimate(&stele, &index, &Resume::none(), 0).unwrap();
+        let mut progress = RestoreProgress::new(Digest::from_bytes([0xdd; 32]));
+        progress.record(Digest::from_bytes([0xc0; 32]));
+        let resume = Resume::from_progress(Some(&progress));
 
+        let estimate = plan.estimate(&stele, &index, &resume, 1 << 20).unwrap();
+
+        assert_eq!(estimate.journals, 1 << 20);
         assert_eq!(estimate.blocks, 3_600 + 11_000);
         assert_eq!(estimate.indexes, 2_200);
         assert_eq!(estimate.logs, 2_100);
