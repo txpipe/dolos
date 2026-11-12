@@ -10,7 +10,7 @@
 use dolos_core::BlockSlot;
 
 use crate::{
-    export::{IndexBand, Plan, Producers},
+    export::{Plan, Producers},
     Error, RetainedEpochs,
 };
 
@@ -118,31 +118,13 @@ pub fn restrict(plan: Plan, range: Option<EpochRange>) -> Plan {
     }
 }
 
-/// Apply an operator's index band to a plan, or leave the measured default.
-///
-/// The one place any command spells the mapping, for the reason [`restrict`] is
-/// shared: `publish`, `digest` and `verify --reproduce` all pay the same index
-/// traversals, and a knob one of them spelled its own way would be a knob an
-/// operator has to learn three times.
-///
-/// Unlike [`restrict`], this changes nothing about the document: banding
-/// reorders when index records are read, never which layer they land in. Two
-/// runs at different bands produce the same digest, which is why a
-/// reproduction is free to band differently than the publish it checks.
-pub fn banded(plan: Plan, band: Option<std::num::NonZeroUsize>) -> Plan {
-    match band {
-        Some(band) => plan.with_band(IndexBand::new(band)),
-        None => plan,
-    }
-}
-
 /// Apply an operator's producer pool to a plan, or leave the sized default.
 ///
-/// Shared for the reason [`banded`] is: the same three commands pay the same
-/// store walks, so the knob that pools them is spelled once. Like the band,
-/// this changes nothing about the document — layers are reassembled by their
-/// position in it, never by completion order — so a reproduction is free to
-/// pool differently than the publish it checks.
+/// Shared for the reason [`restrict`] is: the same three commands pay the same
+/// store walks, so the knob that pools them is spelled once. Unlike a
+/// restriction, this changes nothing about the document — layers are
+/// reassembled by their position in it, never by completion order — so a
+/// reproduction is free to pool differently than the publish it checks.
 pub fn produced(plan: Plan, producers: Option<std::num::NonZeroUsize>) -> Plan {
     match producers {
         Some(producers) => plan.with_producers(Producers::new(producers)),
@@ -166,8 +148,8 @@ pub struct EpochSpan {
 ///
 /// Derived here rather than in each command so that a publisher comparing a
 /// `digest` run against the `publish` that produced a stele is comparing the
-/// same arithmetic — the band clamp and the dump count above all, both of which
-/// are easy to spell two ways and impossible to notice when they disagree.
+/// same arithmetic — the dump count above all, which is easy to spell two ways
+/// and impossible to notice when two commands disagree.
 /// Composing the sentences is the command's.
 #[derive(Debug, Clone)]
 pub struct PlanReport {
@@ -177,13 +159,6 @@ pub struct PlanReport {
     pub sequence: u64,
     /// The tag the sequence renders as, which is the protocol's and can refuse.
     pub tag: String,
-    /// Epochs per index traversal, **clamped to the epochs actually selected**:
-    /// the band chunks them, so a `--epochs 500..502` publish opens three sinks
-    /// whatever the band says, and the unclamped budget would overstate it by
-    /// orders of magnitude.
-    pub band_epochs: usize,
-    /// What those sinks are budgeted, in MiB.
-    pub band_budget_mib: usize,
     /// `None` when the state tip alone is selected, which is a legitimate
     /// publish rather than a mistake.
     pub epochs: Option<EpochSpan>,
@@ -197,16 +172,12 @@ pub struct PlanReport {
 
 impl PlanReport {
     pub fn read(plan: &Plan) -> Result<Self, Error> {
-        let band = plan.band.epochs().min(plan.epochs.len());
-
         Ok(Self {
             network: plan.network.name().to_owned(),
             magic: plan.network.magic(),
             cursor: plan.cursor.to_string(),
             sequence: plan.sequence,
             tag: plan.tag()?,
-            band_epochs: band,
-            band_budget_mib: band.saturating_mul(IndexBand::SINK_BYTES) / (1024 * 1024),
             epochs: match (plan.epochs.first(), plan.epochs.last()) {
                 (Some(first), Some(last)) => Some(EpochSpan {
                     first: first.epoch,

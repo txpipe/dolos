@@ -347,6 +347,30 @@ impl ArchiveStore {
         Ok(())
     }
 
+    /// The newest block the index locates, without reading its frame: its
+    /// slot and the location of that slot's canonical block, as the tip read
+    /// takes them.
+    pub fn newest_block(&self) -> Result<Option<(BlockSlot, BlockLocation)>, ArchiveError> {
+        let snapshot = self.db.snapshot();
+
+        let Some(guard) = snapshot.last_key_value(&self.blocks) else {
+            return Ok(None);
+        };
+
+        let (key, value) = guard.into_inner().map_err(fjall_err)?;
+
+        let slot_bytes: [u8; 8] = key
+            .as_ref()
+            .get(..8)
+            .and_then(|b| b.try_into().ok())
+            .ok_or_else(|| ArchiveError::InternalError("malformed blocks key".to_string()))?;
+
+        Ok(Some((
+            u64::from_be_bytes(slot_bytes),
+            BlockLocation::from_bytes(&value),
+        )))
+    }
+
     /// Whether the index holds any block location, log row or index entry.
     pub fn holds_data(&self) -> Result<bool, Error> {
         for keyspace in [
@@ -1210,22 +1234,10 @@ impl CoreArchiveStore for ArchiveStore {
     }
 
     fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError> {
-        let snapshot = self.db.snapshot();
-
-        let Some(guard) = snapshot.last_key_value(&self.blocks) else {
+        let Some((slot, loc)) = self.newest_block()? else {
             return Ok(None);
         };
 
-        let (key, value) = guard.into_inner().map_err(fjall_err)?;
-
-        let slot_bytes: [u8; 8] = key
-            .as_ref()
-            .get(..8)
-            .and_then(|b| b.try_into().ok())
-            .ok_or_else(|| ArchiveError::InternalError("malformed blocks key".to_string()))?;
-        let slot = u64::from_be_bytes(slot_bytes);
-
-        let loc = BlockLocation::from_bytes(&value);
         let body = self.flatfiles.read(&loc).map_err(io_err)?;
 
         Ok(Some((slot, body)))
@@ -1329,6 +1341,19 @@ impl CoreArchiveStore for ArchiveStore {
         let indexes_done = self.sweep_indexes(&snapshot, prune_before, max_slots, max_entries)?;
 
         Ok(blocks_done && indexes_done)
+    }
+
+    /// Commits are journaled with [`PersistMode::Buffer`]; this fsyncs the
+    /// journal. Block bodies are synced by the commit that appends them, before
+    /// the index entries pointing at them. A read-only view committed nothing.
+    fn persist(&self) -> Result<(), ArchiveError> {
+        if self.view.is_some() {
+            return Ok(());
+        }
+
+        self.db.persist(PersistMode::SyncAll).map_err(fjall_err)?;
+
+        Ok(())
     }
 
     /// Drop everything the archive holds after `after`.
@@ -1847,6 +1872,9 @@ mod tests {
                 assert!(error.to_string().contains("read-only"), "{error:?}");
             }
 
+            // Nothing was committed through the view, so there is nothing to sync.
+            store.persist().unwrap();
+
             for error in [
                 store.compact().unwrap_err(),
                 store.record_identity("other").unwrap_err(),
@@ -1862,6 +1890,28 @@ mod tests {
 
         let store = ArchiveStore::open(schema(), &path, None, Preset::Standard).unwrap();
         assert_eq!(store.get_tip().unwrap().unwrap().0, 102);
+    }
+
+    /// Blocks committed and persisted are there when the archive is reopened
+    /// without a shutdown. The fsync itself shows only after a power loss, so
+    /// this pins that `persist` succeeds on a writable archive.
+    #[test]
+    fn a_persisted_commit_survives_a_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive");
+
+        {
+            let store = ArchiveStore::open(schema(), &path, None, Preset::Standard).unwrap();
+            write(&store, &[(100, body(100, 0)), (101, body(101, 0))]);
+            store.persist().unwrap();
+        }
+
+        let store = ArchiveStore::open(schema(), &path, None, Preset::Standard).unwrap();
+        assert_eq!(store.get_tip().unwrap().unwrap().0, 101);
+        assert_eq!(
+            store.get_block_by_slot(&100).unwrap(),
+            Some(body(100, 0).to_vec())
+        );
     }
 
     /// An archive a stopped removal marked refuses every open, its views'

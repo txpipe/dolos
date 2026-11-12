@@ -356,6 +356,58 @@ fn a_custom_network_reads_the_official_registry_anonymously() {
     );
 }
 
+/// `bootstrap stelae --continue` over a registry record pulls the recorded
+/// epoch's tag and never `latest`, which `--point` defaults to and the soak
+/// chart passes: the restore is handed the recorded point, not only resolved
+/// with it.
+#[test]
+fn a_registry_resume_pulls_the_recorded_epoch_tag() {
+    let node = Node::new();
+    std::fs::create_dir_all(&node.config.storage.path).unwrap();
+
+    let record = dolos_snapshot::restore::SourceRecord {
+        source: networks::PREVIEW.stelae.registry.to_owned(),
+        sequence: 42,
+        inscription_digest: format!("sha256:{}", "ab".repeat(32)).parse().unwrap(),
+    };
+    record
+        .save(&dolos_snapshot::restore::source_path_in(
+            &node.config.storage.path,
+        ))
+        .unwrap();
+
+    let proxy = Proxy::start();
+    let output = proxy.run(
+        &node,
+        &["bootstrap", "stelae", "--continue", "--insecure"],
+        None,
+    );
+
+    assert!(!output.status.success(), "the proxy has no stele");
+
+    let targets: Vec<String> = proxy
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|seen| seen.target.clone())
+        .collect();
+
+    assert!(
+        targets
+            .iter()
+            .any(|target| target.ends_with("/cardano/preview/manifests/epoch-42")),
+        "the recorded epoch tag was not pulled: {targets:?}\n{}",
+        stderr(&output)
+    );
+    assert!(
+        !targets
+            .iter()
+            .any(|target| target.contains("/manifests/latest")),
+        "the resume read latest: {targets:?}"
+    );
+}
+
 /// The commands that left the binary are usage errors, refused before a
 /// configuration is read: the snapshot family moved to the Stelae publisher,
 /// the debug utilities to `cargo xtask debug`, and the rest were deleted.

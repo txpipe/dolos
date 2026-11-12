@@ -17,8 +17,12 @@ edition.workspace = true
 # parties; this profile publishes into registries as a matter of course, so
 # it turns the transport on unconditionally rather than forwarding a feature
 # nothing in dolos ever left off.
-stelae = { git = "https://github.com/txpipe/stelae", rev = "55d5270eb3fc45f921dc56aec5a67f49d415596d", features = ["oci"] }
-stelae-driver = { git = "https://github.com/txpipe/stelae", rev = "55d5270eb3fc45f921dc56aec5a67f49d415596d", features = ["oci"] }
+#
+# Pinned at cdcf271, the stelae main commit after v0.5.2 that streams a
+# restore's layers in order, read ahead by the registry transport
+# (txpipe/stelae#24).
+stelae = { git = "https://github.com/txpipe/stelae", rev = "cdcf27134f574b522bb454ff5ee9f6a2adf0e353", features = ["oci"] }
+stelae-driver = { git = "https://github.com/txpipe/stelae", rev = "cdcf27134f574b522bb454ff5ee9f6a2adf0e353", features = ["oci"] }
 dolos-core = { path = "../core" }
 dolos-cardano = { path = "../cardano" }
 
@@ -26,12 +30,16 @@ hex.workspace = true
 minicbor.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tempfile = "3.20.0"
 thiserror.workspace = true
 tracing.workspace = true
+xxhash-rust.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# Flags for opening what a sweep finds in a shared scratch directory.
+libc = "0.2"
 
 [dev-dependencies]
-tempfile = "3.20.0"
-
 # `node`'s tests build a `[storage]` section the way an operator writes one.
 toml = "0.8.13"
 

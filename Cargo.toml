@@ -120,6 +120,7 @@ stats_alloc = "0.1"
 serial_test = "3"
 dolos-redb3 = { path = "crates/redb3" }
 memmap2 = "0.9"
+tower = { workspace = true, features = ["util"] }
 
 [target.'cfg(unix)'.dev-dependencies]
 nix = { version = "0.30.1", features = ["signal", "resource"] }
@@ -226,7 +227,7 @@ readme = "README.md"
 authors = ["TxPipe <hello@txpipe.io>"]
 
 [workspace.dependencies]
-pallas = { version = "1.3.0", features = ["hardano", "phase2", "unstable"] }
+pallas = { version = "1.4.0", features = ["hardano", "phase2", "unstable"] }
 # pallas = { git = "https://github.com/txpipe/pallas.git", rev = "a7b5a86", features = ["hardano", "phase2", "unstable"] }
 # pallas = { path = "../pallas/pallas", features = ["hardano", "phase2", "unstable"] }
 

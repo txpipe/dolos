@@ -124,6 +124,10 @@ where
         Ok(())
     }
 
+    fn archive_index_deltas(&self) -> &[dolos_core::ArchiveIndexDelta] {
+        self.batch.archive_index_deltas()
+    }
+
     fn tip_events(&self) -> Vec<TipEvent> {
         if !self.live_mode {
             return Vec::new();

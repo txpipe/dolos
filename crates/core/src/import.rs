@@ -12,8 +12,8 @@
 use tracing::{debug, instrument};
 
 use crate::{
-    sync::run_lifecycle, BlockSlot, ChainLogic, ChainPoint, Domain, DomainError, RawBlock,
-    StateError, StateStore, WalError, WalStore, WorkUnit,
+    sync::run_lifecycle, ArchiveIndexDelta, BlockSlot, ChainLogic, ChainPoint, Domain, DomainError,
+    RawBlock, StateError, StateStore, WalError, WalStore, WorkUnit,
 };
 
 /// Extension trait for bulk block import operations.
@@ -34,33 +34,52 @@ pub trait ImportExt: Domain {
     /// # Returns
     ///
     /// The slot of the last imported block.
-    fn import_blocks(&self, raw: Vec<RawBlock>) -> Result<BlockSlot, DomainError>;
+    fn import_blocks(&self, raw: Vec<RawBlock>) -> Result<BlockSlot, DomainError> {
+        self.import_blocks_observed(raw, &mut |_| {})
+    }
+
+    /// The same import, handing `observe` the archive index entries of each
+    /// unit of work once it has committed.
+    fn import_blocks_observed(
+        &self,
+        raw: Vec<RawBlock>,
+        observe: &mut dyn FnMut(&[ArchiveIndexDelta]),
+    ) -> Result<BlockSlot, DomainError>;
 }
 
 impl<D: Domain> ImportExt for D {
-    fn import_blocks(&self, mut raw: Vec<RawBlock>) -> Result<BlockSlot, DomainError> {
+    fn import_blocks_observed(
+        &self,
+        mut raw: Vec<RawBlock>,
+        observe: &mut dyn FnMut(&[ArchiveIndexDelta]),
+    ) -> Result<BlockSlot, DomainError> {
         let mut last = 0;
         let mut chain = self.write_chain();
 
         for block in raw.drain(..) {
             if !chain.can_receive_block() {
-                drain_pending_work::<D>(&mut *chain, self)?;
+                drain_pending_work::<D>(&mut *chain, self, observe)?;
             }
 
             last = chain.receive_block(block)?;
         }
 
         // One last drain to ensure we're up to date
-        drain_pending_work::<D>(&mut *chain, self)?;
+        drain_pending_work::<D>(&mut *chain, self, observe)?;
 
         Ok(last)
     }
 }
 
 /// Drain all pending work from the chain logic using import lifecycle.
-fn drain_pending_work<D: Domain>(chain: &mut D::Chain, domain: &D) -> Result<(), DomainError> {
+fn drain_pending_work<D: Domain>(
+    chain: &mut D::Chain,
+    domain: &D,
+    observe: &mut dyn FnMut(&[ArchiveIndexDelta]),
+) -> Result<(), DomainError> {
     while let Some(mut work) = <D::Chain as ChainLogic>::pop_work::<D>(chain, domain) {
         execute_work_unit(domain, &mut work)?;
+        observe(WorkUnit::<D>::archive_index_deltas(&work));
     }
 
     Ok(())

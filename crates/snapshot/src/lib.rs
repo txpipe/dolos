@@ -54,6 +54,11 @@
 //!   the layers a publish inherits instead of rebuilding.
 //! - [`planning`] — the epoch selection every command that walks these stores
 //!   takes, and the arithmetic each of them reports.
+//! - [`staging`] — one tag and one exact traversal for `indexes` and one shared
+//!   entity traversal, partitioned into durable per-epoch runs that finish as
+//!   layers for several publications.
+//! - [`prepare`] — durable capture of what a boundary alone holds, finished
+//!   into its publication once the sequence is committed.
 //! - [`node`] — what a node's own configuration says about reaching a registry:
 //!   which identity, and where it stages.
 //!
@@ -68,9 +73,11 @@ pub mod layers;
 pub mod namespaces;
 pub mod node;
 pub mod planning;
+pub mod prepare;
 pub mod registry;
 pub mod restore;
 pub mod source;
+pub mod staging;
 
 /// The bounded patience a run spends on an external that fails in bursts, which
 /// is [`stelae_driver`]'s: one policy over attempts and a clock, and nothing
@@ -698,6 +705,12 @@ pub enum Error {
         reason: String,
     },
 
+    #[error("index staging: {0}")]
+    Staging(#[from] staging::Refusal),
+
+    #[error("boundary preparation: {0}")]
+    Preparation(#[from] prepare::Refusal),
+
     #[error("malformed {kind} record: {reason}")]
     MalformedRecord { kind: &'static str, reason: String },
 
@@ -834,6 +847,11 @@ pub enum Error {
     #[error("not enough space: {0}")]
     NotEnoughSpace(String),
 
+    /// A restore asked to resume whose records do not name the stele it
+    /// would read, refused before anything is written.
+    #[error(transparent)]
+    Resume(#[from] restore::ResumeRefusal),
+
     /// A publish that would not extend the repository's chain.
     ///
     /// Both sequences are in the message because the fix depends on which of
@@ -868,6 +886,20 @@ pub enum Error {
     /// can be told apart.
     #[error("the reproduction does not match the published stele — {subject}: {reason}")]
     ReproductionMismatch { subject: String, reason: String },
+
+    /// A restore reached a layer that is not the next one its layer stream
+    /// holds.
+    ///
+    /// The stream is opened over the layers the restore will drain, in plan
+    /// order, so this is a defect in the restore and never in the stele: the
+    /// layer it would have read is another layer's, and is refused before a
+    /// record of it is written.
+    #[error("the restore reached the {kind} layer at {scope} out of turn: {reason}")]
+    LayerOutOfTurn {
+        kind: String,
+        scope: String,
+        reason: String,
+    },
 
     /// A layer that failed its transport verification, named.
     ///

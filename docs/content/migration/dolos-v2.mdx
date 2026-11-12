@@ -249,7 +249,7 @@ Along the way, every command that prints a report or records takes `--format tex
 
 ### Bootstrap and existing data
 
-Every bootstrap source now refuses when a managed store already holds data. `--force` replaces it, after resolving and checking the source's inputs; `--skip-if-data` exits 0 without acting; `--continue`, on `mithril` and `immutabledb` only, resumes an interrupted replay from its committed position. The three exclude one another. A stele restore has no `--continue`: run an interrupted one again with `--force`. The `bootstrap` group no longer needs the `mithril` feature; only `bootstrap mithril` does.
+Every bootstrap source now refuses when a managed store already holds data. `--force` replaces it, after resolving and checking the source's inputs; `--skip-if-data` exits 0 without acting; `--continue` resumes an interrupted replay from its committed position (`mithril`, `immutabledb`) or an interrupted stele restore from the layers it recorded (`stelae`). The three exclude one another. The `bootstrap` group no longer needs the `mithril` feature; only `bootstrap mithril` does.
 
 ### Archive-only import
 

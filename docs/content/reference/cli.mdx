@@ -25,7 +25,7 @@ dolos [--config PATH]
 ├── serve
 ├── bootstrap [--force | --skip-if-data]
 │   ├── mithril [--continue] [--stop-epoch N]
-│   ├── stelae
+│   ├── stelae [--continue]
 │   └── immutabledb --source PATH [--continue] [--stop-epoch N]
 ├── sync
 │   ├── catchup [--follow] [--stop-epoch N]
@@ -224,10 +224,14 @@ Restores a Stelae snapshot (a stele), then starts the WAL at the restored point.
 | `--insecure` | | plaintext HTTP to the registry, for a loopback or in-cluster mirror only |
 | `--scratch-dir DIR` | | where pulled layers are staged, default `<storage.path>/scratch`; registry sources only |
 | `--skip-space-check` | | skip the disk-space preflight |
+| `--read-ahead N` | | layers read ahead of the one being written, default `8`; a registry restore stages each in the scratch directory until its turn, so the preflight sizes it for the `N + 1` largest layers left; `0` or `1` reads one layer at a time |
+| `--continue` | | resume an interrupted restore from the layers it recorded, reading the stele it started from again; with nothing recorded, restore into storage that holds no data |
 | `--registry-user USER` | `DOLOS_STELAE_USER` | the registry user; defaults to the published read-only user on the official repository |
 | `--registry-credentials-file PATH` | | a TOML file naming `password` or `token`, instead of `DOLOS_STELAE_PASSWORD` / `DOLOS_STELAE_TOKEN` |
 
-A restore has no `--continue`: an interrupted one is run again with `--force`. A secret is never a command-line argument.
+A registry read that drops partway, arrives short or fails its digest is made again: each read gets six attempts, waiting 2 s before the second and doubling each time. When the last one fails, the restore exits with an error naming the blob or manifest, the attempt count and the cause.
+
+With `--continue`, the recorded source and epoch are read again: `--source` and `--point` may be left out, a different one is refused (exit `2`), and `--point latest` always agrees. A stele no longer in its source, a progress file with no source record, recorded layers over an archive kept on disk whose index holds none or locates its newest block in a segment file that is missing or cut short, and a WAL with entries or a state cursor other than the stele's are refused, naming `--force`; older segments lost while the newest one stays are not. A secret is never a command-line argument.
 
 ### `dolos bootstrap immutabledb`
 

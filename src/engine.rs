@@ -17,8 +17,9 @@ use dolos_cardano::{
 use dolos_core::config::{ConfigError, RootConfig};
 pub use dolos_core::ReplayProgress;
 use dolos_core::{
-    builtin::NoDiskTier, BootstrapExt as _, ChainLogic as _, ChainPoint, Domain as _, DomainError,
-    Genesis, ImportExt as _, QueryLimiter, RawBlock, StateStore as _, TieredCache,
+    builtin::NoDiskTier, ArchiveIndexDelta, BootstrapExt as _, ChainLogic as _, ChainPoint,
+    Domain as _, DomainError, Genesis, ImportExt as _, QueryLimiter, RawBlock, StateStore as _,
+    TieredCache,
 };
 use dolos_snapshot::source::{SnapshotSource, StoreSnapshot};
 
@@ -276,6 +277,7 @@ impl<'a> ReplayWorkspace<'a> {
                 domain,
                 boundary: None,
                 failed: false,
+                last_delta: None,
             }),
             Err(error) => complete(Err(error), self.finish()),
         }
@@ -335,6 +337,7 @@ pub struct BulkReplaySession {
     domain: DomainAdapter,
     boundary: Option<ChainPoint>,
     failed: bool,
+    last_delta: Option<ArchiveIndexDelta>,
 }
 
 impl BulkReplaySession {
@@ -386,7 +389,12 @@ impl BulkReplaySession {
                 "batch must not be empty",
             ));
         }
-        let boundary = match self.domain.import_blocks(blocks) {
+        let imported = self.domain.import_blocks_observed(blocks, &mut |deltas| {
+            if let Some(last) = deltas.last() {
+                self.last_delta = Some(last.clone());
+            }
+        });
+        let boundary = match imported {
             Ok(_) => false,
             Err(DomainError::StopEpochReached) => true,
             Err(error) => {
@@ -409,6 +417,15 @@ impl BulkReplaySession {
         } else {
             Ok(ReplayProgress::Committed { position })
         }
+    }
+
+    /// The archive index entries of the boundary block this session stopped on.
+    ///
+    /// What a host hands boundary preparation so it captures the boundary's
+    /// index tail without traversing the index. `None` before the boundary, and
+    /// for a session that did not import that block itself.
+    pub fn boundary_index_delta(&self) -> Option<&ArchiveIndexDelta> {
+        self.boundary.as_ref().and(self.last_delta.as_ref())
     }
 
     /// Explicitly apply the configured history retention policy.

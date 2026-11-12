@@ -7,6 +7,9 @@ use tracing::{info, warn};
 use crate::prelude::*;
 
 pub(crate) mod block_refs;
+#[cfg(all(test, unix, feature = "minibf"))]
+mod era_table_tests;
+
 mod convert;
 mod masking;
 mod stream;

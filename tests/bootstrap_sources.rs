@@ -1426,16 +1426,18 @@ fn an_empty_download_directory_is_a_usage_error() {
     );
 }
 
-/// `--continue` belongs to the replays, and says something about data in
-/// storage that `--force` and `--skip-if-data` contradict.
+/// `--continue` belongs to each source and not to the group, and says
+/// something about data in storage that `--force` and `--skip-if-data`
+/// contradict.
 #[test]
-fn continue_is_a_usage_error_outside_the_replays() {
+fn continue_is_a_usage_error_outside_a_source_or_beside_another_answer() {
     let fixture = Fixture::new();
     let node = fixture.node();
     let source = fixture.source();
 
     for args in [
-        &["bootstrap", "stelae", "--continue"][..],
+        &["bootstrap", "--continue", "stelae"][..],
+        &["bootstrap", "--force", "stelae", "--continue"][..],
         &[
             "bootstrap",
             "--continue",

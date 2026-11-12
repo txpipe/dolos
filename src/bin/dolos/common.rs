@@ -189,6 +189,58 @@ fn render_domain_build_error(error: DomainBuildError) -> miette::Report {
     }
 }
 
+/// Keeps the OTLP tracer provider for the life of a command and flushes it on
+/// drop.
+///
+/// `setup_tracing` also registers the provider globally, and that copy is never
+/// dropped, so without the guard the batch exporter's last spans are lost when
+/// the process exits. Hold it until the command returns, inside the command's
+/// tokio runtime, while the exporter can still deliver.
+#[must_use = "dropping the guard shuts tracing down immediately"]
+#[derive(Default)]
+pub struct TracingGuard {
+    provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
+}
+
+impl Drop for TracingGuard {
+    fn drop(&mut self) {
+        if let Some(provider) = self.provider.take() {
+            if let Err(err) = provider.shutdown() {
+                warn!(%err, "failed to flush telemetry on exit");
+            }
+        }
+    }
+}
+
+/// Builds the batch tracer provider over `exporter`, registers it globally and
+/// returns the guard that flushes it, with the tracer for the tracing layer.
+fn telemetry_pipeline<E>(
+    exporter: E,
+    service_name: String,
+) -> (TracingGuard, opentelemetry_sdk::trace::SdkTracer)
+where
+    E: opentelemetry_sdk::trace::SpanExporter + 'static,
+{
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .with_resource(
+            opentelemetry_sdk::Resource::builder()
+                .with_service_name(service_name)
+                .build(),
+        )
+        .build();
+
+    opentelemetry::global::set_tracer_provider(provider.clone());
+
+    let tracer = provider.tracer("dolos");
+
+    let guard = TracingGuard {
+        provider: Some(provider),
+    };
+
+    (guard, tracer)
+}
+
 pub fn setup_tracing_error_only() -> miette::Result<()> {
     let filter = Targets::new().with_default(tracing::Level::ERROR);
 
@@ -246,10 +298,10 @@ fn log_filter(config: &LoggingConfig) -> Result<Targets, ConfigError> {
 pub fn setup_tracing(
     config: &LoggingConfig,
     telemetry: Option<&TelemetryConfig>,
-) -> miette::Result<()> {
+) -> miette::Result<TracingGuard> {
     let filter = log_filter(config).into_diagnostic()?;
 
-    let otel_layer = if let Some(telemetry) = telemetry {
+    let (otel_layer, guard) = if let Some(telemetry) = telemetry {
         let exporter = opentelemetry_otlp::SpanExporter::builder()
             .with_tonic()
             .with_endpoint(&telemetry.otlp_endpoint)
@@ -257,21 +309,14 @@ pub fn setup_tracing(
             .into_diagnostic()
             .context("building OTLP span exporter")?;
 
-        let tracer = opentelemetry_sdk::trace::SdkTracerProvider::builder()
-            .with_batch_exporter(exporter)
-            .with_resource(
-                opentelemetry_sdk::Resource::builder()
-                    .with_service_name(telemetry.service_name.clone())
-                    .build(),
-            )
-            .build();
+        let (guard, tracer) = telemetry_pipeline(exporter, telemetry.service_name.clone());
 
-        opentelemetry::global::set_tracer_provider(tracer.clone());
-
-        let layer = tracing_opentelemetry::layer().with_tracer(tracer.tracer("dolos"));
-        Some(layer)
+        (
+            Some(tracing_opentelemetry::layer().with_tracer(tracer)),
+            guard,
+        )
     } else {
-        None
+        (None, TracingGuard::default())
     };
 
     #[cfg(not(feature = "debug"))]
@@ -298,7 +343,7 @@ pub fn setup_tracing(
     // forwarded to the tracing subscriber.
     tracing_log::LogTracer::init().ok();
 
-    Ok(())
+    Ok(guard)
 }
 
 #[inline]
@@ -594,5 +639,70 @@ mod tests {
         .expect("cancelled drivers should finish promptly");
 
         assert!(result.is_ok(), "a signalled shutdown is not a failure");
+    }
+
+    /// Counts the spans that actually reach the exporter.
+    #[derive(Debug, Clone, Default)]
+    struct CountingExporter(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl opentelemetry_sdk::trace::SpanExporter for CountingExporter {
+        async fn export(
+            &self,
+            batch: Vec<opentelemetry_sdk::trace::SpanData>,
+        ) -> opentelemetry_sdk::error::OTelSdkResult {
+            self.0
+                .fetch_add(batch.len(), std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// The provider `telemetry_pipeline` builds has to end up in the guard it
+    /// returns, or dropping the guard flushes nothing.
+    #[test]
+    fn the_telemetry_pipeline_guard_flushes_its_provider() {
+        use opentelemetry::trace::{Span as _, Tracer as _};
+
+        let exporter = CountingExporter::default();
+        let (guard, tracer) = telemetry_pipeline(exporter.clone(), "dolos-test".into());
+
+        tracer.start("work").end();
+
+        let exported = || exporter.0.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(exported(), 0, "the span should still be buffered");
+
+        // The tracer and the globally registered copy keep the provider alive,
+        // so only the guard can trigger this flush.
+        drop(guard);
+
+        assert_eq!(exported(), 1, "dropping the guard should flush the span");
+    }
+
+    /// The batch exporter holds finished spans until its next scheduled
+    /// export, so a command that returns before then loses them. Dropping the
+    /// guard has to deliver them.
+    #[test]
+    fn dropping_the_tracing_guard_delivers_buffered_spans() {
+        use opentelemetry::trace::{Span as _, Tracer as _};
+
+        let exporter = CountingExporter::default();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_batch_exporter(exporter.clone())
+            .build();
+        let guard = TracingGuard {
+            provider: Some(provider.clone()),
+        };
+
+        // `provider` stands in for the copy `setup_tracing` registers globally,
+        // which is never dropped. Were the guard's copy the last one, dropping
+        // it would flush on its own and this test could not fail.
+        provider.tracer("test").start("work").end();
+
+        let exported = || exporter.0.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(exported(), 0, "the span should still be buffered");
+
+        drop(guard);
+
+        assert_eq!(exported(), 1, "dropping the guard should flush the span");
+        drop(provider);
     }
 }
