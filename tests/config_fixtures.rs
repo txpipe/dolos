@@ -1992,11 +1992,14 @@ fn an_override_name_is_a_key_name() {
 
     let config = load_with_env(
         &fixture("minimal.toml"),
-        &variables(&[("DOLOS_STORAGE__CACHE__ADMISSION__OFFCHAIN-FAILURES", "5")]),
+        &variables(&[(
+            "DOLOS_STORAGE__CACHE__ADMISSION__DREP-OFFCHAIN-FAILURES",
+            "5",
+        )]),
     )
     .unwrap();
 
-    assert_eq!(config.storage.cache.admission["offchain-failures"], 5);
+    assert_eq!(config.storage.cache.admission["drep-offchain-failures"], 5);
 }
 
 /// A variable that sets a table and one that sets a key in it would apply in

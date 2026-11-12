@@ -2025,8 +2025,8 @@ fn reject_moved_sections(document: &::config::Config) -> Result<(), ConfigError>
 /// in place unnoticed. So is one with a character config does not take as part
 /// of a key name, such as `.` or `[`, which it would read as a path or a
 /// subscript; letters, digits, `_` and `-` are kept, so that a key such as the
-/// `offchain-failures` cache namespace can be set. So is a pair where one sets
-/// a table and the other a key in it, which would apply in no fixed order.
+/// `drep-offchain-failures` cache namespace can be set. So is a pair where one
+/// sets a table and the other a key in it, which would apply in no fixed order.
 fn environment_overrides() -> Result<::config::Map<String, String>, ConfigError> {
     let prefix = format!("{ENV_PREFIX}_");
     let mut overrides = ::config::Map::new();

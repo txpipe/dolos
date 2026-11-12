@@ -58,15 +58,15 @@ const POOL_REQUEST_DEADLINE: Duration = Duration::from_secs(10);
 /// Verified DRep bodies, keyed by the content hash of their anchor. The hash
 /// pins the content, so a body is immutable input and is kept in both tiers;
 /// every read checks it against the hash again.
-pub const OFFCHAIN: CacheNamespace = CacheNamespace::immutable("offchain", 1)
+pub const DREP_OFFCHAIN: CacheNamespace = CacheNamespace::immutable("drep-offchain", 1)
     .with_fill_limits(MAX_CONCURRENT_FETCHES, MAX_PENDING_LOADS);
 
 /// Failed DRep fetches, keyed by the content hash and url of their anchor, in
 /// memory only.
-pub const OFFCHAIN_FAILURES: CacheNamespace =
-    CacheNamespace::tip_scoped("offchain-failures", 1, FAILURE_TTL);
+pub const DREP_OFFCHAIN_FAILURES: CacheNamespace =
+    CacheNamespace::tip_scoped("drep-offchain-failures", 1, FAILURE_TTL);
 
-/// Verified proposal bodies, kept and checked as [`OFFCHAIN`] keeps DRep
+/// Verified proposal bodies, kept and checked as [`DREP_OFFCHAIN`] keeps DRep
 /// bodies.
 pub const PROPOSAL_OFFCHAIN: CacheNamespace = CacheNamespace::immutable("proposal-offchain", 1)
     .with_fill_limits(MAX_CONCURRENT_FETCHES, MAX_PENDING_LOADS);
@@ -76,7 +76,7 @@ pub const PROPOSAL_OFFCHAIN_FAILURES: CacheNamespace =
     CacheNamespace::tip_scoped("proposal-offchain-failures", 1, FAILURE_TTL);
 
 /// Verified pool bodies, keyed by advertised content hash, kept and checked as
-/// [`OFFCHAIN`] keeps and checks DRep bodies.
+/// [`DREP_OFFCHAIN`] keeps and checks DRep bodies.
 pub const POOL_OFFCHAIN: CacheNamespace = CacheNamespace::immutable("pool-offchain", 1)
     .with_fill_limits(MAX_CONCURRENT_POOL_FETCHES, MAX_PENDING_POOL_LOADS);
 
@@ -92,8 +92,8 @@ struct MetadataCache {
 }
 
 const DREP_CACHE: MetadataCache = MetadataCache {
-    bodies: OFFCHAIN.name,
-    failures: OFFCHAIN_FAILURES.name,
+    bodies: DREP_OFFCHAIN.name,
+    failures: DREP_OFFCHAIN_FAILURES.name,
 };
 
 const PROPOSAL_CACHE: MetadataCache = MetadataCache {
@@ -144,14 +144,14 @@ impl From<&PoolMetadata> for MetadataLocation {
 /// Where earlier versions kept verified bodies, under the storage path.
 const LEGACY_DIR: &str = "offchain";
 
-/// Registers the namespaces this module keeps. Without [`OFFCHAIN`] anchors
-/// are fetched on every request, outside the cache and its fill limits;
-/// without [`OFFCHAIN_FAILURES`] a failing anchor is fetched again on every
-/// request. The proposal and pool namespaces work the same way.
+/// Registers the namespaces this module keeps. Without [`DREP_OFFCHAIN`]
+/// anchors are fetched on every request, outside the cache and its fill limits;
+/// without [`DREP_OFFCHAIN_FAILURES`] a failing anchor is fetched again on
+/// every request. The proposal and pool namespaces work the same way.
 pub fn register<C: CacheStore>(cache: &C) {
     for namespace in [
-        OFFCHAIN,
-        OFFCHAIN_FAILURES,
+        DREP_OFFCHAIN,
+        DREP_OFFCHAIN_FAILURES,
         PROPOSAL_OFFCHAIN,
         PROPOSAL_OFFCHAIN_FAILURES,
         POOL_OFFCHAIN,
@@ -1040,7 +1040,7 @@ mod tests {
             url: metadata.url.clone(),
             content_hash: Hasher::<256>::hash(POOL_BODY),
         };
-        cache_verified_body(&cache, OFFCHAIN.name, &anchor, POOL_BODY).await;
+        cache_verified_body(&cache, DREP_OFFCHAIN.name, &anchor, POOL_BODY).await;
 
         let failure = crate::mapping::pool_connection_error(&metadata.url);
         let (missing, error) = load_pool_metadata(
@@ -1055,7 +1055,7 @@ mod tests {
 
         let key = MetadataLocation::from(&metadata).failure_key();
         assert!(cache.get(POOL_OFFCHAIN_FAILURES.name, &key).is_some());
-        assert!(cache.get(OFFCHAIN_FAILURES.name, &key).is_none());
+        assert!(cache.get(DREP_OFFCHAIN_FAILURES.name, &key).is_none());
 
         let calls = Arc::new(AtomicUsize::new(0));
         let drep = load_anchor_metadata(
@@ -1486,7 +1486,10 @@ mod tests {
 
         assert_eq!(got.error.unwrap().code, MetadataError::HashMismatch);
         assert!(got.bytes.is_none());
-        assert_eq!(cache.get(OFFCHAIN.name, anchor.content_hash.as_ref()), None);
+        assert_eq!(
+            cache.get(DREP_OFFCHAIN.name, anchor.content_hash.as_ref()),
+            None
+        );
     }
 
     #[tokio::test]
@@ -1494,13 +1497,16 @@ mod tests {
         let cache = memory_cache();
         let anchor = anchor(br#"{"body":"hello"}"#);
 
-        cache_verified_body(&cache, OFFCHAIN.name, &anchor, b"corrupted").await;
+        cache_verified_body(&cache, DREP_OFFCHAIN.name, &anchor, b"corrupted").await;
         assert!(cache
-            .get(OFFCHAIN.name, anchor.content_hash.as_ref())
+            .get(DREP_OFFCHAIN.name, anchor.content_hash.as_ref())
             .is_some());
 
         assert_eq!(cached_drep_metadata(&cache, &anchor).await, None);
-        assert_eq!(cache.get(OFFCHAIN.name, anchor.content_hash.as_ref()), None);
+        assert_eq!(
+            cache.get(DREP_OFFCHAIN.name, anchor.content_hash.as_ref()),
+            None
+        );
 
         let calls = Arc::new(AtomicUsize::new(0));
         let fetch = serving(br#"{"body":"hello"}"#, &calls);
@@ -1565,7 +1571,7 @@ mod tests {
         use dolos_core::cache::{FillLimits, Validity};
 
         for failures in [
-            OFFCHAIN_FAILURES,
+            DREP_OFFCHAIN_FAILURES,
             PROPOSAL_OFFCHAIN_FAILURES,
             POOL_OFFCHAIN_FAILURES,
         ] {
@@ -1576,7 +1582,7 @@ mod tests {
         }
 
         for (bodies, concurrent, pending) in [
-            (OFFCHAIN, 16, 64),
+            (DREP_OFFCHAIN, 16, 64),
             (PROPOSAL_OFFCHAIN, 16, 64),
             (POOL_OFFCHAIN, 64, 128),
         ] {
@@ -1596,7 +1602,11 @@ mod tests {
         let ttl = Duration::from_millis(200);
         let cache = memory_cache();
         cache
-            .register(CacheNamespace::tip_scoped(OFFCHAIN_FAILURES.name, 1, ttl))
+            .register(CacheNamespace::tip_scoped(
+                DREP_OFFCHAIN_FAILURES.name,
+                1,
+                ttl,
+            ))
             .unwrap();
 
         let anchor = anchor(br#"{"body":"later"}"#);
@@ -1714,7 +1724,7 @@ mod tests {
     async fn misses_past_the_pending_bound_answer_by_their_choice() {
         let cache = memory_cache();
         cache
-            .register(CacheNamespace::immutable(OFFCHAIN.name, 1).with_fill_limits(2, 1))
+            .register(CacheNamespace::immutable(DREP_OFFCHAIN.name, 1).with_fill_limits(2, 1))
             .unwrap();
 
         let gated = Gated::default();
@@ -1778,7 +1788,7 @@ mod tests {
     async fn inline_fetches_stay_within_the_fetch_bound() {
         let cache = memory_cache();
         cache
-            .register(CacheNamespace::immutable(OFFCHAIN.name, 1).with_fill_limits(2, 2))
+            .register(CacheNamespace::immutable(DREP_OFFCHAIN.name, 1).with_fill_limits(2, 2))
             .unwrap();
 
         let gated = Gated::default();

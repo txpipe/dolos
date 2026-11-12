@@ -138,7 +138,7 @@ mod tests {
 
         crate::offchain::cache_verified_body(
             app.facade().inner.cache(),
-            crate::offchain::OFFCHAIN.name,
+            crate::offchain::DREP_OFFCHAIN.name,
             &anchor,
             body,
         )
