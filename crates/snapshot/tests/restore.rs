@@ -192,6 +192,48 @@ fn the_headless_facade_restores_a_directory_without_an_observer() {
     );
 }
 
+/// The facade charges the journals it is handed to the destination: journals
+/// no volume can hold refuse the restore before it writes, and the refusal
+/// names them.
+#[test]
+fn the_headless_facade_charges_the_journals_it_is_given() {
+    let domain: ToyDomain = harness();
+    let source = tempfile::tempdir().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    export_to(source.path(), &domain);
+
+    let journals = u64::MAX / 4;
+
+    let blank = Blank::<MemoryStores>::open();
+    let Err(err) = restore::execute(
+        restore::Input::Directory(source.path()),
+        restore::Restoring {
+            network_magic: magic_of(&domain),
+            max_history: None,
+            storage_path: storage.path(),
+            resume: false,
+            skip_space_check: false,
+            journals,
+            read_ahead: restore::DEFAULT_READ_AHEAD,
+            source: None,
+        },
+        target(&blank),
+        None,
+    ) else {
+        panic!("the restore passed a preflight its journals cannot fit");
+    };
+
+    let Error::NotEnoughSpace(message) = err else {
+        panic!("expected a space refusal, got {err:?}");
+    };
+
+    assert!(
+        message.contains(&format!("journals {journals}")),
+        "{message}"
+    );
+    assert_eq!(blank.state().read_cursor().unwrap(), None);
+}
+
 /// A directory stele restored into on-disk stores passes the preflight, and
 /// what the stores then occupy is within the estimate the preflight compared,
 /// journals counted as the stores' own tuning sizes them.
@@ -212,6 +254,11 @@ fn a_restored_fixture_fits_within_its_estimate() {
     let estimate = plan
         .estimate(&stele, &index, &stelae::Resume::none(), journals)
         .unwrap();
+
+    // Export writes at the profile's level and a directory sizes every blob,
+    // so no epoch layer may fall back to its uncompressed size.
+    assert!(plan.immutable_layers().next().is_some());
+    assert_eq!(estimate.fallback_layers, 0, "{estimate}");
 
     plan.preflight(storage.path(), &estimate, None).unwrap();
 

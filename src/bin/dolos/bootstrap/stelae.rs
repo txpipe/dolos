@@ -949,4 +949,43 @@ mod tests {
         in_memory.storage.archive.kind = StoreType::Ephemeral;
         still_holds(&in_memory, 3).unwrap();
     }
+
+    /// Over fjall stores, the journals the restore is handed are both stores'
+    /// `journal_mb`, as their own tuning states it.
+    #[test]
+    fn the_restore_is_handed_both_fjall_journals() {
+        use dolos::storage::{ArchiveStoreBackend, StateStoreBackend};
+
+        let storage = tempfile::tempdir().unwrap();
+
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = storage.path().to_path_buf();
+
+        let node = Node::open(&config).unwrap();
+
+        let (StateStoreBackend::Fjall(state), ArchiveStoreBackend::Fjall(archive)) =
+            (&node.stores.state, &node.stores.archive)
+        else {
+            panic!("the default configuration opens fjall stores");
+        };
+
+        let expected = (state.tuning().journal_mb + archive.tuning().journal_mb) << 20;
+        assert!(expected > 0);
+        assert_eq!(node.journals(), expected);
+
+        let inputs = Inputs {
+            reader: Reader::Dir(storage.path().join("stele")),
+            source: Source::Dir(storage.path().join("stele")),
+            point: Point::Latest,
+            resuming: None,
+        };
+        let feedback = Feedback::hidden();
+        let options = RestoreOptions {
+            feedback: &feedback,
+            skip_space_check: false,
+            read_ahead: dolos_snapshot::restore::DEFAULT_READ_AHEAD,
+        };
+
+        assert_eq!(node.restoring(&inputs, options).journals, expected);
+    }
 }
