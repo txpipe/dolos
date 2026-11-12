@@ -3393,6 +3393,74 @@ mod tests {
         assert_eq!(asked.get(), 0);
     }
 
+    /// A stele that states each layer's compressed size from a table keyed by
+    /// the first byte of its diff id, and is asked nothing else.
+    struct Stated(BTreeMap<u8, u64>);
+
+    impl SteleReader for Stated {
+        type Blob = std::io::Empty;
+
+        fn read_inscription(&self) -> Result<Inscription, stelae::Error> {
+            unreachable!("an estimate reads no inscription")
+        }
+
+        fn blob_index(&self) -> Result<BlobIndex, stelae::Error> {
+            unreachable!("an estimate reads no blob index")
+        }
+
+        fn compressed_size(
+            &self,
+            _: &BlobIndex,
+            descriptor: &LayerDescriptor,
+        ) -> Result<Option<u64>, stelae::Error> {
+            Ok(self.0.get(&descriptor.diff_id.as_bytes()[0]).copied())
+        }
+
+        fn stream_layer(
+            &self,
+            _: &BlobIndex,
+            _: &dyn stelae::profile::Profile,
+            _: &LayerDescriptor,
+            _: Limits,
+        ) -> Result<LayerReader<Self::Blob>, stelae::Error> {
+            unreachable!("an estimate streams no layer")
+        }
+    }
+
+    /// The estimate sizes each epoch layer from the compressed size the
+    /// transport states for it, and falls back only where none is stated.
+    #[test]
+    fn the_estimate_sizes_layers_from_the_transport() {
+        let (entity_kind, _) = ENTITY_KINDS[0];
+
+        let sized = |kind: &str, epoch: u64, byte: u8, uncompressed: u64| LayerDescriptor {
+            uncompressed_size: uncompressed,
+            ..epoch_descriptor(kind, epoch, byte)
+        };
+
+        let mut layers = state_layers();
+        layers.extend([
+            sized(BLOCKS, 0, 0xa0, 10_000),
+            sized("log-pool-epochs", 0, 0xa1, 4_000),
+            sized(entity_kind, 0, 0xa2, 1_000),
+            sized(INDEXES, 0, 0xa3, 3_000),
+            // Stated without a compressed size.
+            sized(BLOCKS, 1, 0xb0, 20_000),
+        ]);
+
+        let plan = plan_of(&inscription(layers));
+        let stele = Stated([(0xa0, 2_000), (0xa1, 1_000), (0xa2, 500), (0xa3, 1_000)].into());
+        let index: BlobIndex = std::iter::empty().collect();
+
+        let estimate = plan.estimate(&stele, &index, &Resume::none(), 0).unwrap();
+
+        assert_eq!(estimate.blocks, 3_600 + 11_000);
+        assert_eq!(estimate.indexes, 2_200);
+        assert_eq!(estimate.logs, 2_100);
+        assert_eq!(estimate.entities, 700);
+        assert_eq!(estimate.fallback_layers, 1);
+    }
+
     /// The factors against the restores they were fitted to: mainnet at epoch
     /// 666, full history and a 10-epoch rolling window, as per-kind declared
     /// and compressed sizes. The estimate plus one staged layer (what those

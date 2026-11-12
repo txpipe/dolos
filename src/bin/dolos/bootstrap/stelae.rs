@@ -988,4 +988,28 @@ mod tests {
 
         assert_eq!(node.restoring(&inputs, options).journals, expected);
     }
+
+    /// A node that keeps no archive is handed its state store's journal
+    /// alone.
+    #[test]
+    fn a_node_without_an_archive_is_handed_only_its_state_journal() {
+        use dolos::storage::StateStoreBackend;
+        use dolos_core::config::HistoryMode;
+
+        let storage = tempfile::tempdir().unwrap();
+
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = storage.path().to_path_buf();
+        config.history.mode = HistoryMode::None;
+
+        let node = Node::open(&config).unwrap();
+
+        let StateStoreBackend::Fjall(state) = &node.stores.state else {
+            panic!("the default configuration opens a fjall state store");
+        };
+
+        let expected = state.tuning().journal_mb << 20;
+        assert!(expected > 0);
+        assert_eq!(node.journals(), expected);
+    }
 }
