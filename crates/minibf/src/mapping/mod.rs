@@ -1939,8 +1939,13 @@ impl<'a> IntoModel<ScriptUtxosInner> for UtxoOutputModelBuilder<'a> {
 }
 
 impl<'a> IntoModel<AssetUtxoContentInner> for UtxoOutputModelBuilder<'a> {
-    // the rows come in the walk's order and are not sorted again
-    type SortKey = ();
+    type SortKey = (u64, usize, u32);
+
+    fn sort_key(&self) -> Option<Self::SortKey> {
+        self.block_data
+            .as_ref()
+            .map(|data| (data.slot, data.tx_index, self.txo_ref.1))
+    }
 
     fn into_model(self) -> Result<AssetUtxoContentInner, StatusCode> {
         let inline_datum = self.output.datum().and_then(|x| match x {
@@ -1953,21 +1958,24 @@ impl<'a> IntoModel<AssetUtxoContentInner> for UtxoOutputModelBuilder<'a> {
             .map(|x| PlutusDataWrapper(x.0.deref().clone()).as_value())
             .transpose()?;
 
-        // The model reports the creating block, so a caller only builds it
-        // for outputs whose block the archive still holds.
-        let block = self
+        // As on the address listing, a live UTxO whose creating block the
+        // archive no longer holds (pruned history) is still listed, its block
+        // fields left empty.
+        let block_hash = self
             .block_data
             .as_ref()
-            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-        let block_time = self.block_time.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map(|b| b.hash.to_string())
+            .unwrap_or_default();
+        let block_height = self.block_data.as_ref().map_or(0, |b| b.height);
+        let block_time = self.block_time.unwrap_or_default();
 
         let out = AssetUtxoContentInner {
             address: self.output.address().into_model()?,
             tx_hash: self.txo_ref.0.to_string(),
             output_index: try_into_or_500!(self.txo_ref.1),
             amount: self.output.value().into_model()?,
-            block: block.hash.to_string(),
-            block_height: try_into_or_500!(block.height),
+            block: block_hash,
+            block_height: try_into_or_500!(block_height),
             block_time: try_into_or_500!(block_time),
             data_hash: self.output.datum().map(|x| match x {
                 DatumOption::Hash(x) => x.to_string(),
@@ -2327,17 +2335,20 @@ mod tests {
         assert_eq!(model.reference_script_hash, None);
     }
 
-    /// The model never reports made-up block data: an output whose creation
-    /// block is gone is a caller bug here, not a row with zeroed fields.
+    /// An output whose creating block the archive no longer holds is still a
+    /// row, its block fields left empty, as on the address listing.
     #[test]
-    fn asset_utxo_model_refuses_missing_block_data() {
+    fn asset_utxo_model_without_block_data_leaves_block_fields_empty() {
         use pallas::ledger::traverse::Era;
 
         let bytes = asset_utxo_output(None);
         let output = MultiEraOutput::decode(Era::Conway, &bytes).unwrap();
         let builder = UtxoOutputModelBuilder::from_output(Hash::from([0xaa; 32]), 0, output);
 
-        let model: Result<AssetUtxoContentInner, _> = builder.into_model();
-        assert_eq!(model, Err(StatusCode::INTERNAL_SERVER_ERROR));
+        let model: AssetUtxoContentInner = builder.into_model().unwrap();
+        assert_eq!(model.tx_hash, Hash::from([0xaa; 32]).to_string());
+        assert_eq!(model.block, "");
+        assert_eq!(model.block_height, 0);
+        assert_eq!(model.block_time, 0);
     }
 }

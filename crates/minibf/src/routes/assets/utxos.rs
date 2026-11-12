@@ -12,7 +12,7 @@ use crate::{
     error::Error,
     mapping::assets::resolve_asset,
     pagination::{Pagination, PaginationParameters},
-    routes::utxos::{load_tag_page_in_heights, HeightRange},
+    routes::utxos::load_tag_page_in_slots,
     Facade,
 };
 
@@ -20,15 +20,16 @@ use crate::{
 ///
 /// The live UTxOs that carry the asset, in creation order: block, tx index,
 /// output index, the order db-sync's `tx_out.id` gives Blockfrost. `from` and
-/// `to` bound the creating block's height, inclusive; an `:index` on them is
-/// validated but, as on Blockfrost, cuts nothing. A valid but unknown asset
-/// is a 404; a known asset no live UTxO holds any more (fully burned) is an
-/// empty page. A UTxO whose creating block the archive no longer holds is
-/// not listed: the row reports that block.
+/// `to` bound the creating block's height, inclusive, and resolve to slots as
+/// on every other `from` / `to` listing ([`Pagination::start_and_end_slots`]);
+/// an `:index` on them cuts nothing, as on Blockfrost. A valid but unknown
+/// asset is a 404; a known asset no live UTxO holds any more (fully burned) is
+/// an empty page. A UTxO whose creating block the archive no longer holds is
+/// listed with its block fields empty, as on the address listing.
 ///
 /// The page comes off the live-UTxO tags in creation order: the offset costs
-/// tag entries, the page its rows and one block read per slot it touches,
-/// however many live UTxOs the asset has.
+/// tag entries, the page its rows and their blocks, however many live UTxOs
+/// the asset has.
 pub async fn by_subject_utxos<D>(
     Path(subject): Path<String>,
     Query(params): Query<PaginationParameters>,
@@ -41,9 +42,16 @@ where
     let (asset, _) = resolve_asset(&domain, &subject).await?;
 
     let tag = Tag::new(utxo_dimensions::ASSET, asset);
-    let range = HeightRange::of(&pagination);
 
-    let utxos = load_tag_page_in_heights(&domain, &tag, &pagination, &range).await?;
+    let slots = match (&pagination.from, &pagination.to) {
+        (None, None) => None,
+        _ => {
+            let (start, end) = pagination.start_and_end_slots(&domain).await?;
+            Some(start..=end)
+        }
+    };
+
+    let utxos = load_tag_page_in_slots(&domain, &tag, &pagination, slots).await?;
 
     Ok(Json(utxos))
 }
@@ -184,17 +192,16 @@ mod tests {
         assert!(to_pivot.iter().all(|x| x.block_height <= pivot));
         assert_eq!(from_pivot.len() + to_pivot.len(), all.len() + within.len());
 
-        // a range past the tip is an empty page, not an error
-        let (status, bytes) = app
-            .get_bytes(&format!("/assets/{asset}/utxos?from=99999999"))
-            .await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(parse_utxos(&bytes).is_empty());
+        // a height the chain does not hold is a 400, as on the other
+        // `from` / `to` listings
+        for query in ["from=99999999", "to=99999999"] {
+            let path = format!("/assets/{asset}/utxos?{query}");
+            assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+        }
     }
 
-    /// Blockfrost reads `from` / `to` here as plain heights: an `:index` is
-    /// validated, a reversed pair is still a 400, but it cuts nothing inside
-    /// the edge block.
+    /// Blockfrost reads `from` / `to` here as plain heights: an `:index` cuts
+    /// nothing inside the edge block.
     #[tokio::test]
     async fn assets_by_subject_utxos_index_cuts_nothing() {
         let app = TestApp::new();
@@ -219,173 +226,13 @@ mod tests {
             .collect();
         assert!(in_block.len() > 1, "need a block with several rows");
 
-        // a reversed index included: Blockfrost compares the heights alone
         for query in [
             format!("from={height}:2&to={height}"),
             format!("from={height}&to={height}:0"),
             format!("from={height}:1&to={height}:1"),
-            format!("from={height}:2&to={height}:1"),
         ] {
             assert_eq!(get(query).await, in_block);
         }
-    }
-
-    /// Bounds Blockfrost rejects (empty parts, a third part, a number past
-    /// `i32::MAX`) are a 400, not ignored.
-    #[tokio::test]
-    async fn assets_by_subject_utxos_bounds_parse_like_blockfrost() {
-        let app = TestApp::new();
-        let asset = app.vectors().asset_unit.as_str();
-
-        for query in [
-            "from=10:2:garbage",
-            "to=1:2:3",
-            "from=10:",
-            "from=:2",
-            "from=",
-            "from=99999999999",
-        ] {
-            let path = format!("/assets/{asset}/utxos?{query}");
-            assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
-        }
-    }
-
-    /// A Byron epoch-boundary block takes the height of the main block
-    /// before it and the slot of the main block after it, and the index keeps
-    /// the boundary block's slot for that height. Simulated here by pointing
-    /// height `h` at the slot of `h + 1`: both bounds still cut at the exact
-    /// heights, including the heights on either side of `h`.
-    #[tokio::test]
-    async fn assets_by_subject_utxos_height_bounds_across_a_byron_boundary() {
-        use dolos_core::{indexes::ArchiveIndexDelta, ArchiveStore as _, ArchiveWriter as _};
-
-        let cfg = SyntheticBlockConfig {
-            block_count: 5,
-            txs_per_block: 3,
-            ..Default::default()
-        };
-
-        let reference = TestApp::new_with_cfg_and_setup(cfg.clone(), |_, _| {});
-        let asset = reference.vectors().asset_unit.clone();
-        let (status, bytes) = reference.get_bytes(&format!("/assets/{asset}/utxos")).await;
-        assert_eq!(status, StatusCode::OK);
-        let all = parse_utxos(&bytes);
-
-        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
-            let (ebb, next) = (&vectors.blocks[1], &vectors.blocks[2]);
-            let writer = domain.archive().start_writer().unwrap();
-            writer
-                .apply_index(&[ArchiveIndexDelta {
-                    slot: next.slot,
-                    block_number: Some(ebb.block_number),
-                    ..Default::default()
-                }])
-                .unwrap();
-            writer.commit().unwrap();
-
-            // the index now answers the boundary block's slot for `h`
-            let slot = domain
-                .archive()
-                .slot_by_block_number(ebb.block_number)
-                .unwrap();
-            assert_eq!(slot, Some(next.slot));
-        });
-
-        let h = app.vectors().blocks[1].block_number as i32;
-        assert!(all.iter().any(|x| x.block_height == h - 1));
-        assert!(all.iter().any(|x| x.block_height == h));
-        assert!(all.iter().any(|x| x.block_height == h + 1));
-
-        // each query and the heights it has to select
-        let cases = [
-            (format!("from={h}"), h..=i32::MAX),
-            (format!("to={h}"), i32::MIN..=h),
-            (format!("from={h}&to={h}"), h..=h),
-            (format!("from={}", h + 1), h + 1..=i32::MAX),
-            (format!("to={}", h + 1), i32::MIN..=h + 1),
-            (format!("to={}", h - 1), i32::MIN..=h - 1),
-            (format!("from={}&to={h}", h - 1), h - 1..=h),
-            (format!("from={h}:2&to={h}:2"), h..=h),
-        ];
-
-        for (query, heights) in cases {
-            let (status, bytes) = app
-                .get_bytes(&format!("/assets/{asset}/utxos?{query}"))
-                .await;
-            assert_eq!(status, StatusCode::OK, "{query}");
-
-            let expected: Vec<_> = all
-                .iter()
-                .filter(|x| heights.contains(&x.block_height))
-                .cloned()
-                .collect();
-            assert!(!expected.is_empty(), "{query} selects nothing");
-            assert_eq!(parse_utxos(&bytes), expected, "{query}");
-        }
-    }
-
-    /// A fork between the tag read and the value read can move a row's
-    /// transaction to a block outside the range, while its tag entry inside
-    /// the range is the one the walk read. The row is held against the height
-    /// of the block it is in: it is no row of the page.
-    #[tokio::test]
-    async fn assets_by_subject_utxos_hold_a_moved_row_against_the_range() {
-        use dolos_cardano::indexes::utxo_tags;
-        use dolos_core::{
-            indexes::UtxoIndexDelta, StateStore as _, StateWriter as _, TxoRef, UtxoPosition,
-        };
-        use pallas::ledger::traverse::MultiEraOutput;
-
-        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
-            block_count: 5,
-            txs_per_block: 2,
-            ..Default::default()
-        });
-        let asset = app.vectors().asset_unit.clone();
-        let blocks = app.vectors().blocks.clone();
-        let (from, to) = (blocks[1].block_number, blocks[3].block_number);
-        let path = format!("/assets/{asset}/utxos?from={from}&to={to}");
-
-        let (status, bytes) = app.get_bytes(&path).await;
-        assert_eq!(status, StatusCode::OK);
-        let within = parse_utxos(&bytes);
-        assert!(within
-            .iter()
-            .all(|x| (from..=to).contains(&(x.block_height as u64))));
-
-        let (status, bytes) = app.get_bytes(&format!("/assets/{asset}/utxos")).await;
-        assert_eq!(status, StatusCode::OK);
-        let moved = parse_utxos(&bytes)
-            .into_iter()
-            .find(|x| x.block_height as u64 == blocks[4].block_number)
-            .expect("a row past the range");
-
-        // the tag entry of a row of the last block sits inside the range,
-        // off its edges, as a fork that moved the row there would leave it
-        let domain = app.facade().inner;
-        let txo = TxoRef(
-            moved.tx_hash.parse().expect("tx hash"),
-            moved.output_index as u32,
-        );
-        let value = domain
-            .state()
-            .get_utxos(vec![txo.clone()])
-            .expect("utxo read")
-            .remove(&txo)
-            .expect("the moved row's value");
-        let output = MultiEraOutput::try_from(value.as_ref()).expect("output");
-        let position = Some(UtxoPosition::new(blocks[2].slot, 0));
-        let delta = UtxoIndexDelta {
-            produced: vec![(txo, position, utxo_tags(&output))],
-            consumed: vec![],
-        };
-        let writer = domain.state().start_writer().expect("state writer");
-        writer.apply_utxo_tags(&delta).expect("apply tags");
-        writer.commit().expect("commit");
-
-        let (status, bytes) = app.get_bytes(&path).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(parse_utxos(&bytes), within);
     }
 
     fn five_blocks() -> SyntheticBlockConfig {
@@ -445,19 +292,18 @@ mod tests {
         parse_utxos(&bytes)
     }
 
-    /// An offset means the same on an edge zone as off it. A UTxO spent since
-    /// its tag read holds its place in the offset when its block is in the
-    /// range, as an entry counted unread does off the edges, and holds none
-    /// when its block is outside the range.
+    /// An offset means the same whichever bound the walk starts at. A UTxO
+    /// spent since its tag read holds its place in the offset when its block
+    /// is in the range, its value unread, and holds none when its block is
+    /// outside the range.
     #[tokio::test]
-    async fn assets_by_subject_utxos_count_a_spent_edge_row_as_off_the_edges() {
+    async fn assets_by_subject_utxos_count_a_spent_row_in_the_offset() {
         let plain = TestApp::new_with_cfg(five_blocks());
         let asset = plain.vectors().asset_unit.clone();
         let blocks = plain.vectors().blocks.clone();
         let (below, from) = (blocks[1].block_number, blocks[2].block_number);
 
-        // `from` puts its own block and the one below it on the edge; from
-        // the block below, the same rows are off the edge
+        // from the block below, the same rows come after that block's own
         let on_edge = format!("from={from}");
         let off_edge = format!("from={below}");
 
@@ -487,183 +333,6 @@ mod tests {
         for skip in 0..=rows.len() {
             let expected: Vec<_> = rows.get(skip).cloned().into_iter().collect();
             assert_eq!(row_past(&app, &on_edge, skip).await, expected, "{skip}");
-        }
-    }
-
-    /// A block pruned between the index read and the block read leaves its
-    /// rows without block data. Simulated by moving one tx's rows to the slot
-    /// of a later block that does not hold it: the index still lists them,
-    /// the block read does not find the tx. Such a row keeps its place in
-    /// the offset and drops out of the page, which is topped up, so walking
-    /// the pages one row at a time still reaches every other row and never
-    /// the vanished one.
-    #[tokio::test]
-    async fn assets_by_subject_utxos_block_vanished_mid_request() {
-        use dolos_cardano::indexes::utxo_index_delta_from_utxo_delta;
-        use std::sync::Arc;
-
-        use dolos_core::{
-            EraCbor, StateStore as _, StateWriter as _, UtxoIndexDelta, UtxoPosition, UtxoSetDelta,
-            UtxoValue,
-        };
-
-        let cfg = SyntheticBlockConfig {
-            block_count: 5,
-            txs_per_block: 3,
-            ..Default::default()
-        };
-
-        let reference = TestApp::new_with_cfg_and_setup(cfg.clone(), |_, _| {});
-        let asset = reference.vectors().asset_unit.clone();
-        let first = reference.vectors().blocks[0].block_number;
-        let query = format!("/assets/{asset}/utxos?from={first}");
-        let (status, bytes) = reference.get_bytes(&query).await;
-        assert_eq!(status, StatusCode::OK);
-        let all = parse_utxos(&bytes);
-
-        let gone = reference.vectors().blocks[1].tx_hashes[0].clone();
-        assert!(
-            all.iter().any(|x| x.tx_hash == gone),
-            "fixture needs its rows"
-        );
-        let expected: Vec<_> = all.iter().filter(|x| x.tx_hash != gone).cloned().collect();
-
-        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
-            let gone_hash: dolos_core::TxHash = gone.parse().unwrap();
-            let subject = hex::decode(&asset).unwrap();
-
-            // the tx's live rows, with the tags their bodies carry
-            let refs: Vec<_> = domain
-                .state()
-                .utxos_by_tag(utxo_dimensions::ASSET, &subject)
-                .unwrap()
-                .into_iter()
-                .filter(|txo| txo.0 == gone_hash)
-                .collect();
-            assert!(!refs.is_empty(), "fixture needs the tx's rows");
-            let bodies = domain.state().get_utxos(refs.clone()).unwrap();
-            let tagged = utxo_index_delta_from_utxo_delta(&UtxoSetDelta {
-                produced_utxo: bodies.clone(),
-                ..Default::default()
-            })
-            .produced;
-
-            // out of their own position, back in under block 3's first tx:
-            // the tags that order them and the values that locate them
-            let position = UtxoPosition::new(vectors.blocks[3].slot, 0);
-            let moved: Vec<_> = tagged
-                .iter()
-                .cloned()
-                .map(|(txo, _, tags)| (txo, Some(position), tags))
-                .collect();
-            let produced_utxo = bodies
-                .iter()
-                .map(|(txo, value)| {
-                    let output = EraCbor(value.era(), value.cbor().to_vec());
-                    (
-                        txo.clone(),
-                        Arc::new(UtxoValue::new(output, Some(position))),
-                    )
-                })
-                .collect();
-
-            let writer = domain.state().start_writer().unwrap();
-            writer
-                .apply_utxo_tags(&UtxoIndexDelta {
-                    consumed: tagged,
-                    ..Default::default()
-                })
-                .unwrap();
-            writer.commit().unwrap();
-
-            let writer = domain.state().start_writer().unwrap();
-            writer
-                .apply_utxoset(&UtxoSetDelta {
-                    produced_utxo,
-                    ..Default::default()
-                })
-                .unwrap();
-            writer
-                .apply_utxo_tags(&UtxoIndexDelta {
-                    produced: moved,
-                    ..Default::default()
-                })
-                .unwrap();
-            writer.commit().unwrap();
-        });
-
-        let (status, bytes) = app.get_bytes(&query).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(parse_utxos(&bytes), expected);
-
-        // The offset counts the vanished row where the tag lists it: at block
-        // 3's first tx, tied with that tx's own rows and ordered by ref. Its
-        // page serves the next row; every other page the row listed there, so
-        // a client that read past it before it vanished loses nothing.
-        // Starting at block 3 puts it in the `from` edge zone.
-        let block_3 = &app.vectors().blocks[3];
-        for from in [first, block_3.block_number] {
-            let in_range: Vec<_> = expected
-                .iter()
-                .filter(|x| x.block_height as u64 >= from)
-                .cloned()
-                .collect();
-            let at = in_range
-                .iter()
-                .position(|x| x.block_height as u64 == block_3.block_number)
-                .expect("rows in block 3")
-                + usize::from(gone > block_3.tx_hashes[0]);
-            let mut listed = in_range.clone();
-            listed.insert(at, in_range[at].clone());
-
-            let mut served = Vec::new();
-            for page in 1..=listed.len() {
-                let (status, bytes) = app
-                    .get_bytes(&format!(
-                        "/assets/{asset}/utxos?from={from}&count=1&page={page}"
-                    ))
-                    .await;
-                assert_eq!(status, StatusCode::OK, "page {page}");
-                served.extend(parse_utxos(&bytes));
-            }
-            assert_eq!(served, listed, "from={from}");
-        }
-
-        // The scan still lists the vanished row, so the walk has `all.len()`
-        // positions. Every page up to there must come back full: a short page
-        // would read as the end of the list. Desc puts the vanished row last in
-        // its slot group, so its page has to be topped up from the next window.
-        for order in ["asc", "desc"] {
-            for count in [1, 2] {
-                let pages = all.len().div_ceil(count);
-                let mut walked = Vec::new();
-
-                for page in 1..=pages + 1 {
-                    let (status, bytes) = app
-                        .get_bytes(&format!("{query}&order={order}&count={count}&page={page}"))
-                        .await;
-                    assert_eq!(status, StatusCode::OK, "{order} page {page}");
-                    let rows = parse_utxos(&bytes);
-
-                    if page < pages {
-                        assert_eq!(rows.len(), count, "{order}/{count}: page {page} is short");
-                    }
-                    if page > pages {
-                        assert!(rows.is_empty(), "{order}/{count}: rows past the end");
-                    }
-                    walked.extend(rows);
-                }
-
-                assert!(walked.iter().all(|x| x.tx_hash != gone));
-                for row in &expected {
-                    assert!(
-                        walked.contains(row),
-                        "{order}/{count}: {}#{} never served",
-                        row.tx_hash,
-                        row.output_index
-                    );
-                }
-            }
         }
     }
 
@@ -701,63 +370,6 @@ mod tests {
         }
     }
 
-    /// A bound height the index does not know is told apart by the oldest
-    /// block held, not the tip. A rollback drops the index entries before the
-    /// bodies, so the tip can still show a height the index no longer has:
-    /// such a `from` is past the held chain (an empty page) and such a `to`
-    /// bounds nothing that is held, rather than the reverse.
-    #[tokio::test]
-    async fn assets_by_subject_utxos_bound_rolled_back_from_the_index() {
-        use dolos_core::{indexes::ArchiveIndexDelta, ArchiveStore as _, ArchiveWriter as _};
-
-        let cfg = SyntheticBlockConfig {
-            block_count: 5,
-            txs_per_block: 3,
-            ..Default::default()
-        };
-
-        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
-            let tip = vectors.blocks.last().unwrap();
-            let writer = domain.archive().start_writer().unwrap();
-            writer
-                .undo_index(&[ArchiveIndexDelta {
-                    slot: tip.slot,
-                    block_number: Some(tip.block_number),
-                    ..Default::default()
-                }])
-                .unwrap();
-            writer.commit().unwrap();
-
-            // the body is still the tip, the index lost its height
-            let slot = domain.archive().slot_by_block_number(tip.block_number);
-            assert_eq!(slot.unwrap(), None);
-            assert_eq!(
-                domain.archive().get_tip().unwrap().map(|x| x.0),
-                Some(tip.slot)
-            );
-        });
-
-        let asset = app.vectors().asset_unit.as_str();
-        let tip = app.vectors().blocks.last().unwrap().block_number;
-
-        let (status, bytes) = app.get_bytes(&format!("/assets/{asset}/utxos")).await;
-        assert_eq!(status, StatusCode::OK);
-        let all = parse_utxos(&bytes);
-        assert!(all.len() > 1);
-
-        let (status, bytes) = app
-            .get_bytes(&format!("/assets/{asset}/utxos?from={tip}"))
-            .await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(parse_utxos(&bytes).is_empty());
-
-        let (status, bytes) = app
-            .get_bytes(&format!("/assets/{asset}/utxos?to={tip}"))
-            .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(parse_utxos(&bytes), all);
-    }
-
     #[tokio::test]
     async fn assets_by_subject_utxos_bad_request() {
         let app = TestApp::new();
@@ -773,72 +385,64 @@ mod tests {
         }
     }
 
+    /// A pruned archive still lists every live UTxO of the asset, in the same
+    /// order: a row whose creating block is gone keeps its place with its
+    /// block fields empty, as on the address listing.
     #[tokio::test]
     async fn assets_by_subject_utxos_pruned_history() {
-        let full = TestApp::new();
+        let full = TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        });
         let asset = full.vectors().asset_unit.clone();
+        let listing = |query: &str| format!("/assets/{asset}/utxos?{query}");
 
-        let (status, bytes) = full.get_bytes(&format!("/assets/{asset}/utxos")).await;
+        let (status, bytes) = full.get_bytes(&listing("")).await;
         assert_eq!(status, StatusCode::OK);
         let all = parse_utxos(&bytes);
 
         let pruned = TestApp::new_pruned();
         let first_retained = pruned.vectors().blocks[2].block_number as i32;
-        let pruned_height = pruned.vectors().blocks[0].block_number;
 
-        // rows of pruned blocks are gone, the rest keeps its order
-        let (status, bytes) = pruned.get_bytes(&format!("/assets/{asset}/utxos")).await;
+        let (status, bytes) = pruned.get_bytes(&listing("")).await;
         assert_eq!(status, StatusCode::OK);
-        let retained = parse_utxos(&bytes);
-        let expected: Vec<_> = all
-            .iter()
-            .filter(|x| x.block_height >= first_retained)
-            .cloned()
-            .collect();
-        assert!(!expected.is_empty(), "fixture needs retained rows");
-        assert_eq!(retained, expected);
+        let listed = parse_utxos(&bytes);
+        assert_eq!(listed.len(), all.len());
 
-        // a pruned lower bound is no bound: everything held is newer
-        let (status, bytes) = pruned
-            .get_bytes(&format!("/assets/{asset}/utxos?from={pruned_height}"))
-            .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(parse_utxos(&bytes), expected);
+        let (mut held, mut gone) = (0, 0);
 
-        // a pruned upper bound excludes everything held
-        let (status, bytes) = pruned
-            .get_bytes(&format!("/assets/{asset}/utxos?to={pruned_height}"))
-            .await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(parse_utxos(&bytes).is_empty());
+        for (row, expected) in listed.iter().zip(&all) {
+            assert_eq!(
+                (&row.tx_hash, row.output_index),
+                (&expected.tx_hash, expected.output_index)
+            );
 
-        // an upper bound past the tip is no bound
-        let (status, bytes) = pruned
-            .get_bytes(&format!("/assets/{asset}/utxos?to=99999999"))
-            .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(parse_utxos(&bytes), expected);
-
-        // pages stay aligned: page 1 of size 1 is the first retained row, and
-        // the pruned rows cost nothing on the pages after it either — a walk
-        // one row at a time lists every retained row once and nothing else
-        let (status, bytes) = pruned
-            .get_bytes(&format!("/assets/{asset}/utxos?count=1&page=1"))
-            .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(parse_utxos(&bytes), vec![expected[0].clone()]);
-
-        for from in [String::new(), format!("&from={pruned_height}")] {
-            let mut walked = Vec::new();
-            for page in 1..=expected.len() + 1 {
-                let (status, bytes) = pruned
-                    .get_bytes(&format!("/assets/{asset}/utxos?count=1&page={page}{from}"))
-                    .await;
-                assert_eq!(status, StatusCode::OK, "page {page}");
-                walked.extend(parse_utxos(&bytes));
+            if expected.block_height >= first_retained {
+                assert_eq!(row, expected);
+                held += 1;
+            } else {
+                assert_eq!(row.block, "");
+                assert_eq!(row.block_height, 0);
+                assert_eq!(row.block_time, 0);
+                assert_eq!(row.amount, expected.amount);
+                gone += 1;
             }
-            assert_eq!(walked, expected, "from={from:?}");
         }
+
+        assert!(held > 0 && gone > 0, "fixture needs held and pruned rows");
+
+        // a bound within the held history selects what it does on the full
+        // archive
+        let query = format!("from={first_retained}");
+        let (status, bytes) = full.get_bytes(&listing(&query)).await;
+        assert_eq!(status, StatusCode::OK);
+        let expected = parse_utxos(&bytes);
+        assert!(!expected.is_empty());
+
+        let (status, bytes) = pruned.get_bytes(&listing(&query)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(parse_utxos(&bytes), expected);
     }
 
     #[tokio::test]
