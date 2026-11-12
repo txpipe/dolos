@@ -346,11 +346,12 @@ where
             None => entries.is_empty(),
         };
 
-        // the offset counts entries, their values unread
+        // The offset counts entries, their values unread. As the store's own
+        // skip on a plain listing, it keeps no record of the refs it passes,
+        // so a deep page holds the page's refs, not the offset's.
         let mut passed = rows.uncounted(entries);
         let page = passed.split_off(skip.min(passed.len()));
         skip -= passed.len();
-        rows.count_entries(&passed);
 
         // the page's values only, a UTxO spent since the tag read giving its
         // place to the next entry

@@ -11,7 +11,7 @@ use dolos_core::{Domain, Tag};
 use crate::{
     error::Error,
     mapping::assets::resolve_asset,
-    pagination::{Pagination, PaginationParameters},
+    pagination::{Pagination, PaginationError, PaginationNumberAndIndex, PaginationParameters},
     routes::utxos::load_tag_page_in_slots,
     Facade,
 };
@@ -38,7 +38,7 @@ pub async fn by_subject_utxos<D>(
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let pagination = Pagination::try_from(params)?;
+    let pagination = Pagination::try_from(heights_only(params)?)?;
     let (asset, _) = resolve_asset(&domain, &subject).await?;
 
     let tag = Tag::new(utxo_dimensions::ASSET, asset);
@@ -54,6 +54,24 @@ where
     let utxos = load_tag_page_in_slots(&domain, &tag, &pagination, slots).await?;
 
     Ok(Json(utxos))
+}
+
+/// `params` with each `from` / `to` bound cut to its height, once the bound
+/// has parsed whole. Blockfrost reads the bounds here as heights alone, so an
+/// `:index` must be well formed but neither cuts rows nor takes part in the
+/// order check between the two bounds.
+fn heights_only(params: PaginationParameters) -> Result<PaginationParameters, PaginationError> {
+    let height = |bound: Option<String>| {
+        bound
+            .map(|bound| PaginationNumberAndIndex::try_from(bound).map(|x| x.number.to_string()))
+            .transpose()
+    };
+
+    Ok(PaginationParameters {
+        from: height(params.from)?,
+        to: height(params.to)?,
+        ..params
+    })
 }
 
 #[cfg(test)]
@@ -230,6 +248,8 @@ mod tests {
             format!("from={height}:2&to={height}"),
             format!("from={height}&to={height}:0"),
             format!("from={height}:1&to={height}:1"),
+            // a reversed index included: the heights alone are compared
+            format!("from={height}:2&to={height}:1"),
         ] {
             assert_eq!(get(query).await, in_block);
         }
@@ -379,7 +399,14 @@ mod tests {
         }
 
         let asset = app.vectors().asset_unit.as_str();
-        for query in ["from=abc", "from=999999999&to=1", "order=a", "count=0"] {
+        for query in [
+            "from=abc",
+            "from=10:x",
+            "to=1:",
+            "from=999999999&to=1",
+            "order=a",
+            "count=0",
+        ] {
             let path = format!("/assets/{asset}/utxos?{query}");
             assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
         }
