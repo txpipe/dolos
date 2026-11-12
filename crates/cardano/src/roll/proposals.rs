@@ -139,10 +139,8 @@ fn conway_to_pparamset(update: &ProtocolParamUpdate) -> PParamsSet {
             set.set(value);
         }
 
-        if !updated.unknown.is_empty() {
-            let value = PParamValue::CostModelsUnknown(updated.unknown.clone());
-            set.set(value);
-        }
+        let value = PParamValue::CostModelsUnknown(updated.unknown.clone());
+        set.set(value);
     }
 
     set
@@ -448,5 +446,55 @@ impl BlockVisitor for ProposalVisitor {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pallas::{codec::minicbor, ledger::primitives::conway::CostModels};
+
+    use super::*;
+
+    #[test]
+    fn conway_cost_models_capture_absent_empty_and_populated() {
+        let mut update: ProtocolParamUpdate = minicbor::decode(&[0xa0]).unwrap();
+        assert!(conway_to_pparamset(&update).is_empty());
+
+        update.cost_models_for_script_languages = Some(CostModels {
+            plutus_v1: None,
+            plutus_v2: None,
+            plutus_v3: None,
+            unknown: BTreeMap::new(),
+        });
+        let empty = conway_to_pparamset(&update);
+        assert_eq!(
+            empty,
+            PParamsSet::default().with(PParamValue::CostModelsUnknown(BTreeMap::new()))
+        );
+        assert_eq!(empty.iter().count(), 1);
+
+        let models = update.cost_models_for_script_languages.as_mut().unwrap();
+        models.plutus_v1 = Some(vec![1, -2]);
+        models.plutus_v2 = Some(vec![3, -4]);
+        models.plutus_v3 = Some(vec![5, -6]);
+        let known = conway_to_pparamset(&update);
+        assert_eq!(known.cost_models_unknown(), Some(BTreeMap::new()));
+        assert_eq!(known.iter().count(), 4);
+
+        let unknown = BTreeMap::from([(7, vec![8, -9])]);
+        update
+            .cost_models_for_script_languages
+            .as_mut()
+            .unwrap()
+            .unknown = unknown.clone();
+        let populated = conway_to_pparamset(&update);
+        assert_eq!(
+            populated,
+            PParamsSet::default()
+                .with(PParamValue::CostModelsPlutusV1(vec![1, -2]))
+                .with(PParamValue::CostModelsPlutusV2(vec![3, -4]))
+                .with(PParamValue::CostModelsPlutusV3(vec![5, -6]))
+                .with(PParamValue::CostModelsUnknown(unknown))
+        );
     }
 }
