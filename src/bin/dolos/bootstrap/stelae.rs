@@ -71,7 +71,7 @@ pub struct Args {
     pub scratch_dir: Option<PathBuf>,
 
     /// skip the restore disk-space preflight and continue even when the
-    /// stele's declared sizes exceed the available space
+    /// estimate of what the restore will occupy exceeds the available space
     #[arg(long, action)]
     pub skip_space_check: bool,
 
@@ -499,9 +499,30 @@ impl Node {
             storage_path: &self.root,
             resume: inputs.resuming.is_some(),
             skip_space_check: options.skip_space_check,
+            journals: self.journals(),
             read_ahead: options.read_ahead,
             source: Some(&inputs.source),
         }
+    }
+
+    /// What the stores' journals may hold between them: each fjall store's
+    /// `journal_mb`, and nothing for a backend that keeps no such journal.
+    fn journals(&self) -> u64 {
+        use dolos::storage::{ArchiveStoreBackend, StateStoreBackend};
+
+        const MIB: u64 = 1024 * 1024;
+
+        let state = match &self.stores.state {
+            StateStoreBackend::Fjall(state) => state.tuning().journal_mb,
+            _ => 0,
+        };
+
+        let archive = match &self.stores.archive {
+            ArchiveStoreBackend::Fjall(archive) => archive.tuning().journal_mb,
+            _ => 0,
+        };
+
+        (state + archive) * MIB
     }
 
     /// Where the restore writes.
@@ -927,5 +948,68 @@ mod tests {
         let mut in_memory = config.clone();
         in_memory.storage.archive.kind = StoreType::Ephemeral;
         still_holds(&in_memory, 3).unwrap();
+    }
+
+    /// Over fjall stores, the journals the restore is handed are both stores'
+    /// `journal_mb`, as their own tuning states it.
+    #[test]
+    fn the_restore_is_handed_both_fjall_journals() {
+        use dolos::storage::{ArchiveStoreBackend, StateStoreBackend};
+
+        let storage = tempfile::tempdir().unwrap();
+
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = storage.path().to_path_buf();
+
+        let node = Node::open(&config).unwrap();
+
+        let (StateStoreBackend::Fjall(state), ArchiveStoreBackend::Fjall(archive)) =
+            (&node.stores.state, &node.stores.archive)
+        else {
+            panic!("the default configuration opens fjall stores");
+        };
+
+        let expected = (state.tuning().journal_mb + archive.tuning().journal_mb) << 20;
+        assert!(expected > 0);
+        assert_eq!(node.journals(), expected);
+
+        let inputs = Inputs {
+            reader: Reader::Dir(storage.path().join("stele")),
+            source: Source::Dir(storage.path().join("stele")),
+            point: Point::Latest,
+            resuming: None,
+        };
+        let feedback = Feedback::hidden();
+        let options = RestoreOptions {
+            feedback: &feedback,
+            skip_space_check: false,
+            read_ahead: dolos_snapshot::restore::DEFAULT_READ_AHEAD,
+        };
+
+        assert_eq!(node.restoring(&inputs, options).journals, expected);
+    }
+
+    /// A node that keeps no archive is handed its state store's journal
+    /// alone.
+    #[test]
+    fn a_node_without_an_archive_is_handed_only_its_state_journal() {
+        use dolos::storage::StateStoreBackend;
+        use dolos_core::config::HistoryMode;
+
+        let storage = tempfile::tempdir().unwrap();
+
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = storage.path().to_path_buf();
+        config.history.mode = HistoryMode::None;
+
+        let node = Node::open(&config).unwrap();
+
+        let StateStoreBackend::Fjall(state) = &node.stores.state else {
+            panic!("the default configuration opens a fjall state store");
+        };
+
+        let expected = state.tuning().journal_mb << 20;
+        assert!(expected > 0);
+        assert_eq!(node.journals(), expected);
     }
 }

@@ -126,11 +126,12 @@ fn restore_into<B: ToyStores>(
     let stele = SteleDir::open(root)?;
 
     let plan = restore::plan(&stele, magic, None)?;
+    let index = stele.blob_index()?;
+
     // A directory stele stages nothing — its blobs are read where they are —
     // so the only volume this restore has a need on is the destination.
-    plan.preflight(root, &stelae::Resume::none(), None)?;
-
-    let index = stele.blob_index()?;
+    let estimate = plan.estimate(&stele, &index, &stelae::Resume::none(), 0)?;
+    plan.preflight(root, &estimate, None)?;
 
     restore::restore(
         &stele,
@@ -167,6 +168,7 @@ fn the_headless_facade_restores_a_directory_without_an_observer() {
             storage_path: storage.path(),
             resume: false,
             skip_space_check: false,
+            journals: 0,
             read_ahead: restore::DEFAULT_READ_AHEAD,
             source: None,
         },
@@ -188,6 +190,122 @@ fn the_headless_facade_restores_a_directory_without_an_observer() {
         outcome.summary.layers_fetched,
         outcome.plan.layers().count()
     );
+}
+
+/// The facade charges the journals it is handed to the destination: journals
+/// no volume can hold refuse the restore before it writes, and the refusal
+/// names them.
+#[test]
+fn the_headless_facade_charges_the_journals_it_is_given() {
+    let domain: ToyDomain = harness();
+    let source = tempfile::tempdir().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    export_to(source.path(), &domain);
+
+    let journals = u64::MAX / 4;
+
+    let blank = Blank::<MemoryStores>::open();
+    let Err(err) = restore::execute(
+        restore::Input::Directory(source.path()),
+        restore::Restoring {
+            network_magic: magic_of(&domain),
+            max_history: None,
+            storage_path: storage.path(),
+            resume: false,
+            skip_space_check: false,
+            journals,
+            read_ahead: restore::DEFAULT_READ_AHEAD,
+            source: None,
+        },
+        target(&blank),
+        None,
+    ) else {
+        panic!("the restore passed a preflight its journals cannot fit");
+    };
+
+    let Error::NotEnoughSpace(message) = err else {
+        panic!("expected a space refusal, got {err:?}");
+    };
+
+    assert!(
+        message.contains(&format!("journals {journals}")),
+        "{message}"
+    );
+    assert_eq!(blank.state().read_cursor().unwrap(), None);
+}
+
+/// A directory stele restored into on-disk stores passes the preflight, and
+/// what the stores then occupy is within the estimate the preflight compared,
+/// journals counted as the stores' own tuning sizes them.
+#[test]
+fn a_restored_fixture_fits_within_its_estimate() {
+    let domain: ToyDomain = harness();
+    let source = tempfile::tempdir().unwrap();
+    export_to(source.path(), &domain);
+
+    let storage = tempfile::tempdir().unwrap();
+    let preset = dolos_fjall::Preset::Standard;
+    let journals =
+        (preset.state().database.journal_mb + preset.archive().database.journal_mb) << 20;
+
+    let stele = SteleDir::open(source.path()).unwrap();
+    let plan = restore::plan(&stele, magic_of(&domain), None).unwrap();
+    let index = stele.blob_index().unwrap();
+    let estimate = plan
+        .estimate(&stele, &index, &stelae::Resume::none(), journals)
+        .unwrap();
+
+    // Export writes at the profile's level and a directory sizes every blob,
+    // so no epoch layer may fall back to its uncompressed size.
+    assert!(plan.immutable_layers().next().is_some());
+    assert_eq!(estimate.fallback_layers, 0, "{estimate}");
+
+    plan.preflight(storage.path(), &estimate, None).unwrap();
+
+    let stores = FjallStores::open_in(storage.path(), preset).unwrap();
+
+    // The restore persists both stores before it returns.
+    restore::restore(
+        &stele,
+        &index,
+        &plan,
+        restore::Target::new(stores.archive(), stores.state()),
+        default_budget(),
+        restore::DEFAULT_READ_AHEAD,
+        &mut Checkpoint::none(),
+        &Observer::silent(),
+    )
+    .unwrap();
+
+    let restored = allocated(storage.path());
+
+    assert!(restored > 0);
+    assert!(
+        restored <= estimate.total(),
+        "restored {restored} bytes against an estimate of {estimate}"
+    );
+}
+
+/// Bytes allocated under `dir`, as `du` counts them where the platform says.
+fn allocated(dir: &std::path::Path) -> u64 {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            let metadata = entry.metadata().unwrap();
+
+            if metadata.is_dir() {
+                allocated(&entry.path())
+            } else {
+                #[cfg(unix)]
+                let bytes = std::os::unix::fs::MetadataExt::blocks(&metadata) * 512;
+                #[cfg(not(unix))]
+                let bytes = metadata.len();
+
+                bytes
+            }
+        })
+        .sum()
 }
 
 // --------------------------------------------------------------------------
@@ -1595,6 +1713,7 @@ fn the_headless_facade_resumes_an_interrupted_directory_restore() {
             storage_path: storage.path(),
             resume: true,
             skip_space_check: false,
+            journals: 0,
             read_ahead: restore::DEFAULT_READ_AHEAD,
             source: None,
         },
