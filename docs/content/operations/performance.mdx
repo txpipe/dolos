@@ -29,6 +29,34 @@ The main drivers of resource usage are:
 
 If your goal is to minimize operational cost, start with the smallest storage mode and API surface that satisfies your workload, then increase capacity only where measurements show a bottleneck.
 
+### Open-file limits
+
+A file descriptor is a handle for an open file, a socket, or a similar resource. On Unix, `RLIMIT_NOFILE` sets the maximum number of file descriptors that a process can have open. The soft limit is the active limit. The hard limit is the highest value that a process can set for its soft limit.
+
+Dolos adjusts `RLIMIT_NOFILE` before each command that opens or changes a store. Read-only maintenance commands also do this. Dolos increases the soft limit to the hard limit, but not to more than a ceiling. On Linux, the ceiling is 1048576, the default `fs.nr_open`. On macOS, the ceiling is 10240 (`OPEN_MAX`), the highest soft limit that macOS accepts. Dolos does not change the hard limit and does not decrease a soft limit.
+
+The minimum soft limit is 4096. If macOS refuses the ceiling, Dolos sets the soft limit to 4096. For example, macOS refuses the ceiling when `kern.maxfilesperproc` is less than it. If Dolos cannot set 4096, it stops before it opens a store. The error message gives the limits and the steps that increase them. The help, version, configuration, initialization, and service-management commands do not do this check. Windows has no `RLIMIT_NOFILE`, and Dolos does not do this check on Windows.
+
+To see the limits, run these commands in the shell that starts Dolos:
+
+```bash
+ulimit -Sn
+ulimit -Hn
+```
+
+If the hard limit is less than 4096, increase it in the session, the container, or the service manager that starts Dolos. Then restart Dolos. For a systemd system service, put this setting, or a larger value, in a service override:
+
+```ini
+[Service]
+LimitNOFILE=4096
+```
+
+Then reload the systemd configuration and restart the service. A systemd user service gets its hard limit from its user manager. A service override cannot set a limit that is more than this hard limit.
+
+Each Fjall database keeps a cache of open table files. In the `standard` preset, the maximum size of this cache is 900 files on Linux, 150 on macOS, and 400 on Windows. On Linux, the two caches can thus use 1800 descriptors. At the minimum of 4096, 2296 descriptors stay available for other uses. These uses are journals, compaction, flat-file reads, the other stores, sockets, and the runtime. Dolos calculates the minimum as the larger of 4096 and the sum of the two caches plus 2048.
+
+The minimum lets Dolos start, but it is not sufficient for all loads. Flat-file block reads and API connections use descriptors that are not in the two caches. A node with many API requests needs more descriptors. Thus, set a hard limit that is much more than the minimum. Most Linux distributions give a hard limit of 524288. Monitor the number of open descriptors of the process and the number of concurrent requests. A larger limit does not increase the size of the Fjall caches.
+
 ## Query latency
 
 Query latency is workload-dependent. Dolos generally performs best on indexed and current-state lookups, where the request can be satisfied directly from the state store. Historical queries can be more expensive because they may require joining the archive's lookups with archived block data.

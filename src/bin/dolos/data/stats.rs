@@ -44,9 +44,10 @@ impl std::fmt::Display for Report {
 
                 writeln!(
                     f,
-                    "{store}: fjall, preset {}, cache {} MB, journal {} MB, {} workers, flush on commit {}",
+                    "{store}: fjall, preset {}, cache {} MB, {} cached files, journal {} MB, {} workers, flush on commit {}",
                     cell(&tuning["preset"]),
                     cell(&tuning["cache_mb"]),
+                    cell(&tuning["max_cached_files"]),
                     cell(&tuning["journal_mb"]),
                     cell(&tuning["workers"]),
                     cell(&tuning["flush_on_commit"]),
@@ -264,6 +265,7 @@ fn fjall_section(
         "tuning": {
             "preset": tuning.preset.name(),
             "cache_mb": tuning.cache_mb,
+            "max_cached_files": tuning.max_cached_files,
             "journal_mb": tuning.journal_mb,
             "workers": tuning.workers,
             "flush_on_commit": tuning.flush_on_commit,
@@ -280,12 +282,19 @@ mod tests {
 
     fn assert_reports(section: &serde_json::Value, tuning: &dolos_fjall::preset::Tuning) {
         let cores = std::thread::available_parallelism().map_or(1, usize::from);
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        let max_cached_files = 900;
+        #[cfg(target_os = "windows")]
+        let max_cached_files = 400;
+        #[cfg(target_os = "macos")]
+        let max_cached_files = 150;
 
         assert_eq!(
             section["tuning"],
             json!({
                 "preset": "standard",
                 "cache_mb": 500,
+                "max_cached_files": max_cached_files,
                 "journal_mb": 512,
                 "workers": cores.min(4),
                 "flush_on_commit": false,
