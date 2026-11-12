@@ -71,7 +71,7 @@ pub struct Args {
     pub scratch_dir: Option<PathBuf>,
 
     /// skip the restore disk-space preflight and continue even when the
-    /// stele's declared sizes exceed the available space
+    /// estimate of what the restore will occupy exceeds the available space
     #[arg(long, action)]
     pub skip_space_check: bool,
 
@@ -499,9 +499,30 @@ impl Node {
             storage_path: &self.root,
             resume: inputs.resuming.is_some(),
             skip_space_check: options.skip_space_check,
+            journals: self.journals(),
             read_ahead: options.read_ahead,
             source: Some(&inputs.source),
         }
+    }
+
+    /// What the stores' journals may hold between them: each fjall store's
+    /// `journal_mb`, and nothing for a backend that keeps no such journal.
+    fn journals(&self) -> u64 {
+        use dolos::storage::{ArchiveStoreBackend, StateStoreBackend};
+
+        const MIB: u64 = 1024 * 1024;
+
+        let state = match &self.stores.state {
+            StateStoreBackend::Fjall(state) => state.tuning().journal_mb,
+            _ => 0,
+        };
+
+        let archive = match &self.stores.archive {
+            ArchiveStoreBackend::Fjall(archive) => archive.tuning().journal_mb,
+            _ => 0,
+        };
+
+        (state + archive) * MIB
     }
 
     /// Where the restore writes.

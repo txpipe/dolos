@@ -124,7 +124,7 @@
 //! segment file with nothing pointing at them. Reads go through the table, so
 //! the node is correct; the dead space is bounded by one layer and is the price
 //! of not starting over. The preflight carries no addend for it; the reason is
-//! on [`Plan::remaining_uncompressed_size`].
+//! on [`Plan::estimate`].
 //!
 //! ## Memory
 //!
@@ -175,7 +175,7 @@ use dolos_core::{
 };
 use stelae::{
     frame::Limits,
-    inscription::{Inscription, LayerDescriptor},
+    inscription::{Compression, Inscription, LayerDescriptor},
     plan::{Remaining, Resume},
     progress::{Event, Observer, Outcome},
     transport::{BlobIndex, LayerStream, SteleReader},
@@ -297,6 +297,9 @@ pub struct Plan {
     /// than silent whenever it is not: a restore that quietly dropped a layer
     /// is a node missing data nothing downstream would notice.
     pub skipped_unknown: Vec<LayerDescriptor>,
+    /// The compression the stele's layers were published under, which decides
+    /// which factors [`Plan::estimate`] sizes them with.
+    pub compression: Compression,
 }
 
 /// One retained state dump a stele carries, as a report counts it.
@@ -417,9 +420,9 @@ impl Plan {
     /// immutable ones it has not recorded, and every tip layer.
     ///
     /// One definition for both halves of "what is left" — the compressed bytes
-    /// [`Plan::remaining`] reports and the uncompressed room
-    /// [`Plan::remaining_uncompressed_size`] demands. Two filters saying the
-    /// same thing is two places for the resume rule to drift.
+    /// [`Plan::remaining`] reports and the layers [`Plan::staging_peak`]
+    /// stages. Two filters saying the same thing is two places for the resume
+    /// rule to drift; [`Plan::estimate`] applies the same rule kind by kind.
     pub fn remaining_layers<'a>(
         &'a self,
         resume: &'a Resume,
@@ -438,28 +441,107 @@ impl Plan {
         self.layers().map(|l| l.uncompressed_size).sum()
     }
 
-    /// Uncompressed bytes a run with `resume` behind it still has to write.
+    /// What a run with `resume` behind it will occupy on the destination
+    /// volume at its peak, sized from the stele's layers.
     ///
-    /// [`Plan::uncompressed_size`] made resume-aware, and the number
-    /// [`Plan::preflight`] sizes the destination on: the layers a resumed run
-    /// will actually write, which is the immutable ones the resume has not
-    /// recorded plus every tip layer. Charging a resume for layers its own
-    /// earlier attempt already committed measures it against free space those
-    /// layers consumed and then bills for them a second time, which refuses
-    /// runs that would finish.
+    /// Over the layers that run still writes, by [`Plan::remaining_layers`]'s
+    /// rule: see [`Estimate`] for what each term counts. `journals` is what the
+    /// destination stores' journals may hold between them; the transport
+    /// states each layer's compressed size, when it can.
     ///
-    /// **No addend.** A redone layer is rewritten and not appended — every
-    /// write path is keyed — with one exception, the fjall archive, which
-    /// leaves the superseded block bodies of an interrupted `blocks` layer as
-    /// dead space in its segment file. That is past spend, not future spend:
-    /// [`preflight::check`] reads free space at check time, so those bytes are
-    /// already out of what it compares against, and the layer that left them
-    /// is not recorded as done, so its full uncompressed size is charged
-    /// again.
-    pub fn remaining_uncompressed_size(&self, resume: &Resume) -> u64 {
-        self.remaining_layers(resume)
-            .map(|l| l.uncompressed_size)
-            .sum()
+    /// **No addend for a redone layer.** Every write path is keyed except the
+    /// fjall archive's block bodies, which an interrupted `blocks` layer leaves
+    /// as dead space in its segment file. That is past spend: free space is
+    /// read at check time, so those bytes are already out of it, and the layer
+    /// is not recorded as done, so it is charged again in full.
+    pub fn estimate<R: SteleReader>(
+        &self,
+        stele: &R,
+        index: &BlobIndex,
+        resume: &Resume,
+        journals: u64,
+    ) -> Result<Estimate, Error> {
+        self.estimate_with(resume, journals, |descriptor| {
+            Ok(stele.compressed_size(index, descriptor)?)
+        })
+    }
+
+    /// [`Plan::estimate`] over a compressed-size lookup rather than a
+    /// transport, so the arithmetic is testable without one.
+    fn estimate_with(
+        &self,
+        resume: &Resume,
+        journals: u64,
+        mut compressed: impl FnMut(&LayerDescriptor) -> Result<Option<u64>, Error>,
+    ) -> Result<Estimate, Error> {
+        // The compressed factors were fitted to this profile's own level; a
+        // stele compressed otherwise is sized from what it declares instead.
+        let at_profile_level = self.compression == crate::compression();
+
+        let mut estimate = Estimate {
+            journals,
+            ..Estimate::default()
+        };
+
+        let mut on_disk = |kind: OnDisk, descriptor: &LayerDescriptor| -> Result<u64, Error> {
+            if resume.is_done(&descriptor.diff_id) {
+                return Ok(0);
+            }
+
+            let sized = match at_profile_level {
+                true => compressed(descriptor)?,
+                false => None,
+            };
+
+            Ok(match sized {
+                Some(bytes) => scaled(bytes, kind.per_compressed),
+                None => {
+                    estimate.fallback_layers += 1;
+                    scaled(descriptor.uncompressed_size, kind.per_uncompressed)
+                }
+            })
+        };
+
+        let (mut blocks, mut logs, mut entities, mut indexes) = (0u64, 0u64, 0u64, 0u64);
+
+        for epoch in &self.epochs {
+            if let Some(descriptor) = &epoch.blocks {
+                blocks = blocks.saturating_add(on_disk(BLOCKS_ON_DISK, descriptor)?);
+            }
+
+            for descriptor in epoch.logs.values() {
+                logs = logs.saturating_add(on_disk(LOGS_ON_DISK, descriptor)?);
+            }
+
+            for descriptor in epoch.entities.values() {
+                entities = entities.saturating_add(on_disk(ENTITIES_ON_DISK, descriptor)?);
+            }
+
+            if let Some(descriptor) = &epoch.indexes {
+                indexes = indexes.saturating_add(on_disk(INDEXES_ON_DISK, descriptor)?);
+            }
+        }
+
+        estimate.blocks = blocks;
+        estimate.logs = logs;
+        estimate.entities = entities;
+        estimate.indexes = indexes;
+
+        estimate.state = self
+            .tip_layers()
+            .fold(0, |sum, layer| sum.saturating_add(layer.uncompressed_size));
+
+        let utxo_records = self
+            .state
+            .get(&UTXOS)
+            .into_iter()
+            .flatten()
+            .fold(0u64, |sum, layer| sum.saturating_add(layer.records));
+
+        estimate.derived_tags = utxo_records.saturating_mul(DERIVED_TAG_BYTES_PER_UTXO);
+        estimate.headroom = scaled(estimate.before_headroom(), COMPACTION_HEADROOM_PER_MILLE);
+
+        Ok(estimate)
     }
 
     /// Compressed bytes a run with `resume` behind it stages at once at
@@ -497,28 +579,37 @@ impl Plan {
     /// on one pool of free bytes, and the default `<storage.path>/scratch`
     /// makes that the ordinary case.
     ///
-    /// Both needs are resume-aware, and for the same reason: what a run has to
-    /// fit is what *this* run will move, not what the plan describes. The
-    /// destination's is [`Plan::remaining_uncompressed_size`], the staging
-    /// volume's is [`Plan::staging_peak`] of the layers still to pull.
-    ///
-    /// The destination comparison is deliberately against the *uncompressed*
-    /// size of those layers rather than against a prediction of what the
-    /// stores will occupy. It is the only number the inscription carries, it is
-    /// an underestimate for every backend (a store keeps indexes and slack of
-    /// its own), and an underestimate is the safe direction for a check whose
-    /// job is to catch the obviously-doomed run.
+    /// The destination's need is `estimate` ([`Plan::estimate`]): what the
+    /// stores will occupy at their peak, per kind from calibrated factors, the
+    /// derived tags no layer ships, the journals and compaction headroom. Not
+    /// the declared uncompressed size, which overstates history several-fold
+    /// and understates the state tip. The staging volume's need is
+    /// [`Plan::staging_peak`] of the layers still to pull. Both are
+    /// resume-aware, and what was compared is logged whatever the outcome.
     pub fn preflight(
         &self,
         path: &Path,
-        resume: &Resume,
+        estimate: &Estimate,
         staging: Option<Staging<'_>>,
     ) -> Result<(), Error> {
-        let mut needs = vec![preflight::Need::of(
-            "restoring it",
-            path,
-            self.remaining_uncompressed_size(resume),
-        )];
+        info!(
+            sequence = self.sequence,
+            blocks = estimate.blocks,
+            indexes = estimate.indexes,
+            logs = estimate.logs,
+            entities = estimate.entities,
+            state = estimate.state,
+            derived_tags = estimate.derived_tags,
+            journals = estimate.journals,
+            headroom = estimate.headroom,
+            destination = estimate.total(),
+            fallback_layers = estimate.fallback_layers,
+            staging = staging.and_then(|staging| staging.peak),
+            free = preflight::available(path),
+            "restore disk-space preflight"
+        );
+
+        let mut needs = vec![preflight::Need::of("restoring it", path, estimate.total())];
 
         if let Some(staging) = staging {
             if staging.unsized_layers > 0 {
@@ -545,8 +636,136 @@ impl Plan {
             ));
         }
 
-        Ok(preflight::check(&needs)?)
+        preflight::check(&needs).map_err(|error| match Error::from(error) {
+            Error::NotEnoughSpace(reason) => {
+                Error::NotEnoughSpace(format!("{reason}; the destination estimate is {estimate}"))
+            }
+            other => other,
+        })
     }
+}
+
+/// What a restore will occupy on its destination volume, by term, in bytes.
+///
+/// Calibrated, not derived: the epoch kinds use per-kind factors fitted
+/// against measured mainnet restores (full history and a 10-epoch window), on
+/// the compressed size where the transport states it and the stele is at this
+/// profile's compression level, and on the declared uncompressed size
+/// otherwise.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Estimate {
+    pub blocks: u64,
+    pub indexes: u64,
+    pub logs: u64,
+    pub entities: u64,
+    /// The state tip's layers, at their declared uncompressed size.
+    pub state: u64,
+    /// The live-UTxO tags the restore derives and no layer ships, per
+    /// `state-utxos` record.
+    pub derived_tags: u64,
+    /// What the destination stores' journals may hold.
+    pub journals: u64,
+    /// Compaction headroom over every term above.
+    pub headroom: u64,
+    /// Epoch layers sized from their uncompressed size: no compressed size
+    /// stated, or a stele not at this profile's compression level.
+    pub fallback_layers: usize,
+}
+
+impl Estimate {
+    /// The destination need.
+    pub fn total(&self) -> u64 {
+        self.before_headroom().saturating_add(self.headroom)
+    }
+
+    fn before_headroom(&self) -> u64 {
+        [
+            self.blocks,
+            self.indexes,
+            self.logs,
+            self.entities,
+            self.state,
+            self.derived_tags,
+            self.journals,
+        ]
+        .into_iter()
+        .fold(0, u64::saturating_add)
+    }
+}
+
+impl std::fmt::Display for Estimate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} bytes: blocks {}, indexes {}, logs {}, entities {}, state tip {}, derived UTxO \
+             tags {}, journals {}, compaction headroom {}",
+            self.total(),
+            self.blocks,
+            self.indexes,
+            self.logs,
+            self.entities,
+            self.state,
+            self.derived_tags,
+            self.journals,
+            self.headroom,
+        )?;
+
+        if self.fallback_layers > 0 {
+            write!(
+                f,
+                " ({} layers sized from their uncompressed size)",
+                self.fallback_layers
+            )?;
+        }
+
+        Ok(())
+    }
+}
+
+/// On-disk bytes per layer byte for one epoch kind, in thousandths.
+#[derive(Debug, Clone, Copy)]
+struct OnDisk {
+    /// Per compressed byte, at this profile's compression level.
+    per_compressed: u64,
+    /// Per declared uncompressed byte: the fallback.
+    per_uncompressed: u64,
+}
+
+// Fitted against full-history and 10-epoch mainnet restores of one tip, then
+// rounded up; still to be re-validated on testnet steles.
+const BLOCKS_ON_DISK: OnDisk = OnDisk {
+    per_compressed: 1_800,
+    per_uncompressed: 550,
+};
+
+const INDEXES_ON_DISK: OnDisk = OnDisk {
+    per_compressed: 2_200,
+    per_uncompressed: 700,
+};
+
+const LOGS_ON_DISK: OnDisk = OnDisk {
+    per_compressed: 2_100,
+    per_uncompressed: 930,
+};
+
+const ENTITIES_ON_DISK: OnDisk = OnDisk {
+    per_compressed: 1_400,
+    per_uncompressed: 1_250,
+};
+
+/// Bytes of derived live-UTxO tags per `state-utxos` record, measured at about
+/// 306 on mainnet.
+const DERIVED_TAG_BYTES_PER_UTXO: u64 = 310;
+
+/// Headroom over the final size for compaction and the state-tip phase, in
+/// thousandths; measured peaks ran up to about 7% above it.
+const COMPACTION_HEADROOM_PER_MILLE: u64 = 75;
+
+/// `bytes` times `per_mille` thousandths, rounded up and saturating.
+fn scaled(bytes: u64, per_mille: u64) -> u64 {
+    let scaled = (u128::from(bytes) * u128::from(per_mille)).div_ceil(1_000);
+
+    u64::try_from(scaled).unwrap_or(u64::MAX)
 }
 
 /// Where a restore stages pulled layers, and how much it stages at once.
@@ -634,6 +853,7 @@ pub fn plan<R: SteleReader>(
         skipped_epochs: selected.1,
         skipped_unknown,
         position,
+        compression: inscription.compression,
     })
 }
 
@@ -1307,8 +1527,13 @@ pub struct Restoring<'a> {
     /// Whether to honour the progress file an interrupted restore left.
     pub resume: bool,
     /// The operator explicitly accepted the risk of restoring without checking
-    /// the destination and staging volumes against the stele's declared sizes.
+    /// the destination and staging volumes against what the restore will
+    /// occupy.
     pub skip_space_check: bool,
+    /// Bytes the destination stores' journals may hold between them, which
+    /// the space preflight adds to the destination: each fjall store's
+    /// `journal_mb`, and nothing for a store that keeps no journal.
+    pub journals: u64,
     /// How many layers to read ahead of the one being drained; 0 and 1 read
     /// one layer at a time. [`DEFAULT_READ_AHEAD`] unless the operator says.
     /// A transport whose blobs are local reads one at a time whatever it says.
@@ -1568,7 +1793,12 @@ where
         None => None,
     };
 
-    check_restore_space(&plan, node, checkpoint.resume(), staging)?;
+    check_restore_space(
+        &plan,
+        node,
+        || plan.estimate(stele, &index, checkpoint.resume(), node.journals),
+        staging,
+    )?;
 
     // A restore that doesn't resume starts its progress over before it writes
     // anything, so this run's record is never beside an earlier run's layers.
@@ -1607,14 +1837,14 @@ where
 fn check_restore_space(
     plan: &Plan,
     node: Restoring<'_>,
-    resume: &Resume,
+    estimate: impl FnOnce() -> Result<Estimate, Error>,
     staging: Option<Staging<'_>>,
 ) -> Result<(), Error> {
     if node.skip_space_check {
         tracing::warn!("skipping restore disk-space preflight by operator request");
         Ok(())
     } else {
-        plan.preflight(node.storage_path, resume, staging)
+        plan.preflight(node.storage_path, &estimate()?, staging)
     }
 }
 
@@ -2501,6 +2731,7 @@ mod tests {
             state_dumps: BTreeMap::new(),
             skipped_epochs: skipped,
             skipped_unknown: Vec::new(),
+            compression: crate::compression(),
         };
 
         let tip = crate::state_layer_count() as u64;
@@ -2916,6 +3147,25 @@ mod tests {
         assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
     }
 
+    /// A plan over `stele`'s epochs and tip, every epoch kept.
+    fn plan_of(stele: &Inscription) -> Plan {
+        Plan {
+            position: read_position(&stele.position).unwrap(),
+            sequence: stele.sequence,
+            epochs: select_epochs(stele).unwrap(),
+            state: select_state(stele).unwrap().tip,
+            state_dumps: BTreeMap::new(),
+            skipped_epochs: 0,
+            skipped_unknown: Vec::new(),
+            compression: stele.compression.clone(),
+        }
+    }
+
+    /// An estimate with no compressed sizes and no journals.
+    fn declared_only(plan: &Plan, resume: &Resume) -> Estimate {
+        plan.estimate_with(resume, 0, |_| Ok(None)).unwrap()
+    }
+
     /// The preflight is a refusal for a doomed run, not a promise about a
     /// tight one: an impossible requirement is refused and a plausible one is
     /// allowed through.
@@ -2923,23 +3173,16 @@ mod tests {
     fn the_preflight_refuses_what_cannot_fit() {
         let temp = tempfile::tempdir().unwrap();
 
-        let mut plan = Plan {
-            position: read_position(&inscription(vec![]).position).unwrap(),
-            sequence: 3,
-            epochs: Vec::new(),
-            state: select_state(&inscription(state_layers())).unwrap().tip,
-            state_dumps: BTreeMap::new(),
-            skipped_epochs: 0,
-            skipped_unknown: Vec::new(),
-        };
+        let mut plan = plan_of(&inscription(state_layers()));
+        let estimate = declared_only(&plan, &Resume::none());
 
-        plan.preflight(temp.path(), &Resume::none(), None).unwrap();
+        plan.preflight(temp.path(), &estimate, None).unwrap();
 
         // A directory that does not exist yet is measured through its parent,
         // which is the shape a fresh node's storage path has.
         plan.preflight(
             &temp.path().join("not").join("created").join("yet"),
-            &Resume::none(),
+            &estimate,
             None,
         )
         .unwrap();
@@ -2950,10 +3193,18 @@ mod tests {
             descriptor.uncompressed_size = u64::MAX / tip;
         }
 
-        let err = plan
-            .preflight(temp.path(), &Resume::none(), None)
-            .unwrap_err();
-        assert!(matches!(err, Error::NotEnoughSpace(_)), "{err:?}");
+        let estimate = declared_only(&plan, &Resume::none());
+
+        let err = plan.preflight(temp.path(), &estimate, None).unwrap_err();
+
+        // The refusal names what was compared, term by term.
+        let Error::NotEnoughSpace(message) = err else {
+            panic!("{err:?}");
+        };
+        assert!(
+            message.contains(&format!("the destination estimate is {estimate}")),
+            "{message}"
+        );
 
         check_restore_space(
             &plan,
@@ -2963,10 +3214,11 @@ mod tests {
                 storage_path: temp.path(),
                 resume: false,
                 skip_space_check: true,
+                journals: 0,
                 read_ahead: DEFAULT_READ_AHEAD,
                 source: None,
             },
-            &Resume::none(),
+            || panic!("a skipped check estimates nothing"),
             None,
         )
         .unwrap();
@@ -2988,17 +3240,7 @@ mod tests {
         layers.push(epoch_descriptor(BLOCKS, 1, 0xa1));
         layers.push(epoch_descriptor(BLOCKS, 2, 0xa2));
 
-        let stele = inscription(layers);
-
-        let mut plan = Plan {
-            position: read_position(&stele.position).unwrap(),
-            sequence: stele.sequence,
-            epochs: select_epochs(&stele).unwrap(),
-            state: select_state(&stele).unwrap().tip,
-            state_dumps: BTreeMap::new(),
-            skipped_epochs: 0,
-            skipped_unknown: Vec::new(),
-        };
+        let mut plan = plan_of(&inscription(layers));
 
         // Epochs 0 and 1 are each larger than any volume; epoch 2 and the tip
         // keep their hundred bytes. So the whole plan cannot fit anywhere, and
@@ -3019,40 +3261,228 @@ mod tests {
 
         let tip = crate::state_layer_count() as u64;
 
-        // An empty resume asks for exactly what it asked for before there was
-        // a resume at all.
-        assert_eq!(
-            plan.remaining_uncompressed_size(&Resume::none()),
-            plan.uncompressed_size()
-        );
-
-        let err = plan
-            .preflight(temp.path(), &Resume::none(), None)
-            .unwrap_err();
+        let whole = declared_only(&plan, &Resume::none());
+        let err = plan.preflight(temp.path(), &whole, None).unwrap_err();
         assert!(matches!(err, Error::NotEnoughSpace(_)), "{err:?}");
 
         // Both impossible epochs committed: what is left is epoch 2 and the
         // tip, and the run proceeds on a volume that could never have held the
         // whole stele.
         let resume = blocks_of(0..2);
+        let left = declared_only(&plan, &resume);
+        assert_eq!(left.blocks, scaled(100, BLOCKS_ON_DISK.per_uncompressed));
         assert_eq!(
-            plan.remaining_uncompressed_size(&resume),
-            (tip + 1) * 100,
+            left.state,
+            tip * 100,
             "the tip is always redone and is always charged"
         );
-        plan.preflight(temp.path(), &resume, None).unwrap();
+        plan.preflight(temp.path(), &left, None).unwrap();
 
         // One of them committed: the other is still ahead of this run, and it
         // is still refused. Subtracting too much is the dangerous direction.
-        let err = plan
-            .preflight(temp.path(), &blocks_of(0..1), None)
-            .unwrap_err();
+        let one = declared_only(&plan, &blocks_of(0..1));
+        let err = plan.preflight(temp.path(), &one, None).unwrap_err();
         assert!(matches!(err, Error::NotEnoughSpace(_)), "{err:?}");
 
         // Every epoch committed leaves the tip, which no resume ever skips.
+        let none_left = declared_only(&plan, &blocks_of(0..3));
+        assert_eq!(none_left.blocks, 0);
+        assert_eq!(none_left.state, tip * 100);
+    }
+
+    /// The estimate is the documented sum, term by term: compressed factors
+    /// where a size is stated, uncompressed factors where it is not or the
+    /// stele is at another level, the tip at its declared size plus the tags
+    /// per UTxO record, the journals, and the headroom over all of it.
+    #[test]
+    fn the_estimate_is_the_hand_computed_sum() {
+        let (entity_kind, _) = ENTITY_KINDS[0];
+
+        let sized = |kind: &str, epoch: u64, byte: u8, uncompressed: u64| LayerDescriptor {
+            uncompressed_size: uncompressed,
+            ..epoch_descriptor(kind, epoch, byte)
+        };
+
+        let mut layers = state_layers();
+        layers.extend([
+            sized(BLOCKS, 0, 0xa0, 10_000),
+            sized("log-pool-epochs", 0, 0xa1, 4_000),
+            sized(entity_kind, 0, 0xa2, 1_000),
+            sized(INDEXES, 0, 0xa3, 3_000),
+            // Stated without a compressed size.
+            sized(BLOCKS, 1, 0xb0, 20_000),
+            // Recorded by the resume below, so never charged.
+            sized(BLOCKS, 2, 0xc0, 1_000_000),
+        ]);
+
+        let utxo_shards = STATE_KINDS
+            .iter()
+            .find(|(_, ns, _, _)| *ns == UTXOS)
+            .map(|(_, _, shards, _)| u64::from(*shards))
+            .unwrap();
+
+        for layer in layers
+            .iter_mut()
+            .filter(|l| state_ns_for(&l.kind) == Some(UTXOS))
+        {
+            layer.records = 1_000;
+        }
+
+        let mut plan = plan_of(&inscription(layers));
+
+        let compressed: BTreeMap<u8, u64> = [
+            (0xa0, 2_000),
+            (0xa1, 1_000),
+            (0xa2, 500),
+            (0xa3, 1_000),
+            (0xc0, 1),
+        ]
+        .into();
+        let asked = std::cell::Cell::new(0);
+        let lookup = |descriptor: &LayerDescriptor| {
+            asked.set(asked.get() + 1);
+            Ok(compressed.get(&descriptor.diff_id.as_bytes()[0]).copied())
+        };
+
+        let mut progress = RestoreProgress::new(Digest::from_bytes([0xdd; 32]));
+        progress.record(Digest::from_bytes([0xc0; 32]));
+        let resume = Resume::from_progress(Some(&progress));
+
+        let tip = crate::state_layer_count() as u64;
+        let state = tip * 100;
+        let derived_tags = utxo_shards * 1_000 * 310;
+        let journals = 1 << 20;
+
+        let at_level = plan.estimate_with(&resume, journals, lookup).unwrap();
+
+        let terms = 3_600 + 11_000 + 2_200 + 2_100 + 700 + state + derived_tags + journals;
         assert_eq!(
-            plan.remaining_uncompressed_size(&blocks_of(0..3)),
-            tip * 100
+            at_level,
+            Estimate {
+                blocks: 3_600 + 11_000,
+                indexes: 2_200,
+                logs: 2_100,
+                entities: 700,
+                state,
+                derived_tags,
+                journals,
+                headroom: (terms * 75).div_ceil(1_000),
+                fallback_layers: 1,
+            }
+        );
+        assert_eq!(at_level.total(), terms + (terms * 75).div_ceil(1_000));
+        assert_eq!(asked.get(), 5, "the recorded layer is never sized");
+
+        // Another level: every epoch layer falls back, and the transport is
+        // never asked.
+        plan.compression = Compression {
+            algo: "zstd".to_owned(),
+            level: 3,
+        };
+        asked.set(0);
+
+        let elsewhere = plan.estimate_with(&resume, journals, lookup).unwrap();
+
+        let terms = 5_500 + 11_000 + 2_100 + 3_720 + 1_250 + state + derived_tags + journals;
+        assert_eq!(elsewhere.blocks, 5_500 + 11_000);
+        assert_eq!(elsewhere.indexes, 2_100);
+        assert_eq!(elsewhere.logs, 3_720);
+        assert_eq!(elsewhere.entities, 1_250);
+        assert_eq!(elsewhere.fallback_layers, 5);
+        assert_eq!(elsewhere.total(), terms + (terms * 75).div_ceil(1_000));
+        assert_eq!(asked.get(), 0);
+    }
+
+    /// The factors against the restores they were fitted to: mainnet at epoch
+    /// 666, full history and a 10-epoch rolling window, as per-kind declared
+    /// and compressed sizes. The estimate plus one staged layer (what those
+    /// runs staged) covers each measured peak plus staging, and stays within
+    /// a fifth of it on full history.
+    #[test]
+    fn the_estimate_covers_the_measured_mainnet_restores() {
+        const GIB: f64 = (1u64 << 30) as f64;
+        const STAGED: u64 = 507_016_167; // the stele's largest compressed layer
+        const TIP_UNCOMPRESSED: u64 = 2_884_489_232;
+        const TIP_UTXO_RECORDS: u64 = 10_850_435;
+        const JOURNALS: u64 = 2 * (512 << 20);
+
+        struct Run {
+            // (uncompressed, compressed) per kind.
+            blocks: (u64, u64),
+            indexes: (u64, u64),
+            logs: (u64, u64),
+            entities: (u64, u64),
+            // Peak on disk, and that plus staging, in GiB.
+            peak: f64,
+            peak_and_staging: f64,
+        }
+
+        let full = Run {
+            blocks: (233_781_288_667, 58_613_985_987),
+            indexes: (73_465_292_183, 18_751_443_803),
+            logs: (95_241_902_989, 35_937_513_226),
+            entities: (682_193_394, 603_288_293),
+            peak: 197.70,
+            peak_and_staging: 198.17,
+        };
+
+        let rolling = Run {
+            blocks: (2_581_200_339, 872_178_058),
+            indexes: (908_087_152, 291_623_701),
+            logs: (1_502_982_184, 661_579_814),
+            entities: (2_740_726, 2_463_471),
+            peak: 10.60,
+            peak_and_staging: 11.07,
+        };
+
+        let estimate = |run: &Run| {
+            let (entity_kind, _) = ENTITY_KINDS[0];
+            let mut compressed = BTreeMap::new();
+
+            let mut layers: Vec<LayerDescriptor> = [
+                (BLOCKS, run.blocks, 0xa0),
+                ("log-pool-epochs", run.logs, 0xa1),
+                (entity_kind, run.entities, 0xa2),
+                (INDEXES, run.indexes, 0xa3),
+            ]
+            .into_iter()
+            .map(|(kind, (uncompressed, packed), byte)| {
+                compressed.insert(byte, packed);
+                LayerDescriptor {
+                    uncompressed_size: uncompressed,
+                    ..epoch_descriptor(kind, 0, byte)
+                }
+            })
+            .collect();
+
+            // The tip, its whole declared size on one UTxO shard.
+            let mut tip = state_layers();
+            for layer in &mut tip {
+                let utxos = state_ns_for(&layer.kind) == Some(UTXOS) && layer.scope["shard"] == 0;
+                layer.uncompressed_size = if utxos { TIP_UNCOMPRESSED } else { 0 };
+                layer.records = if utxos { TIP_UTXO_RECORDS } else { 0 };
+            }
+            layers.extend(tip);
+
+            plan_of(&inscription(layers))
+                .estimate_with(&Resume::none(), JOURNALS, |descriptor| {
+                    Ok(compressed.get(&descriptor.diff_id.as_bytes()[0]).copied())
+                })
+                .unwrap()
+        };
+
+        for (name, run) in [("full", &full), ("rolling", &rolling)] {
+            let destination = estimate(run).total() as f64 / GIB;
+            let checked = destination + STAGED as f64 / GIB;
+
+            assert!(destination >= run.peak, "{name}: {destination} GiB");
+            assert!(checked >= run.peak_and_staging, "{name}: {checked} GiB");
+        }
+
+        let checked = (estimate(&full).total() + STAGED) as f64 / GIB;
+        assert!(
+            checked <= full.peak_and_staging * 1.2,
+            "full: {checked} GiB"
         );
     }
 
@@ -3069,19 +3499,14 @@ mod tests {
         let scratch = temp.path().join("scratch");
 
         let plan = Plan {
-            position: read_position(&inscription(vec![]).position).unwrap(),
-            sequence: 3,
-            epochs: Vec::new(),
             state: BTreeMap::new(),
-            state_dumps: BTreeMap::new(),
-            skipped_epochs: 0,
-            skipped_unknown: Vec::new(),
+            ..plan_of(&inscription(state_layers()))
         };
 
         let staging = |read_ahead, peak, unsized_layers| {
             plan.preflight(
                 temp.path(),
-                &Resume::none(),
+                &Estimate::default(),
                 Some(Staging {
                     dir: &scratch,
                     read_ahead,

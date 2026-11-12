@@ -27,8 +27,8 @@ Options:
           directory to stage pulled layers in; defaults to `<storage.path>/scratch`. registry
           sources only — a `file://` restore stages nothing
       --skip-space-check
-          skip the restore disk-space preflight and continue even when the stele's declared sizes
-          exceed the available space
+          skip the restore disk-space preflight and continue even when the estimate of what the
+          restore will occupy exceeds the available space
       --read-ahead <LAYERS>
           how many layers to read ahead of the one being written; a registry restore stages each in
           the scratch directory until its turn. 0 or 1 reads one layer at a time [default: 8]
