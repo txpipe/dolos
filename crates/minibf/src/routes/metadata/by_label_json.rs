@@ -209,4 +209,15 @@ mod tests {
         assert!(body.starts_with(r#"[{"tx_hash":""#));
         assert!(body.ends_with(&tail));
     }
+
+    /// A body that does not reach a response frees its metadata in full.
+    #[test]
+    fn metadata_label_json_body_frees_nested_metadata() {
+        use crate::test_support::{nested_value, VALUE_LEVELS};
+
+        drop(MetadataLabelJsonBody(vec![TxMetadataLabelJsonInner {
+            tx_hash: String::new(),
+            json_metadata: Some(nested_value(VALUE_LEVELS)),
+        }]));
+    }
 }

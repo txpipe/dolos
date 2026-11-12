@@ -718,7 +718,7 @@ fn tx_metadatum_to_json(metadatum: &alonzo::Metadatum) -> serde_json::Value {
 
 /// One entry of `/txs/{hash}/metadata`. The fields are in sorted order, and
 /// serde writes them in this order.
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct TxMetadataJsonInner {
     pub json_metadata: serde_json::Value,
     pub label: String,

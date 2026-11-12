@@ -2,8 +2,10 @@
 //! blockfrost-openapi models and `serde_json`.
 //!
 //! For bodies big enough that encoding through the models dominates the
-//! request. A writer must produce the bytes the serde path would, and its tests
-//! hold it to that path.
+//! request, and for bodies that hold nested `serde_json::Value`s, which
+//! [`write_value`] writes and [`drop_value`] frees at any nesting depth. A
+//! writer must produce the bytes the serde path would, and its tests hold it
+//! to that path.
 
 use axum::{
     http::{header, HeaderValue},
@@ -234,18 +236,9 @@ mod tests {
     /// A value with many nesting levels writes and frees in full.
     #[test]
     fn value_writes_and_frees_nested_values() {
-        const LEVELS: usize = 100_000;
+        use crate::test_support::{nested_value, VALUE_LEVELS as LEVELS};
 
-        let mut value = json!(0);
-        for _ in 0..LEVELS {
-            value = Value::Object(
-                [("k".to_string(), Value::Array(vec![value]))]
-                    .into_iter()
-                    .collect(),
-            );
-        }
-
-        let body = ValueBody(value).to_json_vec();
+        let body = ValueBody(nested_value(LEVELS)).to_json_vec();
 
         assert_eq!(
             body,

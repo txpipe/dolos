@@ -38,7 +38,7 @@ use crate::{
     mapping::{
         asset_fingerprint,
         direct_json::{drop_value, ValueBody},
-        sorted_json, IntoModel,
+        sorted_json,
     },
     Facade,
 };
@@ -114,7 +114,7 @@ impl OnchainMetadata {
     }
 
     fn from_metadatum(unit: &str, metadatum: Metadatum) -> Result<Option<Self>, StatusCode> {
-        let value = CIP25Metadata(metadatum).into_model()?;
+        let value = cip25_metadata_json(&metadatum);
 
         let (metadata, version) = match value {
             serde_json::Value::Object(mut map) => {
@@ -197,6 +197,31 @@ impl OnchainMetadata {
     fn is_present(&self) -> bool {
         !self.metadata.is_empty()
     }
+
+    /// Moves out the properties, the standard and the extra datum.
+    fn into_parts(
+        mut self,
+    ) -> (
+        HashMap<String, serde_json::Value>,
+        Option<OnchainMetadataStandard>,
+        Option<String>,
+    ) {
+        (
+            std::mem::take(&mut self.metadata),
+            self.version,
+            self.extra.take(),
+        )
+    }
+}
+
+/// Frees the properties with [`drop_value`], on every path that does not move
+/// them into a response.
+impl Drop for OnchainMetadata {
+    fn drop(&mut self) {
+        for (_, value) in self.metadata.drain() {
+            drop_value(value);
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -235,8 +260,6 @@ impl From<TokenRegistryMetadata> for OffchainMetadata {
     }
 }
 
-struct CIP25Metadata(Metadatum);
-
 /// Returns the object in `value`. A value of another kind is freed with
 /// [`drop_value`].
 fn take_object(
@@ -259,45 +282,42 @@ fn cip25_bytes(bytes: &[u8]) -> String {
     }
 }
 
-/// Returns the CIP-25 JSON object key of a metadatum, or `None` when the key
-/// does not convert to a JSON string.
-fn cip25_key(key: &Metadatum) -> Option<String> {
-    match key {
-        Metadatum::Text(x) => Some(x.clone()),
-        Metadatum::Bytes(x) => Some(cip25_bytes(x)),
-        // only an integer outside the JSON number range converts to a string
-        Metadatum::Int(x) => serde_json::Number::from_i128(i128::from(*x))
-            .is_none()
-            .then(|| x.to_string()),
-        Metadatum::Array(_) | Metadatum::Map(_) => None,
-    }
-}
+/// Converts a CIP-25 metadatum to JSON: bytes become UTF-8 or bare hex, and
+/// a map keeps only the entries whose key converts to a JSON string.
+fn cip25_metadata_json(metadatum: &Metadatum) -> serde_json::Value {
+    fold_tree(
+        metadatum,
+        |node, children: Vec<serde_json::Value>| match node {
+            Metadatum::Int(x) => serde_json::Number::from_i128(i128::from(*x))
+                .map(serde_json::Value::Number)
+                .unwrap_or_else(|| serde_json::Value::String(x.to_string())),
+            Metadatum::Text(x) => serde_json::Value::String(x.clone()),
+            Metadatum::Bytes(x) => serde_json::Value::String(cip25_bytes(x)),
+            Metadatum::Array(_) => serde_json::Value::Array(children),
+            Metadatum::Map(_) => {
+                let mut fields = serde_json::Map::new();
+                let mut children = children.into_iter();
 
-impl IntoModel<serde_json::Value> for CIP25Metadata {
-    type SortKey = ();
+                // children alternate key and value
+                while let (Some(key), Some(value)) = (children.next(), children.next()) {
+                    match key {
+                        serde_json::Value::String(key) => {
+                            // a repeated key keeps its last value
+                            if let Some(replaced) = fields.insert(key, value) {
+                                drop_value(replaced);
+                            }
+                        }
+                        other => {
+                            drop_value(other);
+                            drop_value(value);
+                        }
+                    }
+                }
 
-    fn into_model(self) -> Result<serde_json::Value, StatusCode> {
-        let json = fold_tree(
-            &self.0,
-            |node, children: Vec<serde_json::Value>| match node {
-                Metadatum::Int(x) => serde_json::Number::from_i128(i128::from(*x))
-                    .map(serde_json::Value::Number)
-                    .unwrap_or_else(|| serde_json::Value::String(x.to_string())),
-                Metadatum::Text(x) => serde_json::Value::String(x.clone()),
-                Metadatum::Bytes(x) => serde_json::Value::String(cip25_bytes(x)),
-                Metadatum::Array(_) => serde_json::Value::Array(children),
-                // children alternate key and value; a key's JSON is not used
-                Metadatum::Map(kvs) => serde_json::Value::Object(
-                    kvs.iter()
-                        .zip(children.into_iter().skip(1).step_by(2))
-                        .filter_map(|((key, _), value)| cip25_key(key).map(|key| (key, value)))
-                        .collect(),
-                ),
-            },
-        );
-
-        Ok(json)
-    }
+                serde_json::Value::Object(fields)
+            }
+        },
+    )
 }
 
 async fn datum_from_hash<D>(
@@ -558,15 +578,19 @@ impl AssetModelBuilder {
         let policy = self.subject[..28].to_vec();
         let asset = self.subject[28..].to_vec();
 
-        let metadata = self.onchain_metadata(domain).await?;
+        let onchain = self.onchain_metadata(domain).await?;
+        let metadata = self.offchain_metadata(&self.unit).await?.map(Box::new);
+        let fingerprint = asset_fingerprint(&self.subject)?;
 
-        // moves the on-chain metadata instead of copying it
-        let (onchain_metadata, onchain_metadata_standard, onchain_metadata_extra) = match metadata {
-            Some(m) => (Some(m.metadata), Some(m.version), Some(m.extra)),
+        // moves the on-chain metadata instead of copying it. until here, an
+        // early return frees it through `OnchainMetadata`
+        let (onchain_metadata, onchain_metadata_standard, onchain_metadata_extra) = match onchain {
+            Some(onchain) => {
+                let (metadata, version, extra) = onchain.into_parts();
+                (Some(metadata), Some(version), Some(extra))
+            }
             None => (None, Some(None), Some(None)),
         };
-
-        let metadata = self.offchain_metadata(&self.unit).await?.map(Box::new);
 
         let asset_name = hex::encode(asset);
         let asset_name = (!asset_name.is_empty()).then_some(asset_name);
@@ -575,7 +599,7 @@ impl AssetModelBuilder {
             asset: hex::encode(&self.subject),
             policy_id: hex::encode(policy),
             asset_name,
-            fingerprint: asset_fingerprint(&self.subject)?,
+            fingerprint,
             quantity: self.summary.fold.quantity().to_string(),
             initial_mint_tx_hash: self
                 .summary
@@ -597,16 +621,20 @@ impl AssetModelBuilder {
 /// Serializes an asset with sorted keys at every level. The on-chain metadata
 /// moves into the sorted map without a copy.
 pub(crate) fn asset_json(mut asset: Asset) -> Result<ValueBody, StatusCode> {
-    let onchain_metadata = asset.onchain_metadata.take();
+    // a `ValueBody` frees the metadata on an early return
+    let onchain_metadata = asset
+        .onchain_metadata
+        .take()
+        .map(|metadata| ValueBody(serde_json::Value::Object(metadata.into_iter().collect())));
 
     let Json(mut json) = sorted_json(asset)?;
 
-    if let (Some(onchain_metadata), serde_json::Value::Object(fields)) =
+    if let (Some(mut onchain_metadata), serde_json::Value::Object(fields)) =
         (onchain_metadata, &mut json)
     {
         fields.insert(
             "onchain_metadata".to_string(),
-            serde_json::Value::Object(onchain_metadata.into_iter().collect()),
+            std::mem::take(&mut onchain_metadata.0),
         );
     }
 
@@ -910,6 +938,7 @@ mod tests {
 
     /// Serializes the asset that `metadata` describes as the route does.
     fn asset_bytes(metadata: OnchainMetadata) -> Vec<u8> {
+        let (metadata, version, extra) = metadata.into_parts();
         let asset = Asset {
             asset: String::new(),
             policy_id: POLICY.to_string(),
@@ -918,9 +947,9 @@ mod tests {
             quantity: "1".to_string(),
             initial_mint_tx_hash: String::new(),
             mint_or_burn_count: 1,
-            onchain_metadata: Some(metadata.metadata),
-            onchain_metadata_standard: Some(metadata.version),
-            onchain_metadata_extra: Some(metadata.extra),
+            onchain_metadata: Some(metadata),
+            onchain_metadata_standard: Some(version),
+            onchain_metadata_extra: Some(extra),
             metadata: None,
         };
 
@@ -936,14 +965,16 @@ mod tests {
 
         let asset = vec![(text("james"), crate::test_support::mixed_metadatum())];
         let policy = vec![(text(POLICY), Metadatum::Map(asset.into()))];
-        let metadata = OnchainMetadata::from_metadatum(&unit, Metadatum::Map(policy.into()))
-            .unwrap()
-            .unwrap();
+        let (metadata, version, _) =
+            OnchainMetadata::from_metadatum(&unit, Metadatum::Map(policy.into()))
+                .unwrap()
+                .unwrap()
+                .into_parts();
 
         let asset = Asset {
             policy_id: POLICY.to_string(),
-            onchain_metadata: Some(metadata.metadata),
-            onchain_metadata_standard: Some(metadata.version),
+            onchain_metadata: Some(metadata),
+            onchain_metadata_standard: Some(version),
             ..Default::default()
         };
 
@@ -983,9 +1014,7 @@ mod tests {
     /// that are not text or bytes, and writes bytes as UTF-8 or bare hex.
     #[test]
     fn cip25_metadata_json_keeps_its_output() {
-        let json = CIP25Metadata(crate::test_support::mixed_metadatum())
-            .into_model()
-            .unwrap();
+        let json = cip25_metadata_json(&crate::test_support::mixed_metadatum());
 
         assert_eq!(
             serde_json::to_string(&json).unwrap(),
@@ -993,30 +1022,132 @@ mod tests {
         );
     }
 
-    /// A nested CIP-25 property renders in full, through the same steps as
-    /// the route.
-    #[test]
-    fn cip25_metadata_renders_nested_properties() {
-        use crate::test_support::{nested_metadatum, NESTING};
+    /// The CIP-25 label of one policy and one asset: `{policy: {asset:
+    /// entry}}`, and an optional top-level `version`.
+    fn cip25_label(asset: Metadatum, entry: Metadatum, version: Option<Metadatum>) -> Metadatum {
+        let text = |x: &str| Metadatum::Text(x.to_string());
 
+        let mut label = vec![(
+            text(POLICY),
+            Metadatum::Map(KeyValuePairs::Def(vec![(asset, entry)])),
+        )];
+        label.extend(version.map(|version| (text("version"), version)));
+
+        Metadatum::Map(KeyValuePairs::Def(label))
+    }
+
+    /// The properties and standard that `from_metadatum` finds for `unit`.
+    fn cip25_parts(
+        unit: &str,
+        label: Metadatum,
+    ) -> (serde_json::Value, Option<OnchainMetadataStandard>) {
+        let (metadata, version, _) = OnchainMetadata::from_metadatum(unit, label)
+            .unwrap()
+            .unwrap()
+            .into_parts();
+
+        (
+            serde_json::Value::Object(metadata.into_iter().collect()),
+            version,
+        )
+    }
+
+    /// The `version` field selects CIP-25 v2 as an integer or as a string.
+    /// Only v2 allows an array of strings for `image`.
+    #[test]
+    fn cip25_metadata_reads_its_version() {
         let text = |x: &str| Metadatum::Text(x.to_string());
         let unit = format!("{POLICY}{}", hex::encode("james"));
+        let properties = || {
+            Metadatum::Map(KeyValuePairs::Def(vec![
+                (text("name"), text("James")),
+                (
+                    text("image"),
+                    Metadatum::Array(vec![text("ipfs://"), text("a")]),
+                ),
+            ]))
+        };
+        let expected = serde_json::json!({"image": ["ipfs://", "a"], "name": "James"});
 
-        let properties = vec![
-            (text("name"), text("james")),
-            (text("nested"), nested_metadatum(NESTING)),
-        ];
-        let asset = vec![(text("james"), Metadatum::Map(properties.into()))];
-        let policy = vec![(text(POLICY), Metadatum::Map(asset.into()))];
+        for (version, standard) in [
+            (
+                Some(Metadatum::Int(2.into())),
+                Some(OnchainMetadataStandard::Cip25v2),
+            ),
+            (Some(text("2")), Some(OnchainMetadataStandard::Cip25v2)),
+            (Some(Metadatum::Int(1.into())), None),
+            (None, None),
+        ] {
+            let label = cip25_label(text("james"), properties(), version);
+            assert_eq!(cip25_parts(&unit, label), (expected.clone(), standard));
+        }
+    }
 
-        let metadata = OnchainMetadata::from_metadatum(&unit, Metadatum::Map(policy.into()))
-            .unwrap()
-            .unwrap();
-        let body = asset_bytes(metadata);
+    /// An asset name that is not UTF-8 matches its key as hex without a
+    /// prefix. A policy entry that is not an object gives no properties.
+    #[test]
+    fn cip25_metadata_finds_its_asset_entry() {
+        let text = |x: &str| Metadatum::Text(x.to_string());
+        let name = [0xff, 0x00];
+        let unit = format!("{POLICY}{}", hex::encode(name));
+        let properties = Metadatum::Map(KeyValuePairs::Def(vec![
+            (text("name"), text("Raw")),
+            (text("image"), text("ipfs://raw")),
+        ]));
 
-        let arrays = NESTING - 1;
-        let nested = format!(r#""nested":{}0{}"#, "[".repeat(arrays), "]".repeat(arrays));
-        assert!(std::str::from_utf8(&body).unwrap().contains(&nested));
+        let label = cip25_label(Metadatum::Bytes(name.to_vec().into()), properties, None);
+        assert_eq!(
+            cip25_parts(&unit, label),
+            (
+                serde_json::json!({"image": "ipfs://raw", "name": "Raw"}),
+                Some(OnchainMetadataStandard::Cip25v1)
+            )
+        );
+
+        let label = cip25_label(
+            Metadatum::Bytes(name.to_vec().into()),
+            text("not a map"),
+            None,
+        );
+        assert_eq!(cip25_parts(&unit, label), (serde_json::json!({}), None));
+    }
+
+    /// The CIP-25 converter frees what it does not keep: an entry whose key is
+    /// not a JSON string, and the value that a repeated key replaces. Each
+    /// holds many nesting levels here.
+    #[test]
+    fn cip25_metadata_frees_the_parts_it_drops() {
+        use crate::test_support::nested_metadatum;
+
+        let text = |x: &str| Metadatum::Text(x.to_string());
+        let metadatum = Metadatum::Map(KeyValuePairs::Def(vec![
+            (nested_metadatum(100_000), text("structured key")),
+            (Metadatum::Int(0.into()), nested_metadatum(100_000)),
+            (text("a"), nested_metadatum(100_000)),
+            (text("a"), text("last")),
+        ]));
+
+        let json = cip25_metadata_json(&metadatum);
+        assert_eq!(json, serde_json::json!({"a": "last"}));
+
+        // pallas frees the metadatum itself, which is outside this test
+        std::mem::forget(metadatum);
+    }
+
+    /// On-chain metadata that does not reach a response frees its properties
+    /// in full.
+    #[test]
+    fn onchain_metadata_frees_nested_properties() {
+        use crate::test_support::{nested_value, VALUE_LEVELS};
+
+        let metadata = OnchainMetadata {
+            version: None,
+            metadata: HashMap::from([("nested".to_string(), nested_value(VALUE_LEVELS))]),
+            extra: None,
+            cip68: None,
+        };
+
+        assert!(metadata.is_present());
     }
 
     #[test]

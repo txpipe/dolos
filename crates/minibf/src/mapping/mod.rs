@@ -1998,18 +1998,6 @@ impl<'a> IntoModel<AssetUtxoContentInner> for UtxoOutputModelBuilder<'a> {
     }
 }
 
-/// Returns the JSON object key of a metadatum. A structured key becomes the
-/// word `array` or `map`.
-pub fn metadatum_key(metadatum: &alonzo::Metadatum) -> String {
-    match metadatum {
-        alonzo::Metadatum::Int(x) => x.to_string(),
-        alonzo::Metadatum::Bytes(x) => format!("0x{}", hex::encode(x.as_slice())),
-        alonzo::Metadatum::Text(x) => x.clone(),
-        alonzo::Metadatum::Array(_) => "array".to_string(),
-        alonzo::Metadatum::Map(_) => "map".to_string(),
-    }
-}
-
 /// Converts a metadatum to JSON.
 pub fn metadatum_to_json(metadatum: &alonzo::Metadatum) -> serde_json::Value {
     fold_tree(
@@ -2023,13 +2011,31 @@ pub fn metadatum_to_json(metadatum: &alonzo::Metadatum) -> serde_json::Value {
                 serde_json::Value::String(format!("0x{}", hex::encode(x.as_slice())))
             }
             alonzo::Metadatum::Array(_) => serde_json::Value::Array(children),
-            // children alternate key and value; a key's JSON is not used
-            alonzo::Metadatum::Map(kvs) => serde_json::Value::Object(
-                kvs.iter()
-                    .map(|(key, _)| metadatum_key(key))
-                    .zip(children.into_iter().skip(1).step_by(2))
-                    .collect(),
-            ),
+            alonzo::Metadatum::Map(_) => {
+                let mut fields = serde_json::Map::new();
+                let mut children = children.into_iter();
+
+                // children alternate key and value
+                while let (Some(key), Some(value)) = (children.next(), children.next()) {
+                    let key = match key {
+                        serde_json::Value::String(key) => key,
+                        serde_json::Value::Number(key) => key.to_string(),
+                        // a structured key becomes the word `array` or `map`
+                        other => {
+                            let word = if other.is_array() { "array" } else { "map" };
+                            direct_json::drop_value(other);
+                            word.to_string()
+                        }
+                    };
+
+                    // a repeated key keeps its last value
+                    if let Some(replaced) = fields.insert(key, value) {
+                        direct_json::drop_value(replaced);
+                    }
+                }
+
+                serde_json::Value::Object(fields)
+            }
         },
     )
 }
@@ -2260,10 +2266,7 @@ impl IntoModel<HashMap<String, serde_json::Value>> for PlutusDataWrapper {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        mapping::direct_json::WriteJson,
-        test_support::{mixed_metadatum, nested_metadatum, NESTING},
-    };
+    use crate::test_support::{mixed_metadatum, nested_metadatum};
 
     /// The JSON of a metadatum with every variant, structured and duplicate
     /// keys, and an integer outside the `i64` range.
@@ -2277,16 +2280,26 @@ mod tests {
         );
     }
 
-    /// Nested metadata converts in full.
+    /// The converter frees what it does not keep: the JSON of a structured key
+    /// and the value that a repeated key replaces. Both hold many nesting
+    /// levels here.
     #[test]
-    fn metadatum_json_converts_nested_metadata() {
-        let json: serde_json::Value = nested_metadatum(NESTING).into_model().unwrap();
+    fn metadatum_json_frees_the_parts_it_drops() {
+        use pallas::codec::utils::KeyValuePairs;
 
-        let arrays = NESTING - 1;
-        assert_eq!(
-            String::from_utf8(direct_json::ValueBody(json).to_json_vec()).unwrap(),
-            format!("{}0{}", "[".repeat(arrays), "]".repeat(arrays))
-        );
+        let text = |x: &str| alonzo::Metadatum::Text(x.to_string());
+        let int = |x: i64| alonzo::Metadatum::Int(x.into());
+        let metadatum = alonzo::Metadatum::Map(KeyValuePairs::Def(vec![
+            (nested_metadatum(100_000), int(1)),
+            (text("a"), nested_metadatum(100_000)),
+            (text("a"), int(2)),
+        ]));
+
+        let json = metadatum_to_json(&metadatum);
+        assert_eq!(json, serde_json::json!({"array": 1, "a": 2}));
+
+        // pallas frees the metadatum itself, which is outside this test
+        std::mem::forget(metadatum);
     }
 
     #[test]

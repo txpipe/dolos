@@ -1045,6 +1045,24 @@ impl TestAppBuilder {
 /// serializes this depth with `serde_json` fails its test in a debug build.
 pub const NESTING: usize = 6_000;
 
+/// The nesting levels of [`nested_value`] in the tests that free bodies. The
+/// default `Drop` of `serde_json::Value` cannot free this depth on a test
+/// thread, so these tests fail if a body frees its values that way.
+pub const VALUE_LEVELS: usize = 100_000;
+
+/// A `serde_json::Value` of `levels` times `{"k":[..]}` around `0`.
+pub fn nested_value(levels: usize) -> serde_json::Value {
+    let mut value = serde_json::json!(0);
+    for _ in 0..levels {
+        value = serde_json::Value::Object(
+            [("k".to_string(), serde_json::Value::Array(vec![value]))]
+                .into_iter()
+                .collect(),
+        );
+    }
+    value
+}
+
 /// A metadatum of `depth` nodes on its longest path: arrays around an integer.
 pub fn nested_metadatum(depth: usize) -> pallas::ledger::primitives::Metadatum {
     use pallas::ledger::primitives::Metadatum;

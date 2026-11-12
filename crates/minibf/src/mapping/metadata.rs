@@ -18,7 +18,7 @@ use pallas::{
 
 use super::{
     direct_json::{drop_value, write_str, write_value, WriteJson},
-    IntoModel,
+    metadatum_to_json, IntoModel,
 };
 
 /// The labels in the CIP-10 registry. Each label has the description that
@@ -113,19 +113,15 @@ impl IntoModel<Vec<TxMetadataLabelJsonInner>> for MetadataHistoryModelBuilder {
     type SortKey = ();
 
     fn into_model(self) -> Result<Vec<TxMetadataLabelJsonInner>, StatusCode> {
-        let mapped: Vec<_> = self
+        let mapped = self
             .items
             .into_iter()
             .take(self.page_size)
-            .map(|(hash, datum)| {
-                let json = datum.into_model()?;
-
-                Result::<_, StatusCode>::Ok(TxMetadataLabelJsonInner {
-                    tx_hash: hash.to_string(),
-                    json_metadata: Some(json),
-                })
+            .map(|(hash, datum)| TxMetadataLabelJsonInner {
+                tx_hash: hash.to_string(),
+                json_metadata: Some(metadatum_to_json(&datum)),
             })
-            .collect::<Result<_, _>>()?;
+            .collect();
 
         Ok(mapped)
     }

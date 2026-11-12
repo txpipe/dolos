@@ -175,4 +175,15 @@ mod tests {
         );
         assert_eq!(String::from_utf8(bytes).unwrap(), expected);
     }
+
+    /// A body that does not reach a response frees its metadata in full.
+    #[test]
+    fn txs_metadata_body_frees_nested_metadata() {
+        use crate::test_support::{nested_value, VALUE_LEVELS};
+
+        drop(TxMetadataJsonBody(vec![TxMetadataJsonInner {
+            json_metadata: nested_value(VALUE_LEVELS),
+            label: "1".to_string(),
+        }]));
+    }
 }
