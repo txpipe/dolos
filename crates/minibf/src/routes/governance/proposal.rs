@@ -167,6 +167,7 @@ mod tests {
             cc_votes: Default::default(),
             drep_votes: Default::default(),
             spo_votes: Default::default(),
+            cost_models_present: false,
         };
 
         let writer = domain
@@ -242,6 +243,7 @@ mod tests {
                 cc_votes: Default::default(),
                 drep_votes: Default::default(),
                 spo_votes: Default::default(),
+                cost_models_present: false,
             };
 
             let writer = domain

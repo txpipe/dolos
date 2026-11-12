@@ -381,6 +381,15 @@ impl BlockVisitor for ProposalVisitor {
         update: &MultiEraUpdate,
     ) -> Result<(), ChainError> {
         let action = pre_conway_to_pparamset(update);
+        let cost_models_present = update
+            .alonzo_first_proposed_cost_models_for_script_languages()
+            .is_some()
+            || update
+                .babbage_first_proposed_cost_models_for_script_languages()
+                .is_some()
+            || update
+                .conway_first_proposed_cost_models_for_script_languages()
+                .is_some();
 
         deltas.add_for_entity(NewProposalV2::new(
             block.slot(),
@@ -397,6 +406,7 @@ impl BlockVisitor for ProposalVisitor {
             None,
             None,
             None,
+            cost_models_present,
         ));
 
         Ok(())
@@ -415,6 +425,11 @@ impl BlockVisitor for ProposalVisitor {
         };
 
         let (action, parent, purpose) = parse_gov_action(&proposal.gov_action);
+        let cost_models_present = matches!(
+            &proposal.gov_action,
+            GovAction::ParameterChange(_, update, _)
+                if update.cost_models_for_script_languages.is_some()
+        );
 
         let reward_account = pallas_extras::parse_reward_account(&proposal.reward_account)
             .ok_or(ChainError::InvalidProposalParams)?;
@@ -433,6 +448,7 @@ impl BlockVisitor for ProposalVisitor {
             parent,
             purpose,
             Some(proposal.anchor.clone()),
+            cost_models_present,
         ));
 
         Ok(())
@@ -448,5 +464,165 @@ impl BlockVisitor for ProposalVisitor {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dolos_core::EntityDelta as _;
+    use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
+    use pallas::{
+        codec::minicbor,
+        ledger::{
+            primitives::conway::{Anchor, CostModels, ProposalProcedure, Update},
+            traverse::{Era, MultiEraProposal},
+        },
+    };
+
+    use super::*;
+
+    fn created_proposal(deltas: WorkDeltas) -> crate::ProposalState {
+        let mut deltas = deltas.entities.into_values().flatten();
+        let crate::CardanoDelta::NewProposalV2(mut delta) = deltas.next().unwrap() else {
+            panic!("The delta was not a NewProposalV2 value.");
+        };
+        assert!(deltas.next().is_none());
+        let mut state = None;
+        delta.apply(&mut state);
+        state.unwrap()
+    }
+
+    #[test]
+    fn visitors_capture_original_cost_models_presence() {
+        let (blocks, _, _) = build_synthetic_blocks(SyntheticBlockConfig {
+            block_count: 1,
+            txs_per_block: 1,
+            ..Default::default()
+        });
+        let block = MultiEraBlock::decode(&blocks[0]).unwrap();
+        let txs = block.txs();
+        let mut visitor = ProposalVisitor {
+            current_epoch: Some(1),
+            network_magic: Some(2),
+            protocol: Some(10),
+            ..Default::default()
+        };
+        let empty = CostModels {
+            plutus_v1: None,
+            plutus_v2: None,
+            plutus_v3: None,
+            unknown: BTreeMap::new(),
+        };
+        let known = CostModels {
+            plutus_v1: Some(vec![1, -2]),
+            ..empty.clone()
+        };
+
+        for models in [None, Some(empty), Some(known)] {
+            let mut update: ProtocolParamUpdate = minicbor::decode(&[0xa0]).unwrap();
+            update.cost_models_for_script_languages = models.clone();
+            let proposal = ProposalProcedure {
+                deposit: 100,
+                reward_account: [vec![0xe0], vec![1; 28]].concat().into(),
+                gov_action: GovAction::ParameterChange(None, Box::new(update.clone()), None),
+                anchor: Anchor {
+                    url: "metadata".to_string(),
+                    content_hash: [2; 32].into(),
+                },
+            };
+            let mut deltas = WorkDeltas::default();
+            visitor
+                .visit_proposal(
+                    &mut deltas,
+                    &block,
+                    &txs[0],
+                    &MultiEraProposal::from_conway(&proposal),
+                    0,
+                )
+                .unwrap();
+            let state = created_proposal(deltas);
+            assert_eq!(state.cost_models_present, models.is_some());
+            let ProposalAction::ParamChange(params) = state.action else {
+                panic!("The proposal action was not a parameter change.");
+            };
+            assert_eq!(params.cost_models_unknown(), None);
+
+            let bytes = minicbor::to_vec(Update {
+                proposed_protocol_parameter_updates: BTreeMap::from([(vec![1; 28].into(), update)]),
+                epoch: 1,
+            })
+            .unwrap();
+            for era in [Era::Alonzo, Era::Babbage, Era::Conway] {
+                let update = MultiEraUpdate::decode_for_era(era, &bytes).unwrap();
+                let mut deltas = WorkDeltas::default();
+                visitor
+                    .visit_update(&mut deltas, &block, Some(&txs[0]), &update)
+                    .unwrap();
+                let state = created_proposal(deltas);
+                assert_eq!(state.cost_models_present, models.is_some(), "{era:?}");
+                let ProposalAction::ParamChange(params) = state.action else {
+                    panic!("The proposal action was not a parameter change.");
+                };
+                assert_eq!(params.cost_models_unknown(), None);
+            }
+
+            let proposal = ProposalProcedure {
+                gov_action: GovAction::Information,
+                ..proposal
+            };
+            let mut deltas = WorkDeltas::default();
+            visitor
+                .visit_proposal(
+                    &mut deltas,
+                    &block,
+                    &txs[0],
+                    &MultiEraProposal::from_conway(&proposal),
+                    0,
+                )
+                .unwrap();
+            assert!(!created_proposal(deltas).cost_models_present);
+        }
+    }
+
+    #[test]
+    fn conway_cost_models_capture_absent_empty_and_populated() {
+        let mut update: ProtocolParamUpdate = minicbor::decode(&[0xa0]).unwrap();
+        let absent = conway_to_pparamset(&update);
+        assert!(absent.is_empty());
+        assert_eq!(absent.cost_models_unknown(), None);
+
+        update.cost_models_for_script_languages = Some(CostModels {
+            plutus_v1: None,
+            plutus_v2: None,
+            plutus_v3: None,
+            unknown: BTreeMap::new(),
+        });
+        let empty = conway_to_pparamset(&update);
+        assert!(empty.is_empty());
+        assert_eq!(empty.cost_models_unknown(), None);
+
+        let models = update.cost_models_for_script_languages.as_mut().unwrap();
+        models.plutus_v1 = Some(vec![1, -2]);
+        models.plutus_v2 = Some(vec![3, -4]);
+        models.plutus_v3 = Some(vec![5, -6]);
+        let known = conway_to_pparamset(&update);
+        assert_eq!(known.cost_models_unknown(), None);
+        assert_eq!(known.iter().count(), 3);
+
+        let unknown = BTreeMap::from([(7, vec![8, -9])]);
+        update
+            .cost_models_for_script_languages
+            .as_mut()
+            .unwrap()
+            .unknown = unknown.clone();
+        let populated = conway_to_pparamset(&update);
+        assert_eq!(
+            populated,
+            PParamsSet::default()
+                .with(PParamValue::CostModelsPlutusV1(vec![1, -2]))
+                .with(PParamValue::CostModelsPlutusV2(vec![3, -4]))
+                .with(PParamValue::CostModelsPlutusV3(vec![5, -6]))
+                .with(PParamValue::CostModelsUnknown(unknown))
+        );
     }
 }

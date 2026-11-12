@@ -119,7 +119,7 @@ pub const SCHEMA_REVS: [(Namespace, u64); 31] = [
     (PolicyFirstMintChunk::NS, 1),
     (PoolEpochLog::NS, 1),
     (PoolState::NS, 1),
-    (ProposalState::NS, 1),
+    (ProposalState::NS, 2),
     (UTXOS, 1),
 ];
 

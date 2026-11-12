@@ -15,15 +15,8 @@ fn the_v2_profile_freeze_baseline_holds() {
     assert_eq!(PROFILE_VERSION, 1, "PROFILE_VERSION moved: {PROCESS}");
     assert_eq!(MEDIA_TYPE_VERSION, 1, "MEDIA_TYPE_VERSION moved: {PROCESS}");
 
-    let moved: Vec<_> = SCHEMA_REVS
-        .iter()
-        .filter(|(_, rev)| *rev != 1)
-        .map(|(ns, rev)| format!("{ns} = {rev}"))
-        .collect();
-
-    assert!(
-        moved.is_empty(),
-        "SCHEMA_REVS moved off revision 1 ({}): {PROCESS}",
-        moved.join(", ")
-    );
+    for (ns, rev) in SCHEMA_REVS {
+        let expected = if ns == "proposals" { 2 } else { 1 };
+        assert_eq!(rev, expected, "{ns}: SCHEMA_REVS moved: {PROCESS}");
+    }
 }

@@ -178,6 +178,7 @@ mod tests {
             tx,
             idx,
             action,
+            cost_models_present: false,
             max_epoch: None,
             ratified_epoch: None,
             canceled_epoch: None,
