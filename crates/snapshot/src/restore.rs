@@ -3429,8 +3429,8 @@ mod tests {
 
     /// The estimate sizes each epoch layer from the compressed size the
     /// transport states for it, and falls back only where none is stated. It
-    /// charges nothing for a layer the resume records, and the journals it is
-    /// handed.
+    /// charges nothing for a layer the resume records, and charges the journals
+    /// it is handed as given.
     #[test]
     fn the_estimate_sizes_layers_from_the_transport() {
         let (entity_kind, _) = ENTITY_KINDS[0];
