@@ -281,7 +281,11 @@ impl ArchiveStore {
         view: Option<Arc<View>>,
     ) -> Result<Self, Error> {
         let tuning = preset.archive();
-        let db = crate::open_database(tuning.database.builder(index_path), index_path, || {
+        let builder = match view {
+            Some(_) => tuning.database.view_builder(index_path),
+            None => tuning.database.builder(index_path),
+        };
+        let db = crate::open_database(builder, index_path, || {
             view.as_ref()
                 .map_or(index_path.to_path_buf(), |view| view.source_of(index_path))
         })?;
@@ -1846,6 +1850,40 @@ mod tests {
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect()
+    }
+
+    /// A view over an index keyspace past its L0 threshold leaves its runs as
+    /// they are: fjall queues a compaction for it on open, and a view has no
+    /// workers to run one in its mirror.
+    #[test]
+    fn a_view_leaves_a_compaction_backlog_alone() {
+        use fjall::AbstractTree;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive");
+        let runs = usize::from(Preset::Standard.archive().tags.l0_threshold) + 2;
+
+        {
+            let store = ArchiveStore::open(schema(), &path, None, Preset::Standard).unwrap();
+
+            // Keys at both ends make every table overlap, so each flush is its
+            // own L0 run; a manual flush queues no compaction.
+            for run in 0..runs as u32 {
+                store.tags.insert("a", run.to_be_bytes()).unwrap();
+                store.tags.insert("z", run.to_be_bytes()).unwrap();
+                store.tags.tree.flush_active_memtable(0).unwrap();
+            }
+            assert_eq!(store.tags.tree.l0_run_count(), runs);
+            store.shutdown().unwrap();
+        }
+
+        let view = open_view(&path);
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        assert_eq!(
+            view.tags.tree.l0_run_count(),
+            runs,
+            "the view compacted its mirror"
+        );
     }
 
     /// A writer, a prune, a truncation, a compaction or an identity on a

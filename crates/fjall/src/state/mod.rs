@@ -112,7 +112,11 @@ impl StateStore {
 
     fn open_at(path: &Path, preset: Preset, view: Option<Arc<View>>) -> Result<Self, Error> {
         let tuning = preset.state();
-        let db = crate::open_database(tuning.database.builder(path), path, || {
+        let builder = match view {
+            Some(_) => tuning.database.view_builder(path),
+            None => tuning.database.builder(path),
+        };
+        let db = crate::open_database(builder, path, || {
             view.as_ref()
                 .map_or(path.to_path_buf(), |view| view.source_of(path))
         })?;
@@ -667,6 +671,40 @@ mod tests {
 
         let _store = StateStore::open(&path, Preset::Standard).unwrap();
         assert_eq!(left(dir.path()), ["state"]);
+    }
+
+    /// A view over a keyspace past its L0 threshold leaves its runs as they
+    /// are: fjall queues a compaction for it on open, and a view has no
+    /// workers to run one in its mirror.
+    #[test]
+    fn a_view_leaves_a_compaction_backlog_alone() {
+        use fjall::AbstractTree;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state");
+        let runs = usize::from(Preset::Standard.state().tags.l0_threshold) + 2;
+
+        {
+            let store = StateStore::open(&path, Preset::Standard).unwrap();
+
+            // Keys at both ends make every table overlap, so each flush is its
+            // own L0 run; a manual flush queues no compaction.
+            for run in 0..runs as u32 {
+                store.tags.insert("a", run.to_be_bytes()).unwrap();
+                store.tags.insert("z", run.to_be_bytes()).unwrap();
+                store.tags.tree.flush_active_memtable(0).unwrap();
+            }
+            assert_eq!(store.tags.tree.l0_run_count(), runs);
+            store.shutdown().unwrap();
+        }
+
+        let view = StateStore::open_view(&path, Preset::Standard).unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        assert_eq!(
+            view.tags.tree.l0_run_count(),
+            runs,
+            "the view compacted its mirror"
+        );
     }
 
     /// A view reports its footprint under the store's own folder, not the

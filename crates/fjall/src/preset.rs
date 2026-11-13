@@ -86,6 +86,14 @@ impl DatabaseTuning {
             .max_journaling_size(self.journal_mb * MIB)
             .worker_threads(self.workers())
     }
+
+    /// A Fjall builder for a read-only open of the database at `path`, with
+    /// no background workers. Fjall queues a flush or compaction for every
+    /// keyspace with sealed memtables or L0 runs on open; a view refuses
+    /// writes, so it needs neither, and without workers none of them runs.
+    pub fn view_builder(&self, path: &Path) -> DatabaseBuilder<Database> {
+        self.builder(path).worker_threads_unchecked(0)
+    }
 }
 
 /// Settings of one keyspace, fixed when Fjall creates it.
