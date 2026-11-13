@@ -79,7 +79,8 @@ impl DatabaseTuning {
             .min(self.max_workers)
     }
 
-    pub(crate) fn builder(&self, path: &Path) -> DatabaseBuilder<Database> {
+    /// A Fjall builder for a database at `path` with this tuning.
+    pub fn builder(&self, path: &Path) -> DatabaseBuilder<Database> {
         Database::builder(path)
             .cache_size(self.cache_mb * MIB)
             .max_journaling_size(self.journal_mb * MIB)
@@ -118,7 +119,8 @@ impl KeyspaceTuning {
         ..Self::FJALL_DEFAULT
     };
 
-    pub(crate) fn options(&self) -> KeyspaceCreateOptions {
+    /// The Fjall options that create a keyspace with this tuning.
+    pub fn options(&self) -> KeyspaceCreateOptions {
         let compaction = Leveled::default()
             .with_l0_threshold(self.l0_threshold)
             .with_table_target_size(self.table_mb * MIB)
