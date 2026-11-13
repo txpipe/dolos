@@ -174,6 +174,27 @@ pub fn make_conway_block_with_witnessed_txs_at(
     )>,
     auxiliary_data: Option<alonzo::AuxiliaryData>,
 ) -> (ChainPoint, RawBlock) {
+    let auxiliary_data_set = auxiliary_data
+        .map(|aux| (0u32, KeepRaw::from(aux)))
+        .into_iter()
+        .collect();
+
+    assemble_conway_block(slot, block_number, prev_hash, txs, auxiliary_data_set)
+}
+
+/// [`make_conway_block_with_witnessed_txs_at`] with the auxiliary data of each
+/// tx keyed by the tx's index in the block.
+fn assemble_conway_block(
+    slot: BlockSlot,
+    block_number: u64,
+    prev_hash: Option<Hash<32>>,
+    txs: Vec<(
+        pallas::ledger::primitives::conway::TransactionBody<'static>,
+        WitnessSet<'static>,
+        bool,
+    )>,
+    auxiliary_data_set: BTreeMap<u32, KeepRaw<'static, alonzo::AuxiliaryData>>,
+) -> (ChainPoint, RawBlock) {
     let header_body = HeaderBody {
         block_number,
         slot,
@@ -213,14 +234,7 @@ pub fn make_conway_block_with_witnessed_txs_at(
         header: KeepRaw::from(header),
         transaction_witness_sets,
         transaction_bodies,
-        auxiliary_data_set: match auxiliary_data {
-            Some(aux) => {
-                let mut map = BTreeMap::new();
-                map.insert(0u32, KeepRaw::from(aux));
-                map
-            }
-            None => BTreeMap::new(),
-        },
+        auxiliary_data_set,
         invalid_transactions: (!invalid.is_empty()).then_some(invalid),
     };
 
@@ -255,14 +269,62 @@ pub fn make_conway_block_with_metadata_at(
     metadata: Vec<(u64, alonzo::Metadatum)>,
     valid: bool,
 ) -> (ChainPoint, RawBlock) {
-    let body = pallas::ledger::primitives::conway::TransactionBody {
+    let body = metadata_tx_body(None);
+    let aux = alonzo::AuxiliaryData::ShelleyMa(alonzo::ShelleyMaAuxiliaryData {
+        transaction_metadata: metadata.into_iter().collect(),
+        auxiliary_scripts: None,
+    });
+
+    make_conway_block_with_txs_at(
+        slot,
+        block_number,
+        prev_hash,
+        vec![(body, valid)],
+        Some(aux),
+    )
+}
+
+/// Makes a Conway block at a given height, after `prev_hash`, with one valid
+/// transaction for each entry of `metadata`, in order. Each transaction has
+/// no inputs and no outputs, and it contains its own metadata. Its body
+/// carries the metadata's hash, so different metadata gives different
+/// transaction hashes.
+pub fn make_conway_block_with_metadata_txs_at(
+    slot: BlockSlot,
+    block_number: u64,
+    prev_hash: Option<Hash<32>>,
+    metadata: Vec<Vec<(u64, alonzo::Metadatum)>>,
+) -> (ChainPoint, RawBlock) {
+    let mut auxiliary_data_set = BTreeMap::new();
+    let txs = metadata
+        .into_iter()
+        .enumerate()
+        .map(|(index, entries)| {
+            let aux = alonzo::AuxiliaryData::ShelleyMa(alonzo::ShelleyMaAuxiliaryData {
+                transaction_metadata: entries.into_iter().collect(),
+                auxiliary_scripts: None,
+            });
+            let body = metadata_tx_body(Some(aux.compute_hash()));
+            auxiliary_data_set.insert(index as u32, KeepRaw::from(aux));
+            (body, empty_witness_set(), true)
+        })
+        .collect();
+
+    assemble_conway_block(slot, block_number, prev_hash, txs, auxiliary_data_set)
+}
+
+/// A transaction body with no inputs and no outputs.
+fn metadata_tx_body(
+    auxiliary_data_hash: Option<Hash<32>>,
+) -> pallas::ledger::primitives::conway::TransactionBody<'static> {
+    pallas::ledger::primitives::conway::TransactionBody {
         inputs: pallas::codec::utils::Set::from(vec![]),
         outputs: vec![],
         fee: 170_000,
         ttl: None,
         certificates: None,
         withdrawals: None,
-        auxiliary_data_hash: None,
+        auxiliary_data_hash,
         validity_interval_start: None,
         mint: None,
         script_data_hash: None,
@@ -276,20 +338,7 @@ pub fn make_conway_block_with_metadata_at(
         proposal_procedures: None,
         treasury_value: None,
         donation: None,
-    };
-
-    let aux = alonzo::AuxiliaryData::ShelleyMa(alonzo::ShelleyMaAuxiliaryData {
-        transaction_metadata: metadata.into_iter().collect(),
-        auxiliary_scripts: None,
-    });
-
-    make_conway_block_with_txs_at(
-        slot,
-        block_number,
-        prev_hash,
-        vec![(body, valid)],
-        Some(aux),
-    )
+    }
 }
 
 /// Number of slots in a Byron epoch on the default genesis values pallas uses
