@@ -6,7 +6,7 @@ edition.workspace = true
 [dependencies]
 dolos-core = { path = "../core" }
 dolos-flatfiles = { path = "../flatfiles" }
-fjall = "3.1.0"
+fjall = "=3.1.13"
 smallvec = { version = "1.15.0", features = ["const_generics", "union"] }
 tracing.workspace = true
 thiserror.workspace = true
