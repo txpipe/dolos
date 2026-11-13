@@ -9,6 +9,9 @@ use serde_json::{json, Value};
 use crate::test_support::{TestApp, TestFault};
 
 const QUEUE: Duration = Duration::from_millis(300);
+/// Scheduling allowance on a measured queue wait, well below the gap
+/// between [`QUEUE`] and the default queue.
+const QUEUE_SLACK: Duration = Duration::from_secs(1);
 const SLOW_READ: Duration = Duration::from_secs(3);
 
 fn limiter(app: &TestApp) -> QueryLimiter {
@@ -57,7 +60,9 @@ async fn heavy_matches_wait_out_the_queue_then_get_503() {
             let (status, headers, body) = app.get_response(&path).await;
 
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{path}");
-            assert!(started.elapsed() >= QUEUE, "{path} skipped the queue");
+            let waited = started.elapsed();
+            assert!(waited >= QUEUE, "{path} skipped the queue");
+            assert!(waited < QUEUE + QUEUE_SLACK, "{path} waited {waited:?}");
             assert_eq!(headers[header::RETRY_AFTER], "1", "{path}");
 
             let body: Value = serde_json::from_slice(&body).unwrap();

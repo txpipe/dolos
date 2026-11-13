@@ -869,6 +869,9 @@ mod tests {
     }
 
     const SHORT_QUEUE: Duration = Duration::from_millis(100);
+    /// Scheduling allowance on a measured queue wait, well below the gap
+    /// between the test queues and the default one.
+    const QUEUE_SLACK: Duration = Duration::from_secs(1);
 
     /// A blocking closure that runs until its gate opens, and tells when it
     /// has started.
@@ -939,7 +942,9 @@ mod tests {
 
         let started = std::time::Instant::now();
         assert!(limiter.admit_heavy().await.is_none());
-        assert!(started.elapsed() >= SHORT_QUEUE, "{:?}", started.elapsed());
+        let waited = started.elapsed();
+        assert!(waited >= SHORT_QUEUE, "{waited:?}");
+        assert!(waited < SHORT_QUEUE + QUEUE_SLACK, "{waited:?}");
         assert_eq!(limiter.heavy_admitted(), 2);
     }
 

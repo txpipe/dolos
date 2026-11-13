@@ -15,6 +15,9 @@ use serde_json::{json, Value};
 use crate::test_support::{TestApp, TestFault};
 
 const QUEUE: Duration = Duration::from_millis(300);
+/// Scheduling allowance on a measured queue wait, well below the gap
+/// between [`QUEUE`] and the default queue.
+const QUEUE_SLACK: Duration = Duration::from_secs(1);
 const SLOW_READ: Duration = Duration::from_secs(3);
 
 fn limiter(app: &TestApp) -> QueryLimiter {
@@ -74,6 +77,15 @@ async fn wait_until_free(limiter: &QueryLimiter) {
     }
 }
 
+async fn wait_until_busy(limiter: &QueryLimiter) {
+    let started = Instant::now();
+
+    while limiter.heavy_in_use() == 0 {
+        assert!(started.elapsed() < SLOW_READ * 3, "no heavy scan started");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 #[derive(Default)]
 struct Peaks {
     stop: AtomicBool,
@@ -115,7 +127,9 @@ async fn heavy_routes_wait_out_the_queue_then_get_503() {
         let (status, headers, body) = app.get_with_headers(&path).await;
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{path}");
-        assert!(started.elapsed() >= QUEUE, "{path} skipped the queue");
+        let waited = started.elapsed();
+        assert!(waited >= QUEUE, "{path} skipped the queue");
+        assert!(waited < QUEUE + QUEUE_SLACK, "{path} waited {waited:?}");
         assert_eq!(headers[header::RETRY_AFTER], "1", "{path}");
 
         let body: Value = serde_json::from_slice(&body).unwrap();
@@ -292,9 +306,7 @@ async fn a_dropped_client_keeps_its_slot_until_its_read_ends() {
         async move { app.get_bytes(&path).await }
     });
 
-    while limiter.heavy_in_use() == 0 {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    wait_until_busy(&limiter).await;
     client.abort();
     assert!(client.await.unwrap_err().is_cancelled());
 
@@ -337,9 +349,7 @@ async fn heavy_requests_leave_query_permits_to_light_routes() {
             })
             .collect();
 
-        while limiter.heavy_in_use() == 0 {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        wait_until_busy(&limiter).await;
 
         for _ in 0..3 {
             let started = Instant::now();
