@@ -32,12 +32,12 @@ where
 
     let tag = Tag::new(utxo_dimensions::SCRIPT_REF, hash.to_vec());
 
-    let items = crate::routes::utxos::load_tag_page(&domain, &tag, &pagination).await?;
+    let items = crate::utxos::load_tag_page(&domain, &tag, &pagination).await?;
 
     // an unknown script is a 404. a known script that no live UTxO holds as a
     // reference script is an empty page. the index cannot tell the two apart,
     // so the archive existence check runs only when the index holds nothing.
-    if items.is_empty() && crate::routes::utxos::tag_is_empty(&domain, &tag).await? {
+    if items.is_empty() && crate::utxos::tag_is_empty(&domain, &tag).await? {
         domain
             .query()
             .script_by_hash(&hash)
