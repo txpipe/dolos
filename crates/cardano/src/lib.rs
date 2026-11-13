@@ -531,11 +531,17 @@ impl dolos_core::ChainLogic for CardanoLogic {
     fn compute_catchup(
         block: &dolos_core::Cbor,
         inputs: &std::collections::HashMap<dolos_core::TxoRef, Arc<UtxoValue>>,
-        _point: ChainPoint,
+        point: ChainPoint,
     ) -> Result<dolos_core::CatchUpBlockData, ChainError> {
         let block_arc = Arc::new(block.clone());
         let blockd = OwnedMultiEraBlock::decode(block_arc)?;
         let blockv = blockd.view();
+        let decoded_point = ChainPoint::Specific(blockv.slot(), blockv.hash());
+        if point.slot() != blockv.slot() || point.hash() != Some(blockv.hash()) {
+            return Err(ChainError::consensus(format!(
+                "the WAL entry at {point} holds a different block, at {decoded_point}"
+            )));
+        }
 
         let decoded_inputs: std::collections::HashMap<_, _> = inputs
             .iter()
@@ -566,6 +572,60 @@ impl dolos_core::ChainLogic for CardanoLogic {
             archive_index_deltas,
             tx_hashes,
         })
+    }
+
+    fn prepare_replay<S: StateStore>(
+        state: &S,
+        genesis: Arc<Genesis>,
+        block: &dolos_core::Cbor,
+        deltas: &mut [Self::Delta],
+    ) -> Result<(), ChainError> {
+        let needs_mint_epoch = deltas
+            .iter()
+            .any(|delta| matches!(delta, CardanoDelta::MintedBlocksInc(_)));
+        #[allow(deprecated)]
+        let has_transition = deltas.iter().any(|delta| {
+            matches!(
+                delta,
+                CardanoDelta::EpochTransition(_) | CardanoDelta::EpochTransitionV2(_)
+            )
+        });
+        let epoch = if needs_mint_epoch || !has_transition {
+            let block = MultiEraBlock::decode(block)?;
+            let summary = eras::load_chain_summary_from_state(state)?;
+            if summary.is_empty() {
+                return Err(ChainError::EraNotFound);
+            }
+            let epoch = summary.slot_epoch(block.slot()).0;
+            if !has_transition {
+                let initialized = state
+                    .read_entity_typed::<EpochState>(&())?
+                    .ok_or(ChainError::NoActiveEpoch)?;
+                if epoch > initialized.number {
+                    return Err(ChainError::consensus(format!(
+                        "cannot replay the WAL block at slot {} in epoch {epoch}. The initialized epoch is {}. The epoch boundary work must initialize epoch {epoch} before the replay",
+                        block.slot(), initialized.number
+                    )));
+                }
+            }
+            Some(epoch)
+        } else {
+            None
+        };
+
+        #[allow(deprecated)]
+        for delta in deltas {
+            match delta {
+                CardanoDelta::MintedBlocksInc(delta) => {
+                    delta.epoch = epoch.expect("a minting delta has a block epoch");
+                }
+                CardanoDelta::EpochTransition(delta) => delta.genesis = Some(genesis.clone()),
+                CardanoDelta::EpochTransitionV2(delta) => delta.genesis = Some(genesis.clone()),
+                _ => {}
+            }
+        }
+
+        Ok(())
     }
 
     fn rolling_back<D: Domain>(domain: &D, to: &ChainPoint) {
@@ -649,4 +709,306 @@ pub fn load_test_genesis(env: &str) -> Genesis {
         None,
     )
     .unwrap()
+}
+
+#[cfg(test)]
+mod replay_tests {
+    use super::*;
+    use dolos_core::{builtin::MemoryStateStore, ChainLogic as _, StateWriter as _};
+    use dolos_testing::{blocks::make_conway_block, toy_domain::ToyDomain};
+
+    #[test]
+    fn compute_catchup_accepts_matching_point() {
+        let (point, block) = make_conway_block(42);
+        CardanoLogic::compute_catchup(&block, &Default::default(), point).unwrap();
+    }
+
+    #[test]
+    fn compute_catchup_rejects_wrong_slot() {
+        let (point, block) = make_conway_block(42);
+        let wrong = ChainPoint::Specific(43, point.hash().unwrap());
+        let error = CardanoLogic::compute_catchup(&block, &Default::default(), wrong.clone())
+            .err()
+            .expect("wrong slot must fail");
+        assert!(matches!(error, ChainError::Consensus(_)));
+        assert!(error.to_string().contains(&wrong.to_string()));
+        assert!(error.to_string().contains(&point.to_string()));
+    }
+
+    #[test]
+    fn compute_catchup_rejects_wrong_hash() {
+        let (point, block) = make_conway_block(42);
+        let wrong = ChainPoint::Specific(point.slot(), [0; 32].into());
+        let error = CardanoLogic::compute_catchup(&block, &Default::default(), wrong.clone())
+            .err()
+            .expect("wrong hash must fail");
+        assert!(matches!(error, ChainError::Consensus(_)));
+        assert!(error.to_string().contains(&wrong.to_string()));
+        assert!(error.to_string().contains(&point.to_string()));
+    }
+
+    #[test]
+    fn compute_catchup_rejects_undefined_points() {
+        let (_, block) = make_conway_block(0);
+        for point in [ChainPoint::Origin, ChainPoint::Slot(0)] {
+            assert!(matches!(
+                CardanoLogic::compute_catchup(&block, &Default::default(), point),
+                Err(ChainError::Consensus(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn prepare_replay_accepts_initialized_epoch_without_minting() {
+        let domain = ToyDomain::new(None, None);
+        let initialized = domain
+            .state()
+            .read_entity_typed::<EpochState>(&())
+            .unwrap()
+            .unwrap();
+        let summary = eras::load_chain_summary_from_state(domain.state()).unwrap();
+        let (_, block) = make_conway_block(summary.epoch_start(initialized.number) + 1);
+        CardanoLogic::prepare_replay(domain.state(), domain.genesis(), &block, &mut []).unwrap();
+    }
+
+    #[test]
+    fn prepare_replay_accepts_prior_epoch_without_minting() {
+        let domain = ToyDomain::new(None, None);
+        let writer = domain.state().start_writer().unwrap();
+        let mut initialized = domain
+            .state()
+            .read_entity_typed::<EpochState>(&())
+            .unwrap()
+            .unwrap();
+        initialized.number = 2;
+        writer.write_entity_typed(&(), &initialized).unwrap();
+        writer.commit().unwrap();
+        let summary = eras::load_chain_summary_from_state(domain.state()).unwrap();
+        let (_, block) = make_conway_block(summary.epoch_start(1) + 1);
+
+        CardanoLogic::prepare_replay(domain.state(), domain.genesis(), &block, &mut []).unwrap();
+        assert_eq!(
+            domain
+                .state()
+                .read_entity_typed::<EpochState>(&())
+                .unwrap()
+                .unwrap()
+                .number,
+            2
+        );
+    }
+
+    #[test]
+    fn prepare_replay_rejects_uninitialized_epoch_without_minting() {
+        let domain = ToyDomain::new(None, None);
+        let initialized = domain
+            .state()
+            .read_entity_typed::<EpochState>(&())
+            .unwrap()
+            .unwrap();
+        let summary = eras::load_chain_summary_from_state(domain.state()).unwrap();
+        let epoch = initialized.number + 1;
+        let (_, block) = make_conway_block(summary.epoch_start(epoch));
+        let error = CardanoLogic::prepare_replay(domain.state(), domain.genesis(), &block, &mut [])
+            .unwrap_err();
+        assert!(matches!(error, ChainError::Consensus(_)));
+        let message = error.to_string();
+        assert!(message.contains(&format!("in epoch {epoch}")));
+        assert!(message.contains(&format!("initialized epoch is {}", initialized.number)));
+        assert!(message.contains("epoch boundary work"));
+    }
+
+    #[test]
+    fn prepare_replay_rejects_missing_epoch_state() {
+        let domain = ToyDomain::new(None, None);
+        let state = MemoryStateStore::new();
+        let summary = eras::load_chain_summary_from_state(domain.state()).unwrap();
+        let writer = state.start_writer().unwrap();
+        writer
+            .write_entity_typed(&EraKey::from(summary.edge().protocol), summary.edge())
+            .unwrap();
+        writer.commit().unwrap();
+        let (_, block) = make_conway_block(summary.edge().start.slot + 1);
+
+        assert!(matches!(
+            CardanoLogic::prepare_replay(&state, domain.genesis(), &block, &mut []),
+            Err(ChainError::NoActiveEpoch)
+        ));
+    }
+
+    #[test]
+    fn prepare_replay_uses_era_offsets_without_changing_encoding() {
+        let domain = ToyDomain::new(None, None);
+        let writer = domain.state().start_writer().unwrap();
+        writer
+            .write_entity_typed(
+                &EraKey::from(9),
+                &EraState {
+                    start: EraBoundary {
+                        epoch: 666,
+                        slot: 100_000,
+                        timestamp: 0,
+                    },
+                    end: None,
+                    epoch_length: 100,
+                    slot_length: 1,
+                    protocol: 9,
+                },
+            )
+            .unwrap();
+        writer
+            .write_entity_typed(
+                &(),
+                &EpochState {
+                    number: 666,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        writer.commit().unwrap();
+        let (_, block) = make_conway_block(100_007);
+        let delta = CardanoDelta::from(MintedBlocksInc {
+            operator: [1; 28].into(),
+            count: 1,
+            epoch: 666,
+        });
+        let encoded = bincode::serialize(&vec![delta]).unwrap();
+        let mut deltas: Vec<CardanoDelta> = bincode::deserialize(&encoded).unwrap();
+        let CardanoDelta::MintedBlocksInc(delta) = &deltas[0] else {
+            panic!("the delta is not a minting delta");
+        };
+        assert_eq!(delta.epoch, 0);
+
+        CardanoLogic::prepare_replay(domain.state(), domain.genesis(), &block, &mut deltas)
+            .unwrap();
+
+        let CardanoDelta::MintedBlocksInc(delta) = &deltas[0] else {
+            panic!("the delta is not a minting delta");
+        };
+        assert_eq!(delta.epoch, 666);
+        assert_eq!(bincode::serialize(&deltas).unwrap(), encoded);
+    }
+
+    #[test]
+    fn prepare_replay_rejects_missing_era_summary() {
+        let domain = ToyDomain::new(None, None);
+        let state = MemoryStateStore::new();
+        let (_, block) = make_conway_block(100_007);
+        let mut deltas = vec![CardanoDelta::from(MintedBlocksInc {
+            operator: [1; 28].into(),
+            count: 1,
+            epoch: 0,
+        })];
+
+        assert!(matches!(
+            CardanoLogic::prepare_replay(&state, domain.genesis(), &block, &mut deltas),
+            Err(ChainError::EraNotFound)
+        ));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn prepare_replay_restores_minting_context_with_legacy_transitions() {
+        let domain = ToyDomain::new(None, None);
+        let initialized = domain
+            .state()
+            .read_entity_typed::<EpochState>(&())
+            .unwrap()
+            .unwrap();
+        let epoch = initialized.number + 1;
+        let summary = eras::load_chain_summary_from_state(domain.state()).unwrap();
+        let (_, block) = make_conway_block(summary.epoch_start(epoch));
+        let transitions = [
+            CardanoDelta::from(EpochTransition::new(
+                epoch,
+                pots::Pots::default(),
+                None,
+                None,
+            )),
+            CardanoDelta::from(EpochTransitionV2::new(
+                epoch,
+                pots::Pots::default(),
+                None,
+                None,
+                None,
+            )),
+        ];
+        for transition in transitions {
+            let deltas = vec![
+                transition,
+                CardanoDelta::from(MintedBlocksInc {
+                    operator: [1; 28].into(),
+                    count: 1,
+                    epoch,
+                }),
+            ];
+            let encoded = bincode::serialize(&deltas).unwrap();
+            let mut deltas: Vec<CardanoDelta> = bincode::deserialize(&encoded).unwrap();
+
+            CardanoLogic::prepare_replay(domain.state(), domain.genesis(), &block, &mut deltas)
+                .unwrap();
+
+            let CardanoDelta::MintedBlocksInc(delta) = &deltas[1] else {
+                panic!("the delta is not a minting delta");
+            };
+            assert_eq!(delta.epoch, epoch);
+            assert_eq!(bincode::serialize(&deltas).unwrap(), encoded);
+            assert_eq!(
+                domain
+                    .state()
+                    .read_entity_typed::<EpochState>(&())
+                    .unwrap()
+                    .unwrap()
+                    .number,
+                initialized.number
+            );
+        }
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn prepare_replay_restores_transition_genesis_without_changing_encoding() {
+        let domain = ToyDomain::new(None, None);
+        let genesis = domain.genesis();
+        let transition = Some(EraTransition {
+            prev_version: EraKey::from(8),
+            new_version: EraKey::from(9),
+        });
+        let deltas = vec![
+            CardanoDelta::from(EpochTransition::new(
+                1,
+                pots::Pots::default(),
+                transition.clone(),
+                Some(genesis.clone()),
+            )),
+            CardanoDelta::from(EpochTransitionV2::new(
+                1,
+                pots::Pots::default(),
+                transition,
+                None,
+                Some(genesis.clone()),
+            )),
+        ];
+        let state = MemoryStateStore::new();
+        for delta in deltas {
+            let encoded = bincode::serialize(&vec![delta]).unwrap();
+            let mut deltas: Vec<CardanoDelta> = bincode::deserialize(&encoded).unwrap();
+            let restored = match &deltas[0] {
+                CardanoDelta::EpochTransition(delta) => &delta.genesis,
+                CardanoDelta::EpochTransitionV2(delta) => &delta.genesis,
+                _ => unreachable!(),
+            };
+            assert!(restored.is_none());
+
+            CardanoLogic::prepare_replay(&state, genesis.clone(), &vec![], &mut deltas).unwrap();
+
+            let restored = match &deltas[0] {
+                CardanoDelta::EpochTransition(delta) => &delta.genesis,
+                CardanoDelta::EpochTransitionV2(delta) => &delta.genesis,
+                _ => unreachable!(),
+            };
+            assert!(Arc::ptr_eq(restored.as_ref().unwrap(), &genesis));
+            assert_eq!(bincode::serialize(&deltas).unwrap(), encoded);
+        }
+    }
 }

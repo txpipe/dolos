@@ -168,8 +168,13 @@ fn render_domain_build_error(error: DomainBuildError) -> miette::Report {
             ref state,
         }) => {
             let msg = match (wal, state) {
-                (Some(w), Some(s)) => format!(
+                (Some(w), Some(s)) if s.slot() > w.slot() => format!(
                     "state (slot {}) is ahead of WAL (slot {})",
+                    s.slot(),
+                    w.slot()
+                ),
+                (Some(w), Some(s)) => format!(
+                    "state (slot {}) is behind WAL (slot {}) after catch-up",
                     s.slot(),
                     w.slot()
                 ),
@@ -184,6 +189,12 @@ fn render_domain_build_error(error: DomainBuildError) -> miette::Report {
                 _ => "storage may be corrupted; consider re-bootstrapping with `dolos bootstrap`",
             };
             miette::miette!(help = help, "{msg}")
+        }
+        DomainBuildError::Bootstrap(error @ dolos_core::DomainError::WalGap { .. }) => {
+            miette::miette!(
+                help = "To see the missing blocks, run `dolos sync recover --dry-run`. To reset the WAL to the state cursor, run `dolos sync recover --discard-wal`. This command erases the rollback history of the WAL.",
+                "{error}, so Dolos does not replay it"
+            )
         }
         other => miette::miette!("{other}"),
     }

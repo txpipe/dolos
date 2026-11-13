@@ -4,7 +4,7 @@
 //! It ensures storage consistency and drains any pending initialization work
 //! using the full sync lifecycle (WAL + tip notifications).
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use tracing::{error, info, warn};
 
@@ -204,7 +204,7 @@ pub fn catch_up_stores<D: Domain>(domain: &D) -> Result<(), DomainError> {
         return Ok(());
     };
 
-    catch_up_state(domain, &target)?;
+    catch_up_state(domain, &target, true)?;
     catch_up_archive(domain, &target)?;
 
     Ok(())
@@ -214,7 +214,7 @@ pub fn catch_up_stores<D: Domain>(domain: &D) -> Result<(), DomainError> {
 /// archive to replay into.
 pub fn catch_up_state_only<D: Domain>(domain: &D) -> Result<(), DomainError> {
     match catch_up_target(domain)? {
-        Some(target) => catch_up_state(domain, &target),
+        Some(target) => catch_up_state(domain, &target, false),
         None => Ok(()),
     }
 }
@@ -263,12 +263,7 @@ pub struct RecoveryStep {
     /// The WAL entries replayed, synthetic ones aside.
     pub entries: u64,
     /// Whether the WAL holds every block after `from`: it reaches back to
-    /// `from`, and no `reset_to` past `from` discarded blocks. Catch-up does
-    /// not check this: with real blocks after the gap it replays them and
-    /// reaches the WAL tip, the gap's blocks never applied. When the tip
-    /// itself is a synthetic entry it cannot reach, the state's catch-up
-    /// fails, while the archive's logs it and leaves the archive behind. A
-    /// no-op archive
+    /// `from`, and no `reset_to` past `from` discarded blocks. A no-op archive
     /// (`history.mode = "none"`) has no tip, so it always replays from
     /// nothing.
     pub covered: bool,
@@ -376,7 +371,11 @@ where
 /// land in the same commit as the UTxO set they project. Boundary work units
 /// never write the WAL, so they can't leave the WAL ahead of state; recovering
 /// a crash *during* a boundary is a separate concern (#1018).
-fn catch_up_state<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), DomainError> {
+fn catch_up_state<D: Domain>(
+    domain: &D,
+    target: &ChainPoint,
+    repair_archive_indexes: bool,
+) -> Result<(), DomainError> {
     let state_cursor = domain.state().read_cursor()?;
 
     if state_cursor.as_ref() == Some(target) {
@@ -396,6 +395,44 @@ fn catch_up_state<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), Doma
         None => None,
     };
 
+    let plan = recovery_plan(domain.wal(), domain.state(), domain.archive())?;
+    if plan
+        .steps
+        .iter()
+        .any(|step| step.store == RecoveredStore::State && !step.covered)
+    {
+        error!(%target, state = ?state_cursor, "the WAL does not hold all the blocks after the state");
+        return Err(DomainError::WalGap {
+            wal: target.clone(),
+            state: state_cursor,
+        });
+    }
+
+    let mut archived = HashSet::new();
+    if repair_archive_indexes {
+        for (point, block) in domain
+            .wal()
+            .iter_blocks(start.clone(), Some(target.clone()))?
+        {
+            if Some(point.slot()) <= state_slot || block.is_empty() {
+                continue;
+            }
+            let candidates = domain.archive().get_blocks_by_slot(&point.slot())?;
+            if candidates.is_empty() {
+                continue;
+            }
+            if !candidates
+                .iter()
+                .any(|candidate| candidate == block.as_ref())
+            {
+                return Err(DomainError::Internal(format!(
+                    "the archived block at {point} is not the same as the WAL block"
+                )));
+            }
+            archived.insert(point.slot());
+        }
+    }
+
     let logs = domain.wal().iter_logs(start, Some(target.clone()))?;
 
     let mut count = 0u64;
@@ -411,6 +448,8 @@ fn catch_up_state<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), Doma
             continue;
         }
 
+        D::Chain::prepare_replay(domain.state(), domain.genesis(), &log.block, &mut log.delta)?;
+        let catchup = D::Chain::compute_catchup(&log.block, &log.inputs, point.clone())?;
         let writer = domain.state().start_writer()?;
 
         // Forward mirror of the rollback loop in `sync.rs`: load each entity
@@ -419,12 +458,16 @@ fn catch_up_state<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), Doma
         crate::state::apply_delta_chunk::<D>(&mut entities, domain.state(), &mut log.delta)?;
         crate::state::save_entities::<D>(&writer, &entities)?;
 
-        let catchup = D::Chain::compute_catchup(&log.block, &log.inputs, point.clone())?;
-
         writer.apply_utxoset(&catchup.utxo_delta)?;
         writer.apply_utxo_tags(&catchup.utxo_index_delta)?;
 
         writer.set_cursor(point.clone())?;
+
+        if archived.contains(&point.slot()) {
+            let archive_writer = domain.archive().start_writer()?;
+            archive_writer.apply_index(&catchup.archive_index_deltas)?;
+            archive_writer.commit()?;
+        }
 
         // Commit per entry so a later block touching the same entity reloads
         // the value this block just wrote.
@@ -437,9 +480,10 @@ fn catch_up_state<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), Doma
         info!(count, "state caught up from WAL");
     }
 
-    // A WAL that claims a tip the state can't reach (e.g. entries wiped by
-    // `reset_to`) is unrecoverable — fail loudly instead of leaving a silent
-    // gap the upstream intersection would then skip past.
+    // The coverage check before the replay refuses a WAL that does not hold
+    // all the blocks (e.g. entries wiped by `reset_to`). If the replay still
+    // stops before the tip, fail loudly instead of leaving a silent gap the
+    // upstream intersection would then skip past.
     verify_caught_up(
         "state",
         domain.state().read_cursor()?,
