@@ -11,10 +11,25 @@ use dolos_core::Domain;
 use crate::{
     error::Error,
     mapping::pools::{build_pool_metadata_response, PoolMetadataResponse},
+    offchain::PoolMetadataLoad,
     Facade,
 };
 
-use super::{fetch_pool_metadata_with_error, parse_pool_id_bounded, read_pool_row};
+use super::{parse_pool_id_bounded, read_pool_row};
+
+async fn fetch_pool_metadata_with_error<C: dolos_core::CacheStore>(
+    cache: &C,
+    pool: &PoolState,
+) -> PoolMetadataLoad {
+    let Some(metadata) = pool
+        .snapshot
+        .live()
+        .and_then(|x| x.params.pool_metadata.as_ref())
+    else {
+        return (None, None);
+    };
+    crate::offchain::fetch_pool_metadata(cache, metadata).await
+}
 
 pub async fn by_id_metadata<D: Domain>(
     Path(id): Path<String>,
@@ -34,7 +49,7 @@ where
         .snapshot
         .live()
         .and_then(|x| x.params.pool_metadata.as_ref());
-    let (offchain, error) = fetch_pool_metadata_with_error(&pool).await;
+    let (offchain, error) = fetch_pool_metadata_with_error(domain.inner.cache(), &pool).await;
 
     Ok(Json(build_pool_metadata_response(
         hash, onchain, offchain, error,
@@ -46,7 +61,7 @@ mod tests {
     use super::*;
     use crate::{
         routes::pools::{
-            fetch_pool_offchain_metadata,
+            extended::page_pool_metadata,
             testing::{assert_status, invalid_pool_id, missing_pool_id, retiring_pool},
         },
         test_support::{TestApp, TestFault},
@@ -74,7 +89,10 @@ mod tests {
             hash: vec![2u8; 32].into(),
         });
 
-        let (metadata, error) = fetch_pool_metadata_with_error(&pool).await;
+        let app = TestApp::new();
+        let facade = app.facade();
+        let cache = facade.inner.cache();
+        let (metadata, error) = fetch_pool_metadata_with_error(cache, &pool).await;
 
         assert!(metadata.is_none());
         assert_eq!(
@@ -86,7 +104,9 @@ mod tests {
         );
         assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
 
-        assert!(fetch_pool_offchain_metadata(&pool).await.is_none());
+        let onchain = pool.snapshot.live().unwrap().params.pool_metadata.as_ref();
+        let (listed, _) = page_pool_metadata(cache, &[onchain]).await.remove(0);
+        assert!(listed.is_none());
         assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
     }
 

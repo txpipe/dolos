@@ -7,9 +7,7 @@ use std::{
 };
 
 use axum::http::StatusCode;
-use blockfrost_openapi::models::{
-    pool_list_retire_inner::PoolListRetireInner, DrepsInnerMetadataError,
-};
+use blockfrost_openapi::models::pool_list_retire_inner::PoolListRetireInner;
 use dolos_cardano::{
     final_rows::newest_final_row,
     indexes::CardanoArchiveIndexExt,
@@ -20,18 +18,12 @@ use dolos_core::{
     keys, ArchiveStore as _, BlockSlot, Domain, Entity as _, KeyRange, StateStore as _,
 };
 use itertools::Itertools;
-use pallas::{
-    crypto::hash::Hasher,
-    ledger::{primitives::StakeCredential, traverse::MultiEraBlock},
-};
+use pallas::ledger::{primitives::StakeCredential, traverse::MultiEraBlock};
 
 use crate::{
     error::Error,
     log_and_500,
-    mapping::{
-        bech32_pool, pool_offchain_body, pool_offchain_metadata,
-        pools::{hash_mismatch_error, pool_fetch_error, retire_list_model},
-    },
+    mapping::{bech32_pool, pools::retire_list_model},
     pagination::Pagination,
     scan::{EntityScan, ENTITY_CHUNK},
     Facade,
@@ -509,60 +501,6 @@ fn logged_pools<D: Domain>(domain: &D) -> Result<Vec<PoolState>, StatusCode> {
     }
 
     Ok(newest.into_values().collect())
-}
-
-async fn fetch_pool_offchain_metadata(
-    pool: &PoolState,
-) -> Option<crate::mapping::PoolOffchainMetadata> {
-    let metadata = pool
-        .snapshot
-        .live()
-        .and_then(|x| x.params.pool_metadata.as_ref());
-
-    match metadata {
-        Some(metadata) => {
-            pool_offchain_metadata(&metadata.url, Some(metadata.hash.as_slice())).await
-        }
-        None => None,
-    }
-}
-
-async fn fetch_pool_metadata_with_error(
-    pool: &PoolState,
-) -> (
-    Option<crate::mapping::PoolOffchainMetadata>,
-    Option<DrepsInnerMetadataError>,
-) {
-    let Some(metadata) = pool
-        .snapshot
-        .live()
-        .and_then(|x| x.params.pool_metadata.as_ref())
-    else {
-        return (None, None);
-    };
-
-    let body = match pool_offchain_body(&metadata.url).await {
-        Ok(body) => body,
-        Err(error) => return (None, pool_fetch_error(&metadata.url, error)),
-    };
-
-    let actual_hash = Hasher::<256>::hash(body.as_ref());
-
-    if actual_hash.as_ref() != metadata.hash.as_slice() {
-        return (
-            None,
-            Some(hash_mismatch_error(
-                &metadata.url,
-                metadata.hash.as_slice(),
-                actual_hash.as_ref(),
-            )),
-        );
-    }
-
-    match serde_json::from_slice(body.as_ref()) {
-        Ok(offchain) => (Some(offchain), None),
-        Err(_) => (None, None),
-    }
 }
 
 /// The listing order of `/pools` and `/pools/extended`: the slot of each

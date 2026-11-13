@@ -4,9 +4,9 @@
 
 use axum::http::StatusCode;
 use blockfrost_openapi::models::{
-    dreps_inner_metadata_error::Code, pool_delegators_inner::PoolDelegatorsInner,
-    pool_list_retire_inner::PoolListRetireInner, pool_votes_inner, DrepsInnerMetadataError,
-    PoolListExtendedInnerMetadata, PoolMetadata as PoolMetadataModel,
+    pool_delegators_inner::PoolDelegatorsInner, pool_list_retire_inner::PoolListRetireInner,
+    pool_votes_inner, DrepsInnerMetadataError, PoolListExtendedInnerMetadata,
+    PoolMetadata as PoolMetadataModel,
 };
 use dolos_cardano::{PoolEpochLog, PoolHash};
 use pallas::ledger::{
@@ -15,7 +15,9 @@ use pallas::ledger::{
 };
 use serde::Serialize;
 
-use super::{bech32_pool, IntoModel, OffchainFetchError, MAX_POOL_METADATA_BYTES};
+use crate::offchain::PoolMetadataLoad;
+
+use super::{bech32_pool, IntoModel};
 
 #[derive(Serialize)]
 #[serde(untagged)]
@@ -29,7 +31,7 @@ pub struct EmptyObject {}
 
 pub(crate) fn build_pool_extended_metadata(
     onchain: Option<&pallas::ledger::primitives::PoolMetadata>,
-    offchain: Option<crate::mapping::PoolOffchainMetadata>,
+    (offchain, error): PoolMetadataLoad,
 ) -> Option<Box<PoolListExtendedInnerMetadata>> {
     onchain.map(|onchain| {
         Box::new(match offchain {
@@ -45,6 +47,7 @@ pub(crate) fn build_pool_extended_metadata(
             None => PoolListExtendedInnerMetadata {
                 url: Some(onchain.url.clone()),
                 hash: Some(hex::encode(&*onchain.hash)),
+                error: error.map(Box::new),
                 ..Default::default()
             },
         })
@@ -74,61 +77,6 @@ pub(crate) fn build_pool_metadata_response(
         description: offchain.as_ref().map(|x| x.description.clone()),
         homepage: offchain.as_ref().map(|x| x.homepage.clone()),
     }))
-}
-
-pub(crate) fn hash_mismatch_error(
-    url: &str,
-    expected_hash: &[u8],
-    actual_hash: &[u8],
-) -> blockfrost_openapi::models::DrepsInnerMetadataError {
-    DrepsInnerMetadataError::new(
-        Code::HashMismatch,
-        format!(
-            "Hash mismatch when fetching metadata from {url}. Expected \"{}\" but got \"{}\".",
-            hex::encode(expected_hash),
-            hex::encode(actual_hash),
-        ),
-    )
-}
-
-pub(crate) fn http_response_error(url: &str, status: StatusCode) -> DrepsInnerMetadataError {
-    let reason = status.canonical_reason().unwrap_or("Unknown");
-
-    DrepsInnerMetadataError::new(
-        Code::HttpResponseError,
-        format!(
-            "Error Offchain Pool: HTTP Response error from {url} resulted in HTTP status code : {} \"{reason}\"",
-            status.as_u16(),
-        ),
-    )
-}
-
-pub(crate) fn connection_error(url: &str) -> DrepsInnerMetadataError {
-    DrepsInnerMetadataError::new(
-        Code::ConnectionError,
-        format!("Error Offchain Pool: Connection failure error when fetching metadata from {url}."),
-    )
-}
-
-pub(crate) fn size_error(url: &str) -> DrepsInnerMetadataError {
-    DrepsInnerMetadataError::new(
-        Code::SizeExceeded,
-        format!(
-            "Error Offchain Pool: Size error, fetching metadata from {url} exceeded {MAX_POOL_METADATA_BYTES} bytes."
-        ),
-    )
-}
-
-pub(crate) fn pool_fetch_error(
-    url: &str,
-    error: OffchainFetchError,
-) -> Option<DrepsInnerMetadataError> {
-    match error {
-        OffchainFetchError::Client | OffchainFetchError::Body => None,
-        OffchainFetchError::Connection => Some(connection_error(url)),
-        OffchainFetchError::HttpResponse(status) => Some(http_response_error(url, status)),
-        OffchainFetchError::SizeExceeded => Some(size_error(url)),
-    }
 }
 
 pub(crate) fn retire_list_model(
@@ -308,6 +256,12 @@ pub(crate) fn pool_vote_model(vote: &Vote) -> pool_votes_inner::Vote {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mapping::{
+        offchain_hash_mismatch_error as hash_mismatch_error,
+        pool_connection_error as connection_error, pool_fetch_error,
+        pool_http_response_error as http_response_error, OffchainFetchError,
+    };
+    use blockfrost_openapi::models::dreps_inner_metadata_error::Code;
     use pallas::ledger::primitives::PoolMetadata;
 
     #[test]
@@ -438,10 +392,17 @@ mod tests {
     }
 
     #[test]
-    fn pool_fetch_error_suppresses_client_and_body_errors() {
-        for error in [OffchainFetchError::Client, OffchainFetchError::Body] {
-            assert!(pool_fetch_error("https://example.com/pool.json", error).is_none());
-        }
+    fn pool_fetch_error_suppresses_client_errors() {
+        assert!(
+            pool_fetch_error("https://example.com/pool.json", OffchainFetchError::Client).is_none()
+        );
+    }
+
+    #[test]
+    fn pool_fetch_error_maps_body_errors_to_connection_errors() {
+        let error = pool_fetch_error("https://example.com/pool.json", OffchainFetchError::Body)
+            .expect("The body error is missing.");
+        assert_eq!(error, connection_error("https://example.com/pool.json"));
     }
 
     #[test]
