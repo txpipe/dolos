@@ -76,6 +76,9 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # A hung test otherwise holds the runner until GitHub's 6-hour job limit.
+    # Warm runs take 10 to 25 minutes; the margin covers a cold cache.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -114,6 +117,7 @@ jobs:
       || github.event_name == 'workflow_dispatch'
       || contains(github.event.pull_request.labels.*.name, 'ci:windows')
     runs-on: windows-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -137,6 +141,7 @@ jobs:
   all-features:
     name: Test (all features)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -172,6 +177,7 @@ jobs:
     name: E2E (sync)
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
