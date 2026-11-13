@@ -1040,3 +1040,118 @@ impl TestAppBuilder {
         TestApp::from_domain(domain, vectors, self.fault, minibf)
     }
 }
+
+/// The nesting depth that the conversion and route tests use. A route that
+/// serializes this depth with `serde_json` fails its test in a debug build.
+pub const NESTING: usize = 6_000;
+
+/// The nesting levels of [`nested_value`] in the tests that free bodies. The
+/// default `Drop` of `serde_json::Value` cannot free this depth on a test
+/// thread, so these tests fail if a body frees its values that way.
+pub const VALUE_LEVELS: usize = 100_000;
+
+/// A `serde_json::Value` of `levels` times `{"k":[..]}` around `0`.
+pub fn nested_value(levels: usize) -> serde_json::Value {
+    let mut value = serde_json::json!(0);
+    for _ in 0..levels {
+        value = serde_json::Value::Object(
+            [("k".to_string(), serde_json::Value::Array(vec![value]))]
+                .into_iter()
+                .collect(),
+        );
+    }
+    value
+}
+
+/// A metadatum of `depth` nodes on its longest path: arrays around an integer.
+pub fn nested_metadatum(depth: usize) -> pallas::ledger::primitives::Metadatum {
+    use pallas::ledger::primitives::Metadatum;
+
+    let mut node = Metadatum::Int(0.into());
+    for _ in 1..depth {
+        node = Metadatum::Array(vec![node]);
+    }
+    node
+}
+
+/// A Conway block with one tx. The tx holds `metadata` as its auxiliary data
+/// and mints `mint`.
+pub fn block_with_metadata(
+    slot: u64,
+    mint: Option<pallas::ledger::primitives::conway::Mint>,
+    metadata: Vec<(u64, pallas::ledger::primitives::Metadatum)>,
+) -> dolos_core::RawBlock {
+    use pallas::{
+        codec::utils::Set,
+        ledger::primitives::{alonzo::AuxiliaryData, conway::TransactionBody},
+    };
+
+    let body = TransactionBody {
+        inputs: Set::from(vec![]),
+        outputs: vec![],
+        fee: 0,
+        ttl: None,
+        certificates: None,
+        withdrawals: None,
+        auxiliary_data_hash: None,
+        validity_interval_start: None,
+        mint,
+        script_data_hash: None,
+        collateral: None,
+        required_signers: None,
+        network_id: None,
+        collateral_return: None,
+        total_collateral: None,
+        reference_inputs: None,
+        voting_procedures: None,
+        proposal_procedures: None,
+        treasury_value: None,
+        donation: None,
+    };
+
+    let aux = AuxiliaryData::Shelley(metadata.into_iter().collect());
+    let (_, raw) = dolos_testing::blocks::make_conway_block_with_txs_at(
+        slot,
+        slot,
+        None,
+        vec![(body, true)],
+        Some(aux),
+    );
+
+    raw
+}
+
+/// A metadatum with every variant, structured and duplicate keys, an integer
+/// outside the `i64` range, and bytes that are not UTF-8.
+pub fn mixed_metadatum() -> pallas::ledger::primitives::Metadatum {
+    use pallas::{codec::utils::KeyValuePairs, ledger::primitives::Metadatum};
+
+    let int = |x: i64| Metadatum::Int(x.into());
+    let text = |x: &str| Metadatum::Text(x.to_string());
+    let bytes = |x: &[u8]| Metadatum::Bytes(x.to_vec().into());
+    let map = |kvs: Vec<(Metadatum, Metadatum)>| Metadatum::Map(KeyValuePairs::Def(kvs));
+    let huge = Metadatum::Int(pallas::codec::utils::Int(
+        pallas::codec::minicbor::data::Int::try_from(-(1i128 << 64)).unwrap(),
+    ));
+
+    map(vec![
+        (text("b"), text("first")),
+        (
+            text("a"),
+            Metadatum::Array(vec![int(1), text("x"), bytes(b"ok")]),
+        ),
+        (
+            int(7),
+            map(vec![
+                (text("z"), int(-3)),
+                (text("y"), Metadatum::Array(vec![])),
+            ]),
+        ),
+        (bytes(&[0xff, 0x00]), bytes(&[0xff, 0x00])),
+        (bytes(b"name"), huge.clone()),
+        (huge, text("huge key")),
+        (Metadatum::Array(vec![int(1)]), text("array key")),
+        (map(vec![]), text("map key")),
+        (text("b"), text("second")),
+    ])
+}

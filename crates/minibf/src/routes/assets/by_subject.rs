@@ -1,20 +1,20 @@
-use axum::{
-    extract::{Path, State},
-    Json,
-};
+use axum::extract::{Path, State};
 use dolos_cardano::periods::assets::WalkBudget;
 use dolos_core::Domain;
 
 use crate::{
     error::Error,
-    mapping::{assets::load_asset_builder, sorted_json},
+    mapping::{
+        assets::{asset_json, load_asset_builder},
+        direct_json::DirectJson,
+    },
     Facade,
 };
 
 pub async fn by_subject<D>(
     Path(unit): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<serde_json::Value>, Error>
+) -> Result<DirectJson, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
@@ -22,7 +22,9 @@ where
     let model = load_asset_builder(&domain, unit, &budget).await?;
 
     // `onchain_metadata` is a `HashMap`: its key order changes per instance
-    Ok(sorted_json(model.into_model(&domain).await?)?)
+    Ok(DirectJson::encode(&asset_json(
+        model.into_model(&domain).await?,
+    )?))
 }
 
 #[cfg(test)]
@@ -255,6 +257,59 @@ mod tests {
             r#""website":"4c68747470733a2f2f70616972"}"#,
         );
         assert!(metadata.starts_with(expected_metadata), "{body}");
+    }
+
+    /// The route renders a nested CIP-25 property in full.
+    #[tokio::test]
+    async fn assets_by_subject_renders_nested_cip25_metadata() {
+        use crate::test_support::{block_with_metadata, nested_metadatum, NESTING};
+        use dolos_core::{import::ImportExt as _, Domain as _, StateStore as _};
+        use pallas::{
+            codec::utils::{Bytes, KeyValuePairs, NonZeroInt},
+            ledger::primitives::Metadatum,
+        };
+        use std::collections::BTreeMap;
+
+        let policy = [0x5b; 28];
+        let text = |x: &str| Metadatum::Text(x.to_string());
+        let map = |kvs: Vec<(Metadatum, Metadatum)>| Metadatum::Map(KeyValuePairs::Def(kvs));
+
+        let properties = map(vec![
+            (text("name"), text("Nest")),
+            (text("nested"), nested_metadatum(NESTING)),
+        ]);
+        let metadata = map(vec![(
+            text(&hex::encode(policy)),
+            map(vec![(text("nest"), properties)]),
+        )]);
+        let mint = BTreeMap::from([(
+            policy.into(),
+            BTreeMap::from([(
+                Bytes::from(b"nest".to_vec()),
+                NonZeroInt::try_from(1).unwrap(),
+            )]),
+        )]);
+
+        let app = TestApp::new_with_cfg_and_setup(Default::default(), |domain, _| {
+            let tip = domain.state().read_cursor().unwrap().unwrap().slot();
+            domain
+                .import_blocks(vec![block_with_metadata(
+                    tip + 1,
+                    Some(mint),
+                    vec![(721, metadata)],
+                )])
+                .unwrap();
+        });
+
+        let path = format!("/assets/{}{}", hex::encode(policy), hex::encode("nest"));
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let arrays = NESTING - 1;
+        let nested = format!(r#""nested":{}0{}"#, "[".repeat(arrays), "]".repeat(arrays));
+        let body = String::from_utf8(bytes).unwrap();
+        assert!(body.contains(r#""onchain_metadata":{"name":"Nest","#));
+        assert!(body.contains(&nested));
     }
 
     #[tokio::test]

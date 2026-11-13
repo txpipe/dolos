@@ -1,10 +1,9 @@
 use axum::{http::StatusCode, Json};
-use itertools::Itertools;
 use num_bigint::BigInt;
 use num_rational::BigRational;
 use num_traits::ToPrimitive;
 use pallas::{
-    codec::minicbor,
+    codec::{minicbor, tree::fold_tree},
     crypto::hash::{Hash, Hasher},
     ledger::{
         addresses::{Address, Network, StakeAddress, StakePayload},
@@ -1999,53 +1998,53 @@ impl<'a> IntoModel<AssetUtxoContentInner> for UtxoOutputModelBuilder<'a> {
     }
 }
 
-impl IntoModel<String> for alonzo::Metadatum {
-    type SortKey = ();
+/// Converts a metadatum to JSON.
+pub fn metadatum_to_json(metadatum: &alonzo::Metadatum) -> serde_json::Value {
+    fold_tree(
+        metadatum,
+        |node, children: Vec<serde_json::Value>| match node {
+            alonzo::Metadatum::Int(x) => serde_json::Number::from_i128(i128::from(*x))
+                .map(serde_json::Value::Number)
+                .unwrap_or_else(|| serde_json::Value::String(x.to_string())),
+            alonzo::Metadatum::Text(x) => serde_json::Value::String(x.clone()),
+            alonzo::Metadatum::Bytes(x) => {
+                serde_json::Value::String(format!("0x{}", hex::encode(x.as_slice())))
+            }
+            alonzo::Metadatum::Array(_) => serde_json::Value::Array(children),
+            alonzo::Metadatum::Map(_) => {
+                let mut fields = serde_json::Map::new();
+                let mut children = children.into_iter();
 
-    fn into_model(self) -> Result<String, StatusCode> {
-        let out = match self {
-            alonzo::Metadatum::Int(x) => x.to_string(),
-            alonzo::Metadatum::Bytes(x) => format!("0x{}", hex::encode(x.as_slice())),
-            alonzo::Metadatum::Text(x) => x.to_string(),
-            alonzo::Metadatum::Array(_) => "array".to_string(),
-            alonzo::Metadatum::Map(_) => "map".to_string(),
-        };
+                // children alternate key and value
+                while let (Some(key), Some(value)) = (children.next(), children.next()) {
+                    let key = match key {
+                        serde_json::Value::String(key) => key,
+                        serde_json::Value::Number(key) => key.to_string(),
+                        // a structured key becomes the word `array` or `map`
+                        other => {
+                            let word = if other.is_array() { "array" } else { "map" };
+                            direct_json::drop_value(other);
+                            word.to_string()
+                        }
+                    };
 
-        Ok(out)
-    }
+                    // a repeated key keeps its last value
+                    if let Some(replaced) = fields.insert(key, value) {
+                        direct_json::drop_value(replaced);
+                    }
+                }
+
+                serde_json::Value::Object(fields)
+            }
+        },
+    )
 }
 
 impl IntoModel<serde_json::Value> for alonzo::Metadatum {
     type SortKey = ();
 
     fn into_model(self) -> Result<serde_json::Value, StatusCode> {
-        let out = match self {
-            alonzo::Metadatum::Int(x) => serde_json::Number::from_i128(x.into())
-                .map(serde_json::Value::Number)
-                .unwrap_or(serde_json::Value::String(x.to_string())),
-            alonzo::Metadatum::Text(x) => serde_json::Value::String(x.to_string()),
-            alonzo::Metadatum::Bytes(x) => {
-                let hex_str = format!("0x{}", hex::encode(x.as_slice()));
-
-                serde_json::Value::String(hex_str)
-            }
-            alonzo::Metadatum::Array(x) => {
-                let items: Vec<_> = x.into_iter().map(|x| x.into_model()).try_collect()?;
-
-                serde_json::Value::Array(items)
-            }
-            alonzo::Metadatum::Map(x) => {
-                let items: serde_json::Map<String, serde_json::Value> = x
-                    .iter()
-                    .map(|(k, v)| Ok((k.clone().into_model()?, v.clone().into_model()?)))
-                    .try_collect()
-                    .map_err(|_: StatusCode| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-                serde_json::Value::Object(items)
-            }
-        };
-
-        Ok(out)
+        Ok(metadatum_to_json(&self))
     }
 }
 
@@ -2267,6 +2266,41 @@ impl IntoModel<HashMap<String, serde_json::Value>> for PlutusDataWrapper {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{mixed_metadatum, nested_metadatum};
+
+    /// The JSON of a metadatum with every variant, structured and duplicate
+    /// keys, and an integer outside the `i64` range.
+    #[test]
+    fn metadatum_json_keeps_its_output() {
+        let json: serde_json::Value = mixed_metadatum().into_model().unwrap();
+
+        assert_eq!(
+            serde_json::to_string(&json).unwrap(),
+            r#"{"-18446744073709551616":"huge key","0x6e616d65":"-18446744073709551616","0xff00":"0xff00","7":{"y":[],"z":-3},"a":[1,"x","0x6f6b"],"array":"array key","b":"second","map":"map key"}"#
+        );
+    }
+
+    /// The converter frees what it does not keep: the JSON of a structured key
+    /// and the value that a repeated key replaces. Both hold many nesting
+    /// levels here.
+    #[test]
+    fn metadatum_json_frees_the_parts_it_drops() {
+        use pallas::codec::utils::KeyValuePairs;
+
+        let text = |x: &str| alonzo::Metadatum::Text(x.to_string());
+        let int = |x: i64| alonzo::Metadatum::Int(x.into());
+        let metadatum = alonzo::Metadatum::Map(KeyValuePairs::Def(vec![
+            (nested_metadatum(100_000), int(1)),
+            (text("a"), nested_metadatum(100_000)),
+            (text("a"), int(2)),
+        ]));
+
+        let json = metadatum_to_json(&metadatum);
+        assert_eq!(json, serde_json::json!({"array": 1, "a": 2}));
+
+        // pallas frees the metadatum itself, which is outside this test
+        std::mem::forget(metadatum);
+    }
 
     #[test]
     fn redeemer_fee_charges_ceiled_price() {

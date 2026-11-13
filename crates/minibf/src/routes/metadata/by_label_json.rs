@@ -4,12 +4,16 @@
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    Json,
 };
 use blockfrost_openapi::models::tx_metadata_label_json_inner::TxMetadataLabelJsonInner;
 use dolos_core::Domain;
 
-use crate::{error::Error, mapping::IntoModel, pagination::PaginationParameters, Facade};
+use crate::{
+    error::Error,
+    mapping::{direct_json::DirectJson, metadata::MetadataLabelJsonBody, IntoModel},
+    pagination::PaginationParameters,
+    Facade,
+};
 
 use super::label_history;
 
@@ -18,7 +22,7 @@ pub async fn by_label_json<D>(
     Path(label): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<TxMetadataLabelJsonInner>>, Error>
+) -> Result<DirectJson, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
@@ -29,7 +33,7 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     }
 
-    Ok(Json(model))
+    Ok(DirectJson::encode(&MetadataLabelJsonBody(model)))
 }
 
 #[cfg(test)]
@@ -152,5 +156,68 @@ mod tests {
         let label = app.vectors().metadata_label.as_str();
         let path = format!("/metadata/txs/labels/{label}");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    /// The body has the bytes that `serde_json` encodes for the entries,
+    /// with the fields in the order of the Blockfrost model.
+    #[test]
+    fn metadata_label_json_body_matches_serde() {
+        use crate::{mapping::direct_json::WriteJson, test_support::mixed_metadatum};
+
+        let items = vec![
+            TxMetadataLabelJsonInner {
+                tx_hash: "aa".repeat(32),
+                json_metadata: Some(mixed_metadatum().into_model().unwrap()),
+            },
+            TxMetadataLabelJsonInner {
+                tx_hash: "bb".repeat(32),
+                json_metadata: None,
+            },
+            TxMetadataLabelJsonInner {
+                tx_hash: "cc".repeat(32),
+                json_metadata: Some(serde_json::Value::String("q\"uote".to_string())),
+            },
+        ];
+
+        assert_eq!(
+            MetadataLabelJsonBody(items.clone()).to_json_vec(),
+            serde_json::to_vec(&items).unwrap()
+        );
+    }
+
+    /// The route renders nested metadata in full.
+    #[tokio::test]
+    async fn metadata_label_json_renders_nested_metadata() {
+        use crate::test_support::{nested_metadatum, NESTING};
+        use dolos_testing::synthetic::SyntheticBlockConfig;
+
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            metadata_entries: vec![(1, nested_metadatum(NESTING))],
+            ..Default::default()
+        });
+        let (status, bytes) = app.get_bytes("/metadata/txs/labels/1?count=1").await;
+
+        assert_eq!(status, StatusCode::OK);
+
+        let arrays = NESTING - 1;
+        let body = String::from_utf8(bytes).unwrap();
+        let tail = format!(
+            r#"","json_metadata":{}0{}}}]"#,
+            "[".repeat(arrays),
+            "]".repeat(arrays)
+        );
+        assert!(body.starts_with(r#"[{"tx_hash":""#));
+        assert!(body.ends_with(&tail));
+    }
+
+    /// A body that does not reach a response frees its metadata in full.
+    #[test]
+    fn metadata_label_json_body_frees_nested_metadata() {
+        use crate::test_support::{nested_value, VALUE_LEVELS};
+
+        drop(MetadataLabelJsonBody(vec![TxMetadataLabelJsonInner {
+            tx_hash: String::new(),
+            json_metadata: Some(nested_value(VALUE_LEVELS)),
+        }]));
     }
 }
