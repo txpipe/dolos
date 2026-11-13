@@ -1,13 +1,14 @@
 use axum::http::StatusCode;
 use blockfrost_openapi::models::block_content::BlockContent;
 use dolos_cardano::ChainSummary;
-use dolos_core::{ArchiveStore as _, BlockBody, Domain};
+use dolos_core::{ArchiveStore, BlockBody, Domain};
 use itertools::Either;
+use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraBlock};
 
 use crate::{
     error::Error,
     mapping::IntoModel,
-    pagination::{Order, Pagination},
+    pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
 
@@ -54,6 +55,11 @@ fn parse_hash_or_number(hash_or_number: &str) -> Result<HashOrNumber, Error> {
     } else {
         let hash = hex::decode(hash_or_number).map_err(|_| Error::InvalidBlockHash)?;
 
+        // a hex string of any other length is malformed, not a missing block
+        if hash.len() != 32 {
+            return Err(Error::InvalidBlockHash);
+        }
+
         Ok(Either::Left(hash))
     }
 }
@@ -83,14 +89,188 @@ where
                 return Err(Error::InvalidBlockNumber);
             }
 
-            Ok(domain
-                .query()
-                .block_by_number(*number)
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            Ok(main_block_by_number(domain, *number)
+                .await?
                 .ok_or(StatusCode::NOT_FOUND)?)
         }
     }
+}
+
+/// Whether `body` is a Byron epoch-boundary block, which db-sync gives no
+/// number and no slot, so Blockfrost reaches it by hash only.
+fn is_boundary_block(body: &[u8]) -> Result<bool, StatusCode> {
+    let block = MultiEraBlock::decode(body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(matches!(block, MultiEraBlock::EpochBoundary(_)))
+}
+
+/// The main block numbered `number`.
+///
+/// A boundary block reports the number of the main block before it and the
+/// index files it under no number, so the slot the index answers with holds
+/// the block that owns the number; a boundary block sharing that slot carries
+/// another number.
+async fn main_block_by_number<D>(
+    domain: &Facade<D>,
+    number: u64,
+) -> Result<Option<BlockBody>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let Some(slot) = domain
+        .query()
+        .slot_by_number(number)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    else {
+        return Ok(None);
+    };
+
+    let candidates = domain
+        .archive()
+        .get_blocks_by_slot(&slot)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    for body in candidates {
+        let block = MultiEraBlock::decode(&body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        if block.number() == number && !matches!(block, MultiEraBlock::EpochBoundary(_)) {
+            return Ok(Some(body));
+        }
+    }
+
+    Ok(None)
+}
+
+/// The main block at `slot`, which a boundary block can share.
+fn main_block_at_slot<D: Domain>(
+    domain: &Facade<D>,
+    slot: u64,
+) -> Result<Option<BlockBody>, StatusCode> {
+    let candidates = domain
+        .archive()
+        .get_blocks_by_slot(&slot)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    for body in candidates {
+        if !is_boundary_block(&body)? {
+            return Ok(Some(body));
+        }
+    }
+
+    Ok(None)
+}
+
+type ArchiveBlocks<'a, D> = <<D as Domain>::Archive as ArchiveStore>::BlockIter<'a>;
+
+fn block_hash(body: &[u8]) -> Result<Hash<32>, StatusCode> {
+    let block = MultiEraBlock::decode(body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(block.hash())
+}
+
+/// The archive's blocks after `block`, in chain order. A boundary block shares
+/// its slot with the main block after it, so the walk starts at the slot and
+/// steps over everything up to the block itself, and no further: a block the
+/// archive no longer holds at its slot, pruned or rolled back since it was
+/// read, is not found rather than searched for across the rest of the chain.
+fn blocks_after<'a, D: Domain>(
+    domain: &Facade<D>,
+    block: &MultiEraBlock,
+) -> Result<ArchiveBlocks<'a, D>, StatusCode> {
+    let mut iter = domain
+        .archive()
+        .get_range(Some(block.slot()), None)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+
+    let hash = block.hash();
+    let mut found = false;
+
+    for (slot, body) in iter.by_ref() {
+        if slot != block.slot() {
+            break;
+        }
+
+        if block_hash(&body)? == hash {
+            found = true;
+            break;
+        }
+    }
+
+    found.then_some(iter).ok_or(StatusCode::NOT_FOUND)
+}
+
+/// The archive's blocks before `block`, in chain order, to be walked from the
+/// back. Bounded to the block's slot like [`blocks_after`].
+fn blocks_before<'a, D: Domain>(
+    domain: &Facade<D>,
+    block: &MultiEraBlock,
+) -> Result<ArchiveBlocks<'a, D>, StatusCode> {
+    let mut iter = domain
+        .archive()
+        .get_range(None, Some(block.slot() + 1))
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+
+    let hash = block.hash();
+    let mut found = false;
+
+    while let Some((slot, body)) = iter.next_back() {
+        if slot != block.slot() {
+            break;
+        }
+
+        if block_hash(&body)? == hash {
+            found = true;
+            break;
+        }
+    }
+
+    found.then_some(iter).ok_or(StatusCode::NOT_FOUND)
+}
+
+/// An upper bound on the archive's blocks after `block`, or on all of them
+/// for `None`: the heights up to the tip, plus one boundary block per epoch,
+/// which carries no height of its own. A page offset past it is empty, so
+/// the walk never pays for an impossible page.
+fn blocks_after_bound(
+    block: Option<&MultiEraBlock>,
+    tip: &MultiEraBlock,
+    chain: &ChainSummary,
+) -> usize {
+    let (tip_epoch, _) = chain.slot_epoch(tip.slot());
+
+    let bound = match block {
+        Some(block) => {
+            let (epoch, _) = chain.slot_epoch(block.slot());
+
+            tip.number().saturating_sub(block.number()) + tip_epoch.saturating_sub(epoch) + 1
+        }
+        None => tip.number() + tip_epoch + 2,
+    };
+
+    usize::try_from(bound).unwrap_or(usize::MAX)
+}
+
+/// An upper bound on the archive's blocks before `block`: its height, plus
+/// one boundary block per epoch up to its own. See [`blocks_after_bound`].
+fn blocks_before_bound(block: &MultiEraBlock, chain: &ChainSummary) -> usize {
+    let (epoch, _) = chain.slot_epoch(block.slot());
+
+    usize::try_from(block.number() + epoch + 1).unwrap_or(usize::MAX)
+}
+
+/// The pagination of `/next` and `/previous`: Blockfrost reads `count` and
+/// `page` there and ignores `order`, `from` and `to`, however malformed.
+fn count_and_page(params: PaginationParameters) -> Result<Pagination, Error> {
+    let params = PaginationParameters {
+        count: params.count,
+        page: params.page,
+        order: None,
+        from: None,
+        to: None,
+    };
+
+    Ok(Pagination::try_from(params)?)
 }
 
 fn tip_block<D: Domain>(domain: &Facade<D>) -> Result<BlockBody, StatusCode> {
@@ -105,14 +285,15 @@ fn tip_block<D: Domain>(domain: &Facade<D>) -> Result<BlockBody, StatusCode> {
 
 async fn build_block_model<D>(
     domain: &Facade<D>,
-    block: &BlockBody,
+    body: &BlockBody,
     tip: &BlockBody,
     chain: &ChainSummary,
 ) -> Result<BlockContent, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let mut builder = BlockModelBuilder::new(block)?;
+    let block = MultiEraBlock::decode(body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut builder = BlockModelBuilder::new(body)?;
 
     let previous_hash = builder.previous_hash();
 
@@ -130,11 +311,8 @@ where
         builder = builder.with_previous(previous)?;
     }
 
-    let maybe_next = domain
-        .query()
-        .block_by_number(builder.next_number())
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // the last block of a Byron epoch is followed by a boundary block
+    let maybe_next = blocks_after(domain, &block)?.next().map(|(_, body)| body);
 
     if let Some(next) = maybe_next.as_ref() {
         builder = builder.with_next(next)?;
@@ -142,22 +320,12 @@ where
 
     builder = builder.with_tip(tip)?;
 
-    builder = builder.with_chain(chain);
+    builder = builder
+        .with_chain(chain)
+        .with_genesis_delegates(&domain.genesis());
 
-    builder.into_model()
-}
-
-async fn single_block_content<D>(
-    domain: &Facade<D>,
-    block: &BlockBody,
-    tip: &BlockBody,
-    chain: &ChainSummary,
-) -> Result<BlockContent, StatusCode>
-where
-    D: Domain + Clone + Send + Sync + 'static,
-{
-    let mut model = build_block_model(domain, block, tip, chain).await?;
-    genesis::set_genesis_previous_block(domain, &mut model);
+    let mut model = builder.into_model()?;
+    genesis::set_genesis_previous_block(domain, &block, &mut model)?;
 
     Ok(model)
 }
@@ -169,22 +337,43 @@ where
 {
     let txs: Vec<T> = BlockModelBuilder::new(block)?.into_model()?;
 
-    let txs = match pagination.order {
-        Order::Asc => txs,
-        Order::Desc => txs.into_iter().rev().collect(),
+    Ok(paged(txs, pagination))
+}
+
+fn paged<T>(items: Vec<T>, pagination: &Pagination) -> Vec<T> {
+    let items = match pagination.order {
+        Order::Asc => items,
+        Order::Desc => items.into_iter().rev().collect(),
     };
 
-    Ok(txs
+    items
         .into_iter()
         .skip(pagination.skip())
         .take(pagination.count)
-        .collect())
+        .collect()
+}
+
+/// Whether the request names the genesis block, which the archive does not
+/// hold.
+fn names_genesis<D: Domain>(
+    domain: &Facade<D>,
+    hash_or_number: &HashOrNumber,
+) -> Result<bool, Error> {
+    match hash_or_number {
+        Either::Left(hash) => genesis::is_genesis_hash(domain, hash).map_err(Error::Code),
+        Either::Right(_) => Ok(false),
+    }
 }
 
 #[cfg(test)]
 mod testing {
+    use std::{collections::BTreeMap, str::FromStr as _, sync::Arc};
+
     use axum::http::StatusCode;
     use blockfrost_openapi::models::block_content::BlockContent;
+    use dolos_core::RawBlock;
+    use dolos_testing::blocks::make_byron_ebb_with_difficulty;
+    use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraBlock};
 
     use crate::test_support::TestApp;
 
@@ -221,7 +410,176 @@ mod testing {
         serde_json::from_slice(&bytes).expect("failed to parse blocks")
     }
 
+    /// Asserts Blockfrost's JSON error body for `path`.
+    pub async fn assert_error(app: &TestApp, path: &str, status: StatusCode, message: &str) {
+        let (actual, bytes) = app.get_bytes(path).await;
+        let body: serde_json::Value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| panic!("no json body for {path}: {bytes:?}"));
+
+        assert_eq!(actual, status, "{path}");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "status_code": status.as_u16(),
+                "error": status.canonical_reason(),
+                "message": message,
+            }),
+            "{path}"
+        );
+    }
+
+    pub const NOT_FOUND: &str = "The requested component has not been found.";
+    pub const SLOT_NOT_INTEGER: &str = "params/slot_number must be integer";
+    pub const BAD_SLOT: &str = "Missing, out of range or malformed slot_number.";
+
+    pub async fn get_block(app: &TestApp, path: &str) -> BlockContent {
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        serde_json::from_slice(&bytes).expect("failed to parse block")
+    }
+
     pub fn hashes(blocks: &[BlockContent]) -> Vec<&str> {
         blocks.iter().map(|b| b.hash.as_str()).collect()
+    }
+
+    /// A mainnet Byron main block from `testdata/`.
+    pub fn mainnet_byron_block(slot: u64) -> RawBlock {
+        include_str!("../../../testdata/mainnet-byron-blocks.txt")
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .find_map(|line| {
+                let (at, cbor) = line.split_once(' ')?;
+                (at.parse::<u64>().ok()? == slot).then(|| hex::decode(cbor).expect("hex vector"))
+            })
+            .map(Arc::new)
+            .expect("no vector for slot")
+    }
+
+    pub struct ArchivedBlock {
+        pub hash: String,
+        pub number: u64,
+    }
+
+    impl ArchivedBlock {
+        fn new(raw: &RawBlock) -> Self {
+            let block = MultiEraBlock::decode(raw).expect("vector decodes");
+
+            Self {
+                hash: block.hash().to_string(),
+                number: block.number(),
+            }
+        }
+    }
+
+    pub struct ByronChain {
+        pub app: TestApp,
+        pub ebb_0: ArchivedBlock,
+        pub ebb_1: ArchivedBlock,
+        /// Main blocks by slot.
+        pub main: BTreeMap<u64, ArchivedBlock>,
+    }
+
+    /// Mainnet's opening and its first epoch boundary: boundary block 0, the
+    /// main blocks at slots 0 and 1, the last two blocks of epoch 0, boundary
+    /// block 1 and the first two blocks of epoch 1. A boundary block shares its
+    /// slot with the main block after it, so two blocks sit at slots 0 and
+    /// 21600. Without `slot_0` the main block at slot 0 is left out and
+    /// boundary block 0 has its slot to itself, as on preprod.
+    ///
+    /// The boundary blocks are built rather than read from mainnet (each
+    /// carries a ~648 KB stakeholder list), each with the difficulty, and so
+    /// the number, of the block before it like the real ones.
+    pub fn mainnet_byron_chain(slot_0: bool) -> ByronChain {
+        byron_chain(slot_0, 0)
+    }
+
+    /// [`mainnet_byron_chain`] with the blocks before `first_slot` pruned, as
+    /// `sync.max_history` leaves an archive: the chain still names them, the
+    /// archive no longer holds them.
+    pub fn pruned_mainnet_byron_chain(first_slot: u64) -> ByronChain {
+        byron_chain(true, first_slot)
+    }
+
+    fn byron_chain(slot_0: bool, first_slot: u64) -> ByronChain {
+        let genesis_hash = Hash::<32>::from_str(crate::hacks::GENESIS_HASH_MAINNET).unwrap();
+        let (_, ebb_0) = make_byron_ebb_with_difficulty(0, genesis_hash, 0);
+
+        let slots = if slot_0 {
+            vec![0, 1, 21598, 21599]
+        } else {
+            vec![1, 21598, 21599]
+        };
+        let opening: Vec<_> = slots.into_iter().map(mainnet_byron_block).collect();
+
+        let last = MultiEraBlock::decode(opening.last().unwrap()).unwrap();
+        let (_, ebb_1) = make_byron_ebb_with_difficulty(1, last.hash(), last.number());
+
+        let mut blocks = vec![ebb_0.clone()];
+        blocks.extend(opening);
+        blocks.push(ebb_1.clone());
+        blocks.extend([21600, 21601].map(mainnet_byron_block));
+
+        let main = blocks
+            .iter()
+            .filter(|raw| !Arc::ptr_eq(raw, &ebb_0) && !Arc::ptr_eq(raw, &ebb_1))
+            .map(|raw| {
+                let slot = MultiEraBlock::decode(raw).unwrap().slot();
+                (slot, ArchivedBlock::new(raw))
+            })
+            .collect();
+
+        let archived: Vec<_> = blocks
+            .iter()
+            .filter(|raw| MultiEraBlock::decode(raw).unwrap().slot() >= first_slot)
+            .cloned()
+            .collect();
+
+        ByronChain {
+            app: TestApp::new_with_archived_blocks(
+                dolos_cardano::include::mainnet::load(),
+                &archived,
+            ),
+            ebb_0: ArchivedBlock::new(&ebb_0),
+            ebb_1: ArchivedBlock::new(&ebb_1),
+            main,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{testing::*, *};
+
+    /// A block the archive no longer holds, as after a prune or a rollback
+    /// since the request read it, is refused at its slot, not searched for
+    /// across the rest of the chain.
+    #[tokio::test]
+    async fn walks_refuse_a_block_the_archive_lost() {
+        let chain = pruned_mainnet_byron_chain(21600);
+        let facade = chain.app.facade();
+
+        let pruned = mainnet_byron_block(1);
+        let pruned = MultiEraBlock::decode(&pruned).unwrap();
+
+        assert!(matches!(
+            blocks_after(&facade, &pruned),
+            Err(StatusCode::NOT_FOUND)
+        ));
+        assert!(matches!(
+            blocks_before(&facade, &pruned),
+            Err(StatusCode::NOT_FOUND)
+        ));
+
+        let held = mainnet_byron_block(21601);
+        let held = MultiEraBlock::decode(&held).unwrap();
+
+        assert!(blocks_after(&facade, &held).is_ok());
+        assert!(blocks_before(&facade, &held).is_ok());
     }
 }
