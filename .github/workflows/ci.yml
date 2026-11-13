@@ -77,7 +77,7 @@ jobs:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     # A hung test otherwise holds the runner until GitHub's 6-hour job limit.
-    # Warm runs take 10 to 25 minutes; the margin covers a cold cache.
+    # Warm runs take 10 to 20 minutes; the margin covers a cold cache.
     timeout-minutes: 60
     strategy:
       fail-fast: false
