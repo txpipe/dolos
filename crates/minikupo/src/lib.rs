@@ -1,6 +1,6 @@
 use axum::{
     extract::Request,
-    http::StatusCode,
+    http::{header, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router, ServiceExt,
@@ -9,11 +9,15 @@ use dolos_cardano::indexes::{AsyncCardanoQueryExt, ScriptLanguage as CardanoLang
 use dolos_core::{config::MinikupoConfig, AsyncQueryFacade, CancelToken, Domain, ServeError};
 use pallas::{codec::minicbor, crypto::hash::Hash};
 use std::ops::Deref;
-use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer, trace};
+use tower_http::{
+    cors::CorsLayer, normalize_path::NormalizePathLayer, timeout::TimeoutLayer, trace,
+};
 use tracing::Level;
 
 use crate::types::BadRequest;
 
+#[cfg(test)]
+mod heavy_scan_tests;
 pub mod patterns;
 mod routes;
 #[cfg(test)]
@@ -112,10 +116,16 @@ where
     D: Domain + Clone + Send + Sync + 'static,
 {
     let permissive_cors = facade.config.permissive_cors();
+    let request_timeout = facade.config.request_timeout();
     let app = Router::new()
         .merge(api_router::<D>())
         .nest("/v1", api_router::<D>())
         .with_state(facade)
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::GATEWAY_TIMEOUT,
+            request_timeout,
+        ))
+        .layer(axum::middleware::map_response(timeout_body))
         .layer(
             trace::TraceLayer::new_for_http()
                 .make_span_with(|request: &Request<_>| {
@@ -183,6 +193,36 @@ where
 
         Ok(())
     }
+}
+
+/// Gives the deadline's bodiless 504 a `hint`, as Kupo's errors carry.
+async fn timeout_body(response: Response) -> Response {
+    let bodiless = response.status() == StatusCode::GATEWAY_TIMEOUT
+        && !response.headers().contains_key(header::CONTENT_TYPE);
+
+    if !bodiless {
+        return response;
+    }
+
+    (
+        StatusCode::GATEWAY_TIMEOUT,
+        Json(BadRequest {
+            hint: Some("The request took longer than this node's deadline.".into()),
+        }),
+    )
+        .into_response()
+}
+
+/// Every heavy-scan slot stayed taken for the whole admission queue.
+pub(crate) fn heavy_scan_limit() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, "1")],
+        Json(BadRequest {
+            hint: Some("The node is serving its limit of heavy requests. Retry later.".into()),
+        }),
+    )
+        .into_response()
 }
 
 pub(crate) fn bad_request(hint: impl Into<String>) -> Response {
