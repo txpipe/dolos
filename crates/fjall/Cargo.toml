@@ -6,7 +6,7 @@ edition.workspace = true
 [dependencies]
 dolos-core = { path = "../core" }
 dolos-flatfiles = { path = "../flatfiles" }
-fjall = "=3.1.13"
+fjall = { git = "https://github.com/txpipe/fjall", rev = "ae794ad448d90214c3491df4c50f59f0fe15cf90" }
 smallvec = { version = "1.15.0", features = ["const_generics", "union"] }
 tracing.workspace = true
 thiserror.workspace = true
