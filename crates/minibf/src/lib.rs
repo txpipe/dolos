@@ -45,6 +45,7 @@ mod routes;
 pub(crate) mod scan;
 #[cfg(test)]
 mod test_support;
+pub(crate) mod utxos;
 
 /// Registers the `/network` namespace, as the router does, for tools that
 /// work on the cache without serving.

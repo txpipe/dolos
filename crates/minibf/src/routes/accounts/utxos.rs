@@ -29,7 +29,7 @@ where
 
     let tag = Tag::new(utxo_dimensions::STAKE, account_key.address.to_vec());
 
-    let utxos = crate::routes::utxos::load_tag_page(&domain, &tag, &pagination).await?;
+    let utxos = crate::utxos::load_tag_page(&domain, &tag, &pagination).await?;
 
     Ok(Json(utxos))
 }

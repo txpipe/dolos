@@ -17,6 +17,7 @@ use pallas::{
 };
 
 use super::IntoModel;
+use crate::pagination::Order;
 
 /// The labels in the CIP-10 registry. Each label has the description that
 /// Blockfrost shows for it.
@@ -55,21 +56,24 @@ pub fn cip10_description(label: u64) -> Option<String> {
 
 /// The transactions carrying one metadata label over the blocks a scan
 /// visits, with the page they fall on: `scan_block` keeps the matches of the
-/// requested page and counts the ones before it.
+/// requested page and counts the ones before it. The blocks come in `order`,
+/// and `scan_block` takes each block's transactions in the same order.
 pub struct MetadataHistoryModelBuilder {
     label: u64,
     page_size: usize,
     page_number: usize,
+    order: Order,
     skipped: usize,
     items: Vec<(Hash<32>, Metadatum)>,
 }
 
 impl MetadataHistoryModelBuilder {
-    pub fn new(label: u64, page_size: usize, page_number: usize) -> Self {
+    pub fn new(label: u64, page_size: usize, page_number: usize, order: Order) -> Self {
         Self {
             label,
             page_size,
             page_number,
+            order,
             skipped: 0,
             items: vec![],
         }
@@ -94,7 +98,12 @@ impl MetadataHistoryModelBuilder {
     pub fn scan_block(&mut self, cbor: &[u8]) -> Result<(), StatusCode> {
         let block = MultiEraBlock::decode(cbor).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        for tx in block.txs() {
+        let mut txs = block.txs();
+        if matches!(self.order, Order::Desc) {
+            txs.reverse();
+        }
+
+        for tx in txs {
             let meta = tx.metadata();
 
             if let Some(label_content) = meta.find(self.label) {
