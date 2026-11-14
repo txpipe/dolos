@@ -135,11 +135,18 @@ pub trait SnapshotSource {
 pub struct StoreSnapshot<'a, A, S> {
     archive: &'a A,
     state: &'a S,
+    mutable_slots: u64,
 }
 
 impl<'a, A: ArchiveStore, S: StateStore> StoreSnapshot<'a, A, S> {
-    pub fn new(archive: &'a A, state: &'a S) -> Self {
-        Self { archive, state }
+    /// A view of `archive` and `state`, on a chain whose genesis has
+    /// `mutable_slots` as its `3k/f` (`dolos_cardano::mutable_slots`).
+    pub fn new(archive: &'a A, state: &'a S, mutable_slots: u64) -> Self {
+        Self {
+            archive,
+            state,
+            mutable_slots,
+        }
     }
 }
 
@@ -163,7 +170,7 @@ impl<A: ArchiveStore, S: StateStore> SnapshotSource for StoreSnapshot<'_, A, S> 
     }
 
     fn plan(&self, network_magic: u64, retained: RetainedEpochs) -> Result<Plan, Error> {
-        export::plan(self.state, network_magic, retained)
+        export::plan(self.state, network_magic, retained, self.mutable_slots)
     }
 
     fn boundary(&self, plan: &Plan) -> Result<Boundary, Error> {

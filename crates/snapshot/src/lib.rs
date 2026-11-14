@@ -61,6 +61,8 @@
 //!   into its publication once the sequence is committed.
 //! - [`node`] — what a node's own configuration says about reaching a registry:
 //!   which identity, and where it stages.
+//! - [`roles`] — which array of the diff chain, `diff` or `tip`, holds each
+//!   layer at a sequence (decision 0080).
 //!
 //! Publisher application policy and replay/acquisition orchestration live in
 //! the Stelae repository. This crate retains the profile-specific encoding,
@@ -76,6 +78,7 @@ pub mod planning;
 pub mod prepare;
 pub mod registry;
 pub mod restore;
+pub mod roles;
 pub mod source;
 pub mod staging;
 
@@ -772,6 +775,11 @@ pub enum Error {
 
     #[error("layer kind {kind:?} does not take {scope}")]
     ScopeMismatch { kind: String, scope: &'static str },
+
+    /// A kind [`roles`] assigns to neither array: one this profile does not
+    /// define, or `digests`, which decision 0080 removes.
+    #[error("layer kind {0:?} has no array in the diff chain")]
+    Unassigned(String),
 
     /// A stele stands at a specific block, so its `position` needs that block's
     /// hash. A cursor that has only a slot cannot anchor one.

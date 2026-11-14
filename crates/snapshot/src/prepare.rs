@@ -325,6 +325,7 @@ impl Bundle {
             cursor: self.cursor.clone(),
             sequence: self.sequence(),
             epochs: self.manifest.identity.windows.clone(),
+            mutable_slots: self.mutable_slots(),
             retained: self.retained.clone(),
             scratch: None,
             producers: Producers::DEFAULT,
