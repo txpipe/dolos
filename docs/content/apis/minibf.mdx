@@ -118,7 +118,7 @@ They share one limit with MiniKupo's heavy matches, `serve.max_concurrent_heavy_
 }
 ```
 
-No other route is refused by this limit. Every route, heavy or not, answers `504 Gateway Timeout` once it runs past `request_timeout_seconds` (120 by default). Clients should retry both after a pause. A `/tx/submit` cut by the deadline may still reach the mempool, since its validation runs to the end; submitting the same transaction again then answers `409 Conflict`. See the [configuration schema](../configuration/schema#serve) for the settings.
+No other route is refused by this limit. Every route, heavy or not, answers `504 Gateway Timeout` once it runs past `request_timeout_seconds` (120 by default). Clients should retry both after a pause. A `/tx/submit` cut by the deadline may still reach the mempool, since its validation runs to the end. Submitting the same transaction again then answers `400 Bad Request`, because the pending copy already spends its inputs, so look the transaction up by its hash before building a replacement. See the [configuration schema](../configuration/schema#serve) for the settings.
 
 ## Coverage
 
