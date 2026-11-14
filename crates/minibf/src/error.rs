@@ -1,5 +1,5 @@
 use axum::{
-    http::StatusCode,
+    http::{header, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -36,6 +36,10 @@ pub enum Error {
     /// The path matched no route. Blockfrost answers those with a global
     /// `400`, not a `404`.
     InvalidPath,
+    /// Every heavy-scan slot stayed taken for the whole admission queue.
+    HeavyScanLimit,
+    /// The request ran past the node's request deadline.
+    RequestTimeout,
 }
 
 #[derive(Serialize)]
@@ -242,6 +246,25 @@ impl IntoResponse for Error {
                     400,
                     "Bad Request",
                     "Invalid path.",
+                )),
+            )
+                .into_response(),
+            Error::HeavyScanLimit => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::RETRY_AFTER, "1")],
+                Json(ErrorBody::new(
+                    503,
+                    "Service Unavailable",
+                    "The node is serving its limit of heavy requests. Retry later.",
+                )),
+            )
+                .into_response(),
+            Error::RequestTimeout => (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(ErrorBody::new(
+                    504,
+                    "Gateway Timeout",
+                    "The request took longer than this node's deadline.",
                 )),
             )
                 .into_response(),

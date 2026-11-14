@@ -19,7 +19,7 @@ use pallas::ledger::{
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 
-use crate::{bad_request, patterns, Facade};
+use crate::{bad_request, heavy_scan_limit, patterns, Facade};
 
 /// UTxO refs read, decoded and filtered per blocking task. A heavy match
 /// releases its permit between chunks, and a dropped one stops at the next
@@ -41,6 +41,27 @@ pub async fn by_pattern<D: Domain>(
         Err(err) => return bad_request(err.to_string()),
     };
 
+    // Output references are point lookups; every other pattern scans.
+    let heavy = matches!(
+        parsed,
+        patterns::Pattern::Address(_) | patterns::Pattern::Asset(_)
+    );
+
+    if !heavy {
+        return respond(&facade, parsed, filters).await;
+    }
+
+    match facade.query_limiter().admit_heavy().await {
+        Some(admission) => admission.scope(respond(&facade, parsed, filters)).await,
+        None => heavy_scan_limit(),
+    }
+}
+
+async fn respond<D: Domain>(
+    facade: &Facade<D>,
+    parsed: patterns::Pattern,
+    filters: MatchesFilters,
+) -> Response {
     let query = facade.query();
     let refs = match parsed {
         patterns::Pattern::Address(pattern) => {
@@ -56,7 +77,7 @@ pub async fn by_pattern<D: Domain>(
             .await
         }
         patterns::Pattern::OutputRef(pattern) => {
-            refs_for_output_ref_pattern(&facade, &pattern).await
+            refs_for_output_ref_pattern(facade, &pattern).await
         }
         patterns::Pattern::Any => return bad_request("wildcard patterns are not supported"),
     };
@@ -66,7 +87,7 @@ pub async fn by_pattern<D: Domain>(
         Err(err) => return err.into_response(),
     };
 
-    let matches = match build_matches(&facade, refs, filter, filters.resolve_hashes).await {
+    let matches = match build_matches(facade, refs, filter, filters.resolve_hashes).await {
         Ok(matches) => matches,
         Err(err) => return err.into_response(),
     };

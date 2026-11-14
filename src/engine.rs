@@ -144,7 +144,7 @@ impl<'a> DomainBuilder<'a> {
         .map_err(DomainBuildError::Chain)?;
 
         let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
-        let query_limiter = QueryLimiter::new(self.config.serve.max_concurrent_queries);
+        let query_limiter = self.config.serve.query_limiter();
         let cache = cache(query_limiter.clone())?;
 
         Ok(DomainAdapter {

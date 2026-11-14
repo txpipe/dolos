@@ -98,6 +98,8 @@ retain_confirmed_blocks = 200
 
 [serve]
 max_concurrent_queries = 32   # 1..=64
+max_concurrent_heavy_scans = 32  # 1..=64
+heavy_scan_queue_seconds = 5     # 0..=60
 
 [serve.grpc]
 listen_address = "[::]:50051"
@@ -116,10 +118,12 @@ token_registry_url = "https://tokens.example.com"
 max_scan_items = 3000
 route_prefix = "/api/v0"
 ipfs_gateways = ["https://ipfs.io", "https://gateway.pinata.cloud"]
+request_timeout_seconds = 120   # 1..=3600
 
 [serve.minikupo]
 listen_address = "[::]:1442"
 permissive_cors = true
+request_timeout_seconds = 120   # 1..=3600
 
 [serve.ouroboros]
 listen_path = "./dolos.socket"
@@ -461,8 +465,14 @@ The client APIs. Each API runs when its table is present.
 | field | type | default |
 | ----- | ---- | ------- |
 | `max_concurrent_queries` | integer | `32`; valid 1 to 64 |
+| `max_concurrent_heavy_scans` | integer | `32`; valid 1 to 64 |
+| `heavy_scan_queue_seconds` | integer (seconds) | `5`; valid 0 to 60 |
 
-`max_concurrent_queries` bounds the blocking query work the node runs at once, across every API. A value outside 1 to 64 is refused. It is also the one integer field that takes nothing but a whole number, written bare or as a string; see [rules across fields](#rules-across-fields).
+`max_concurrent_queries` bounds the blocking query work the node runs at once, across every API. A value outside 1 to 64 is refused.
+
+`max_concurrent_heavy_scans` bounds the heavy-scan requests the node serves at once, MiniBF's and MiniKupo's together: the requests that can read a large part of a store to answer (listed under [MiniBF](../apis/minibf#heavy-scans) and [MiniKupo](../apis/minikupo#heavy-matches)). A heavy-scan request waits up to `heavy_scan_queue_seconds` for a slot, in arrival order, and is then answered `503 Service Unavailable` with `Retry-After: 1`; `0` answers at once. No other request is refused by this limit. A slot stays taken until the blocking work its request started has ended, even when the request was cut by its deadline or its client went away. Heavy scans together hold at most half of `max_concurrent_queries` (at least one), so the rest stays free for every other request. When there are more slots than that half, as at the defaults, each admitted scan reads one block at a time, and admitted scans take turns for that half.
+
+These three fields take nothing but a whole number, written bare or as a string; see [rules across fields](#rules-across-fields).
 
 ### `serve.grpc`
 
@@ -498,12 +508,14 @@ The Blockfrost-compatible [MiniBF](../apis/minibf) endpoint.
 | `max_scan_items` | integer (items) | `3000` |
 | `route_prefix` | string (URL path) | none |
 | `ipfs_gateways` | array of strings (URLs) | `["https://ipfs.io", "https://gateway.pinata.cloud"]` |
+| `request_timeout_seconds` | integer (seconds) | `120`; valid 1 to 3600 |
 
 - `public_url` is the URL clients reach the API at, reported by `/`.
 - `token_registry_url` is the token registry read for off-chain asset metadata.
 - `max_scan_items` caps the items a page-based scan reads on the heavy endpoints.
 - `route_prefix` is a URL path every endpoint is served under, `/health` and `/metrics` included; set `"/api/v0"` to match the Blockfrost server URL. It starts with `/` and names at least one segment, none of them empty; its segments use only letters, digits, `-`, `.`, `_` and `~`, and `.` and `..` segments are refused; a trailing `/` is dropped. A path outside the prefix answers like any unknown path. Unset, the endpoints are served at the root.
 - `ipfs_gateways` resolve `ipfs://` governance-anchor URLs, tried in order until one serves the content. An empty list turns IPFS resolution off.
+- `request_timeout_seconds` is the deadline of every request, the wait for a [heavy-scan](#serve) slot included; a request still running when it passes is answered `504 Gateway Timeout`.
 
 ### `serve.minikupo`
 
@@ -513,6 +525,9 @@ The Kupo-compatible [MiniKupo](../apis/minikupo) endpoint.
 | ----- | ---- | ------- |
 | `listen_address` | string, `IP:PORT` | required |
 | `permissive_cors` | boolean | `true` |
+| `request_timeout_seconds` | integer (seconds) | `120`; valid 1 to 3600 |
+
+- `request_timeout_seconds` is the deadline of every request, the wait for a [heavy-scan](#serve) slot included; a request still running when it passes is answered `504 Gateway Timeout`.
 
 ### `serve.ouroboros`
 
@@ -595,7 +610,8 @@ Besides each field's own type and range, loading refuses:
 - an ephemeral state over a `fjall` archive, while history is kept;
 - `sync.wal_path` with an ephemeral state;
 - `history.window` without `mode = "rolling"`, and `rolling` without a `window`;
-- `serve.max_concurrent_queries` outside 1 to 64.
+- `serve.max_concurrent_queries` or `serve.max_concurrent_heavy_scans` outside 1 to 64, and `serve.heavy_scan_queue_seconds` above 60;
+- `request_timeout_seconds` of `serve.minibf` or `serve.minikupo` outside 1 to 3600.
 
 Each error names the keys involved, and is reported before any store opens.
 
@@ -606,7 +622,7 @@ A plain value of another type is converted to the field's type where it can be, 
 - a string field takes a number or a boolean;
 - a fraction in an integer field is rounded: `pull_batch_size = 0.4` loads as `0`, and `window = { unit = "slot", value = 0.4 }` as a window of zero slots. No integer field takes a negative number: `-5` is refused, but a negative number written with a decimal point, such as `-0.4` or `-5.0`, loads as `0`.
 
-A fraction written as a string, such as `"0.4"`, is refused rather than rounded, and so is a fraction in an [environment variable](./introduction#environment-variables), whose value is always a string. `serve.max_concurrent_queries` is stricter: it takes only a whole number, bare or as a string, and refuses a fraction (`2.0` included), a boolean and the words above.
+A fraction written as a string, such as `"0.4"`, is refused rather than rounded, and so is a fraction in an [environment variable](./introduction#environment-variables), whose value is always a string. `serve.max_concurrent_queries`, `serve.max_concurrent_heavy_scans` and `serve.heavy_scan_queue_seconds` are stricter: they take only a whole number, bare or as a string, and refuse a fraction (`2.0` included), a boolean and the words above.
 
 A value with no conversion is refused, such as `"abc"` in an integer field, `"maybe"` in a boolean field, or a list or table in a plain field. A converted value passes `dolos config check`, so write every field in the type its table gives.
 
