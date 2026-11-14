@@ -19,17 +19,27 @@ fn is_valid_cbor_content_type(headers: &HeaderMap) -> bool {
     content_type == "application/cbor"
 }
 
-pub async fn route<D: Domain + SubmitExt>(
+pub async fn route<D>(
     State(domain): State<Facade<D>>,
     headers: HeaderMap,
     cbor: Bytes,
-) -> Result<String, StatusCode> {
+) -> Result<String, StatusCode>
+where
+    D: Domain + SubmitExt + Clone + Send + Sync + 'static,
+{
     if !is_valid_cbor_content_type(&headers) {
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let chain = domain.read_chain();
-    let result = domain.inner.receive_tx("minibf", &chain, &cbor);
+    // Validation reads the ledger and waits for the submit lock, so it runs
+    // as blocking query work, where the request deadline can still answer.
+    let result = domain
+        .query()
+        .run_blocking(move |domain| {
+            let chain = domain.read_chain();
+            domain.receive_tx("minibf", &chain, &cbor)
+        })
+        .await;
 
     let hash = result.map_err(|e| match e {
         DomainError::ChainError(x) => match x {
@@ -61,6 +71,8 @@ pub async fn route<D: Domain + SubmitExt>(
 mod tests {
     use super::*;
     use crate::test_support::{TestApp, TestFault};
+    use dolos_core::QueryLimiter;
+    use std::time::{Duration, Instant};
 
     async fn assert_status(app: &TestApp, content_type: &str, body: Vec<u8>, expected: StatusCode) {
         let (status, _body) = app.post_bytes("/tx/submit", content_type, body).await;
@@ -118,6 +130,28 @@ mod tests {
             StatusCode::NOT_FOUND,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn a_submit_held_past_the_deadline_gets_504() {
+        let slow = Duration::from_secs(3);
+        let app = TestApp::new_admitting(
+            Some(TestFault::SlowUtxoReads(slow)),
+            QueryLimiter::default(),
+            1,
+        );
+
+        let started = Instant::now();
+        let (status, _body) = app
+            .post_bytes(
+                "/tx/submit",
+                "application/cbor",
+                app.vectors().tx_cbor.clone(),
+            )
+            .await;
+
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        assert!(started.elapsed() < slow, "{:?}", started.elapsed());
     }
 
     #[tokio::test]
