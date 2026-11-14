@@ -18,11 +18,10 @@ edition.workspace = true
 # it turns the transport on unconditionally rather than forwarding a feature
 # nothing in dolos ever left off.
 #
-# Pinned at cdcf271, the stelae main commit after v0.5.2 that streams a
-# restore's layers in order, read ahead by the registry transport
-# (txpipe/stelae#24).
-stelae = { git = "https://github.com/txpipe/stelae", rev = "cdcf27134f574b522bb454ff5ee9f6a2adf0e353", features = ["oci"] }
-stelae-driver = { git = "https://github.com/txpipe/stelae", rev = "cdcf27134f574b522bb454ff5ee9f6a2adf0e353", features = ["oci"] }
+# Pinned at 80c85a5, the stelae main commit after v0.6.0 that names the
+# protocol's artifact a snapshot (txpipe/stelae#28).
+stelae = { git = "https://github.com/txpipe/stelae", rev = "80c85a51a8dd470bed071b02cade1e061111c3ee", features = ["oci"] }
+stelae-driver = { git = "https://github.com/txpipe/stelae", rev = "80c85a51a8dd470bed071b02cade1e061111c3ee", features = ["oci"] }
 dolos-core = { path = "../core" }
 dolos-cardano = { path = "../cardano" }
 

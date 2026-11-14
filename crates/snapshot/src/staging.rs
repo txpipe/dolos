@@ -28,7 +28,7 @@ use stelae::{
     frame::CanonicalCbor,
     inscription::LayerDescriptor,
     progress::{Event, Observer},
-    transport::{RecordSink, SteleWriter},
+    transport::{RecordSink, SnapshotWriter},
     Profile as _,
 };
 use xxhash_rust::xxh3::Xxh3;
@@ -740,7 +740,7 @@ impl<'a> Runs<'a> {
             .publishes(family, epoch, sequence)
     }
 
-    pub(crate) fn write_layer_ticking<W: SteleWriter>(
+    pub(crate) fn write_layer_ticking<W: SnapshotWriter>(
         &self,
         stele: &W,
         family: Family,
@@ -858,7 +858,7 @@ impl Staged {
     ///
     /// The run is checked against its marker as it streams; a mismatch fails
     /// before the sink is finished, so no descriptor is produced.
-    pub fn write_layer<W: SteleWriter>(
+    pub fn write_layer<W: SnapshotWriter>(
         &self,
         stele: &W,
         family: Family,
@@ -869,7 +869,7 @@ impl Staged {
     }
 
     /// [`Staged::write_layer`], calling `tick` once per record.
-    pub(crate) fn write_layer_ticking<W: SteleWriter>(
+    pub(crate) fn write_layer_ticking<W: SnapshotWriter>(
         &self,
         stele: &W,
         family: Family,
@@ -905,7 +905,7 @@ impl Staged {
 
     /// [`Staged::write_layer`] for each of `layers`, at most
     /// [`Budget::workers`] at once, in input order.
-    pub fn write_layers<W: SteleWriter + Sync>(
+    pub fn write_layers<W: SnapshotWriter + Sync>(
         &self,
         stele: &W,
         layers: &[(Family, u64)],

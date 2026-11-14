@@ -146,10 +146,10 @@ use stelae::{
     digest::LayerDigests,
     frame::Limits,
     inscription::{Inscription, LayerDescriptor},
-    oci::{Stele, Transfer},
+    oci::{Snapshot, Transfer},
     progress::Observer,
     transport::BlobIndex,
-    Digest, SteleReader as _, SteleWriter,
+    Digest, SnapshotReader as _, SnapshotWriter,
 };
 
 /// How a repository is named, re-exported so the binary can take one from an
@@ -196,7 +196,7 @@ pub enum Point {
 
 impl Point {
     /// Resolve this point into a readable stele.
-    pub fn pull(&self, registry: &Registry) -> Result<Stele, Error> {
+    pub fn pull(&self, registry: &Registry) -> Result<Snapshot, Error> {
         Ok(match self {
             Self::Latest => registry.pull_latest(&DolosProfile)?,
             Self::Epoch(epoch) => registry.pull_sequence(&DolosProfile, *epoch)?,
@@ -556,7 +556,7 @@ pub fn verify(registry: &Registry, point: Point) -> Result<Verified, Error> {
 /// the digest again out of [`LayerDigests`] costs nothing and keeps the check
 /// in code this crate can point at.
 fn check_layer(
-    stele: &Stele,
+    stele: &Snapshot,
     blobs: &BlobIndex,
     descriptor: &LayerDescriptor,
     limits: Limits,
@@ -701,7 +701,7 @@ pub fn publish_into<W, A, S>(
     observer: &Observer,
 ) -> Result<Published, Error>
 where
-    W: SteleWriter + Sync,
+    W: SnapshotWriter + Sync,
     A: ArchiveStore,
     S: StateStore,
 {
@@ -835,7 +835,7 @@ pub fn preview<A: ArchiveStore, S: StateStore>(
 /// [`export::Settling`] keeps the record from supplying `log-account-epochs`.
 fn chained<'a>(
     publishing: Publishing<'a>,
-    latest: Option<&'a Stele>,
+    latest: Option<&'a Snapshot>,
     plan: &Plan,
 ) -> Result<Settling<Chained<'a>>, Error> {
     // This profile identifies a dataset by its network magic; the driver holds
@@ -855,7 +855,7 @@ fn chained<'a>(
         &plan.position()?,
         origin,
     )?;
-    let manifest = latest.map(Stele::read_inscription).transpose()?;
+    let manifest = latest.map(Snapshot::read_inscription).transpose()?;
 
     Settling::new(chained, manifest.as_ref())
 }

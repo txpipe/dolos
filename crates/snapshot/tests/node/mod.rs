@@ -28,7 +28,7 @@ use dolos_testing::{
     synthetic::{build_synthetic_blocks, seed_epoch_logs, seed_reward_logs, SyntheticBlockConfig},
     toy_domain::{MemoryStores, ToyDomain, ToyStores},
 };
-use stelae::{dir::SteleDir, inscription::Inscription, progress::Observer};
+use stelae::{dir::SnapshotDir, inscription::Inscription, progress::Observer};
 
 /// Preview genesis, synthetic blocks and seeded logs, all inside epoch zero.
 ///
@@ -255,7 +255,7 @@ mod registry_node {
 
         /// The same publish, through a writer of the caller's — the interrupted
         /// transport the resume suite kills at a layer it chose.
-        pub fn publish_through<W: stelae::SteleWriter + Sync>(
+        pub fn publish_through<W: stelae::SnapshotWriter + Sync>(
             &self,
             stele: &W,
             publishing: Publishing<'_>,
@@ -348,7 +348,7 @@ pub fn export_plan<B: ToyStores>(
     domain: &ToyDomain<B>,
     plan: &Plan,
 ) -> Inscription {
-    let stele = SteleDir::create(root).unwrap();
+    let stele = SnapshotDir::create(root).unwrap();
 
     export::export(
         &stele,

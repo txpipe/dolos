@@ -412,7 +412,7 @@ fn agrees(args: &Args, record: &SourceRecord) -> miette::Result<()> {
 
 /// The recorded stele directory, refused as gone when it holds no stele.
 fn reopen_dir(dir: &Path, record: &SourceRecord) -> miette::Result<PathBuf> {
-    match dolos_snapshot::dir::SteleDir::open(dir) {
+    match dolos_snapshot::dir::SnapshotDir::open(dir) {
         Ok(_) => Ok(dir.to_path_buf()),
         Err(_) => Err(refused(ResumeRefusal::Gone(record.clone()))),
     }
@@ -432,7 +432,7 @@ fn check_dir(config: &RootConfig, dir: &Path, clears: bool) -> miette::Result<Pa
         .into_diagnostic()
         .context("resolving --source")?;
 
-    dolos_snapshot::dir::SteleDir::open(&dir)
+    dolos_snapshot::dir::SnapshotDir::open(&dir)
         .into_diagnostic()
         .with_context(|| format!("{} holds no stele", dir.display()))?;
 

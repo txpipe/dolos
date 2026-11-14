@@ -49,10 +49,10 @@ use dolos_snapshot::{
     ENTITY_KINDS, INDEXES, LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
 };
 use stelae::{
-    dir::{BlobIndex, SteleDir, WrittenLayer},
+    dir::{BlobIndex, SnapshotDir, WrittenLayer},
     frame::{CanonicalCbor, LayerHeader, Limits},
     inscription::LayerDescriptor,
-    Digest, Profile, SteleReader, SteleWriter,
+    Digest, Profile, SnapshotReader, SnapshotWriter,
 };
 use stelae_driver::digests::ImmutableDigests;
 
@@ -358,7 +358,7 @@ pub fn encode_all<T>(
 /// content.
 ///
 /// This is exactly what a `diffId` covers, so a golden computed from it is the
-/// same number `SteleDir::write_layer` puts in a descriptor —
+/// same number `SnapshotDir::write_layer` puts in a descriptor —
 /// `descriptors_match_the_per_kind_goldens` holds the two against each other.
 pub fn sequence(kind: &str, scope: &dyn Scope, records: &[CanonicalCbor]) -> Vec<u8> {
     let header = LayerHeader::new(DolosProfile.name(), kind, scope.header().unwrap())
@@ -375,7 +375,7 @@ pub fn sequence(kind: &str, scope: &dyn Scope, records: &[CanonicalCbor]) -> Vec
 }
 
 pub fn write_layer(
-    stele: &SteleDir,
+    stele: &SnapshotDir,
     kind: &str,
     scope: &dyn Scope,
     records: &[CanonicalCbor],
@@ -469,7 +469,7 @@ pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
 /// determinism bug in the format, and this profile is the first real one to put
 /// that to the test.
 pub fn read_both_ways(
-    stele: &SteleDir,
+    stele: &SnapshotDir,
     index: &BlobIndex,
     descriptor: &LayerDescriptor,
 ) -> Vec<Vec<u8>> {

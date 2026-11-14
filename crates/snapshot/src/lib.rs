@@ -105,7 +105,7 @@ pub use stelae::progress;
 /// there is one pin point and one place to absorb upstream churn. These cover
 /// what a test or a binary opens a stele with; anything else a consumer needs
 /// joins the list rather than justifying a second dependency edge.
-pub use stelae::{dir, inscription, transport, SteleReader};
+pub use stelae::{dir, inscription, transport, SnapshotReader};
 
 use dolos_cardano::indexes::entities;
 use dolos_cardano::model::{
@@ -1459,7 +1459,7 @@ pub trait Scope {
     fn shape(&self) -> &'static str;
 
     /// Both encodings plus the kind, ready for
-    /// [`stelae::transport::SteleWriter::layer_sink`].
+    /// [`stelae::transport::SnapshotWriter::layer_sink`].
     ///
     /// Refuses a kind that does not take this scope shape: a state layer
     /// carrying an epoch scope would be structurally valid CBOR and permanently

@@ -46,7 +46,7 @@ use dolos_snapshot::{
 };
 use dolos_testing::toy_domain::{MemoryStores, ToyDomain};
 use serde_json::json;
-use stelae::{Digest, SteleReader as _};
+use stelae::{Digest, SnapshotReader as _};
 
 use node::{account_layer, plan_at_boundary, settled, stake_only, write_account_row, Node};
 use registry_fixture::{Distribution, Fixture, Unanswered};
@@ -634,8 +634,8 @@ fn a_prepared_batch_publishes_what_direct_publishes_do() {
 /// and the stele never becomes readable.
 struct SealFails<'a>(&'a stelae::oci::Registry);
 
-impl stelae::SteleWriter for SealFails<'_> {
-    type Sink = <stelae::oci::Registry as stelae::SteleWriter>::Sink;
+impl stelae::SnapshotWriter for SealFails<'_> {
+    type Sink = <stelae::oci::Registry as stelae::SnapshotWriter>::Sink;
 
     fn layer_sink(
         &self,

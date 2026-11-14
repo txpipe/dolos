@@ -23,7 +23,9 @@ use dolos_snapshot::{
 use dolos_testing::toy_domain::{FjallStores, ToyDomain};
 use node::{export_to, harness, Blank};
 use recorder::{Entry, Journal, Op, RecordedArchive, RecordedState};
-use stelae::{dir::SteleDir, plan::RestoreProgress, progress::Observer, Digest, SteleReader as _};
+use stelae::{
+    dir::SnapshotDir, plan::RestoreProgress, progress::Observer, Digest, SnapshotReader as _,
+};
 
 /// Restore `root` into the recorded fjall pair, checkpointing into `storage`,
 /// and return the journal of the run with the epoch layers it checkpoints.
@@ -40,7 +42,7 @@ fn recorded_restore(root: &Path, storage: &Path, magic: u64) -> (Vec<Entry>, Vec
         journal: journal.clone(),
     };
 
-    let stele = SteleDir::open(root).unwrap();
+    let stele = SnapshotDir::open(root).unwrap();
     let identity = stele.read_inscription().unwrap().digest().unwrap();
     let plan = restore::plan(&stele, magic, None).unwrap();
     let index = stele.blob_index().unwrap();

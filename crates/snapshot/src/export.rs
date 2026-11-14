@@ -35,7 +35,7 @@
 //!
 //! ## Where the stele ends up is not this module's business
 //!
-//! [`export`] takes any [`SteleWriter`] — a directory, a registry, whatever
+//! [`export`] takes any [`SnapshotWriter`] — a directory, a registry, whatever
 //! comes next — because nothing in the walk of a store depends on it. The two
 //! calls it makes are "open a sink for this layer" and "seal the stele with
 //! this inscription", and both are the same code whether the bytes land in
@@ -73,7 +73,7 @@ use serde::{Deserialize, Serialize};
 use stelae::{
     inscription::{HistoryEntry, Inscription, LayerDescriptor},
     progress::{Observer, Outcome},
-    transport::{LayerSpec, RecordSink, SteleWriter, WrittenLayer},
+    transport::{LayerSpec, RecordSink, SnapshotWriter, WrittenLayer},
 };
 use stelae_driver::digests;
 
@@ -399,10 +399,10 @@ impl Following {
     /// [`crate::registry::open`] hold.
     ///
     /// The bytes must *be* the canonical encoding, exactly as
-    /// `stelae::dir::SteleDir` requires of the one it holds: a stele is chained
-    /// to by the digest of its own bytes, so a re-encoded copy names a stele
-    /// nobody published, and the entry this history would carry would attest a
-    /// document that does not exist.
+    /// `stelae::dir::SnapshotDir` requires of the one it holds: a stele is
+    /// chained to by the digest of its own bytes, so a re-encoded copy
+    /// names a stele nobody published, and the entry this history would
+    /// carry would attest a document that does not exist.
     pub fn read(raw: &[u8], plan: &Plan) -> Result<Self, Error> {
         let previous = Inscription::parse(raw)?;
 
@@ -600,7 +600,7 @@ pub fn export<W, A, S>(
     observer: &Observer,
 ) -> Result<Inscription, Error>
 where
-    W: SteleWriter + Sync,
+    W: SnapshotWriter + Sync,
     A: ArchiveStore,
     S: StateStore,
 {
@@ -735,7 +735,7 @@ pub(crate) fn assemble<W, A, S>(
     observer: &Observer,
 ) -> Result<Inscription, Error>
 where
-    W: SteleWriter + Sync,
+    W: SnapshotWriter + Sync,
     A: ArchiveStore,
     S: StateStore,
 {
@@ -872,7 +872,7 @@ where
     A: ArchiveStore,
     S: StateStore,
 {
-    let stele = stelae::dir::SteleDir::create(root)?;
+    let stele = stelae::dir::SnapshotDir::create(root)?;
 
     export(
         &stele,
@@ -1163,7 +1163,7 @@ fn layers_by_scope(
     Ok(layers)
 }
 
-fn sink<W: SteleWriter>(stele: &W, spec: &LayerSpec) -> Result<W::Sink, Error> {
+fn sink<W: SnapshotWriter>(stele: &W, spec: &LayerSpec) -> Result<W::Sink, Error> {
     Ok(stele.layer_sink(&DolosProfile, spec, COMPRESSION_LEVEL)?)
 }
 
@@ -1309,7 +1309,7 @@ pub(crate) fn inherit(
 /// The hash is not stored beside the block, so it is derived here by decoding
 /// the header — the codec takes it as an input and neither derives nor checks
 /// it, which makes this the one site that has to be right.
-pub(crate) fn write_blocks<W: SteleWriter, A: ArchiveStore>(
+pub(crate) fn write_blocks<W: SnapshotWriter, A: ArchiveStore>(
     stele: &W,
     plan: &Plan,
     archive: &A,
@@ -1376,7 +1376,7 @@ pub(crate) fn write_blocks<W: SteleWriter, A: ArchiveStore>(
 /// for a window a namespace wrote nothing in, and a restore reads the absence
 /// as normal.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn write_logs<W: SteleWriter, A: ArchiveStore>(
+pub(crate) fn write_logs<W: SnapshotWriter, A: ArchiveStore>(
     stele: &W,
     plan: &Plan,
     archive: &A,
@@ -1690,7 +1690,7 @@ fn entity_built(
 /// One window's entity layer for one kind, or `None` where it has none: an
 /// entity layer exists if and only if it holds a record.
 #[allow(clippy::too_many_arguments)]
-fn write_entity_layer<W: SteleWriter>(
+fn write_entity_layer<W: SnapshotWriter>(
     stele: &W,
     plan: &Plan,
     prepared: Option<&Prepared<'_>>,
@@ -1733,7 +1733,7 @@ fn write_entity_layer<W: SteleWriter>(
 
 /// One window's `indexes` layer: inherited, the tail captured at the boundary,
 /// or a staged window.
-fn write_index_layer<W: SteleWriter>(
+fn write_index_layer<W: SnapshotWriter>(
     stele: &W,
     plan: &Plan,
     prepared: Option<&Prepared<'_>>,
@@ -1793,7 +1793,7 @@ fn captured_layer<'p>(
 }
 
 /// Stream a captured payload into `spec`'s layer, reporting its records.
-fn replay_layer<W: SteleWriter>(
+fn replay_layer<W: SnapshotWriter>(
     stele: &W,
     prepared: Option<&Prepared<'_>>,
     spec: &LayerSpec,
@@ -1875,7 +1875,7 @@ fn log_key_range(slots: &Range<BlockSlot>) -> KeyRange {
 /// scope, `{"shard": n}`, names no epoch, so scope equality could not tell one
 /// publish's shard from another's.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn write_state_kind<W: SteleWriter, S: StateStore>(
+pub(crate) fn write_state_kind<W: SnapshotWriter, S: StateStore>(
     stele: &W,
     plan: &Plan,
     source: &Source<'_, S>,
@@ -1910,7 +1910,7 @@ pub(crate) fn write_state_kind<W: SteleWriter, S: StateStore>(
 
 /// Walk one state kind's namespace once, routing each record to its shard.
 #[allow(clippy::too_many_arguments)]
-fn walk_state_kind<W: SteleWriter, S: StateStore>(
+fn walk_state_kind<W: SnapshotWriter, S: StateStore>(
     stele: &W,
     plan: &Plan,
     store: &S,
@@ -2006,7 +2006,7 @@ fn route<K: RecordSink>(
 /// `lastImmutable` is read off the records rather than taken as a second input:
 /// it is the last immutable file the layer covers, so deriving it removes the
 /// only way the scope and the records could disagree.
-fn write_digests<W: SteleWriter>(
+fn write_digests<W: SnapshotWriter>(
     stele: &W,
     plan: &Plan,
     records: &[digests::ImmutableDigests],
