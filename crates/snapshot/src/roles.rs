@@ -25,13 +25,14 @@ pub enum Role {
     Tip,
 }
 
-/// When the layer of one kind for window `e` exists and when it is final.
+/// When the layer of one kind for window `e` can first exist and when it is
+/// final.
 ///
 /// Both are sequences: the snapshot at sequence N is cut at the boundary that
 /// opens epoch N, so `e + 1` is the first snapshot after window `e` closes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Anchor {
-    /// First held by the snapshot at `e + first`, final from `e + settled`.
+    /// Possible from the snapshot at `e + first`, final from `e + settled`.
     After { first: u64, settled: u64 },
     /// Written whole by the seal at the boundary that seals window `e`, which
     /// [`Rule::seal`] names.
@@ -134,9 +135,11 @@ impl<'a> Rule<'a> {
         newly_sealable(self.summary, self.mutable_slots, boundary)
     }
 
-    /// The array the snapshot at `sequence` holds a layer of `kind` in, or
-    /// `None` where the rule places no such layer in that snapshot. `window` is
-    /// the epoch the layer's scope names, and `None` for a state shard.
+    /// The array the rule puts a layer of `kind` in at `sequence`, or `None`
+    /// where it places no such layer in that snapshot. `window` is the epoch
+    /// the layer's scope names, and `None` for a state shard. A kind with no
+    /// array is [`Error::Unassigned`], and a scope of the wrong shape
+    /// [`Error::ScopeMismatch`].
     ///
     /// Neither this nor [`Rule::first_listed`] sees records: a log or entity
     /// layer exists only where its window holds one, so an answer says where
@@ -158,13 +161,13 @@ impl<'a> Rule<'a> {
         })
     }
 
-    /// The sequence whose `diff` first lists a layer of `kind` for `window`, or
-    /// `None` for a state shard, which no `diff` lists.
+    /// The sequence whose `diff` would first list a layer of `kind` for
+    /// `window`, or `None` for a state shard, which no `diff` lists.
     pub fn first_listed(&self, kind: &str, window: Option<u64>) -> Result<Option<u64>, Error> {
         Ok(self.span(kind, window)?.map(|(_, settled)| settled))
     }
 
-    /// The first sequence that holds the layer and the first that holds it
+    /// The first sequence that can hold the layer and the first that holds it
     /// final, or `None` for a state shard.
     fn span(&self, kind: &str, window: Option<u64>) -> Result<Option<(u64, u64)>, Error> {
         let mismatch = |scope| Error::ScopeMismatch {
