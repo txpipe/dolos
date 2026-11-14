@@ -8,7 +8,6 @@ use fjall::AbstractTree;
 /// A keyspace at the 30-run L0 write halt, with its workers idle, must still
 /// accept a write: one more write is what lets the halt clear.
 #[test]
-#[ignore = "fjall write halt: enabled by dolos-fjall-fork-adopt"]
 fn a_write_at_the_l0_halt_returns_with_idle_workers() {
     let preset = Preset::Standard.archive();
     let dir = tempfile::tempdir().unwrap();
