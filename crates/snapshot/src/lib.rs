@@ -1554,7 +1554,10 @@ mod tests {
 
     #[test]
     fn an_undefined_kind_is_refused() {
-        for kind in ["utxos", "state", "logs", "receipts", "", "Blocks"] {
+        // `digests` moved to the blocks profile by decision 0080.
+        for kind in [
+            "utxos", "state", "logs", "receipts", "", "Blocks", "digests",
+        ] {
             assert!(DolosProfile.layer_media_type(kind).is_err(), "{kind:?}");
             assert!(
                 checked_layer_media_type(&DolosProfile, kind).is_err(),

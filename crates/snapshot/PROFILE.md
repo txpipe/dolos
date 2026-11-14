@@ -262,7 +262,7 @@ The contract has edges it does not close. Each is waived here, by its finding nu
 - **Datum refcount (18).** `datums.refcount` follows the rule stated under `state-datums`, as it is.
 - **Byte-string values.** A record value is a CBOR byte string to SPEC.md's frame validation, which does not look inside it; the value follows this document's value-encoding section instead.
 
-The `digests` kind this profile once specified, the Mithril-certified digests of each immutable file, moved with block history to the blocks profile (`io.txpipe.cardano.blocks`) by decision 0080; no stele of this profile carries it.
+The `digests` kind this profile once specified, the Mithril-certified digests of each immutable file, moved to the blocks profile (`io.txpipe.cardano.blocks`) by decision 0080; no stele of this profile carries it.
 
 ### The cut point and the boundary sliver
 
