@@ -1815,27 +1815,54 @@ fn kill_and_resume<B: ToyStores>() {
     assert_stores_match(&blank, &domain);
 }
 
-/// Retained state dumps that older publishers wrote beside the tip: the tip's
-/// own blobs under a second descriptor whose scope names an epoch, the
-/// stele's own for a dump cut at this publish, or a past one.
-fn add_dump_descriptors(root: &std::path::Path, inscription: &mut Inscription) {
-    let tip: Vec<LayerDescriptor> = inscription
-        .layers
-        .iter()
-        .filter(|layer| state_ns_for(&layer.kind).is_some())
-        .cloned()
-        .collect();
-
-    let mut epochs = vec![inscription.sequence, inscription.sequence.saturating_sub(1)];
+/// Retained state dumps that a publisher with retained epochs writes beside
+/// the tip: the tip's own blobs under a second descriptor whose scope names an
+/// epoch, the stele's own for a dump cut at this publish, or a past one.
+///
+/// `published_order` lists each kind's dumps, by ascending epoch, before its
+/// tip, as a publisher does; otherwise they follow every other layer.
+fn add_dump_descriptors(
+    root: &std::path::Path,
+    inscription: &mut Inscription,
+    published_order: bool,
+) {
+    let mut epochs = vec![inscription.sequence.saturating_sub(1), inscription.sequence];
     epochs.dedup();
 
-    for epoch in epochs {
-        for layer in &tip {
-            let mut dump = layer.clone();
-            dump.scope = json!({"epoch": epoch, "shard": layer.scope["shard"]});
-            inscription.layers.push(dump);
+    let dumps_of = |kind: &str| -> Vec<LayerDescriptor> {
+        epochs
+            .iter()
+            .flat_map(|epoch| {
+                inscription
+                    .layers
+                    .iter()
+                    .filter(move |layer| layer.kind == kind)
+                    .map(move |layer| {
+                        let mut dump = layer.clone();
+                        dump.scope = json!({"epoch": epoch, "shard": layer.scope["shard"]});
+                        dump
+                    })
+            })
+            .collect()
+    };
+
+    let mut layers = Vec::new();
+    let mut trailing = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+
+    for layer in &inscription.layers {
+        if state_ns_for(&layer.kind).is_some() && seen.insert(layer.kind.clone()) {
+            match published_order {
+                true => layers.extend(dumps_of(&layer.kind)),
+                false => trailing.extend(dumps_of(&layer.kind)),
+            }
         }
+
+        layers.push(layer.clone());
     }
+
+    layers.extend(trailing);
+    inscription.layers = layers;
 
     SteleDir::open(root)
         .unwrap()
@@ -1847,6 +1874,17 @@ fn add_dump_descriptors(root: &std::path::Path, inscription: &mut Inscription) {
 /// same layers read, same bytes planned, same node as the stele without them.
 #[test]
 fn a_stele_with_dump_descriptors_restores_the_tip_and_ignores_them() {
+    restores_like_the_plain_stele(false);
+}
+
+/// The same, with the dumps where a publisher lists them: before the tip
+/// shards they share a shard number with.
+#[test]
+fn a_stele_with_dumps_in_the_published_order_restores_the_tip_and_ignores_them() {
+    restores_like_the_plain_stele(true);
+}
+
+fn restores_like_the_plain_stele(published_order: bool) {
     let domain: ToyDomain<MemoryStores> = harness();
     let magic = magic_of(&domain);
 
@@ -1857,7 +1895,7 @@ fn a_stele_with_dump_descriptors_restores_the_tip_and_ignores_them() {
     let mut dumped = export_to(dumped_root.path(), &domain);
     let plain_count = dumped.layers.len();
 
-    add_dump_descriptors(dumped_root.path(), &mut dumped);
+    add_dump_descriptors(dumped_root.path(), &mut dumped, published_order);
     assert!(dumped.layers.len() > plain_count, "no dump was added");
 
     let plain_plan =

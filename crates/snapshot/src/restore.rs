@@ -988,9 +988,10 @@ fn select_epochs(inscription: &Inscription) -> Result<Vec<EpochLayers>, Error> {
 
 /// The state tip: every state layer whose descriptor scope is `{"shard": n}`.
 ///
-/// A state layer whose scope names an epoch is a retained dump, which older
-/// publishers wrote beside the tip. It is skipped unread: counted with the tip
-/// it would be a duplicate shard and refuse the restore.
+/// A state layer whose scope names an epoch is a retained dump, which a
+/// publisher with retained epochs writes beside the tip and published
+/// lineages carry. It is skipped unread: counted with the tip it would be a
+/// duplicate shard and refuse the restore.
 ///
 /// Completeness is structural, in both dimensions. Every state kind must be
 /// there, and per kind exactly the shards its spec'd count promises, empty
@@ -2439,8 +2440,21 @@ mod tests {
         layers.extend(short);
 
         let tip = select_state(&inscription(layers)).unwrap();
+        let plain = select_state(&inscription(state_layers())).unwrap();
 
-        assert_eq!(tip, select_state(&inscription(state_layers())).unwrap());
+        assert_eq!(tip, plain);
+
+        // The order a publisher lists a kind's layers in: its dumps by
+        // ascending epoch, then its tip. Each dump comes before the tip shard
+        // it shares a shard number with.
+        let mut published = Vec::new();
+        for (kind, ..) in STATE_KINDS {
+            for layers in [dump_layers(1, 0xc0), dump_layers(3, 0x80), state_layers()] {
+                published.extend(layers.into_iter().filter(|layer| layer.kind == kind));
+            }
+        }
+
+        assert_eq!(select_state(&inscription(published)).unwrap(), plain);
     }
 
     #[test]
