@@ -731,13 +731,8 @@ fn expected_state<B: ToyStores>(
 #[test]
 fn both_backends_publish_the_same_inscription() {
     // At the live cursor, which is what a publisher actually stands at, and
-    // then over a plan that cuts a retained dump. The second is not a separate
-    // property: a dump is written by teeing the tip's own sink, so a backend
-    // whose walk order differed would produce two divergent descriptors from
-    // one divergent walk, and the check that catches it has to be run against
-    // a stele that carries them. The harness ledger sits inside epoch 0 and
-    // epoch 0 may not be retained, so the dump-carrying plan stands at the
-    // epoch-1 boundary — see `plan_at_boundary`.
+    // then at the epoch-1 boundary with that epoch retained — see
+    // `plan_at_boundary`.
     same_inscription_from_both_backends(None);
     same_inscription_from_both_backends(Some((1, RetainedEpochs::new(vec![1]).unwrap())));
 }
@@ -826,9 +821,9 @@ fn same_inscription_from_both_backends(at: Option<(u64, RetainedEpochs)>) {
 ///
 /// One backend, one seeding, three walks: strictly serial (one producer, no
 /// threads at all), the default pool, and a pool wider than the job list is
-/// deep. Each runs over a plan that cuts a retained dump — so the tee through
-/// `carry_again` is in the mix. Byte-identical inscriptions and blobs, or the
-/// pool moved something it promised only to reschedule.
+/// deep, each over a plan standing at a retained epoch. Byte-identical
+/// inscriptions and blobs, or the pool moved something it promised only to
+/// reschedule.
 #[test]
 fn a_pooled_production_is_byte_identical_to_the_serial_walk() {
     let domain: ToyDomain = harness();
@@ -893,8 +888,7 @@ fn a_pooled_production_is_byte_identical_to_the_serial_walk() {
 /// A transport that refuses to open a sink for one kind, for the test below.
 ///
 /// The directory twin of `tests/publish.rs`'s `Interrupted`: everything else
-/// goes straight through, and `carry_again`'s default body is right here
-/// because a directory's is the default.
+/// goes straight through.
 struct DyingAt<'a> {
     inner: &'a SteleDir,
     kind: &'static str,
@@ -965,99 +959,24 @@ fn a_failing_producer_fails_the_pooled_export() {
     );
 }
 
-/// The dumps a stele carries, by the epoch their scope names.
-fn dumps_in(
-    inscription: &stelae::inscription::Inscription,
-) -> BTreeMap<u64, Vec<&stelae::inscription::LayerDescriptor>> {
-    let mut by_epoch: BTreeMap<u64, Vec<_>> = BTreeMap::new();
-
-    for layer in &inscription.layers {
-        if state_ns_for(&layer.kind).is_none() {
-            continue;
-        }
-
-        if let Some(epoch) = layer.scope.get("epoch").and_then(serde_json::Value::as_u64) {
-            by_epoch.entry(epoch).or_default().push(layer);
-        }
-    }
-
-    by_epoch
-}
-
-/// Done criterion 1, the half that needs no registry: at the publish that cuts
-/// it, a retained dump **is** the tip — one blob, two descriptors.
+/// Done criterion 1: a publish standing at a retained epoch writes each state
+/// shard once, under the tip's scope.
 ///
-/// The property the whole family's riskiest code exists to hold. It is checked
-/// three ways, because two of them can be true while the third is not: the
-/// descriptors agree on identity and disagree only in scope; the directory
-/// holds exactly as many blobs as there are distinct `diffId`s, so nothing was
-/// written twice; and the pair appears in the document in the order decision
-/// 0026 fixes — dumps ascending epoch, then the tip, shards ascending inside
-/// each.
+/// Both retained epochs are named — the one the publish stands in and one it
+/// has moved past — and neither adds a layer: the state layers are exactly the
+/// tip's, in `STATE_KINDS` order and ascending shard within a kind, and none
+/// of their scopes names an epoch.
 #[test]
-fn a_dump_cut_at_the_sequence_is_the_tips_own_blob() {
+fn a_publish_at_a_retained_epoch_writes_each_state_shard_once() {
     let domain: ToyDomain<MemoryStores> = harness();
     let temp = tempfile::tempdir().unwrap();
 
-    let plan = plan_at_boundary(&domain, 1, RetainedEpochs::new(vec![1]).unwrap());
+    let plan = plan_at_boundary(&domain, 2, RetainedEpochs::new(vec![1, 2]).unwrap());
     let inscription = export_plan(temp.path(), &domain, &plan);
 
-    let dumps = dumps_in(&inscription);
-    assert_eq!(dumps.keys().copied().collect::<Vec<_>>(), vec![1]);
-    assert_eq!(dumps[&1].len(), state_layer_count());
-
-    // One blob, two descriptors: same identity, same records, same size, and a
-    // scope that differs in exactly the epoch.
-    for dump in &dumps[&1] {
-        let shard = dump.scope["shard"].as_u64().unwrap();
-
-        let tip = inscription
-            .layers
-            .iter()
-            .find(|layer| {
-                layer.kind == dump.kind && layer.scope == serde_json::json!({"shard": shard})
-            })
-            .unwrap_or_else(|| panic!("no tip layer for {} shard {shard}", dump.kind));
-
-        assert_eq!(dump.diff_id, tip.diff_id, "{}", dump.kind);
-        assert_eq!(dump.records, tip.records, "{}", dump.kind);
-        assert_eq!(
-            dump.uncompressed_size, tip.uncompressed_size,
-            "{}",
-            dump.kind
-        );
-        assert_eq!(dump.media_type, tip.media_type, "{}", dump.kind);
-        assert_eq!(dump.scope, serde_json::json!({"epoch": 1, "shard": shard}));
-    }
-
-    // And the bytes were written once. A directory names its blobs by content,
-    // so two descriptors over one `diffId` are one file — the count of blobs is
-    // the count of *distinct* identities and not of layers.
-    let identities: std::collections::BTreeSet<_> = inscription
-        .layers
-        .iter()
-        .map(|layer| layer.diff_id)
-        .collect();
-
-    let index = SteleDir::open(temp.path()).unwrap().blob_index().unwrap();
-
-    assert_eq!(index.len(), identities.len());
-    assert_eq!(
-        inscription.layers.len(),
-        identities.len() + state_layer_count(),
-        "every dump shares its blob with the tip shard it was cut from",
-    );
-
-    // Per kind: the dump's shards ascending, then the tip's.
     let mut expected: Vec<(String, serde_json::Value)> = Vec::new();
 
     for (kind, _, shards, _) in STATE_KINDS {
-        for shard in 0..shards {
-            expected.push((
-                kind.to_owned(),
-                serde_json::json!({"epoch": 1, "shard": shard}),
-            ));
-        }
         for shard in 0..shards {
             expected.push((kind.to_owned(), serde_json::json!({"shard": shard})));
         }
@@ -1070,7 +989,14 @@ fn a_dump_cut_at_the_sequence_is_the_tips_own_blob() {
         .map(|layer| (layer.kind.clone(), layer.scope.clone()))
         .collect();
 
-    assert_eq!(found, expected, "the state layers are out of order");
+    assert_eq!(found.len(), state_layer_count());
+    assert_eq!(found, expected);
+
+    // The list is still the signed input it was configured as.
+    assert_eq!(
+        inscription.parameters["stateEpochs"],
+        serde_json::json!([1, 2])
+    );
 }
 
 /// Done criterion 2: the retained list is **signed input**.
@@ -1108,138 +1034,15 @@ fn two_publishers_with_different_retained_lists_do_not_agree() {
 
     assert_eq!(digests.len(), 3, "two lists produced one identity");
 
-    // The parameters are the *only* thing that moved between the first two: the
-    // second carries a dump, the first does not, so the diff an operator reads
-    // is one field and one layer set rather than a document they have to
-    // compare by hand.
+    // The parameters are the *only* thing that moved: the layers are the
+    // same, so the diff an operator reads is one field rather than a document
+    // they have to compare by hand.
     for (left, right) in [(&none, &one), (&none, &two), (&one, &two)] {
         assert_eq!(left.position, right.position);
         assert_eq!(left.compression, right.compression);
+        assert_eq!(left.layers, right.layers);
         assert_ne!(left.parameters, right.parameters);
     }
-}
-
-/// A retained epoch below the sequence that no predecessor can hand over is a
-/// warning and a shorter stele — never a failed publish.
-///
-/// Producing a past epoch's dump is a backfill run's job: this publish's stores
-/// hold the tip, and the state as of an epoch it has moved past is not in them
-/// to be written. The publish that discovers this is the ordinary case for
-/// every publisher that adopts the list before it has backfilled, so it stands.
-#[test]
-fn a_past_dump_no_predecessor_carries_is_skipped_and_the_publish_stands() {
-    let domain: ToyDomain<MemoryStores> = harness();
-    let temp = tempfile::tempdir().unwrap();
-
-    // `First` has nothing to inherit, which is exactly the adopt-miss.
-    let plan = plan_at_boundary(&domain, 2, RetainedEpochs::new(vec![1, 2]).unwrap());
-    let inscription = export_plan(temp.path(), &domain, &plan);
-
-    let dumps = dumps_in(&inscription);
-
-    assert_eq!(
-        dumps.keys().copied().collect::<Vec<_>>(),
-        vec![2],
-        "epoch 1's dump has no source in these stores and had to be skipped",
-    );
-    assert_eq!(dumps[&2].len(), state_layer_count());
-
-    // The list is still what it was configured to be: a skipped dump does not
-    // rewrite the signed input, or two publishers with the same configuration
-    // and different backfill states would stop agreeing on their parameters.
-    assert_eq!(
-        inscription.parameters["stateEpochs"],
-        serde_json::json!([1, 2])
-    );
-
-    // And the stele is whole otherwise.
-    assert_eq!(
-        inscription
-            .layers
-            .iter()
-            .filter(
-                |layer| state_ns_for(&layer.kind).is_some() && layer.scope.get("epoch").is_none()
-            )
-            .count(),
-        state_layer_count(),
-    );
-}
-
-/// What a reproduction can and cannot check about a stele carrying dumps.
-///
-/// Two cases with opposite answers, and the boundary between them is the whole
-/// of what `verify --reproduce` promises once dumps exist:
-///
-/// - the dump **at** the stele's own sequence is cut from the tip by the walk,
-///   so a reproduction rebuilds it out of the stores like every other layer and
-///   a divergence in it would be caught;
-/// - a dump for an epoch **below** the sequence cannot be rebuilt by anything
-///   standing at the tip — that epoch's state is not in these stores — so it is
-///   carried forward from the document under verification and taken on trust,
-///   in the same category `history` is already in.
-///
-/// A reproduction that insisted on building the second would report a
-/// divergence on every stele carrying any state history at all, which is not
-/// strictness but an unusable check.
-#[test]
-fn a_reproduction_rebuilds_the_dump_it_cuts_and_trusts_the_ones_it_inherits() {
-    let domain: ToyDomain<MemoryStores> = harness();
-    let retained = || RetainedEpochs::new(vec![1]).unwrap();
-
-    // The publish that cuts epoch 1's dump, and its reproduction.
-    let cutting = plan_at_boundary(&domain, 1, retained());
-    let temp = tempfile::tempdir().unwrap();
-    let cut = export_plan(temp.path(), &domain, &cutting);
-
-    let reproduced =
-        export::verify_reproduction(&cut, &cutting, domain.archive(), domain.state(), None)
-            .unwrap();
-
-    assert_eq!(reproduced, cut);
-    assert_eq!(dumps_in(&reproduced)[&1].len(), state_layer_count());
-
-    // And it really was rebuilt rather than copied: a reproduction chained the
-    // same way but with nothing to inherit from produces the same document.
-    let from_nothing = export::reproduce(
-        &cutting,
-        domain.archive(),
-        domain.state(),
-        None,
-        &export::First,
-    )
-    .unwrap();
-
-    assert_eq!(from_nothing.layers, cut.layers);
-
-    // The publish that inherits it. Built through `Following`, which is the
-    // predecessor a verifier chaining from a canonical document holds.
-    let following_plan = plan_at_boundary(&domain, 2, retained());
-    let canonical = cut.canonicalize().unwrap();
-
-    let followed = export::reproduce(
-        &following_plan,
-        domain.archive(),
-        domain.state(),
-        None,
-        &export::Following::read(&canonical, &following_plan).unwrap(),
-    )
-    .unwrap();
-
-    // Epoch 1's dump rode across, descriptor for descriptor.
-    assert_eq!(dumps_in(&followed)[&1], dumps_in(&cut)[&1]);
-
-    // And verifying that document reproduces it — which is the case that would
-    // fail outright if an inherited dump had to be rebuilt from these stores.
-    let verified = export::verify_reproduction(
-        &followed,
-        &following_plan,
-        domain.archive(),
-        domain.state(),
-        None,
-    )
-    .unwrap();
-
-    assert_eq!(verified, followed);
 }
 
 /// A predecessor that lends every inheritable layer of an earlier stele, as a
@@ -4681,10 +4484,10 @@ mod boundary_preparation {
         assert_eq!(tail.records, 2);
     }
 
-    /// A retained dump at its boundary is the tip's blob under two descriptors,
-    /// whether cut from the stores or from a bundle.
+    /// A bundle prepared at a retained epoch finalizes into the tip's state
+    /// layers alone, one per shard, as an export from the stores does.
     #[test]
-    fn a_due_dump_is_the_captured_tip() {
+    fn a_retained_epoch_finalizes_each_state_shard_once() {
         let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 3);
@@ -4707,16 +4510,21 @@ mod boundary_preparation {
             )
             .unwrap();
 
-        let dumps: Vec<_> = dumps_in(&finished, 3);
+        let state: Vec<_> = finished
+            .layers
+            .iter()
+            .filter(|layer| state_ns_for(&layer.kind).is_some())
+            .collect();
 
-        assert_eq!(dumps.len(), state_layer_count());
+        assert_eq!(state.len(), state_layer_count());
+        assert!(state.iter().all(|layer| layer.scope.get("epoch").is_none()));
         assert_eq!(
             bundle
                 .layers()
                 .filter(|layer| state_ns_for(&layer.kind).is_some())
                 .count(),
             state_layer_count(),
-            "the bundle holds one payload per shard, not two"
+            "the bundle holds one payload per shard"
         );
     }
 
@@ -5644,27 +5452,9 @@ mod boundary_preparation {
 
         watcher.assert_well_formed(finished.layers.len());
 
-        // A dump described from its tip is the same layer's records once.
-        let dumps = dumps_in(&finished, 3);
-        let content: u64 = finished
-            .layers
-            .iter()
-            .filter(|layer| !dumps.iter().any(|dump| std::ptr::eq(*dump, *layer)))
-            .map(|layer| layer.records - 1)
-            .sum();
+        let content: u64 = finished.layers.iter().map(|layer| layer.records - 1).sum();
 
         assert_eq!(watcher.records(), content);
-    }
-
-    fn dumps_in(
-        inscription: &Inscription,
-        epoch: u64,
-    ) -> Vec<&stelae::inscription::LayerDescriptor> {
-        inscription
-            .layers
-            .iter()
-            .filter(|layer| state_ns_for(&layer.kind).is_some() && layer.scope["epoch"] == epoch)
-            .collect()
     }
 
     fn plain_request<'a>(chain: &Chain, delta: &'a ArchiveIndexDelta) -> Request<'a> {

@@ -322,8 +322,8 @@ pub fn extend_archive_past_cursor<B: ToyStores>(domain: &ToyDomain<B>) -> dolos_
 ///
 /// Stores standing in an earlier epoch are moved onto that boundary first —
 /// see [`stand_at_boundary`] — so the plan is the one a publish from them would
-/// make. The harness ledger lives inside epoch zero, so this is how the dump
-/// paths, which need a sequence a retained list can name, are reached at all.
+/// make. The harness ledger lives inside epoch zero, so this is how a
+/// sequence a retained list can name is reached at all.
 pub fn plan_at_boundary<B: ToyStores>(
     domain: &ToyDomain<B>,
     epoch: u64,
