@@ -644,41 +644,6 @@ fn report(
         );
     }
 
-    // The one line about layers this restore deliberately did not read. A
-    // dump is a past epoch's state, and this run is building a node that
-    // stands at the stele's sequence — so what an operator learns here is what
-    // the stele *carries*, which is the difference between a repository they
-    // can restore an old epoch out of later and one they cannot.
-    //
-    // With the layer count when it is short of a whole one, because a dump may
-    // be. Only the tip is checked for completeness — a publisher whose
-    // predecessor did not carry every shard of an epoch warns and publishes the
-    // short dump anyway — so an epoch listed bare here and an epoch missing
-    // nine of its shards would otherwise read identically, and the second is
-    // not a repository that restores that epoch.
-    let dumps = plan.carried_dumps();
-
-    if !dumps.is_empty() {
-        let epochs: Vec<String> = dumps
-            .iter()
-            .map(|dump| match dump.is_whole() {
-                true => dump.epoch.to_string(),
-                false => format!(
-                    "{} (partial: {} of {} layers)",
-                    dump.epoch,
-                    dump.carried,
-                    dolos_snapshot::restore::CarriedDump::expected(),
-                ),
-            })
-            .collect();
-
-        println!(
-            "dumps:    {} retained state dump(s) carried and not restored (epochs {})",
-            dumps.len(),
-            epochs.join(", "),
-        );
-    }
-
     println!(
         "fetched:  {} layers ({} skipped), {} compressed bytes planned",
         summary.layers_fetched, summary.layers_skipped, outlook.remaining.compressed_bytes,

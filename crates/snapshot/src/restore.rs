@@ -86,14 +86,6 @@
 //! So the tip's layers are never asked about and never recorded; every resumed
 //! restore writes them and derives their live-UTxO tags again.
 //!
-//! A **retained state dump** is the other side of that argument rather than an
-//! exception to it (decision 0026). Its scope is `{"epoch": E, "shard": n}`,
-//! which names the closed epoch it is the state as of, so it is checkpointable
-//! by exactly the rule the epoch layers pass. Nothing exercises that today,
-//! because no restore consumes a dump — [`Plan::state_dumps`] reports them and
-//! stops there. The rule is stated here so that the day one is consumed, the
-//! answer is already the same answer.
-//!
 //! The checkpoint lands after each epoch layer's own commit, which is possible
 //! only because the driver commits per layer. That is the ownership split
 //! ADR-004 draws: the file's shape is protocol, and what counts as *complete*
@@ -272,22 +264,6 @@ pub struct Plan {
     /// shards ascending inside. Namespace byte order is kind byte order, so
     /// iterating the map is iterating the inscription's own layer order.
     pub state: BTreeMap<Namespace, Vec<LayerDescriptor>>,
-    /// The retained state dumps this stele carries, by the epoch their scope
-    /// names, each shaped like [`Plan::state`] inside.
-    ///
-    /// **Reported and not consumed.** A dump is a past epoch's state, and this
-    /// restore is building a node that stands at the stele's `sequence`;
-    /// nothing in the pipeline has a use for one, so none is fetched, none is
-    /// counted against the disk preflight, and none is in [`Plan::layers`].
-    /// It is here because a stele carrying twenty of them and a stele carrying
-    /// none are different artifacts, and a plan that said nothing about the
-    /// difference would make the restore's report a poorer description of the
-    /// stele than the stele is.
-    ///
-    /// Bootstrapping *at* one of these epochs — consuming a dump as the tip —
-    /// is a later plan's, and nothing here forecloses it: `restore_state`
-    /// takes a kind and a descriptor, and a dump's are the tip's.
-    pub state_dumps: BTreeMap<u64, BTreeMap<Namespace, Vec<LayerDescriptor>>>,
     /// Epochs the stele carries and the history window excludes.
     pub skipped_epochs: usize,
     /// Layers of a kind this build does not implement, which it skips rather
@@ -300,27 +276,6 @@ pub struct Plan {
     /// The compression the stele's layers were published under, which decides
     /// which factors [`Plan::estimate`] sizes them with.
     pub compression: Compression,
-}
-
-/// One retained state dump a stele carries, as a report counts it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CarriedDump {
-    /// The epoch the dump's scope names.
-    pub epoch: u64,
-    /// How many state layers it carries.
-    pub carried: usize,
-}
-
-impl CarriedDump {
-    /// Whether the dump carries every state layer an epoch has.
-    pub fn is_whole(&self) -> bool {
-        self.carried == crate::state_layer_count()
-    }
-
-    /// How many it would carry if it were.
-    pub fn expected() -> usize {
-        crate::state_layer_count()
-    }
 }
 
 impl Plan {
@@ -366,35 +321,6 @@ impl Plan {
         kinds.dedup();
 
         kinds
-    }
-
-    /// The retained dumps this stele carries, each with whether it is whole.
-    ///
-    /// A dump may be short of a whole epoch: only the tip is checked for
-    /// completeness — a publisher whose predecessor did not carry every shard
-    /// of an epoch warns and publishes the short dump anyway — so an epoch
-    /// that restores and an epoch missing nine of its shards would
-    /// otherwise be indistinguishable in a report, and the second is not a
-    /// repository that restores that epoch.
-    pub fn carried_dumps(&self) -> Vec<CarriedDump> {
-        self.state_dumps
-            .iter()
-            .map(|(epoch, kinds)| CarriedDump {
-                epoch: *epoch,
-                carried: kinds.values().map(Vec::len).sum(),
-            })
-            .collect()
-    }
-
-    /// The retained dumps this stele carries and this restore does not read.
-    ///
-    /// In no other iterator here: not [`Plan::layers`], not
-    /// [`Plan::uncompressed_size`], not [`Plan::remaining`]. A number an
-    /// operator reads, and nothing a byte is moved for.
-    pub fn dump_layers(&self) -> impl Iterator<Item = &LayerDescriptor> {
-        self.state_dumps
-            .values()
-            .flat_map(|kinds| kinds.values().flatten())
     }
 
     /// Compressed bytes this restore still has to move, given what is done.
@@ -847,8 +773,7 @@ pub fn plan<R: SteleReader>(
 
     Ok(Plan {
         sequence: inscription.sequence,
-        state: state.tip,
-        state_dumps: state.dumps,
+        state,
         epochs: selected.0,
         skipped_epochs: selected.1,
         skipped_unknown,
@@ -1061,48 +986,34 @@ fn select_epochs(inscription: &Inscription) -> Result<Vec<EpochLayers>, Error> {
     Ok(by_epoch.into_values().collect())
 }
 
-/// The state layers, split by the role their scope declares: the tip this
-/// restore consumes, and the retained dumps it only reports.
+/// The state tip: every state layer whose descriptor scope is `{"shard": n}`.
 ///
-/// **The split is the scope's `epoch`** and nothing else (decision 0026). A
-/// state layer whose descriptor scope is `{"shard": n}` is the tip; one whose
-/// scope is `{"epoch": E, "shard": n}` is E's dump. There is no other reading
-/// available and none is wanted: the two roles share a kind, a media type and
-/// a record codec, and the scope is the only field that tells them apart.
+/// A state layer whose scope names an epoch is a retained dump, which older
+/// publishers wrote beside the tip. It is skipped unread: counted with the tip
+/// it would be a duplicate shard and refuse the restore.
 ///
-/// Completeness is structural, in both dimensions — **for the tip**. Every
-/// state kind must be there, and per kind exactly the shards its
-/// spec'd count promises, empty ones included. A missing piece is a missing
-/// slice of the ledger that no later step would notice — the write path
-/// dispatches on the kind, not the shard — so it is refused rather than
-/// restored into a node whose queries quietly miss part of the state.
-///
-/// A dump is held to none of that, and deliberately. It is history rather than
-/// the ledger this node is about to run on: a stele whose predecessor could
-/// not hand over one shard of an old dump publishes the fifteen it has, and
-/// refusing the *restore* over that would trade a working node for a complete
-/// archive nobody asked this run for. What a short dump earns is a count in
-/// the report.
-fn select_state(inscription: &Inscription) -> Result<StateLayers, Error> {
+/// Completeness is structural, in both dimensions. Every state kind must be
+/// there, and per kind exactly the shards its spec'd count promises, empty
+/// ones included. A missing piece is a missing slice of the ledger that no
+/// later step would notice — the write path dispatches on the kind, not the
+/// shard — so it is refused rather than restored into a node whose queries
+/// quietly miss part of the state.
+fn select_state(
+    inscription: &Inscription,
+) -> Result<BTreeMap<Namespace, Vec<LayerDescriptor>>, Error> {
     let mut tip: BTreeMap<Namespace, BTreeMap<u64, LayerDescriptor>> = BTreeMap::new();
-    let mut dumps: BTreeMap<u64, BTreeMap<Namespace, BTreeMap<u64, LayerDescriptor>>> =
-        BTreeMap::new();
 
     for descriptor in &inscription.layers {
         let Some(ns) = state_ns_for(&descriptor.kind) else {
             continue;
         };
 
-        let shard = scope_uint(descriptor, "shard")?;
+        if descriptor.scope.get("epoch").is_some() {
+            continue;
+        }
 
-        let shards = match descriptor.scope.get("epoch") {
-            Some(_) => dumps
-                .entry(scope_uint(descriptor, "epoch")?)
-                .or_default()
-                .entry(ns)
-                .or_default(),
-            None => tip.entry(ns).or_default(),
-        };
+        let shard = scope_uint(descriptor, "shard")?;
+        let shards = tip.entry(ns).or_default();
 
         if shards.insert(shard, descriptor.clone()).is_some() {
             return Err(Error::malformed_inscription(
@@ -1126,32 +1037,10 @@ fn select_state(inscription: &Inscription) -> Result<StateLayers, Error> {
         }
     }
 
-    Ok(StateLayers {
-        tip: flatten(tip),
-        dumps: dumps
-            .into_iter()
-            .map(|(e, kinds)| (e, flatten(kinds)))
-            .collect(),
-    })
-}
-
-/// One kind's shards, ascending, once the map that kept them ordered has done
-/// its job.
-fn flatten(
-    by_ns: BTreeMap<Namespace, BTreeMap<u64, LayerDescriptor>>,
-) -> BTreeMap<Namespace, Vec<LayerDescriptor>> {
-    by_ns
+    Ok(tip
         .into_iter()
         .map(|(ns, layers)| (ns, layers.into_values().collect()))
-        .collect()
-}
-
-/// What [`select_state`] found, kept together because the two halves are one
-/// pass over one set of layers.
-#[derive(Debug)]
-struct StateLayers {
-    tip: BTreeMap<Namespace, Vec<LayerDescriptor>>,
-    dumps: BTreeMap<u64, BTreeMap<Namespace, Vec<LayerDescriptor>>>,
+        .collect())
 }
 
 /// Drop the epochs the history window puts out of reach.
@@ -2487,7 +2376,7 @@ mod tests {
     /// a complete tip selects into.
     #[test]
     fn the_state_tip_requires_every_kind_and_every_shard() {
-        let selected = select_state(&inscription(state_layers())).unwrap().tip;
+        let selected = select_state(&inscription(state_layers())).unwrap();
 
         assert_eq!(selected.len(), STATE_KINDS.len(), "one entry per kind");
 
@@ -2538,77 +2427,20 @@ mod tests {
         assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
     }
 
-    /// Done criterion 3, planning half: a dump is partitioned out of the tip
-    /// by its scope, and it is completeness's business only for the tip.
+    /// A state layer whose scope names an epoch stays out of the tip, whole
+    /// or short, including one at the stele's own epoch.
     #[test]
-    fn a_dumps_scope_puts_it_beside_the_tip_and_not_in_it() {
-        let mut layers = state_layers();
-        layers.extend(dump_layers(2, 0x80));
-        layers.extend(dump_layers(1, 0xc0));
-
-        let selected = select_state(&inscription(layers)).unwrap();
-
-        // The tip is what it was: the dumps did not join it, and did not
-        // displace a shard of it.
-        assert_eq!(selected.tip.len(), STATE_KINDS.len());
-        for (kind, ns, shards, _) in STATE_KINDS {
-            assert_eq!(selected.tip[ns].len(), shards as usize, "{kind}");
-            for layer in &selected.tip[ns] {
-                assert!(layer.scope.get("epoch").is_none(), "{kind}");
-            }
-        }
-
-        // Ascending epoch, whatever order the document listed them in.
-        assert_eq!(
-            selected.dumps.keys().copied().collect::<Vec<_>>(),
-            vec![1, 2]
-        );
-
-        for (epoch, kinds) in &selected.dumps {
-            assert_eq!(kinds.len(), STATE_KINDS.len(), "epoch {epoch}");
-
-            for (kind, ns, shards, _) in STATE_KINDS {
-                assert_eq!(kinds[ns].len(), shards as usize, "{kind} at {epoch}");
-
-                for (shard, layer) in kinds[ns].iter().enumerate() {
-                    assert_eq!(layer.scope["epoch"], *epoch, "{kind}");
-                    assert_eq!(layer.scope["shard"], shard as u64, "{kind}");
-                }
-            }
-        }
-    }
-
-    /// A dump the predecessor could only hand over in part is history this
-    /// stele carries less of — never a reason to refuse the node the tip would
-    /// have built.
-    #[test]
-    fn a_short_dump_is_carried_rather_than_refused() {
-        let mut dump = dump_layers(2, 0x80);
-        dump.retain(|layer| !(layer.kind == "state-utxos" && layer.scope["shard"] == 15));
+    fn a_dump_is_skipped_rather_than_read_as_the_tip() {
+        let mut short = dump_layers(1, 0xc0);
+        short.retain(|layer| !(layer.kind == "state-utxos" && layer.scope["shard"] == 15));
 
         let mut layers = state_layers();
-        layers.extend(dump);
+        layers.extend(dump_layers(3, 0x80));
+        layers.extend(short);
 
-        let selected = select_state(&inscription(layers)).unwrap();
+        let tip = select_state(&inscription(layers)).unwrap();
 
-        assert_eq!(selected.dumps[&2]["utxos"].len(), 15);
-        assert_eq!(selected.tip["utxos"].len(), 16);
-    }
-
-    /// One shard of one epoch, once — the same refusal the tip gets, keyed on
-    /// the whole scope so a dump and the tip cannot collide with each other.
-    #[test]
-    fn one_dump_shard_described_twice_is_refused() {
-        let mut layers = state_layers();
-        layers.extend(dump_layers(2, 0x80));
-        layers.push(descriptor(
-            "state-utxos",
-            json!({"epoch": 2, "shard": 0}),
-            0x7f,
-        ));
-
-        let err = select_state(&inscription(layers)).unwrap_err();
-        assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
+        assert_eq!(tip, select_state(&inscription(state_layers())).unwrap());
     }
 
     #[test]
@@ -2727,8 +2559,7 @@ mod tests {
             position: read_position(&stele.position).unwrap(),
             sequence: stele.sequence,
             epochs,
-            state: select_state(&stele).unwrap().tip,
-            state_dumps: BTreeMap::new(),
+            state: select_state(&stele).unwrap(),
             skipped_epochs: skipped,
             skipped_unknown: Vec::new(),
             compression: crate::compression(),
@@ -2854,7 +2685,7 @@ mod tests {
         // namespace for is skipped like any other unknown kind, and the tip is
         // still complete, because completeness is counted over the kinds this
         // profile defines rather than over the state layers present.
-        assert_eq!(select_state(&stele).unwrap().tip.len(), STATE_KINDS.len());
+        assert_eq!(select_state(&stele).unwrap().len(), STATE_KINDS.len());
 
         // And a stele written by a publisher this build keeps up with skips
         // nothing at all.
@@ -3153,8 +2984,7 @@ mod tests {
             position: read_position(&stele.position).unwrap(),
             sequence: stele.sequence,
             epochs: select_epochs(stele).unwrap(),
-            state: select_state(stele).unwrap().tip,
-            state_dumps: BTreeMap::new(),
+            state: select_state(stele).unwrap(),
             skipped_epochs: 0,
             skipped_unknown: Vec::new(),
             compression: stele.compression.clone(),
