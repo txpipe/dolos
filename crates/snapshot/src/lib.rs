@@ -123,7 +123,7 @@ use stelae::{
     frame::{self, CanonicalCbor},
     inscription::HistoryEntry,
     profile::MediaType,
-    Compression, Profile,
+    Compression, Digest, Profile,
 };
 
 pub use layers::state::shard_of;
@@ -1197,20 +1197,31 @@ impl Network {
 /// `point` is the boundary the stele was cut at — in practice the state store's
 /// cursor after a `stop_epoch` sync. It must carry a hash: a stele that names
 /// only a slot cannot be verified against a chain.
+///
+/// `blocks` is the inscription digest of the blocks snapshot at the same
+/// sequence. Without it the field is left out, so the position's bytes are the
+/// same as before the field existed.
 pub fn position(
     network: &Network,
     point: &ChainPoint,
     epoch: u64,
+    blocks: Option<&Digest>,
 ) -> Result<serde_json::Value, Error> {
     let hash = point
         .hash()
         .ok_or_else(|| Error::UnanchoredPoint(point.to_string()))?;
 
-    Ok(json!({
+    let mut position = json!({
         "network": {"magic": network.magic(), "name": network.name()},
         "point": {"slot": point.slot(), "hash": hex::encode(hash)},
         "epoch": epoch,
-    }))
+    });
+
+    if let Some(blocks) = blocks {
+        position["blocks"] = json!(blocks.to_string());
+    }
+
+    Ok(position)
 }
 
 /// Where a stele stands, as [`position`] records it.
@@ -1225,6 +1236,9 @@ pub struct Position {
     pub point: ChainPoint,
     /// The epoch the point stands in, which is the last one the layers cover.
     pub epoch: u64,
+    /// The inscription digest of the blocks snapshot at the same sequence,
+    /// when the stele names one.
+    pub blocks: Option<Digest>,
 }
 
 /// Read a `position` back.
@@ -1280,10 +1294,22 @@ pub fn read_position(value: &serde_json::Value) -> Result<Position, Error> {
             Error::malformed_inscription("position.point.hash", "not 32 hex-encoded bytes")
         })?;
 
+    let blocks = value
+        .get("blocks")
+        .map(|blocks| {
+            blocks
+                .as_str()
+                .ok_or_else(|| Error::malformed_inscription("position.blocks", "not a string"))?
+                .parse::<Digest>()
+                .map_err(|err| Error::malformed_inscription("position.blocks", err.to_string()))
+        })
+        .transpose()?;
+
     Ok(Position {
         network,
         point: ChainPoint::Specific(slot, hash.into()),
         epoch: uint("epoch", value)?,
+        blocks,
     })
 }
 
@@ -1631,15 +1657,16 @@ mod tests {
         let network = Network::for_magic(MAINNET_MAGIC);
         let point = ChainPoint::Specific(133660800, BlockHash::from([0xab; 32]));
 
-        let built = position(&network, &point, 550).unwrap();
+        let built = position(&network, &point, 550, None).unwrap();
         assert_eq!(built["network"]["magic"], 764824073u64);
         assert_eq!(built["network"]["name"], "mainnet");
         assert_eq!(built["point"]["slot"], 133660800u64);
         assert_eq!(built["point"]["hash"], "ab".repeat(32));
         assert_eq!(built["epoch"], 550u64);
+        assert!(built.get("blocks").is_none());
 
         for unanchored in [ChainPoint::Origin, ChainPoint::Slot(133660800)] {
-            let err = position(&network, &unanchored, 550).unwrap_err();
+            let err = position(&network, &unanchored, 550, None).unwrap_err();
             assert!(matches!(err, Error::UnanchoredPoint(_)), "{err:?}");
         }
     }
@@ -1648,20 +1675,26 @@ mod tests {
     /// are held against each other rather than each against a literal.
     #[test]
     fn position_round_trips() {
+        let blocks = Digest::from_bytes([0xcd; 32]);
+
         for magic in [MAINNET_MAGIC, PREPROD_MAGIC, PREVIEW_MAGIC, 42] {
-            let network = Network::for_magic(magic);
-            let point = ChainPoint::Specific(133660800, BlockHash::from([0xab; 32]));
+            for blocks in [None, Some(blocks)] {
+                let network = Network::for_magic(magic);
+                let point = ChainPoint::Specific(133660800, BlockHash::from([0xab; 32]));
 
-            let read = read_position(&position(&network, &point, 550).unwrap()).unwrap();
+                let written = position(&network, &point, 550, blocks.as_ref()).unwrap();
+                let read = read_position(&written).unwrap();
 
-            assert_eq!(
-                read,
-                Position {
-                    network,
-                    point,
-                    epoch: 550
-                }
-            );
+                assert_eq!(
+                    read,
+                    Position {
+                        network,
+                        point,
+                        epoch: 550,
+                        blocks,
+                    }
+                );
+            }
         }
     }
 
@@ -1674,6 +1707,7 @@ mod tests {
             &Network::for_magic(MAINNET_MAGIC),
             &ChainPoint::Specific(1, BlockHash::from([0xab; 32])),
             0,
+            None,
         )
         .unwrap();
 
@@ -1689,6 +1723,7 @@ mod tests {
             &Network::for_magic(PREVIEW_MAGIC),
             &ChainPoint::Specific(7, BlockHash::from([0xab; 32])),
             0,
+            None,
         )
         .unwrap();
 
@@ -1721,11 +1756,29 @@ mod tests {
         // A hash of the wrong width would otherwise become a plausible,
         // unreachable chain point: `BlockHash` converts from a slice by
         // padding.
-        let mut short = good;
+        let mut short = good.clone();
         short["point"]["hash"] = json!("ab".repeat(31));
 
         let err = read_position(&short).unwrap_err();
         assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
+
+        // `blocks` is optional, but present it must be a digest.
+        for blocks in [
+            json!(null),
+            json!(7),
+            json!("cd".repeat(32)),
+            json!(format!("sha256:{}", "CD".repeat(32))),
+            json!(format!("sha256:{}", "cd".repeat(31))),
+        ] {
+            let mut broken = good.clone();
+            broken["blocks"] = blocks.clone();
+
+            let err = read_position(&broken).unwrap_err();
+            assert!(
+                matches!(&err, Error::MalformedInscription { field, .. } if field == "position.blocks"),
+                "{blocks}: {err:?}"
+            );
+        }
     }
 
     /// The parameters are claims about code elsewhere in this workspace, so

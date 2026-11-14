@@ -318,7 +318,9 @@ impl Bundle {
         by_blob.values().sum()
     }
 
-    /// The plan this boundary was prepared for, without its execution knobs.
+    /// The plan this boundary was prepared for, without its execution knobs
+    /// or a blocks reference: a host names the blocks snapshot with
+    /// [`Plan::with_blocks`].
     pub fn plan(&self) -> Plan {
         Plan {
             network: Network::for_magic(self.network_magic()),
@@ -328,6 +330,7 @@ impl Bundle {
             retained: self.retained.clone(),
             scratch: None,
             producers: Producers::DEFAULT,
+            blocks: None,
         }
     }
 

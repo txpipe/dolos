@@ -331,7 +331,8 @@ and the meaning of `sequence`:
   "sequence": 550,
   "position": { "network": {"magic": 764824073, "name": "mainnet"},
                 "point": {"slot": 152236812, "hash": "…"},
-                "epoch": 550 },
+                "epoch": 550,
+                "blocks": "sha256:…" },
   "parameters": { "entities": {"asset": 32, "script": 28, "stake": 29},
                    "indexKeyHash": "xxh3-64",
                    "shards": {"accounts": 16, "datums": 16, "utxos": 16, "…": 1},
@@ -358,6 +359,8 @@ and the meaning of `sequence`:
      "diffId": "sha256:…", "records": 6188, "uncompressedSize": 618800,
      "scope": {"lastImmutable": 6187}} ] }
 ```
+
+`position` says where the stele stands: the network by magic and by the name `Network::for_magic` derives from it, the anchored chain point it was cut at, and `epoch`, which equals `sequence`. `blocks`, when present, is the inscription digest of the `io.txpipe.cardano.blocks` snapshot at the same sequence, as `sha256:<64 lowercase hex>` (decision 0080). It is optional: a position without it is byte-identical to one written before the field existed, and a reader refuses a `blocks` that is not a digest string. Restore does not check the reference yet.
 
 `parameters` is the profile's compatibility declaration. Every value but one is a consequence of publisher code rather than a free choice: `entities` declares the entity kinds and their id widths (`ENTITY_KINDS`); `indexKeyHash` names the hash behind the pre-hashed index keys; `shards` is the per-namespace shard count map above, each namespace splitting on the shard byte the state-kinds rule fixes; and `schemas` is a per-namespace revision of the *record content* — the stored value a `state-{ns}` or `log-{ns}` layer carries verbatim — which moves when that namespace's stored shape changes, plus one entry at revision `0` per retired namespace, per the removed-kind rule above. `SCHEMA_REVS` in `crates/snapshot/src/namespaces.rs` holds each live namespace's current revision, and the namespace's entry in `crates/snapshot/tests/registry/mod.rs` records why it moved. Every live revision is pinned by a canary in `crates/snapshot/tests/field_registry.rs`, which fails the build when a record's field table moves without its revision, or the other way round. The split between the two is deliberate: a change to how a layer is *framed* moves that kind's media type and fails closed at the transport, while a change to what a record *contains* moves its schema revision, which a reader consults to decide whether it can interpret what it can already parse. The exception, `stateEpochs`, proves the rule: it is the publisher's configured retained set, and it is here precisely *because* it is a choice — declaring it is what turns a configuration difference between two publishers into a visible parameters difference instead of a silently divergent history.
 
