@@ -301,6 +301,20 @@ impl QueryLimiter {
             .filter(|admission| Arc::ptr_eq(admission.slot.semaphore(), &self.heavy.slots))
     }
 
+    /// Wrap `f` to run as the heavy scan the current task runs under, if
+    /// any. A task-local does not cross `spawn`, so work a heavy scan hands
+    /// to another task is wrapped here, before it is spawned.
+    pub fn carry_heavy_scan<F: Future>(&self, f: F) -> impl Future<Output = F::Output> {
+        let heavy = self.current_heavy_scan();
+
+        async move {
+            match heavy {
+                Some(admission) => admission.scope(f).await,
+                None => f.await,
+            }
+        }
+    }
+
     /// Run `f` on the blocking pool once a permit is free. The permit moves
     /// into the closure and is returned when it ends, panics included.
     ///
