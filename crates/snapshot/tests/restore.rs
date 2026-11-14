@@ -1815,6 +1815,33 @@ fn kill_and_resume<B: ToyStores>() {
     assert_stores_match(&blank, &domain);
 }
 
+/// Re-seal the stele at `root` with its tip also described as `epoch`'s
+/// retained dump, the shape steles cut at a retained epoch carry: per kind,
+/// every dump shard ascending and then the tip's, one blob under both.
+fn describe_tip_as_dump(root: &std::path::Path, epoch: u64) -> Inscription {
+    let stele = SteleDir::open(root).unwrap();
+    let mut inscription = stele.read_inscription().unwrap();
+    let original = std::mem::take(&mut inscription.layers);
+
+    for (index, layer) in original.iter().enumerate() {
+        let first_of_kind = index == 0 || original[index - 1].kind != layer.kind;
+
+        if state_ns_for(&layer.kind).is_some() && first_of_kind {
+            for tip in original.iter().filter(|tip| tip.kind == layer.kind) {
+                let mut dump = tip.clone();
+                dump.scope = json!({"epoch": epoch, "shard": tip.scope["shard"]});
+                inscription.layers.push(dump);
+            }
+        }
+
+        inscription.layers.push(layer.clone());
+    }
+
+    stele.seal(&DolosProfile, &inscription).unwrap();
+
+    inscription
+}
+
 /// Done criterion 3: a stele carrying retained dumps restores the tip, reports
 /// the dumps, and pays nothing for them.
 ///
@@ -1836,11 +1863,12 @@ fn a_stele_with_retained_dumps_restores_the_tip_and_reports_the_dumps() {
         &plan_at_boundary(&domain, 1, RetainedEpochs::default()),
     );
 
-    let dumped = export_plan(
+    export_plan(
         dumped_root.path(),
         &domain,
         &plan_at_boundary(&domain, 1, RetainedEpochs::new(vec![1]).unwrap()),
     );
+    let dumped = describe_tip_as_dump(dumped_root.path(), 1);
 
     let plain_plan =
         restore::plan(&SteleDir::open(plain_root.path()).unwrap(), magic, None).unwrap();
@@ -1902,11 +1930,12 @@ fn a_resumed_restore_of_a_dumped_stele_records_only_the_epoch_layers() {
     let root = tempfile::tempdir().unwrap();
     let storage = tempfile::tempdir().unwrap();
 
-    let inscription = export_plan(
+    export_plan(
         root.path(),
         &domain,
         &plan_at_boundary(&domain, 1, RetainedEpochs::new(vec![1]).unwrap()),
     );
+    let inscription = describe_tip_as_dump(root.path(), 1);
 
     let blank = Blank::<MemoryStores>::open();
 

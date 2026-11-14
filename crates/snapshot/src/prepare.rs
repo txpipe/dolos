@@ -677,8 +677,7 @@ pub fn prepare<A: ArchiveStore, S: StateStore>(
     // and its settled account rows, whatever the seal says.
     let capture_from = oldest_unsealed.min(plan.sequence.saturating_sub(1));
 
-    // The tip is the retained dump a publication cuts at this boundary: one
-    // payload, described twice when the publication is assembled.
+    // The retained list writes no layer, so the capture carries none.
     let capture = Plan {
         epochs: plan
             .epochs
@@ -816,7 +815,6 @@ where
                 ns,
                 shards,
                 shard_byte,
-                &First,
                 cursor_ref,
             )
         }));
