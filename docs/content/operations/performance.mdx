@@ -29,6 +29,16 @@ The main drivers of resource usage are:
 
 If your goal is to minimize operational cost, start with the smallest storage mode and API surface that satisfies your workload, then increase capacity only where measurements show a bottleneck.
 
+### Fjall compaction backlog
+
+Each Fjall store, state and archive, reports its compaction backlog as an OpenTelemetry gauge under the `dolos-fjall` meter:
+
+| metric              | kind  | attributes          |
+| ------------------- | ----- | ------------------- |
+| `fjall_l0_runs_max` | gauge | `store`, `keyspace` |
+
+The value is the largest number of L0 runs in any of the store's keyspaces, and `keyspace` names that keyspace. `store` is `state` or `archive`. Fjall halts a keyspace's writes at 30 L0 runs until compaction catches up, so a value climbing toward 30 means compaction is falling behind the writes. The gauge is read when the meter collects, never on a write, and a store opened read-only does not report it. Like the [cache metrics](./cache#metrics), it reaches a collector through the process's OpenTelemetry meter provider, which `dolos daemon` does not export yet.
+
 ## Query latency
 
 Query latency is workload-dependent. Dolos generally performs best on indexed and current-state lookups, where the request can be satisfied directly from the state store. Historical queries can be more expensive because they may require joining the archive's lookups with archived block data.

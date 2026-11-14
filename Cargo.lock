@@ -1653,6 +1653,8 @@ dependencies = [
  "dolos-flatfiles",
  "dolos-testing",
  "fjall",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "pallas",
  "same-file",
  "smallvec",

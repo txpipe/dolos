@@ -77,6 +77,7 @@ use pallas::ledger::traverse::MultiEraBlock;
 use dolos_flatfiles::{decode_locations, encode_locations, BlockLocation, FlatFileStore};
 
 use crate::keys::{dim_prefix, hash_dimension, DIM_HASH_SIZE};
+use crate::metrics::L0Runs;
 use crate::preset::{Preset, Tuning};
 use crate::view::{View, Viewed};
 use crate::Error;
@@ -181,6 +182,8 @@ pub struct ArchiveStore {
     /// material.
     index_sweep: Arc<Mutex<IndexSweepState>>,
     _tempdir: Option<Arc<tempfile::TempDir>>,
+    /// The L0 gauge of a writable store.
+    l0_runs: Option<Arc<L0Runs>>,
     /// The mirror a read-only store opened over, dropped after the database
     /// and every iterator over it.
     view: Option<Arc<View>>,
@@ -290,7 +293,7 @@ impl ArchiveStore {
                 .map_or(index_path.to_path_buf(), |view| view.source_of(index_path))
         })?;
 
-        Ok(Self {
+        let mut store = Self {
             blocks: db.keyspace(keyspace_names::BLOCKS, || tuning.blocks.options())?,
             logs: db.keyspace(keyspace_names::LOGS, || tuning.logs.options())?,
             tags: db.keyspace(keyspace_names::TAGS, || tuning.tags.options())?,
@@ -303,8 +306,15 @@ impl ArchiveStore {
             preset,
             index_sweep: Arc::new(Mutex::new(IndexSweepState::default())),
             _tempdir: tempdir,
+            l0_runs: None,
             view,
-        })
+        };
+
+        if store.view.is_none() {
+            store.l0_runs = Some(Arc::new(L0Runs::report("archive", store.keyspaces())));
+        }
+
+        Ok(store)
     }
 
     /// The tuning the store opened with.
@@ -392,19 +402,25 @@ impl ArchiveStore {
         Ok(false)
     }
 
+    /// Every keyspace, with its name.
+    fn keyspaces(&self) -> Vec<(&'static str, Keyspace)> {
+        vec![
+            (keyspace_names::BLOCKS, self.blocks.clone()),
+            (keyspace_names::LOGS, self.logs.clone()),
+            (keyspace_names::TAGS, self.tags.clone()),
+            (keyspace_names::EXACT, self.exact.clone()),
+            (keyspace_names::ENTITY, self.entity.clone()),
+            (keyspace_names::META, self.meta.clone()),
+        ]
+    }
+
     /// Per-keyspace disk footprint: `(name, bytes, path)`, the path in the
     /// store's own folder.
     pub fn disk_usage(&self) -> Vec<(&'static str, u64, std::path::PathBuf)> {
-        [
-            (keyspace_names::BLOCKS, &self.blocks),
-            (keyspace_names::LOGS, &self.logs),
-            (keyspace_names::TAGS, &self.tags),
-            (keyspace_names::EXACT, &self.exact),
-            (keyspace_names::ENTITY, &self.entity),
-            (keyspace_names::META, &self.meta),
-        ]
-        .map(|(name, ks)| (name, ks.disk_space(), self.source_of(ks.path())))
-        .to_vec()
+        self.keyspaces()
+            .into_iter()
+            .map(|(name, ks)| (name, ks.disk_space(), self.source_of(ks.path())))
+            .collect()
     }
 
     /// Where `path` is in the store itself, when it is in a view's mirror.

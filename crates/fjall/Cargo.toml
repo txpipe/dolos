@@ -9,6 +9,7 @@ dolos-flatfiles = { path = "../flatfiles" }
 fjall = { git = "https://github.com/txpipe/fjall", rev = "ae794ad448d90214c3491df4c50f59f0fe15cf90" }
 smallvec = { version = "1.15.0", features = ["const_generics", "union"] }
 tracing.workspace = true
+opentelemetry.workspace = true
 thiserror.workspace = true
 bincode.workspace = true
 xxhash-rust.workspace = true
@@ -18,3 +19,4 @@ same-file = "1.0.6"
 
 [dev-dependencies]
 dolos-testing = { path = "../testing" }
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
