@@ -146,7 +146,7 @@ fn the_full_reference_parses() {
 
     let serve = &config.serve;
     assert_eq!(serve.max_concurrent_queries, 32);
-    assert_eq!(serve.max_concurrent_heavy_scans, 8);
+    assert_eq!(serve.max_concurrent_heavy_scans, 32);
     assert_eq!(serve.heavy_scan_queue_seconds, 5);
 
     let grpc = serve.grpc.as_ref().unwrap();
@@ -293,7 +293,7 @@ fn omitted_sections_take_their_defaults() {
     assert!(!config.mempool.persistent);
     assert_eq!(config.mempool.retain_confirmed_blocks, 6);
     assert_eq!(config.serve.max_concurrent_queries, 32);
-    assert_eq!(config.serve.max_concurrent_heavy_scans, 8);
+    assert_eq!(config.serve.max_concurrent_heavy_scans, 32);
     assert_eq!(config.serve.heavy_scan_queue_seconds, 5);
     assert!(config.serve.grpc.is_none() && config.serve.minibf.is_none());
     assert!(config.relay.is_none());

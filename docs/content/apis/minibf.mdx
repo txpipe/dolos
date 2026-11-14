@@ -108,7 +108,7 @@ These routes can read a large part of a store for one answer:
 - `/epochs/{number}/stakes/{pool_id}`;
 - `/governance/dreps/{drep_id}/delegators`.
 
-They share one limit with MiniKupo's heavy matches, `serve.max_concurrent_heavy_scans` requests at once (8 by default). A request that finds every slot taken waits up to `serve.heavy_scan_queue_seconds` (5 by default) and is then answered `503 Service Unavailable`, with `Retry-After: 1` and the body:
+They share one limit with MiniKupo's heavy matches, `serve.max_concurrent_heavy_scans` requests at once (32 by default). A request that finds every slot taken waits up to `serve.heavy_scan_queue_seconds` (5 by default) and is then answered `503 Service Unavailable`, with `Retry-After: 1` and the body:
 
 ```json
 {
@@ -118,7 +118,7 @@ They share one limit with MiniKupo's heavy matches, `serve.max_concurrent_heavy_
 }
 ```
 
-No other route is refused by this limit. Every route, heavy or not, answers `504 Gateway Timeout` once it runs past `request_timeout_seconds` (120 by default). Clients should retry both after a pause. See the [configuration schema](../configuration/schema#serve) for the settings.
+No other route is refused by this limit. Every route, heavy or not, answers `504 Gateway Timeout` once it runs past `request_timeout_seconds` (120 by default). Clients should retry both after a pause. A `/tx/submit` cut by the deadline may still reach the mempool, since its validation runs to the end; submitting the same transaction again then answers `409 Conflict`. See the [configuration schema](../configuration/schema#serve) for the settings.
 
 ## Coverage
 

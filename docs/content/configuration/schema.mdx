@@ -98,7 +98,7 @@ retain_confirmed_blocks = 200
 
 [serve]
 max_concurrent_queries = 32   # 1..=64
-max_concurrent_heavy_scans = 8   # 1..=64
+max_concurrent_heavy_scans = 32  # 1..=64
 heavy_scan_queue_seconds = 5     # 0..=60
 
 [serve.grpc]
@@ -465,12 +465,12 @@ The client APIs. Each API runs when its table is present.
 | field | type | default |
 | ----- | ---- | ------- |
 | `max_concurrent_queries` | integer | `32`; valid 1 to 64 |
-| `max_concurrent_heavy_scans` | integer | `8`; valid 1 to 64 |
+| `max_concurrent_heavy_scans` | integer | `32`; valid 1 to 64 |
 | `heavy_scan_queue_seconds` | integer (seconds) | `5`; valid 0 to 60 |
 
 `max_concurrent_queries` bounds the blocking query work the node runs at once, across every API. A value outside 1 to 64 is refused.
 
-`max_concurrent_heavy_scans` bounds the heavy-scan requests the node serves at once, MiniBF's and MiniKupo's together: the requests that can read a large part of a store to answer (listed under [MiniBF](../apis/minibf#heavy-scans) and [MiniKupo](../apis/minikupo#heavy-matches)). A heavy-scan request waits up to `heavy_scan_queue_seconds` for a slot, in arrival order, and is then answered `503 Service Unavailable` with `Retry-After: 1`; `0` answers at once. No other request is refused by this limit. A slot stays taken until the blocking work its request started has ended, even when the request was cut by its deadline or its client went away. Heavy scans together hold at most half of `max_concurrent_queries` (at least one), so the rest stays free for every other request.
+`max_concurrent_heavy_scans` bounds the heavy-scan requests the node serves at once, MiniBF's and MiniKupo's together: the requests that can read a large part of a store to answer (listed under [MiniBF](../apis/minibf#heavy-scans) and [MiniKupo](../apis/minikupo#heavy-matches)). A heavy-scan request waits up to `heavy_scan_queue_seconds` for a slot, in arrival order, and is then answered `503 Service Unavailable` with `Retry-After: 1`; `0` answers at once. No other request is refused by this limit. A slot stays taken until the blocking work its request started has ended, even when the request was cut by its deadline or its client went away. Heavy scans together hold at most half of `max_concurrent_queries` (at least one), so the rest stays free for every other request. When there are more slots than that half, as at the defaults, each admitted scan reads one block at a time, and admitted scans take turns for that half.
 
 These three fields take nothing but a whole number, written bare or as a string; see [rules across fields](#rules-across-fields).
 

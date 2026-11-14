@@ -63,7 +63,7 @@ The node checks the file's `compatibility` declaration before anything else, and
 | `snapshot.state_epochs` | `--state-epochs` or `--state-epochs-file` on `stelae-publisher digest` and `verify --reproduce`; the Stelae publisher's own `stateEpochs` |
 | `sync.sync_limit`, `chain.stop_epoch` | `sync_limit = "UntilTip"`: `dolos sync catchup`, which stops at the upstream tip unless `--follow`; `sync_limit = { MaxBlocks = N }`: removed, with no successor; `stop_epoch`: `--stop-epoch` on `dolos sync catchup`, `dolos bootstrap mithril` and `dolos bootstrap immutabledb` |
 | the query limit, fixed at 32 | `serve.max_concurrent_queries`, from 1 to 64 |
-| no limit on heavy scans, no request deadline | `serve.max_concurrent_heavy_scans` (8) and `serve.heavy_scan_queue_seconds` (5): a heavy MiniBF or MiniKupo request that waits out the queue is answered 503 with `Retry-After: 1`; `request_timeout_seconds` (120) of `serve.minibf` and `serve.minikupo`: a request past it is answered 504 |
+| no limit on heavy scans, no request deadline | `serve.max_concurrent_heavy_scans` (32) and `serve.heavy_scan_queue_seconds` (5): a heavy MiniBF or MiniKupo request that waits out the queue is answered 503 with `Retry-After: 1`; `request_timeout_seconds` (120) of `serve.minibf` and `serve.minikupo`: a request past it is answered 504 |
 | `serve.grpc.tls_client_ca_root` | removed, and refused on load: the endpoint serves plaintext gRPC, so terminate TLS, mutual TLS included, at a reverse proxy |
 | `serve.minibf.url`, `serve.trp.extra_fees` | `serve.minibf.public_url`, `serve.trp.extra_fees_lovelace` |
 | `logging.max_level`, `include_*` | `logging.level` and `logging.filter` (see [logging](#logging)) |

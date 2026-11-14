@@ -192,7 +192,7 @@ fn limiter_closed() -> DomainError {
 
 impl QueryLimiter {
     pub const DEFAULT_CAP: usize = 32;
-    pub const DEFAULT_HEAVY_LIMIT: usize = 8;
+    pub const DEFAULT_HEAVY_LIMIT: usize = 32;
     pub const DEFAULT_HEAVY_QUEUE: Duration = Duration::from_secs(5);
 
     /// A limiter of `cap` permits, at least one, with the default heavy-scan
@@ -906,10 +906,10 @@ mod tests {
     }
 
     #[test]
-    fn heavy_defaults_are_eight_slots_a_five_second_queue_and_half_the_cap() {
+    fn heavy_defaults_are_32_slots_a_five_second_queue_and_half_the_cap() {
         let limiter = QueryLimiter::default();
 
-        assert_eq!(limiter.heavy_limit(), 8);
+        assert_eq!(limiter.heavy_limit(), 32);
         assert_eq!(limiter.heavy_queue(), Duration::from_secs(5));
         assert_eq!(limiter.heavy_share(), 16);
 
@@ -920,6 +920,7 @@ mod tests {
     #[tokio::test]
     async fn heavy_fan_out_divides_the_share_among_the_slots() {
         for (cap, heavy, light_fan_out, heavy_fan_out) in [
+            (32, 32, 16, 1),
             (32, 8, 16, 2),
             (64, 4, 16, 8),
             (8, 8, 4, 1),

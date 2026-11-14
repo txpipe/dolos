@@ -53,7 +53,7 @@ retain_confirmed_blocks = 200
 
 [serve]
 max_concurrent_queries = 32   # 1..=64
-max_concurrent_heavy_scans = 8   # 1..=64
+max_concurrent_heavy_scans = 32  # 1..=64
 heavy_scan_queue_seconds = 5     # 0..=60
 
 [serve.grpc]
