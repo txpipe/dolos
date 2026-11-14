@@ -12,7 +12,7 @@ use axum::http::{header, StatusCode};
 use dolos_core::QueryLimiter;
 use serde_json::{json, Value};
 
-use crate::test_support::{TestApp, TestFault};
+use crate::test_support::{TestApp, TestFault, SUBMIT_TESTS};
 
 const QUEUE: Duration = Duration::from_millis(300);
 /// Scheduling allowance on a measured queue wait, well below the gap
@@ -148,6 +148,19 @@ async fn heavy_routes_wait_out_the_queue_then_get_503() {
         let (status, _) = app.get_bytes(&path).await;
         assert_ne!(status, StatusCode::SERVICE_UNAVAILABLE, "{path}");
     }
+
+    let serial = SUBMIT_TESTS.lock().await;
+    let started = Instant::now();
+    let (status, _) = app
+        .post_bytes(
+            "/tx/submit",
+            "application/cbor",
+            app.vectors().tx_cbor.clone(),
+        )
+        .await;
+    assert_ne!(status, StatusCode::SERVICE_UNAVAILABLE, "/tx/submit");
+    assert!(started.elapsed() < QUEUE, "/tx/submit waited for a slot");
+    drop(serial);
 
     drop(held);
 
@@ -323,10 +336,10 @@ async fn a_dropped_client_keeps_its_slot_until_its_read_ends() {
 
 /// Heavy requests, more than the limit, hold at most the heavy share of
 /// query permits while light requests complete beside them, at the default
-/// and at other query and heavy limits.
+/// (32 permits, 32 heavy slots) and at other query and heavy limits.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn heavy_requests_leave_query_permits_to_light_routes() {
-    for (cap, heavy) in [(32, 8), (4, 4), (8, 2), (64, 16)] {
+    for (cap, heavy) in [(32, 32), (32, 8), (4, 4), (8, 2), (64, 16)] {
         let app = Arc::new(TestApp::new_admitting(
             Some(TestFault::SlowUtxoReads(Duration::from_millis(300))),
             QueryLimiter::with_heavy_scans(cap, heavy, Duration::from_secs(30)),

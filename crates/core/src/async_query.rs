@@ -1024,7 +1024,7 @@ mod tests {
     /// most the heavy share, and a light closure runs beside them.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn heavy_scans_hold_at_most_their_share() {
-        for (cap, heavy) in [(8, 2), (32, 8), (6, 4)] {
+        for (cap, heavy) in [(32, 32), (8, 2), (32, 8), (6, 4)] {
             let limiter = QueryLimiter::with_heavy_scans(cap, heavy, SHORT_QUEUE);
             let share = limiter.heavy_share();
             let mut gates = Vec::new();

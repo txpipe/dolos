@@ -505,6 +505,11 @@ impl<B: ToyStores> TestDomainBuilder<B> {
     }
 }
 
+/// Taken by tests whose submit timing matters. Submission holds a
+/// process-wide lock (`dolos_core::submit`), so a submit held in one test
+/// would otherwise delay or cut a submit in another.
+pub static SUBMIT_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub struct TestApp {
     router: Router,
     facade: Facade<dolos_testing::faults::FaultyToyDomain>,

@@ -70,7 +70,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{TestApp, TestFault};
+    use crate::test_support::{TestApp, TestFault, SUBMIT_TESTS};
     use dolos_core::QueryLimiter;
     use std::time::{Duration, Instant};
 
@@ -134,6 +134,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_submit_held_past_the_deadline_gets_504() {
+        let _serial = SUBMIT_TESTS.lock().await;
         let slow = Duration::from_secs(3);
         let app = TestApp::new_admitting(
             Some(TestFault::SlowUtxoReads(slow)),
@@ -152,6 +153,54 @@ mod tests {
 
         assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
         assert!(started.elapsed() < slow, "{:?}", started.elapsed());
+
+        // The cut submit still holds the process-wide submit lock. Keep other
+        // submit tests out until it ends: a probe submit queues behind it.
+        let probe = TestApp::new();
+        let _ = probe
+            .post_bytes(
+                "/tx/submit",
+                "application/cbor",
+                probe.vectors().tx_cbor.clone(),
+            )
+            .await;
+    }
+
+    /// Submission waits for a query permit like any other store read, so the
+    /// deadline answers a submit queued behind a busy limiter.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_submit_waiting_for_a_query_permit_gets_504() {
+        let _serial = SUBMIT_TESTS.lock().await;
+        let app = TestApp::new_admitting(None, QueryLimiter::new(1), 1);
+        let limiter = dolos_core::Domain::query_limiter(&app.facade().inner).clone();
+
+        let (open, gate) = std::sync::mpsc::channel::<()>();
+        let (started, running) = tokio::sync::oneshot::channel();
+        let holder = tokio::spawn({
+            let limiter = limiter.clone();
+            async move {
+                limiter
+                    .run_blocking(move || {
+                        let _ = started.send(());
+                        let _ = gate.recv();
+                    })
+                    .await
+            }
+        });
+        running.await.unwrap();
+        assert_eq!(limiter.in_use(), 1);
+
+        let (status, _body) = app
+            .post_bytes(
+                "/tx/submit",
+                "application/cbor",
+                app.vectors().tx_cbor.clone(),
+            )
+            .await;
+
+        open.send(()).unwrap();
+        holder.await.unwrap().unwrap();
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
     }
 
     #[tokio::test]
