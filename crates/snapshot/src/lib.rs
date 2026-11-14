@@ -1762,22 +1762,25 @@ mod tests {
         let err = read_position(&short).unwrap_err();
         assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
 
-        // `blocks` is optional, but present it must be a digest.
-        for blocks in [
-            json!(null),
-            json!(7),
-            json!("cd".repeat(32)),
-            json!(format!("sha256:{}", "CD".repeat(32))),
-            json!(format!("sha256:{}", "cd".repeat(31))),
+        // `blocks` is optional, but present it must be a digest string. A
+        // string is refused for its digest, anything else for not being one.
+        for (blocks, a_string) in [
+            (json!(null), false),
+            (json!(7), false),
+            (json!("cd".repeat(32)), true),
+            (json!(format!("sha256:{}", "CD".repeat(32))), true),
+            (json!(format!("sha256:{}", "cd".repeat(31))), true),
         ] {
             let mut broken = good.clone();
             broken["blocks"] = blocks.clone();
 
             let err = read_position(&broken).unwrap_err();
-            assert!(
-                matches!(&err, Error::MalformedInscription { field, .. } if field == "position.blocks"),
-                "{blocks}: {err:?}"
-            );
+            let Error::MalformedInscription { field, reason } = &err else {
+                panic!("{blocks}: {err:?}");
+            };
+
+            assert_eq!(field, "position.blocks", "{blocks}");
+            assert_eq!(reason == "not a string", !a_string, "{blocks}: {reason}");
         }
     }
 
