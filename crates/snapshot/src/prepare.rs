@@ -148,6 +148,11 @@ struct Identity {
     retained: Vec<u64>,
     windows: Vec<EpochWindow>,
     mutable_slots: u64,
+    /// The plan's `position.blocks`. Left out when absent, so a manifest
+    /// without it is the format-1 manifest it always was, and an older build
+    /// refuses one with it: the field it drops breaks the checksum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    blocks: Option<Digest>,
 }
 
 impl Identity {
@@ -166,6 +171,7 @@ impl Identity {
                 "mutable slot count",
                 self.mutable_slots != other.mutable_slots,
             ),
+            ("blocks reference", self.blocks != other.blocks),
         ]
         .into_iter()
         .find_map(|(what, differs)| differs.then_some(what))
@@ -320,7 +326,8 @@ impl Bundle {
         by_blob.values().sum()
     }
 
-    /// The plan this boundary was prepared for, without its execution knobs.
+    /// The plan this boundary was prepared for, with the blocks reference it
+    /// was prepared with and without its execution knobs.
     pub fn plan(&self) -> Plan {
         Plan {
             network: Network::for_magic(self.network_magic()),
@@ -330,6 +337,7 @@ impl Bundle {
             retained: self.retained.clone(),
             scratch: None,
             producers: Producers::DEFAULT,
+            blocks: self.manifest.identity.blocks,
         }
     }
 
@@ -911,6 +919,7 @@ fn identity_of(plan: &Plan, request: &Request<'_>) -> Result<Identity, Error> {
         retained: plan.retained.as_slice().to_vec(),
         windows: plan.epochs.clone(),
         mutable_slots: request.mutable_slots,
+        blocks: plan.blocks,
     })
 }
 

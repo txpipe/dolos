@@ -2444,6 +2444,7 @@ mod tests {
                 &crate::Network::for_magic(MAINNET_MAGIC),
                 &ChainPoint::Specific(250, [0x0b; 32].into()),
                 2,
+                None,
             )
             .unwrap(),
             crate::parameters(&Default::default()),

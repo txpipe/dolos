@@ -306,9 +306,42 @@ fn an_unnamed_network_renders_from_its_magic() {
     assert_eq!(position["network"]["name"], "testnet-42");
 }
 
+/// A blocks reference for the tests that name one.
+fn some_blocks() -> stelae::Digest {
+    format!("sha256:{}", "ab".repeat(32)).parse().unwrap()
+}
+
 // --------------------------------------------------------------------------
 // 2. A complete stele from a live store set
 // --------------------------------------------------------------------------
+
+/// The reference a plan takes with `with_blocks` is the one its stele names,
+/// and a plan without one publishes the position it always did.
+#[test]
+fn a_plan_naming_its_blocks_publishes_them_in_position() {
+    let domain: ToyDomain = harness();
+    let (with_root, without_root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+
+    let with = export_plan(
+        with_root.path(),
+        &domain,
+        &plan_for(&domain).with_blocks(some_blocks()),
+    );
+    let without = export_to(without_root.path(), &domain);
+
+    let read = dolos_snapshot::read_position(&with.position).unwrap();
+    assert_eq!(read.blocks, Some(some_blocks()));
+
+    assert!(
+        without.position.get("blocks").is_none(),
+        "{}",
+        without.position
+    );
+
+    let mut stripped = with.position.clone();
+    stripped.as_object_mut().unwrap().remove("blocks");
+    assert_eq!(stripped, without.position);
+}
 
 /// Done criterion 1.
 #[test]
@@ -4141,9 +4174,13 @@ mod boundary_preparation {
         }
 
         fn prepare(&self, store: &Store, retained: &[u64]) -> Result<Bundle, Error> {
+            self.prepare_plan(store, &self.plan(retained))
+        }
+
+        fn prepare_plan(&self, store: &Store, plan: &Plan) -> Result<Bundle, Error> {
             prepare::prepare(
                 store,
-                &self.plan(retained),
+                plan,
                 &self.archive,
                 &self.state,
                 &Request {
@@ -4905,6 +4942,87 @@ mod boundary_preparation {
             preparation_refusal(contract),
             Refusal::SourceMismatch { sequence: 2, .. }
         ));
+
+        assert_eq!(fs::read(root.path().join("bundles/2.json")).unwrap(), held);
+    }
+
+    /// The blocks reference a boundary is prepared with reaches its
+    /// publication: the bundle carries it to finalization, through a reload.
+    #[test]
+    fn a_prepared_boundary_keeps_its_blocks_reference() {
+        let (root, stage_root, frozen_root, finished_root) =
+            (tempdir(), tempdir(), tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let plan = chain.plan(&[]).with_blocks(some_blocks());
+
+        let bundle = chain.prepare_plan(&store, &plan).unwrap();
+        assert_eq!(store.load(2).unwrap().plan().blocks, Some(some_blocks()));
+
+        let frozen = export::export(
+            &SnapshotDir::create(frozen_root.path()).unwrap(),
+            &plan,
+            &chain.archive,
+            &chain.state,
+            None,
+            &export::First,
+            &Observer::silent(),
+        )
+        .unwrap();
+
+        chain.advance_to(3);
+
+        let staged = chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &export::First,
+        );
+        let finished = chain
+            .finalize(
+                finished_root.path(),
+                &store,
+                &bundle,
+                &staged,
+                &export::First,
+            )
+            .unwrap();
+
+        let read = dolos_snapshot::read_position(&finished.position).unwrap();
+        assert_eq!(read.blocks, Some(some_blocks()));
+
+        assert_same_stele(
+            (frozen_root.path(), &frozen),
+            (finished_root.path(), &finished),
+            "with a blocks reference",
+        );
+    }
+
+    /// A bundle is prepared for one blocks reference, and one prepared
+    /// without any keeps the manifest it always had.
+    #[test]
+    fn another_blocks_reference_is_another_bundle() {
+        let root = tempdir();
+        let store = store(root.path());
+        let chain = Chain::at(Shape::Shelley, 2);
+
+        chain.prepare(&store, &[]).unwrap();
+
+        let held = fs::read(root.path().join("bundles/2.json")).unwrap();
+        let sealed: serde_json::Value = serde_json::from_slice(&held).unwrap();
+        assert!(
+            sealed["manifest"]["identity"].get("blocks").is_none(),
+            "{}",
+            sealed["manifest"]["identity"]
+        );
+
+        let refused = chain.prepare_plan(&store, &chain.plan(&[]).with_blocks(some_blocks()));
+
+        match preparation_refusal(refused) {
+            Refusal::SourceMismatch { sequence: 2, what } => {
+                assert!(what.contains("blocks reference"), "{what}")
+            }
+            other => panic!("{other:?}"),
+        }
 
         assert_eq!(fs::read(root.path().join("bundles/2.json")).unwrap(), held);
     }
