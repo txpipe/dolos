@@ -74,6 +74,7 @@ use stelae::{
     inscription::{HistoryEntry, Inscription, LayerDescriptor},
     progress::{Observer, Outcome},
     transport::{LayerSpec, RecordSink, SteleWriter, WrittenLayer},
+    Digest,
 };
 use stelae_driver::digests;
 
@@ -223,6 +224,10 @@ pub struct Plan {
     /// that walks these stores pays the same serial cost without it. See
     /// [`Producers`].
     pub producers: Producers,
+    /// The inscription digest of the blocks snapshot at this sequence, which
+    /// `position.blocks` names. Signed input the host supplies, like
+    /// `retained`; `None` leaves the field out of `position`.
+    pub blocks: Option<Digest>,
 }
 
 impl Plan {
@@ -269,6 +274,7 @@ impl Plan {
             retained,
             scratch: None,
             producers: Producers::DEFAULT,
+            blocks: None,
         })
     }
 
@@ -292,6 +298,13 @@ impl Plan {
         self
     }
 
+    /// Name the blocks snapshot at this sequence in `position.blocks`.
+    pub fn with_blocks(mut self, blocks: Digest) -> Self {
+        self.blocks = Some(blocks);
+
+        self
+    }
+
     /// Keep only the epoch layers within `first..=last`.
     ///
     /// A partial publish: the state tip is unaffected, since it is the tip
@@ -308,7 +321,12 @@ impl Plan {
 
     /// The profile's `position` for this plan.
     pub fn position(&self) -> Result<serde_json::Value, Error> {
-        crate::position(&self.network, &self.cursor, self.sequence)
+        crate::position(
+            &self.network,
+            &self.cursor,
+            self.sequence,
+            self.blocks.as_ref(),
+        )
     }
 
     /// The immutable tag this stele would publish under.
@@ -2323,6 +2341,7 @@ mod chain_tests {
             retained: RetainedEpochs::default(),
             scratch: None,
             producers: Producers::DEFAULT,
+            blocks: None,
         }
     }
 
@@ -2351,6 +2370,7 @@ mod chain_tests {
                 network,
                 &ChainPoint::Specific(250, BlockHash::from([0xab; 32])),
                 2,
+                None,
             )
             .unwrap();
 
@@ -2382,6 +2402,7 @@ mod chain_tests {
             &network,
             &ChainPoint::Specific(150, BlockHash::from([0xcd; 32])),
             1,
+            None,
         )
         .unwrap();
 
@@ -2434,6 +2455,7 @@ mod chain_tests {
             &network,
             &ChainPoint::Specific(150, BlockHash::from([0xcd; 32])),
             1,
+            None,
         )
         .unwrap();
 
@@ -2489,6 +2511,7 @@ mod chain_tests {
             &network,
             &ChainPoint::Specific(150, BlockHash::from([0xcd; 32])),
             1,
+            None,
         )
         .unwrap();
 
