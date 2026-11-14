@@ -29,7 +29,7 @@ use dolos_core::{BlockHash, ChainPoint};
 use dolos_snapshot::{
     entity_kind_for,
     layers::{blocks, entities, indexes, logs, state},
-    log_ns_for, state_ns_for, DolosProfile, RetainedEpochs, BLOCKS, DIGESTS, INDEXES,
+    log_ns_for, state_ns_for, DolosProfile, RetainedEpochs, BLOCKS, INDEXES,
 };
 use stelae::{
     dir::SteleDir,
@@ -37,12 +37,11 @@ use stelae::{
     inscription::{HistoryEntry, Inscription},
     Digest, SteleReader, SteleWriter,
 };
-use stelae_driver::digests;
 
 /// `(kind, diffId, records, uncompressedSize)`, in inscription order.
 ///
 /// `records` counts the protocol's header record, as a descriptor does.
-const GOLDEN_LAYERS: [(&str, &str, u64, u64); 71] = [
+const GOLDEN_LAYERS: [(&str, &str, u64, u64); 70] = [
     (
         BLOCKS,
         "sha256:14a05418723da3c0b4117b5f30ef07d96887b3e12eae114988ff299a654ff106",
@@ -463,17 +462,11 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 71] = [
         2,
         91,
     ),
-    (
-        DIGESTS,
-        "sha256:13f9bbdf676ac47ad7238a52fa525f4413a88335c23d2d567c888abd8dedec80",
-        3,
-        250,
-    ),
 ];
 
 /// The stele's identity: sha256 of the canonical inscription.
 const GOLDEN_INSCRIPTION: &str =
-    "sha256:22ff30a27e126e8ba1d7b0a960e8f874640aafe138c1904fe4f80e397f48504c";
+    "sha256:c6dc0c2ff0140b28237b029dd2769d71aeaae76dd09f9a5ad96059bec6398880";
 
 fn history() -> Vec<HistoryEntry> {
     vec![
@@ -881,10 +874,7 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#""scope":{"shard":0},"uncompressedSize":91},"#,
     r#"{"diffId":"sha256:f193e457cf6094ca38250b65ce07d37be4e056b816106a56545d751d30bd8673","kind":"state-utxos","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-utxos.v1+zstd","records":2,"#,
-    r#""scope":{"shard":1},"uncompressedSize":91},"#,
-    r#"{"diffId":"sha256:13f9bbdf676ac47ad7238a52fa525f4413a88335c23d2d567c888abd8dedec80","kind":"digests","#,
-    r#""mediaType":"application/vnd.dolos.stelae.digests.v1+zstd","records":3,"#,
-    r#""scope":{"lastImmutable":3},"uncompressedSize":250}"#,
+    r#""scope":{"shard":1},"uncompressedSize":91}"#,
     r#"],"parameters":{"#,
     r#""entities":{"asset":32,"script":28,"stake":29},"#,
     r#""indexKeyHash":"xxh3-64","#,
@@ -928,9 +918,6 @@ fn decode_one(kind: &str, record: &[u8]) {
         }
         INDEXES => {
             indexes::decode(record).unwrap();
-        }
-        DIGESTS => {
-            digests::decode(record).unwrap();
         }
         other => panic!("no codec for layer kind {other:?}"),
     }

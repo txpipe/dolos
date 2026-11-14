@@ -55,7 +55,6 @@ fn published(
         &plan,
         domain.archive(),
         domain.state(),
-        None,
         &Observer::silent(),
     )
     .unwrap();

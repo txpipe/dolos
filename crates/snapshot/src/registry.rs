@@ -165,7 +165,7 @@ use stelae::{
 /// resolved them to.
 pub use stelae::oci::{Auth, Registry, Repository, DEFAULT_CONCURRENCY, SCHEME};
 
-use stelae_driver::{digests, publish::Chained};
+use stelae_driver::publish::Chained;
 
 use crate::{
     export::{self, Plan, Predecessor as _, Settling, Standing},
@@ -661,7 +661,6 @@ pub fn publish<A, S>(
     plan: &Plan,
     archive: &A,
     state: &S,
-    digest_records: Option<&[digests::ImmutableDigests]>,
     observer: &Observer,
 ) -> Result<Published, Error>
 where
@@ -674,7 +673,6 @@ where
         plan,
         archive,
         state,
-        digest_records,
         observer,
     )
 }
@@ -697,7 +695,6 @@ pub fn publish_into<W, A, S>(
     plan: &Plan,
     archive: &A,
     state: &S,
-    digest_records: Option<&[digests::ImmutableDigests]>,
     observer: &Observer,
 ) -> Result<Published, Error>
 where
@@ -710,15 +707,7 @@ where
     crate::boundary::check(plan, archive, state)?;
 
     publish_chained(publishing, plan, |settling| {
-        export::export(
-            stele,
-            plan,
-            archive,
-            state,
-            digest_records,
-            settling,
-            observer,
-        )
+        export::export(stele, plan, archive, state, settling, observer)
     })
 }
 
@@ -731,20 +720,12 @@ pub fn publish_prepared<A: ArchiveStore>(
     publishing: Publishing<'_>,
     finalizing: &prepare::Finalizing<'_>,
     archive: &A,
-    digest_records: Option<&[digests::ImmutableDigests]>,
     observer: &Observer,
 ) -> Result<Published, Error> {
     let registry = publishing.registry;
 
     publish_chained(publishing, &finalizing.bundle.plan(), |settling| {
-        prepare::finalize(
-            registry,
-            finalizing,
-            archive,
-            digest_records,
-            settling,
-            observer,
-        )
+        prepare::finalize(registry, finalizing, archive, settling, observer)
     })
 }
 
@@ -785,17 +766,12 @@ fn publish_chained(
 
 /// What [`publish`] would do, without writing anything.
 ///
-/// Takes `digest_records` for the same reason [`publish`] does, and not because
-/// anything supplies them yet: a `digests` layer is one more layer, and a dry
-/// run that counted the layers of a *different* publish than the one that
-/// follows it is the one number a publisher trusts, wrong. The two entry points
-/// read the same input so they cannot drift when Phase 4 gives the records a
-/// source.
-///
-/// It takes the archive for the same reason again. Log layers are sparse — an
-/// epoch publishes one per namespace that wrote something — so the count is a
-/// property of the store, not arithmetic over the plan, and a dry run that did
-/// not look would report layers the publish then does not write.
+/// It takes the archive because a dry run that counted the layers of a
+/// *different* publish than the one that follows it is the one number a
+/// publisher trusts, wrong. Log layers are sparse — an epoch publishes one per
+/// namespace that wrote something — so the count is a property of the store,
+/// not arithmetic over the plan, and a dry run that did not look would report
+/// layers the publish then does not write.
 ///
 /// It takes the state store because a dry run asks the boundary question the
 /// publish does, against the same stores, and refuses where the publish would.
@@ -804,7 +780,6 @@ pub fn preview<A: ArchiveStore, S: StateStore>(
     plan: &Plan,
     archive: &A,
     state: &S,
-    digest_records: Option<&[digests::ImmutableDigests]>,
 ) -> Result<Preview, Error> {
     crate::boundary::check(plan, archive, state)?;
 
@@ -812,7 +787,7 @@ pub fn preview<A: ArchiveStore, S: StateStore>(
     let latest = registry.latest(&DolosProfile)?;
     let settling = chained(publishing, latest.as_ref(), plan)?;
     let previous = settling.inner();
-    let forecast = export::forecast(plan, archive, &settling, digest_records)?;
+    let forecast = export::forecast(plan, archive, &settling)?;
 
     Ok(Preview {
         sequence: plan.sequence,
@@ -903,7 +878,6 @@ mod tests {
                 json!({"shard": 0}),
                 2,
             ),
-            layer(crate::DIGESTS, json!({"lastImmutable": 7}), 3),
         ];
 
         let table = inheritable_layers(&previous, &DolosProfile).unwrap();

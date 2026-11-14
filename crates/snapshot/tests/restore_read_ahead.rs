@@ -93,7 +93,6 @@ impl Published {
             &plan_at_boundary(&domain, 1, Default::default()),
             domain.archive(),
             domain.state(),
-            None,
             &Observer::silent(),
         )
         .unwrap();

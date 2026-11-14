@@ -45,16 +45,15 @@ use dolos_snapshot::{
         logs::LogRecord,
         state::{self, StateRecord},
     },
-    DigestsScope, DolosProfile, EpochScope, Error, Network, Scope, StateScope, BLOCKS, DIGESTS,
-    ENTITY_KINDS, INDEXES, LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
+    DolosProfile, EpochScope, Error, Network, Scope, StateScope, BLOCKS, ENTITY_KINDS, INDEXES,
+    LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
 };
 use stelae::{
     dir::{BlobIndex, SteleDir, WrittenLayer},
     frame::{CanonicalCbor, LayerHeader, Limits},
     inscription::LayerDescriptor,
-    Digest, Profile, SteleReader, SteleWriter,
+    Profile, SteleReader, SteleWriter,
 };
-use stelae_driver::digests::ImmutableDigests;
 
 pub const NETWORK_MAGIC: u64 = dolos_snapshot::MAINNET_MAGIC;
 
@@ -62,7 +61,6 @@ pub const NETWORK_MAGIC: u64 = dolos_snapshot::MAINNET_MAGIC;
 pub const EPOCH: u64 = 7;
 pub const START_SLOT: u64 = 100;
 pub const END_SLOT: u64 = 101;
-pub const LAST_IMMUTABLE: u64 = 3;
 
 /// The boundary block this stele stands at.
 pub const POINT_HASH: [u8; 32] = [0x0b; 32];
@@ -177,14 +175,6 @@ pub const DUMP_EPOCH: u64 = 4;
 
 pub fn dump_scope(shard: u8) -> StateScope {
     StateScope::dump(NETWORK_MAGIC, DUMP_EPOCH, shard)
-}
-
-pub fn digests_scope() -> DigestsScope {
-    DigestsScope {
-        network_magic: NETWORK_MAGIC,
-        epoch: EPOCH,
-        last_immutable: LAST_IMMUTABLE,
-    }
 }
 
 /// Three blocks, two of which share a slot — the Byron end-of-epoch boundary
@@ -323,17 +313,6 @@ pub fn state(ns: Namespace, shard: u8) -> Vec<StateRecord> {
     }]
 }
 
-pub fn digests() -> Vec<ImmutableDigests> {
-    (0..2u64)
-        .map(|n| ImmutableDigests {
-            immutable_number: n,
-            chunk: Digest::from_bytes([0x50 | n as u8; 32]),
-            primary: Digest::from_bytes([0x60 | n as u8; 32]),
-            secondary: Digest::from_bytes([0x70 | n as u8; 32]),
-        })
-        .collect()
-}
-
 /// A key of `ns`'s log at `slot`, made from `byte`.
 pub fn log_key(ns: Namespace, slot: u64, byte: u8) -> LogKey {
     let key = state_key(ns, byte);
@@ -401,7 +380,6 @@ pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
     use dolos_snapshot::layers::{
         blocks, entities as entities_layer, indexes as indexes_layer, logs,
     };
-    use stelae_driver::digests as digests_layer;
 
     let mut layers: Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> = vec![
         (
@@ -450,14 +428,6 @@ pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
             }
         }
     }
-
-    layers.push((
-        DIGESTS,
-        Box::new(digests_scope()),
-        encode_all(&self::digests(), |record| {
-            Ok(digests_layer::encode(record)?)
-        }),
-    ));
 
     layers
 }
