@@ -135,8 +135,12 @@ impl<'a> Rule<'a> {
     }
 
     /// The array the snapshot at `sequence` holds a layer of `kind` in, or
-    /// `None` where that snapshot holds no such layer. `window` is the epoch
-    /// the layer's scope names, and `None` for a state shard.
+    /// `None` where the rule places no such layer in that snapshot. `window` is
+    /// the epoch the layer's scope names, and `None` for a state shard.
+    ///
+    /// Neither this nor [`Rule::first_listed`] sees records: a log or entity
+    /// layer exists only where its window holds one, so an answer says where
+    /// such a layer goes, not that it exists.
     pub fn role(
         &self,
         kind: &str,
@@ -483,6 +487,10 @@ mod tests {
         ));
         assert!(matches!(
             rule.role("log-unknown", Some(1), 3),
+            Err(Error::Unassigned(_))
+        ));
+        assert!(matches!(
+            rule.role("state-unknown", None, 3),
             Err(Error::Unassigned(_))
         ));
         assert!(matches!(
