@@ -15,6 +15,10 @@ use opentelemetry_sdk::metrics::{
 /// Below the INDEX threshold of 8, so the open's compaction leaves them.
 const RUNS: u32 = 5;
 
+/// Fewer than `RUNS`, and below the default threshold of 4, so `state-utxos`
+/// holds runs too but is not the largest.
+const UTXO_RUNS: u32 = 3;
+
 /// Every `(store, keyspace, runs)` point the gauge reports when collected now.
 fn collect(provider: &SdkMeterProvider, exporter: &InMemoryMetricExporter) -> Vec<String> {
     exporter.reset();
@@ -69,16 +73,27 @@ fn the_gauge_reports_each_open_stores_most_l0_runs_with_its_keyspace() {
     let state_path = dir.path().join("state");
     let tuning = Preset::Standard.state();
 
+    // Keys at both ends make every table overlap, so each flush is its own L0
+    // run; a manual flush queues no compaction.
+    let add_run = |keyspace: &fjall::Keyspace, run: u32| {
+        keyspace.insert("a", run.to_be_bytes()).unwrap();
+        keyspace.insert("z", run.to_be_bytes()).unwrap();
+        keyspace.tree.flush_active_memtable(0).unwrap();
+    };
+
     {
         let db = tuning.database.builder(&state_path).open().unwrap();
+        let utxos = db
+            .keyspace("state-utxos", || tuning.utxos.options())
+            .unwrap();
         let tags = db.keyspace("state-tags", || tuning.tags.options()).unwrap();
 
-        // Keys at both ends make every table overlap, so each flush is its
-        // own L0 run; a manual flush queues no compaction.
+        for run in 0..UTXO_RUNS {
+            add_run(&utxos, run);
+        }
+
         for run in 0..RUNS {
-            tags.insert("a", run.to_be_bytes()).unwrap();
-            tags.insert("z", run.to_be_bytes()).unwrap();
-            tags.tree.flush_active_memtable(0).unwrap();
+            add_run(&tags, run);
         }
     }
 
@@ -99,6 +114,25 @@ fn the_gauge_reports_each_open_stores_most_l0_runs_with_its_keyspace() {
         ]
     );
 
+    // The gauge reads the open store at each collect.
+    let tags = state
+        .database()
+        .keyspace("state-tags", || tuning.tags.options())
+        .unwrap();
+    add_run(&tags, RUNS);
+    drop(tags);
+
+    assert_eq!(
+        collect(&provider, &exporter),
+        [
+            "fjall_l0_runs_max{keyspace=archive-blocks,store=archive} 0".to_string(),
+            format!(
+                "fjall_l0_runs_max{{keyspace=state-tags,store=state}} {}",
+                RUNS + 1
+            ),
+        ]
+    );
+
     // A closed store reports nothing, and neither does a view over it.
     state.shutdown().unwrap();
     drop(state);
@@ -113,5 +147,15 @@ fn the_gauge_reports_each_open_stores_most_l0_runs_with_its_keyspace() {
     archive.shutdown().unwrap();
     drop(archive);
 
+    let archive_view = ArchiveStore::open_view(
+        StateSchema::default(),
+        dir.path().join("archive"),
+        None,
+        Preset::Standard,
+    )
+    .unwrap();
+
     assert_eq!(collect(&provider, &exporter), Vec::<String>::new());
+
+    drop(archive_view);
 }
