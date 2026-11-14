@@ -118,7 +118,7 @@ They share one limit with MiniKupo's heavy matches, `serve.max_concurrent_heavy_
 }
 ```
 
-No other route is refused by this limit. Every route, heavy or not, answers `504 Gateway Timeout` once it runs past `request_timeout_seconds` (120 by default). Clients should retry both after a pause. A `/tx/submit` cut by the deadline may still reach the mempool, since its validation runs to the end. Submitting the same transaction again then answers `400 Bad Request`, because the pending copy already spends its inputs, so look the transaction up by its hash before building a replacement. See the [configuration schema](../configuration/schema#serve) for the settings.
+No other route is refused by this limit. Every route, heavy or not, answers `504 Gateway Timeout` once it runs past `request_timeout_seconds` (120 by default). Clients should retry both after a pause. A `/tx/submit` cut by the deadline may still reach the mempool, since its validation runs to the end. While the node holds that copy, submitting the same transaction again answers `400 Bad Request`, because the copy already spends its inputs. MiniBF serves no pending transactions: `/txs/{hash}` answers `404 Not Found` until the transaction is in a block, so neither answer means it was rejected. Before building a replacement, wait until the transaction appears at `/txs/{hash}` or its validity interval has passed, or spend at least one of the same inputs in the replacement, so the two can never both land. See the [configuration schema](../configuration/schema#serve) for the settings.
 
 ## Coverage
 
