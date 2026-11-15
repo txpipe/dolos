@@ -187,12 +187,7 @@ fn configured_boundary_survives_inspection_and_requires_explicit_advancement() {
             Some(boundary.clone())
         );
         assert_eq!(snapshot.epoch().unwrap(), Some(1));
-        let plan = snapshot
-            .plan(
-                u64::from(genesis.network_magic()),
-                dolos_snapshot::planning::retained_epochs(&[]).unwrap(),
-            )
-            .unwrap();
+        let plan = snapshot.plan(u64::from(genesis.network_magic())).unwrap();
         assert_eq!(plan.sequence, 1);
         drop(snapshot);
         workspace.finish().unwrap();
@@ -248,12 +243,7 @@ fn the_boundary_delta_is_the_index_tail_a_traversal_finds() {
     assert!(!delta.tags.is_empty());
 
     let snapshot = session.snapshot();
-    let plan = snapshot
-        .plan(
-            magic,
-            dolos_snapshot::planning::retained_epochs(&[]).unwrap(),
-        )
-        .unwrap();
+    let plan = snapshot.plan(magic).unwrap();
     let silent = dolos_snapshot::progress::Observer::silent();
     let scratch = tempfile::tempdir().unwrap();
 
@@ -314,13 +304,12 @@ fn a_stop_epoch_cut_publishes_and_a_later_cursor_is_refused() {
         .unwrap();
     session.finish().unwrap();
 
-    let retained = || dolos_snapshot::planning::retained_epochs(&[]).unwrap();
     let silent = dolos_snapshot::progress::Observer::silent();
     let steles = tempfile::tempdir().unwrap();
 
     let workspace = ReplayWorkspace::open(&node.config, genesis.clone()).unwrap();
     let snapshot = workspace.snapshot();
-    let plan = snapshot.plan(magic, retained()).unwrap();
+    let plan = snapshot.plan(magic).unwrap();
     let evidence = snapshot.boundary(&plan).unwrap();
     assert_eq!(evidence.epoch, 1);
     assert_eq!(evidence.first, boundary);
@@ -338,7 +327,7 @@ fn a_stop_epoch_cut_publishes_and_a_later_cursor_is_refused() {
 
     let workspace = ReplayWorkspace::open(&node.config, genesis).unwrap();
     let snapshot = workspace.snapshot();
-    let plan = snapshot.plan(magic, retained()).unwrap();
+    let plan = snapshot.plan(magic).unwrap();
     assert_eq!(
         plan.sequence, 1,
         "still in epoch 1, one block past its first"

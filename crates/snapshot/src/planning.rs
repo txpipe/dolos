@@ -11,7 +11,7 @@ use dolos_core::BlockSlot;
 
 use crate::{
     export::{Plan, Producers},
-    Error, RetainedEpochs,
+    Error,
 };
 
 /// An epoch selection, in Rust's own range spellings.
@@ -94,17 +94,6 @@ impl std::str::FromStr for EpochRange {
     }
 }
 
-/// The retained state-dump epochs a node publishes under.
-///
-/// Read here rather than in each command for the same reason [`restrict`] is:
-/// `publish`, `digest` and `verify --reproduce` all put this list in
-/// `parameters`, and a node that gave them different lists would be verifying
-/// a different document than the one it published — and being told it does not
-/// match. An empty list is a publisher that retains the tip alone.
-pub fn retained_epochs(epochs: &[u64]) -> Result<RetainedEpochs, Error> {
-    RetainedEpochs::new(epochs.to_vec())
-}
-
 /// Apply an operator's selection to a plan, or leave it whole.
 ///
 /// The one place any command narrows a plan. `restrict_epochs` takes two
@@ -162,12 +151,6 @@ pub struct PlanReport {
     /// `None` when the state tip alone is selected, which is a legitimate
     /// publish rather than a mistake.
     pub epochs: Option<EpochSpan>,
-    /// The dump epochs this publisher retains. An empty list is a choice with
-    /// consequences — it is what makes this publisher's parameters differ from
-    /// a co-signer's that retains dumps — so it is reported either way.
-    pub retained: Vec<u64>,
-    /// How many of them fall due at this sequence.
-    pub dumps_due: usize,
 }
 
 impl PlanReport {
@@ -188,8 +171,6 @@ impl PlanReport {
                 }),
                 _ => None,
             },
-            retained: plan.retained.as_slice().to_vec(),
-            dumps_due: plan.retained.due(plan.sequence).count(),
         })
     }
 }
@@ -218,21 +199,6 @@ mod tests {
     fn a_nonsensical_range_is_refused() {
         for raw in ["520..500", "..0", "abc", "", "500..abc", "500..=", "-1"] {
             assert!(raw.parse::<EpochRange>().is_err(), "{raw:?}");
-        }
-    }
-    /// The list a publisher passes is the list validated, unchanged — what
-    /// the configured `state_epochs` gave before it moved to the invocation.
-    #[test]
-    fn an_explicit_list_is_validated_as_given() {
-        for list in [&[][..], &[208], &[208, 236, 290, 365]] {
-            assert_eq!(retained_epochs(list).unwrap().as_slice(), list);
-        }
-
-        for list in [&[0u64][..], &[208, 208], &[236, 208]] {
-            assert!(
-                matches!(retained_epochs(list), Err(Error::RetainedEpochs(_))),
-                "{list:?}"
-            );
         }
     }
 }

@@ -41,13 +41,13 @@ use crate::{
     reporting::Cursor,
     scope_key,
     staging::{self, sync_dir, Budget, Capture, Family, Runs, Staged},
-    state_layer_count, DolosProfile, Error, Network, RetainedEpochs, Scope as _, COMPRESSION_LEVEL,
-    ENTITY_KINDS, INDEXES, LOG_KINDS, MAX_RECORD, MEDIA_TYPE_VERSION, PROFILE_NAME,
-    PROFILE_VERSION, STATE_KINDS,
+    state_layer_count, DolosProfile, Error, Network, Scope as _, COMPRESSION_LEVEL, ENTITY_KINDS,
+    INDEXES, LOG_KINDS, MAX_RECORD, MEDIA_TYPE_VERSION, PROFILE_NAME, PROFILE_VERSION, STATE_KINDS,
 };
 
-/// Version of the bundle manifest and its layout.
-pub const BUNDLE_FORMAT: u32 = 1;
+/// Version of the bundle manifest and its layout. Format 2 drops the retained
+/// list from the identity; a format-1 bundle is refused rather than read.
+pub const BUNDLE_FORMAT: u32 = 2;
 
 /// The level payloads are compressed at on their way to the store. Identity is
 /// the uncompressed digest, so this trades scratch for preparation time and
@@ -142,12 +142,9 @@ struct Identity {
     sequence: u64,
     cursor: (BlockSlot, String),
     store_contract: String,
-    retained: Vec<u64>,
     windows: Vec<EpochWindow>,
     mutable_slots: u64,
-    /// The plan's `position.blocks`. Left out when absent, so a manifest
-    /// without it is the format-1 manifest it always was, and an older build
-    /// refuses one with it: the field it drops breaks the checksum.
+    /// The plan's `position.blocks`. Left out when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     blocks: Option<Digest>,
 }
@@ -162,7 +159,6 @@ impl Identity {
                 "store contract",
                 self.store_contract != other.store_contract,
             ),
-            ("retained list", self.retained != other.retained),
             ("set of windows", self.windows != other.windows),
             (
                 "mutable slot count",
@@ -221,7 +217,6 @@ fn checksum(manifest: &Manifest) -> Result<u64, serde_json::Error> {
 pub struct Bundle {
     manifest: Manifest,
     cursor: ChainPoint,
-    retained: RetainedEpochs,
     index: BlobIndex,
     layers: BTreeMap<(String, String), usize>,
 }
@@ -235,9 +230,6 @@ impl Bundle {
             .ok()
             .and_then(|raw| raw.try_into().ok())
             .ok_or_else(|| corrupt(sequence, "the cursor hash is not 32 hex-encoded bytes"))?;
-
-        let retained = RetainedEpochs::new(manifest.identity.retained.clone())
-            .map_err(|e| corrupt(sequence, e))?;
 
         let layers = manifest
             .layers
@@ -258,7 +250,6 @@ impl Bundle {
 
         Ok(Self {
             cursor: ChainPoint::Specific(*slot, hash.into()),
-            retained,
             index,
             layers,
             manifest,
@@ -332,7 +323,6 @@ impl Bundle {
             sequence: self.sequence(),
             epochs: self.manifest.identity.windows.clone(),
             mutable_slots: self.mutable_slots(),
-            retained: self.retained.clone(),
             scratch: None,
             producers: Producers::DEFAULT,
             blocks: self.manifest.identity.blocks,
@@ -685,7 +675,6 @@ pub fn prepare<A: ArchiveStore, S: StateStore>(
     // and its settled account rows, whatever the seal says.
     let capture_from = oldest_unsealed.min(plan.sequence.saturating_sub(1));
 
-    // The retained list writes no layer, so the capture carries none.
     let capture = Plan {
         epochs: plan
             .epochs
@@ -693,7 +682,6 @@ pub fn prepare<A: ArchiveStore, S: StateStore>(
             .filter(|window| window.epoch >= capture_from)
             .copied()
             .collect(),
-        retained: RetainedEpochs::default(),
         ..plan.clone()
     };
 
@@ -914,7 +902,6 @@ fn identity_of(plan: &Plan, request: &Request<'_>) -> Result<Identity, Error> {
         sequence: plan.sequence,
         cursor: (plan.cursor.slot(), hex::encode(hash)),
         store_contract: request.store_contract.clone(),
-        retained: plan.retained.as_slice().to_vec(),
         windows: plan.epochs.clone(),
         mutable_slots: request.mutable_slots,
         blocks: plan.blocks,

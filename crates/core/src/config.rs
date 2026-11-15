@@ -1606,21 +1606,20 @@ impl ConfigError {
 }
 
 /// Sections an older configuration carried that are now inputs of the
-/// commands that read them, and where each one went.
+/// commands that read them, or gone, and what became of each one.
 const MOVED_TO_ARGUMENTS: [(&str, &str); 3] = [
     (
         "mithril",
-        "`dolos bootstrap mithril --aggregator --genesis-vkey`",
+        "moved to `dolos bootstrap mithril --aggregator --genesis-vkey`",
     ),
     (
         "snapshot",
-        "`stelae-publisher digest --state-epochs-file` (and `verify --reproduce`), one epoch per \
-         line; the download URL has no successor",
+        "is gone: its state epochs and download URL have no successor",
     ),
     (
         "stelae",
-        "`--registry-user` / `DOLOS_STELAE_USER`, `DOLOS_STELAE_PASSWORD`, `DOLOS_STELAE_TOKEN` \
-         and `--registry-credentials-file` on `dolos bootstrap stelae`",
+        "moved to `--registry-user` / `DOLOS_STELAE_USER`, `DOLOS_STELAE_PASSWORD`, \
+         `DOLOS_STELAE_TOKEN` and `--registry-credentials-file` on `dolos bootstrap stelae`",
     ),
 ];
 
@@ -2122,7 +2121,7 @@ fn reject_moved_sections(document: &::config::Config) -> Result<(), ConfigError>
     let moved: Vec<String> = MOVED_TO_ARGUMENTS
         .iter()
         .filter(|(section, _)| document.get::<::config::Value>(section).is_ok())
-        .map(|(section, destination)| format!("[{section}] moved to {destination}"))
+        .map(|(section, fate)| format!("[{section}] {fate}"))
         .collect();
 
     if moved.is_empty() {

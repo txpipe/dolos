@@ -57,8 +57,8 @@ use dolos_snapshot::{
     export::{self, EpochWindow, Plan, Predecessor as _},
     facade::{Selection, SnapshotSource as _, StoreSnapshot},
     layers::{blocks, entities, indexes, logs, state},
-    state_layer_count, state_ns_for, DolosProfile, Network, RetainedEpochs, BLOCKS, ENTITY_KINDS,
-    INDEXES, LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
+    state_layer_count, state_ns_for, DolosProfile, Network, BLOCKS, ENTITY_KINDS, INDEXES,
+    LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
 };
 use dolos_testing::{
     blocks::make_conway_block_with_prev,
@@ -78,7 +78,7 @@ use watcher::Watcher;
 
 /// The identity of an export over the skeleton store set.
 const GOLDEN_SKELETON: &str =
-    "sha256:ed7236c56ff338c81e1703e5f85afc1dc97270e0e6df2e0c97aca442352f06a4";
+    "sha256:d25948e8acbed1a80bd98cc713cb0f7b896c3d5aa374011d256e95323f7dccf4";
 
 /// Where the skeleton fixture stands: on the first block of epoch 2 under
 /// [`skeleton_summary`], after fifty empty slots, so the export covers three
@@ -189,7 +189,6 @@ fn a_bare_boundary_exports_the_pinned_skeleton() {
         &skeleton_summary(),
         Network::for_magic(dolos_snapshot::MAINNET_MAGIC),
         skeleton_point(),
-        Default::default(),
         SKELETON_MUTABLE_SLOTS,
     )
     .unwrap();
@@ -268,7 +267,6 @@ fn a_log_under_an_uncovered_namespace_fails_the_export() {
         &skeleton_summary(),
         Network::for_magic(dolos_snapshot::MAINNET_MAGIC),
         skeleton_point(),
-        Default::default(),
         SKELETON_MUTABLE_SLOTS,
     )
     .unwrap();
@@ -300,7 +298,6 @@ fn an_unnamed_network_renders_from_its_magic() {
         &skeleton_summary(),
         Network::for_magic(42),
         skeleton_point(),
-        Default::default(),
         SKELETON_MUTABLE_SLOTS,
     )
     .unwrap();
@@ -758,26 +755,24 @@ fn expected_state<B: ToyStores>(
 #[test]
 fn both_backends_publish_the_same_inscription() {
     // At the live cursor, which is what a publisher actually stands at, and
-    // then at the epoch-1 boundary with that epoch retained — see
-    // `plan_at_boundary`.
+    // then at the epoch-1 boundary — see `plan_at_boundary`.
     same_inscription_from_both_backends(None);
-    same_inscription_from_both_backends(Some((1, RetainedEpochs::new(vec![1]).unwrap())));
+    same_inscription_from_both_backends(Some(1));
 }
 
-/// The plan the comparison is run over: the live cursor, or a boundary point
-/// with a retained list.
+/// The plan the comparison is run over: the live cursor, or a boundary point.
 ///
 /// A free function rather than a closure because the two domains are two
 /// types — the whole point of the comparison — and a closure cannot be generic
 /// over them.
-fn plan_of<B: ToyStores>(domain: &ToyDomain<B>, at: &Option<(u64, RetainedEpochs)>) -> Plan {
+fn plan_of<B: ToyStores>(domain: &ToyDomain<B>, at: &Option<u64>) -> Plan {
     match at {
-        Some((epoch, retained)) => plan_at_boundary(domain, *epoch, retained.clone()),
+        Some(epoch) => plan_at_boundary(domain, *epoch),
         None => plan_for(domain),
     }
 }
 
-fn same_inscription_from_both_backends(at: Option<(u64, RetainedEpochs)>) {
+fn same_inscription_from_both_backends(at: Option<u64>) {
     let memory: ToyDomain<MemoryStores> = harness();
     let fjall: ToyDomain<FjallStores> = harness();
 
@@ -848,16 +843,15 @@ fn same_inscription_from_both_backends(at: Option<(u64, RetainedEpochs)>) {
 ///
 /// One backend, one seeding, three walks: strictly serial (one producer, no
 /// threads at all), the default pool, and a pool wider than the job list is
-/// deep, each over a plan standing at a retained epoch. Byte-identical
+/// deep, each over a plan standing at an epoch boundary. Byte-identical
 /// inscriptions and blobs, or the pool moved something it promised only to
 /// reschedule.
 #[test]
 fn a_pooled_production_is_byte_identical_to_the_serial_walk() {
     let domain: ToyDomain = harness();
-    let retained = RetainedEpochs::new(vec![1]).unwrap();
 
     let pool_of = |producers: usize| {
-        plan_at_boundary(&domain, 1, retained.clone()).with_producers(export::Producers::new(
+        plan_at_boundary(&domain, 1).with_producers(export::Producers::new(
             std::num::NonZeroUsize::new(producers).unwrap(),
         ))
     };
@@ -985,19 +979,15 @@ fn a_failing_producer_fails_the_pooled_export() {
     );
 }
 
-/// Done criterion 1: a publish standing at a retained epoch writes each state
-/// shard once, under the tip's scope.
-///
-/// Both retained epochs are named — the one the publish stands in and one it
-/// has moved past — and neither adds a layer: the state layers are exactly the
-/// tip's, in `STATE_KINDS` order and ascending shard within a kind, and none
-/// of their scopes names an epoch.
+/// A publish at a boundary writes each state shard once, under the tip's
+/// scope: the state layers are exactly the tip's, in `STATE_KINDS` order and
+/// ascending shard within a kind, and none of their scopes names an epoch.
 #[test]
-fn a_publish_at_a_retained_epoch_writes_each_state_shard_once() {
+fn a_publish_writes_each_state_shard_once_as_the_tip() {
     let domain: ToyDomain<MemoryStores> = harness();
     let temp = tempfile::tempdir().unwrap();
 
-    let plan = plan_at_boundary(&domain, 2, RetainedEpochs::new(vec![1, 2]).unwrap());
+    let plan = plan_at_boundary(&domain, 2);
     let inscription = export_plan(temp.path(), &domain, &plan);
 
     let mut expected: Vec<(String, serde_json::Value)> = Vec::new();
@@ -1018,57 +1008,15 @@ fn a_publish_at_a_retained_epoch_writes_each_state_shard_once() {
     assert_eq!(found.len(), state_layer_count());
     assert_eq!(found, expected);
 
-    // The list is still the signed input it was configured as.
-    assert_eq!(
-        inscription.parameters["stateEpochs"],
-        serde_json::json!([1, 2])
-    );
-}
-
-/// Done criterion 2: the retained list is **signed input**.
-///
-/// Two publishers over one ledger, standing at one point, differing in nothing
-/// but their configuration, publish different documents — and the difference is
-/// legible in `parameters` rather than buried in a layer. That is what makes a
-/// publisher running the wrong list eject itself from co-signing instead of
-/// quietly attesting a different history.
-#[test]
-fn two_publishers_with_different_retained_lists_do_not_agree() {
-    let domain: ToyDomain<MemoryStores> = harness();
-
-    let publish = |retained: RetainedEpochs| {
-        let temp = tempfile::tempdir().unwrap();
-        let plan = plan_at_boundary(&domain, 2, retained);
-
-        (export_plan(temp.path(), &domain, &plan), temp)
-    };
-
-    let (none, _a) = publish(RetainedEpochs::default());
-    let (one, _b) = publish(RetainedEpochs::new(vec![2]).unwrap());
-    let (two, _c) = publish(RetainedEpochs::new(vec![1, 2]).unwrap());
-
-    assert_eq!(none.parameters["stateEpochs"], serde_json::json!([]));
-    assert_eq!(one.parameters["stateEpochs"], serde_json::json!([2]));
-    assert_eq!(two.parameters["stateEpochs"], serde_json::json!([1, 2]));
-
-    // Different parameters, therefore different identities — the divergence a
-    // co-signer sees.
-    let digests: std::collections::BTreeSet<_> = [&none, &one, &two]
-        .into_iter()
-        .map(|inscription| inscription.digest().unwrap())
+    // The parameters name no epoch: what they hold is code, not choice.
+    let keys: Vec<&str> = inscription
+        .parameters
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
         .collect();
-
-    assert_eq!(digests.len(), 3, "two lists produced one identity");
-
-    // The parameters are the *only* thing that moved: the layers are the
-    // same, so the diff an operator reads is one field rather than a document
-    // they have to compare by hand.
-    for (left, right) in [(&none, &one), (&none, &two), (&one, &two)] {
-        assert_eq!(left.position, right.position);
-        assert_eq!(left.compression, right.compression);
-        assert_eq!(left.layers, right.layers);
-        assert_ne!(left.parameters, right.parameters);
-    }
+    assert_eq!(keys, ["entities", "indexKeyHash", "schemas", "shards"]);
 }
 
 /// A predecessor that lends every inheritable layer of an earlier stele, as a
@@ -1212,12 +1160,12 @@ fn a_chained_publish_rebuilds_the_account_rows_ewrap_rewrote() {
 
     write_account_row(&domain, 1, stake_only());
 
-    let cut_at_2 = plan_at_boundary(&domain, 2, RetainedEpochs::default());
+    let cut_at_2 = plan_at_boundary(&domain, 2);
     let predecessor = reproduce_fresh(&cut_at_2, &domain);
 
     write_account_row(&domain, 1, settled());
 
-    let cut_at_3 = plan_at_boundary(&domain, 3, RetainedEpochs::default());
+    let cut_at_3 = plan_at_boundary(&domain, 3);
     let lending = Lending::following(&predecessor, &cut_at_3);
 
     let chained = export::reproduce(&cut_at_3, domain.archive(), domain.state(), &lending).unwrap();
@@ -1246,12 +1194,12 @@ fn a_resumed_first_publish_builds_every_account_window() {
 
     write_account_row(&domain, 1, stake_only());
 
-    let cut_at_2 = plan_at_boundary(&domain, 2, RetainedEpochs::default());
+    let cut_at_2 = plan_at_boundary(&domain, 2);
     let interrupted = reproduce_fresh(&cut_at_2, &domain);
 
     write_account_row(&domain, 1, settled());
 
-    let cut_at_4 = plan_at_boundary(&domain, 4, RetainedEpochs::default());
+    let cut_at_4 = plan_at_boundary(&domain, 4);
     let resuming = Lending::resuming(&interrupted);
 
     let resumed =
@@ -1280,17 +1228,17 @@ fn a_record_never_supplies_an_account_window_the_manifest_lacks() {
 
     write_account_row(&domain, 1, stake_only());
 
-    let cut_at_2 = plan_at_boundary(&domain, 2, RetainedEpochs::default());
+    let cut_at_2 = plan_at_boundary(&domain, 2);
     let interrupted = reproduce_fresh(&cut_at_2, &domain);
 
     write_account_row(&domain, 1, settled());
 
-    let cut_at_3 = plan_at_boundary(&domain, 3, RetainedEpochs::default());
+    let cut_at_3 = plan_at_boundary(&domain, 3);
     let mut restricted = reproduce_fresh(&cut_at_3, &domain);
     let window_1 = account_layer(&restricted, 1);
     restricted.layers.retain(|layer| *layer != window_1);
 
-    let cut_at_4 = plan_at_boundary(&domain, 4, RetainedEpochs::default());
+    let cut_at_4 = plan_at_boundary(&domain, 4);
     let lending_record = || {
         let mut lending = Lending::following(&restricted, &cut_at_4);
         lending.layers.push(account_layer(&interrupted, 1));
@@ -1336,10 +1284,10 @@ fn a_record_never_supplies_an_account_window_the_manifest_lacks() {
 fn a_settling_predecessor_passes_each_landed_layer_on() {
     let domain: ToyDomain<MemoryStores> = harness();
 
-    let cut_at_2 = plan_at_boundary(&domain, 2, RetainedEpochs::default());
+    let cut_at_2 = plan_at_boundary(&domain, 2);
     let predecessor = reproduce_fresh(&cut_at_2, &domain);
 
-    let cut_at_3 = plan_at_boundary(&domain, 3, RetainedEpochs::default());
+    let cut_at_3 = plan_at_boundary(&domain, 3);
     let landed = |predecessor: &dyn export::Predecessor| {
         export::reproduce(&cut_at_3, domain.archive(), domain.state(), predecessor).unwrap()
     };
@@ -1374,11 +1322,11 @@ fn a_forecast_counts_no_unsettled_account_window_the_stores_lack() {
 
     write_account_row(&source, 1, stake_only());
 
-    let cut_at_2 = plan_at_boundary(&source, 2, RetainedEpochs::default());
+    let cut_at_2 = plan_at_boundary(&source, 2);
     let predecessor = reproduce_fresh(&cut_at_2, &source);
 
     let domain: ToyDomain<MemoryStores> = harness();
-    let cut_at_3 = plan_at_boundary(&domain, 3, RetainedEpochs::default());
+    let cut_at_3 = plan_at_boundary(&domain, 3);
     let lending = Lending::following(&predecessor, &cut_at_3);
 
     let chained = export::reproduce(&cut_at_3, domain.archive(), domain.state(), &lending).unwrap();
@@ -1476,8 +1424,7 @@ const CANONICAL_SKELETON: &str = concat!(
     r#""entities":{"asset":32,"script":28,"stake":29},"#,
     r#""indexKeyHash":"xxh3-64","#,
     r#""schemas":{"account-address-epochs":1,"account-addresses":1,"account-epochs":1,"account-history":1,"account-stats":1,"accounts":1,"address-stats":1,"asset-mint-chunks":1,"asset-mints":1,"datums":1,"drep-epochs":1,"drep-observations":1,"dreps":1,"epochs":1,"eras":1,"first-mint-chunks":1,"first-mints":1,"first-script-chunks":1,"first-scripts":1,"gov":1,"metadata-labels":1,"payment-address-epochs":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"policy-first-mint-chunks":1,"pool-epochs":1,"pools":1,"proposals":1,"utxos":1},"#,
-    r#""shards":{"account-addresses":1,"account-history":1,"account-stats":1,"accounts":16,"address-stats":1,"asset-mints":1,"datums":16,"drep-observations":1,"dreps":1,"epochs":1,"eras":1,"first-mints":1,"first-scripts":1,"gov":1,"metadata-labels":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"pools":1,"proposals":1,"utxos":16},"#,
-    r#""stateEpochs":[]"#,
+    r#""shards":{"account-addresses":1,"account-history":1,"account-stats":1,"accounts":16,"address-stats":1,"asset-mints":1,"datums":16,"drep-observations":1,"dreps":1,"epochs":1,"eras":1,"first-mints":1,"first-scripts":1,"gov":1,"metadata-labels":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"pools":1,"proposals":1,"utxos":16}"#,
     r#"},"position":{"epoch":2,"network":{"magic":764824073,"name":"mainnet"},"point":{"hash":"018f99053185b9f7bae6fad0b8aa50710ebc131352dbb47f32d5030622bf51df","slot":250}},"profile":{"name":"io.txpipe.dolos.cardano","version":1},"schema":1,"sequence":2}"#,
 );
 
@@ -2366,7 +2313,6 @@ fn an_export_costs_one_index_traversal_however_many_epochs_it_covers() {
             &skeleton_summary(),
             Network::for_magic(dolos_snapshot::MAINNET_MAGIC),
             skeleton_point(),
-            Default::default(),
             SKELETON_MUTABLE_SLOTS,
         )
         .unwrap()
@@ -2428,7 +2374,6 @@ fn skeleton_plan() -> Plan {
         &skeleton_summary(),
         Network::for_magic(dolos_snapshot::MAINNET_MAGIC),
         skeleton_point(),
-        Default::default(),
         SKELETON_MUTABLE_SLOTS,
     )
     .unwrap()
@@ -2694,7 +2639,6 @@ fn the_headless_facade_plans_encodes_and_reproduces_one_document() {
     let plan = source
         .selected_plan(
             u64::from(domain.genesis().network_magic()),
-            RetainedEpochs::default(),
             Selection::default(),
         )
         .unwrap();
@@ -4139,19 +4083,18 @@ mod boundary_preparation {
             self.write_state(3);
         }
 
-        fn plan(&self, retained: &[u64]) -> Plan {
+        fn plan(&self) -> Plan {
             Plan::new(
                 &self.summary,
                 Network::for_magic(MAINNET_MAGIC),
                 self.tip.clone().unwrap(),
-                RetainedEpochs::new(retained.to_vec()).unwrap(),
                 self.mutable,
             )
             .unwrap()
         }
 
-        fn prepare(&self, store: &Store, retained: &[u64]) -> Result<Bundle, Error> {
-            self.prepare_plan(store, &self.plan(retained))
+        fn prepare(&self, store: &Store) -> Result<Bundle, Error> {
+            self.prepare_plan(store, &self.plan())
         }
 
         fn prepare_plan(&self, store: &Store, plan: &Plan) -> Result<Bundle, Error> {
@@ -4188,15 +4131,10 @@ mod boundary_preparation {
         }
 
         /// The ordinary export of the stores as they stand.
-        fn export(
-            &self,
-            root: &Path,
-            retained: &[u64],
-            previous: &dyn export::Predecessor,
-        ) -> Inscription {
+        fn export(&self, root: &Path, previous: &dyn export::Predecessor) -> Inscription {
             export::export(
                 &SteleDir::create(root).unwrap(),
-                &self.plan(retained),
+                &self.plan(),
                 &self.archive,
                 &self.state,
                 previous,
@@ -4289,7 +4227,6 @@ mod boundary_preparation {
     #[test]
     fn a_prepared_boundary_finishes_as_the_store_frozen_there() {
         for shape in [Shape::Shelley, Shape::Byron] {
-            let retained = [3];
             let (root, stage_root) = (tempdir(), tempdir());
             let store = store(root.path());
             let mut chain = Chain::new(shape);
@@ -4297,7 +4234,7 @@ mod boundary_preparation {
 
             for boundary in [2, 3, 5] {
                 chain.advance_to(boundary);
-                bundles.push(chain.prepare(&store, &retained).unwrap());
+                bundles.push(chain.prepare(&store).unwrap());
             }
 
             assert_eq!(
@@ -4325,7 +4262,7 @@ mod boundary_preparation {
             for bundle in &bundles {
                 let frozen_root = tempdir();
                 let frozen_chain = Chain::at(shape, bundle.sequence());
-                let frozen = frozen_chain.export(frozen_root.path(), &retained, &export::First);
+                let frozen = frozen_chain.export(frozen_root.path(), &export::First);
 
                 let finished_root = tempdir();
                 let finished = chain
@@ -4363,18 +4300,17 @@ mod boundary_preparation {
     #[test]
     fn a_chained_batch_matches_the_chained_exports() {
         for shape in [Shape::Shelley, Shape::Byron] {
-            let retained = [3];
             let (root, stage_root, seed_root) = (tempdir(), tempdir(), tempdir());
             let store = store(root.path());
 
-            let seed = Chain::at(shape, 1).export(seed_root.path(), &retained, &export::First);
+            let seed = Chain::at(shape, 1).export(seed_root.path(), &export::First);
 
             let mut chain = Chain::at(shape, 2);
             let mut bundles = Vec::new();
 
             for boundary in [2, 3, 4] {
                 chain.advance_to(boundary);
-                bundles.push(chain.prepare(&store, &retained).unwrap());
+                bundles.push(chain.prepare(&store).unwrap());
             }
 
             let lending = Lending::following(&seed, &bundles[0].plan());
@@ -4397,7 +4333,6 @@ mod boundary_preparation {
                 let frozen_root = tempdir();
                 let frozen = Chain::at(shape, bundle.sequence()).export(
                     frozen_root.path(),
-                    &retained,
                     &Lending::following(&frozen_previous, &plan),
                 );
 
@@ -4452,8 +4387,8 @@ mod boundary_preparation {
             2
         );
 
-        let before = frozen.export(at_two.path(), &[], &export::First);
-        let after = later.export(at_six.path(), &[], &export::First);
+        let before = frozen.export(at_two.path(), &export::First);
+        let after = later.export(at_six.path(), &export::First);
 
         assert!(
             layer_of(&before, "log-first-script-chunks", 1).is_none()
@@ -4478,14 +4413,14 @@ mod boundary_preparation {
         assert_eq!(tail.records, 2);
     }
 
-    /// A bundle prepared at a retained epoch finalizes into the tip's state
-    /// layers alone, one per shard, as an export from the stores does.
+    /// A bundle finalizes into the tip's state layers alone, one per shard, as
+    /// an export from the stores does.
     #[test]
-    fn a_retained_epoch_finalizes_each_state_shard_once() {
+    fn a_bundle_finalizes_each_state_shard_once() {
         let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 3);
-        let bundle = chain.prepare(&store, &[3]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(4);
 
@@ -4531,13 +4466,13 @@ mod boundary_preparation {
             let chain = Chain::at(shape, 2);
             let (delta_root, traversal_root) = (tempdir(), tempdir());
 
-            let from_delta = chain.prepare(&store(delta_root.path()), &[]).unwrap();
+            let from_delta = chain.prepare(&store(delta_root.path())).unwrap();
 
             assert_eq!(chain.archive.traversals(), (0, 0), "{shape:?}");
 
             let from_traversal = prepare::prepare(
                 &store(traversal_root.path()),
-                &chain.plan(&[]),
+                &chain.plan(),
                 &chain.archive,
                 &chain.state,
                 &Request {
@@ -4569,7 +4504,7 @@ mod boundary_preparation {
 
         let refused = prepare::prepare(
             &store,
-            &chain.plan(&[]),
+            &chain.plan(),
             &chain.archive,
             &chain.state,
             &Request {
@@ -4595,7 +4530,7 @@ mod boundary_preparation {
 
         chain.finish_epoch();
 
-        let refused = chain.prepare(&store(root.path()), &[]).unwrap_err();
+        let refused = chain.prepare(&store(root.path())).unwrap_err();
 
         assert!(matches!(refused, Error::NotABoundary { .. }), "{refused:?}");
     }
@@ -4611,7 +4546,7 @@ mod boundary_preparation {
 
         let refused = prepare::prepare(
             &store,
-            &chain.plan(&[]),
+            &chain.plan(),
             &Counted::failing(chain.archive.inner.clone(), Traversal::Logs, 1),
             &chain.state,
             &Request {
@@ -4633,8 +4568,8 @@ mod boundary_preparation {
         fs::write(root.path().join("bundles/2.json.partial"), b"{").unwrap();
         assert!(store.sequences().unwrap().is_empty());
 
-        let retried = chain.prepare(&store, &[]).unwrap();
-        let clean = chain.prepare(&self::store(clean_root.path()), &[]).unwrap();
+        let retried = chain.prepare(&store).unwrap();
+        let clean = chain.prepare(&self::store(clean_root.path())).unwrap();
 
         assert_eq!(
             retried.layers().collect::<Vec<_>>(),
@@ -4650,7 +4585,7 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
         let blob = root.path().join("blobs/sha256");
 
         chain.advance_to(3);
@@ -4711,7 +4646,7 @@ mod boundary_preparation {
         let store = store(root.path());
         let chain = Chain::at(Shape::Shelley, 2);
 
-        chain.prepare(&store, &[]).unwrap();
+        chain.prepare(&store).unwrap();
 
         let path = root.path().join("bundles/2.json");
         let original = fs::read_to_string(&path).unwrap();
@@ -4728,7 +4663,7 @@ mod boundary_preparation {
                 Refusal::Corrupt { sequence: 2, .. }
             ));
             assert!(
-                chain.prepare(&store, &[]).is_err(),
+                chain.prepare(&store).is_err(),
                 "a damaged bundle is not silently captured over"
             );
             assert!(
@@ -4740,7 +4675,7 @@ mod boundary_preparation {
         store.release(2).unwrap();
         assert!(blobs(root.path()).is_empty());
 
-        chain.prepare(&store, &[]).unwrap();
+        chain.prepare(&store).unwrap();
         store.load(2).unwrap();
     }
 
@@ -4768,11 +4703,11 @@ mod boundary_preparation {
         let root = tempdir();
         let store = store(root.path());
 
-        Chain::at(Shape::Shelley, 2).prepare(&store, &[]).unwrap();
+        Chain::at(Shape::Shelley, 2).prepare(&store).unwrap();
 
         store.load(2).unwrap();
         rewrite_manifest(&root.path().join("bundles/2.json"), |manifest| {
-            manifest.replace("\"format\":1", "\"format\":2")
+            manifest.replace("\"format\":2", "\"format\":3")
         });
 
         let reason = match preparation_refusal(store.load(2)) {
@@ -4780,7 +4715,35 @@ mod boundary_preparation {
             other => panic!("{other:?}"),
         };
 
-        assert!(reason.contains("format 2"), "{reason}");
+        assert!(reason.contains("format 3"), "{reason}");
+    }
+
+    /// A format-1 bundle, which carried the retained list in its identity, is
+    /// refused rather than read as current: the field this build no longer
+    /// reads breaks the checksum, and the format is not this build's either.
+    #[test]
+    fn a_format_1_manifest_with_a_retained_list_is_refused() {
+        let root = tempdir();
+        let store = store(root.path());
+        let chain = Chain::at(Shape::Shelley, 2);
+
+        chain.prepare(&store).unwrap();
+
+        store.load(2).unwrap();
+        rewrite_manifest(&root.path().join("bundles/2.json"), |manifest| {
+            manifest
+                .replace("\"format\":2", "\"format\":1")
+                .replace("\"windows\":", "\"retained\":[1],\"windows\":")
+        });
+
+        assert!(matches!(
+            preparation_refusal(store.load(2)),
+            Refusal::Corrupt { sequence: 2, .. }
+        ));
+        assert!(
+            chain.prepare(&store).is_err(),
+            "an old bundle is not silently captured over"
+        );
     }
 
     /// A manifest's claims about a payload are held against the payload as it
@@ -4790,7 +4753,7 @@ mod boundary_preparation {
         let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(3);
 
@@ -4841,7 +4804,7 @@ mod boundary_preparation {
 
         let bundle = prepare::prepare(
             &store,
-            &chain.plan(&[]),
+            &chain.plan(),
             &chain.archive,
             &chain.state,
             &Request {
@@ -4864,7 +4827,7 @@ mod boundary_preparation {
         let root = tempdir();
         let store = store(root.path());
 
-        Chain::at(Shape::Shelley, 2).prepare(&store, &[]).unwrap();
+        Chain::at(Shape::Shelley, 2).prepare(&store).unwrap();
 
         fs::rename(
             root.path().join("bundles/2.json"),
@@ -4884,21 +4847,21 @@ mod boundary_preparation {
         let root = tempdir();
         let store = store(root.path());
         let chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
         let held = fs::read(root.path().join("bundles/2.json")).unwrap();
 
         // The same request over the same stores is the same bundle, and the
         // walk that establishes it writes nothing.
-        let same = chain.prepare(&store, &[]).unwrap();
+        let same = chain.prepare(&store).unwrap();
         assert_eq!(
             same.layers().collect::<Vec<_>>(),
             bundle.layers().collect::<Vec<_>>()
         );
 
-        // Another retained list, another contract, another block at the boundary.
+        // Another contract.
         let contract = prepare::prepare(
             &store,
-            &chain.plan(&[]),
+            &chain.plan(),
             &chain.archive,
             &chain.state,
             &Request {
@@ -4909,10 +4872,6 @@ mod boundary_preparation {
             &Observer::silent(),
         );
 
-        assert!(matches!(
-            preparation_refusal(chain.prepare(&store, &[1])),
-            Refusal::SourceMismatch { sequence: 2, .. }
-        ));
         assert!(matches!(
             preparation_refusal(contract),
             Refusal::SourceMismatch { sequence: 2, .. }
@@ -4929,7 +4888,7 @@ mod boundary_preparation {
             (tempdir(), tempdir(), tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let plan = chain.plan(&[]).with_blocks(some_blocks());
+        let plan = chain.plan().with_blocks(some_blocks());
 
         let bundle = chain.prepare_plan(&store, &plan).unwrap();
         assert_eq!(store.load(2).unwrap().plan().blocks, Some(some_blocks()));
@@ -4979,7 +4938,7 @@ mod boundary_preparation {
         let store = store(root.path());
         let chain = Chain::at(Shape::Shelley, 2);
 
-        chain.prepare(&store, &[]).unwrap();
+        chain.prepare(&store).unwrap();
 
         let held = fs::read(root.path().join("bundles/2.json")).unwrap();
         let sealed: serde_json::Value = serde_json::from_slice(&held).unwrap();
@@ -4989,7 +4948,7 @@ mod boundary_preparation {
             sealed["manifest"]["identity"]
         );
 
-        let refused = chain.prepare_plan(&store, &chain.plan(&[]).with_blocks(some_blocks()));
+        let refused = chain.prepare_plan(&store, &chain.plan().with_blocks(some_blocks()));
 
         match preparation_refusal(refused) {
             Refusal::SourceMismatch { sequence: 2, what } => {
@@ -5008,7 +4967,7 @@ mod boundary_preparation {
         let (root, stage_root, other_stage_root) = (tempdir(), tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(3);
 
@@ -5083,11 +5042,11 @@ mod boundary_preparation {
         let other = self::store(other_root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
         let delta = chain.boundary_delta.clone().unwrap();
-        let first = chain.prepare(&store, &[]).unwrap();
+        let first = chain.prepare(&store).unwrap();
 
         let foreign = prepare::prepare(
             &other,
-            &chain.plan(&[]),
+            &chain.plan(),
             &chain.archive,
             &chain.state,
             &Request {
@@ -5130,7 +5089,7 @@ mod boundary_preparation {
         let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(3);
 
@@ -5174,7 +5133,7 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let early = chain.prepare(&store, &[]).unwrap();
+        let early = chain.prepare(&store).unwrap();
         let staged = chain.stage(
             stage_root.path(),
             std::slice::from_ref(&early),
@@ -5183,7 +5142,7 @@ mod boundary_preparation {
 
         chain.advance_to(3);
 
-        let later = chain.prepare(&store, &[]).unwrap();
+        let later = chain.prepare(&store).unwrap();
         let refused = chain.finalize(tempdir().path(), &store, &later, &staged, &export::First);
 
         assert!(matches!(
@@ -5198,7 +5157,7 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 3);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         // Epoch 0's first block.
         assert_eq!(bundle.horizon(), Some(10));
@@ -5258,7 +5217,7 @@ mod boundary_preparation {
         let store = store(root.path());
         let chain = Chain::at(Shape::Shelley, 2);
 
-        chain.prepare(&store, &[]).unwrap();
+        chain.prepare(&store).unwrap();
 
         let foreign = Store::open(root.path(), "another").unwrap();
 
@@ -5271,7 +5230,7 @@ mod boundary_preparation {
             Refusal::ForeignOwner { sequence: 2, .. }
         ));
         assert!(matches!(
-            preparation_refusal(chain.prepare(&foreign, &[])),
+            preparation_refusal(chain.prepare(&foreign)),
             Refusal::ForeignOwner { sequence: 2, .. }
         ));
 
@@ -5285,11 +5244,11 @@ mod boundary_preparation {
         let root = tempdir();
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Byron, 5);
-        let five = chain.prepare(&store, &[]).unwrap();
+        let five = chain.prepare(&store).unwrap();
 
         chain.advance_to(6);
 
-        let six = chain.prepare(&store, &[]).unwrap();
+        let six = chain.prepare(&store).unwrap();
 
         let shared: Vec<_> = five
             .references()
@@ -5328,7 +5287,7 @@ mod boundary_preparation {
     fn a_sweep_finishes_what_a_crash_left() {
         let root = tempdir();
         let store = store(root.path());
-        let bundle = Chain::at(Shape::Shelley, 2).prepare(&store, &[]).unwrap();
+        let bundle = Chain::at(Shape::Shelley, 2).prepare(&store).unwrap();
 
         fs::write(root.path().join("blobs/sha256/orphan"), b"x").unwrap();
         fs::write(root.path().join("blobs/.staging-1-1"), b"x").unwrap();
@@ -5352,7 +5311,7 @@ mod boundary_preparation {
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 4);
         let delta = chain.boundary_delta.clone().unwrap();
-        let plan = chain.plan(&[]).restrict_epochs(Some(4), None);
+        let plan = chain.plan().restrict_epochs(Some(4), None);
 
         let bundle = prepare::prepare(
             &store,
@@ -5416,7 +5375,7 @@ mod boundary_preparation {
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 3);
         let delta = chain.boundary_delta.clone().unwrap();
-        let plan = chain.plan(&[]);
+        let plan = chain.plan();
 
         let source = StoreSnapshot::new(&chain.archive, &chain.state, chain.mutable);
         let bundle = source
@@ -5470,11 +5429,9 @@ mod boundary_preparation {
         let delta = chain.boundary_delta.clone().unwrap();
         let watcher = Arc::new(Watcher::default());
 
-        // Retained epochs due at the boundary, one it would adopt and one it
-        // cuts, are not captured: its tip is what a publication describes twice.
         let bundle = prepare::prepare(
             &store,
-            &chain.plan(&[1, 2]),
+            &chain.plan(),
             &chain.archive,
             &chain.state,
             &Request {
@@ -5495,7 +5452,7 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 3);
-        let bundle = chain.prepare(&store, &[3]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(4);
 
@@ -5541,7 +5498,7 @@ mod boundary_preparation {
         let root = tempdir();
         let store = store(root.path());
 
-        Chain::at(Shape::Shelley, 2).prepare(&store, &[]).unwrap();
+        Chain::at(Shape::Shelley, 2).prepare(&store).unwrap();
         rewrite_manifest(&root.path().join("bundles/2.json"), edit);
 
         let refusal = preparation_refusal(store.load(2));
@@ -5590,7 +5547,7 @@ mod boundary_preparation {
 
         let bundle = prepare::prepare(
             &store,
-            &chain.plan(&[]),
+            &chain.plan(),
             &chain.archive,
             &chain.state,
             &Request {
@@ -5630,7 +5587,7 @@ mod boundary_preparation {
         let store = store(root.path());
         let first = Chain::at(Shape::Shelley, 2);
 
-        first.prepare(&store, &[]).unwrap();
+        first.prepare(&store).unwrap();
 
         let held_marker = fs::read(root.path().join("bundles/2.json")).unwrap();
         let held_blobs = blobs(root.path());
@@ -5650,7 +5607,7 @@ mod boundary_preparation {
             .unwrap();
         writer.commit().unwrap();
 
-        let what = match preparation_refusal(rebuilt.prepare(&store, &[])) {
+        let what = match preparation_refusal(rebuilt.prepare(&store)) {
             Refusal::SourceMismatch { sequence: 2, what } => what,
             other => panic!("{other:?}"),
         };
@@ -5665,8 +5622,8 @@ mod boundary_preparation {
 
         store.release(2).unwrap();
 
-        let frozen = rebuilt.export(frozen_root.path(), &[], &export::First);
-        let bundle = rebuilt.prepare(&store, &[]).unwrap();
+        let frozen = rebuilt.export(frozen_root.path(), &export::First);
+        let bundle = rebuilt.prepare(&store).unwrap();
 
         rebuilt.advance_to(3);
 
@@ -5701,13 +5658,13 @@ mod boundary_preparation {
         let chain = Chain::at(Shape::Shelley, 2);
         let mut delta = chain.boundary_delta.clone().unwrap();
 
-        chain.prepare(&store, &[]).unwrap();
+        chain.prepare(&store).unwrap();
 
         delta.tx_hashes.pop();
 
         let what = match preparation_refusal(prepare::prepare(
             &store,
-            &chain.plan(&[]),
+            &chain.plan(),
             &chain.archive,
             &chain.state,
             &plain_request(&chain, &delta),
@@ -5723,7 +5680,7 @@ mod boundary_preparation {
         chain.log(&writer, PoolEpochLog::NS, 1, 9, 99);
         writer.commit().unwrap();
 
-        let what = match preparation_refusal(chain.prepare(&store, &[])) {
+        let what = match preparation_refusal(chain.prepare(&store)) {
             Refusal::SourceMismatch { what, .. } => what,
             other => panic!("{other:?}"),
         };
@@ -5738,11 +5695,11 @@ mod boundary_preparation {
         let root = tempdir();
         let store = store(root.path());
         let chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         let again = prepare::prepare(
             &store,
-            &chain.plan(&[]),
+            &chain.plan(),
             &chain.archive,
             &chain.state,
             &Request {
@@ -5767,7 +5724,7 @@ mod boundary_preparation {
         let store = store(root.path());
         let held = Chain::at(Shape::Shelley, 2);
 
-        held.prepare(&store, &[]).unwrap();
+        held.prepare(&store).unwrap();
 
         let mut fork = Chain::new(Shape::Shelley);
         fork.number = 100;
@@ -5778,7 +5735,7 @@ mod boundary_preparation {
         assert_eq!(ours.slot(), theirs.slot());
         assert_ne!(ours.hash(), theirs.hash());
 
-        let what = match preparation_refusal(fork.prepare(&store, &[])) {
+        let what = match preparation_refusal(fork.prepare(&store)) {
             Refusal::SourceMismatch { sequence: 2, what } => what,
             other => panic!("{other:?}"),
         };
@@ -5793,7 +5750,7 @@ mod boundary_preparation {
         let chain = Chain::at(Shape::Shelley, 4);
         let delta = chain.boundary_delta.clone().unwrap();
 
-        chain.prepare(&store, &[]).unwrap();
+        chain.prepare(&store).unwrap();
 
         let refused = |plan: Plan, request: Request<'_>| {
             let what = match preparation_refusal(prepare::prepare(
@@ -5812,13 +5769,13 @@ mod boundary_preparation {
         };
 
         let windows = refused(
-            chain.plan(&[]).restrict_epochs(Some(4), None),
+            chain.plan().restrict_epochs(Some(4), None),
             plain_request(&chain, &delta),
         );
         assert!(windows.contains("windows"), "{windows}");
 
         let sealing = refused(
-            chain.plan(&[]),
+            chain.plan(),
             Request {
                 mutable_slots: chain.mutable + 1,
                 ..plain_request(&chain, &delta)
@@ -5827,21 +5784,34 @@ mod boundary_preparation {
         assert!(sealing.contains("mutable"), "{sealing}");
     }
 
-    /// A changed retained list says so, rather than "other stores".
+    /// A changed store contract says so, rather than "other stores".
     #[test]
     fn the_refusal_names_what_differs() {
         let root = tempdir();
         let store = store(root.path());
         let chain = Chain::at(Shape::Shelley, 2);
+        let delta = chain.boundary_delta.clone().unwrap();
 
-        chain.prepare(&store, &[]).unwrap();
+        chain.prepare(&store).unwrap();
 
-        let what = match preparation_refusal(chain.prepare(&store, &[1])) {
+        let refused = prepare::prepare(
+            &store,
+            &chain.plan(),
+            &chain.archive,
+            &chain.state,
+            &Request {
+                store_contract: "another".to_owned(),
+                ..plain_request(&chain, &delta)
+            },
+            &Observer::silent(),
+        );
+
+        let what = match preparation_refusal(refused) {
             Refusal::SourceMismatch { what, .. } => what,
             other => panic!("{other:?}"),
         };
 
-        assert!(what.contains("retained"), "{what}");
+        assert!(what.contains("store contract"), "{what}");
     }
 
     fn blocks_from(chain: &Chain, from: u64) -> Vec<(ChainPoint, Vec<u8>)> {
@@ -5960,7 +5930,7 @@ mod boundary_preparation {
     #[test]
     fn a_restricted_plan_is_refused_past_its_closed_window() {
         let chain = Chain::at(Shape::Shelley, 4);
-        let plan = chain.plan(&[]).restrict_epochs(Some(3), None);
+        let plan = chain.plan().restrict_epochs(Some(3), None);
         let horizon = last_block_to(&chain, chain.start(3));
 
         assert_a_prune_is_refused(chain, plan, 4, horizon);
@@ -5969,7 +5939,7 @@ mod boundary_preparation {
     #[test]
     fn the_first_boundary_is_refused_past_its_closed_window() {
         let chain = Chain::at(Shape::Shelley, 1);
-        let plan = chain.plan(&[]);
+        let plan = chain.plan();
         let horizon = first_block_from(&chain, chain.start(0));
 
         assert_a_prune_is_refused(chain, plan, 1, horizon);
@@ -5978,7 +5948,7 @@ mod boundary_preparation {
     #[test]
     fn an_early_byron_boundary_is_refused_past_its_closed_windows() {
         let chain = Chain::at(Shape::Byron, 3);
-        let plan = chain.plan(&[]);
+        let plan = chain.plan();
 
         assert_a_prune_is_refused(chain, plan, 3, 0);
     }
@@ -5991,7 +5961,7 @@ mod boundary_preparation {
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 4);
         let delta = chain.boundary_delta.clone().unwrap();
-        let plan = chain.plan(&[]).restrict_epochs(Some(3), None);
+        let plan = chain.plan().restrict_epochs(Some(3), None);
 
         let bundle = prepare::prepare(
             &store,
@@ -6031,7 +6001,7 @@ mod boundary_preparation {
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 4);
         let delta = chain.boundary_delta.clone().unwrap();
-        let plan = chain.plan(&[]).restrict_epochs(Some(4), None);
+        let plan = chain.plan().restrict_epochs(Some(4), None);
 
         let bundle = prepare::prepare(
             &store,
@@ -6116,7 +6086,7 @@ mod boundary_preparation {
 
         let refused = prepare::prepare(
             &store,
-            &chain.plan(&[]),
+            &chain.plan(),
             &chain.archive,
             &chain.state,
             &plain_request(&chain, &foreign),
@@ -6135,7 +6105,7 @@ mod boundary_preparation {
         let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
         let slot = bundle.cursor().slot();
 
         chain.advance_to(3);
@@ -6204,7 +6174,7 @@ mod boundary_preparation {
 
         let refused = prepare::prepare(
             &store,
-            &chain.plan(&[]),
+            &chain.plan(),
             &archive,
             &chain.state,
             &plain_request(&chain, chain.boundary_delta.as_ref().unwrap()),
@@ -6286,7 +6256,7 @@ mod boundary_preparation {
     fn export_under(chain: &Chain, scratch: &Path, observer: &Observer) -> Inscription {
         export::export(
             &Discarding,
-            &chain.plan(&[]).with_scratch(scratch),
+            &chain.plan().with_scratch(scratch),
             &chain.archive,
             &chain.state,
             &export::First,
@@ -6446,11 +6416,8 @@ mod boundary_preparation {
                 .map_err(|error| error.to_string())
         };
 
-        println!("unset: {:?}", digest(&chain.plan(&[])));
-        println!(
-            "named: {:?}",
-            digest(&chain.plan(&[]).with_scratch(&scratch))
-        );
+        println!("unset: {:?}", digest(&chain.plan()));
+        println!("named: {:?}", digest(&chain.plan().with_scratch(&scratch)));
     }
 
     /// A digest spools like any export. With nowhere to do it the refusal says
@@ -6506,7 +6473,7 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(3);
 
@@ -6582,10 +6549,10 @@ mod boundary_preparation {
         stelae::inscription::LayerDescriptor,
     ) {
         let (seed_root, whole_root) = (tempdir(), tempdir());
-        let seed = Chain::at(Shape::Shelley, 1).export(seed_root.path(), &[], &export::First);
+        let seed = Chain::at(Shape::Shelley, 1).export(seed_root.path(), &export::First);
         let at_two = Chain::at(Shape::Shelley, 2);
-        let plan = at_two.plan(&[]);
-        let whole = at_two.export(whole_root.path(), &[], &Lending::following(&seed, &plan));
+        let plan = at_two.plan();
+        let whole = at_two.export(whole_root.path(), &Lending::following(&seed, &plan));
         let recorded = layer_of(&whole, kind, epoch).unwrap().clone();
 
         (seed, whole, recorded)
@@ -6596,12 +6563,11 @@ mod boundary_preparation {
     fn an_export_rebuilds_a_dropped_recorded_blob() {
         let (seed, whole, recorded) = interrupted_at_two(INDEXES, 1);
         let chain = Chain::at(Shape::Shelley, 2);
-        let plan = chain.plan(&[]);
+        let plan = chain.plan();
         let root = tempdir();
 
         let rebuilt = chain.export(
             root.path(),
-            &[],
             &RecordedBlob {
                 inner: Lending::following(&seed, &plan),
                 recorded,
@@ -6620,7 +6586,7 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
         let plan = bundle.plan();
 
         chain.advance_to(3);
@@ -6660,17 +6626,17 @@ mod boundary_preparation {
     fn a_batch_rebuilds_a_dropped_recorded_entity_blob() {
         let (seed_root, whole_root, root, stage_root, finished_root) =
             (tempdir(), tempdir(), tempdir(), tempdir(), tempdir());
-        let seed = Chain::at(Shape::Shelley, 3).export(seed_root.path(), &[], &export::First);
+        let seed = Chain::at(Shape::Shelley, 3).export(seed_root.path(), &export::First);
         let at_four = Chain::at(Shape::Shelley, 4);
-        let plan = at_four.plan(&[]);
-        let whole = at_four.export(whole_root.path(), &[], &Lending::following(&seed, &plan));
+        let plan = at_four.plan();
+        let whole = at_four.export(whole_root.path(), &Lending::following(&seed, &plan));
         let recorded = layer_of(&whole, "entity-asset", 2).unwrap().clone();
 
         assert!(layer_of(&seed, "entity-asset", 2).is_none());
 
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 4);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
         let plan = bundle.plan();
 
         chain.advance_to(5);
@@ -6695,13 +6661,13 @@ mod boundary_preparation {
     fn the_rest_of_a_batch_reuses_its_runs_after_a_commit() {
         let (root, stage_root, seed_root) = (tempdir(), tempdir(), tempdir());
         let store = store(root.path());
-        let seed = Chain::at(Shape::Shelley, 1).export(seed_root.path(), &[], &export::First);
+        let seed = Chain::at(Shape::Shelley, 1).export(seed_root.path(), &export::First);
         let mut chain = Chain::at(Shape::Shelley, 2);
         let mut bundles = Vec::new();
 
         for boundary in [2, 3, 4] {
             chain.advance_to(boundary);
-            bundles.push(chain.prepare(&store, &[]).unwrap());
+            bundles.push(chain.prepare(&store).unwrap());
         }
 
         let lending = Lending::following(&seed, &bundles[0].plan());
@@ -6728,11 +6694,8 @@ mod boundary_preparation {
 
         let (frozen_root, finished_root) = (tempdir(), tempdir());
         let plan = bundles[1].plan();
-        let frozen = Chain::at(Shape::Shelley, bundles[1].sequence()).export(
-            frozen_root.path(),
-            &[],
-            &Lending::following(&first, &plan),
-        );
+        let frozen = Chain::at(Shape::Shelley, bundles[1].sequence())
+            .export(frozen_root.path(), &Lending::following(&first, &plan));
         let finished = chain
             .finalize(
                 finished_root.path(),
@@ -6757,7 +6720,7 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
         let plan = bundle.plan();
 
         chain.advance_to(3);
@@ -6789,7 +6752,7 @@ mod boundary_preparation {
         let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
         let plan = bundle.plan();
 
         chain.advance_to(3);
@@ -6837,7 +6800,7 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(3);
         chain.stage(
@@ -6876,7 +6839,7 @@ mod boundary_preparation {
         let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(3);
 
@@ -6940,7 +6903,7 @@ mod boundary_preparation {
             .unwrap();
         writer.commit().unwrap();
 
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(3);
 
@@ -6998,7 +6961,7 @@ mod boundary_preparation {
         let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(3);
 
@@ -7039,7 +7002,7 @@ mod boundary_preparation {
 
         let refused = prepare::prepare(
             &store,
-            &chain.plan(&[]).with_producers(export::Producers::new(
+            &chain.plan().with_producers(export::Producers::new(
                 std::num::NonZeroUsize::new(1).unwrap(),
             )),
             &Counted::failing(chain.archive.inner.clone(), Traversal::Tags, 1),
@@ -7059,8 +7022,8 @@ mod boundary_preparation {
         );
         assert!(store.sequences().unwrap().is_empty());
 
-        let retried = chain.prepare(&store, &[]).unwrap();
-        let clean = chain.prepare(&self::store(clean_root.path()), &[]).unwrap();
+        let retried = chain.prepare(&store).unwrap();
+        let clean = chain.prepare(&self::store(clean_root.path())).unwrap();
 
         assert_eq!(
             retried.layers().collect::<Vec<_>>(),
@@ -7113,7 +7076,7 @@ mod boundary_preparation {
             (tempdir(), tempdir(), tempdir(), tempdir());
         let store = store(root.path());
         let mut first = Chain::at(Shape::Shelley, 2);
-        let bundle = first.prepare(&store, &[]).unwrap();
+        let bundle = first.prepare(&store).unwrap();
 
         first.advance_to(3);
 
@@ -7130,8 +7093,8 @@ mod boundary_preparation {
         let mut rebuilt = Chain::at(Shape::Shelley, 2);
         edit(&rebuilt);
 
-        let frozen = rebuilt.export(frozen_root.path(), &[], &export::First);
-        let bundle = rebuilt.prepare(&store, &[]).unwrap();
+        let frozen = rebuilt.export(frozen_root.path(), &export::First);
+        let bundle = rebuilt.prepare(&store).unwrap();
 
         rebuilt.advance_to(3);
 
@@ -7203,7 +7166,7 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.stage(
             stage_root.path(),
@@ -7211,7 +7174,7 @@ mod boundary_preparation {
             &export::First,
         );
 
-        let held = chain.prepare(&store, &[]).unwrap();
+        let held = chain.prepare(&store).unwrap();
         let restarted = chain.stage(
             stage_root.path(),
             std::slice::from_ref(&held),
@@ -7228,11 +7191,11 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let two = chain.prepare(&store, &[]).unwrap();
+        let two = chain.prepare(&store).unwrap();
 
         chain.advance_to(3);
 
-        let three = chain.prepare(&store, &[]).unwrap();
+        let three = chain.prepare(&store).unwrap();
 
         chain.stage(
             stage_root.path(),
@@ -7266,7 +7229,7 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut first = Chain::at(Shape::Shelley, 2);
-        let old = first.prepare(&store, &[]).unwrap();
+        let old = first.prepare(&store).unwrap();
 
         first.advance_to(3);
         first.stage(
@@ -7282,7 +7245,7 @@ mod boundary_preparation {
         let mut rebuilt = Chain::at(Shape::Shelley, 2);
         one_more_entity_row(&rebuilt);
 
-        let bundle = rebuilt.prepare(&store, &[]).unwrap();
+        let bundle = rebuilt.prepare(&store).unwrap();
 
         rebuilt.advance_to(3);
 
@@ -7382,13 +7345,11 @@ mod boundary_preparation {
         }
 
         let delta = chain.boundary_delta.clone().unwrap();
-        let plan = chain.plan(&[]).restrict_epochs(case.first_window, None);
+        let plan = chain.plan().restrict_epochs(case.first_window, None);
 
         let seed = case.predecessor.map(|sequence| {
             let seed_chain = Chain::at(case.shape, sequence);
-            let seed_plan = seed_chain
-                .plan(&[])
-                .restrict_epochs(case.first_window, None);
+            let seed_plan = seed_chain.plan().restrict_epochs(case.first_window, None);
 
             export::export(
                 &SteleDir::create(seed_root.path()).unwrap(),
@@ -7538,7 +7499,7 @@ mod boundary_preparation {
         let store = store(root.path());
         let chain = Chain::at(Shape::Shelley, 5);
         let delta = chain.boundary_delta.clone().unwrap();
-        let plan = chain.plan(&[]).restrict_epochs(Some(3), None);
+        let plan = chain.plan().restrict_epochs(Some(3), None);
 
         prepare::prepare(
             &store,
@@ -7696,7 +7657,7 @@ mod boundary_preparation {
             let store = store(root.path());
             let chain = Chain::at(shape, 5);
             let delta = chain.boundary_delta.clone().unwrap();
-            let plan = chain.plan(&[]).restrict_epochs(Some(3), None);
+            let plan = chain.plan().restrict_epochs(Some(3), None);
 
             let bundle = prepare::prepare(
                 &store,
@@ -7754,7 +7715,7 @@ mod boundary_preparation {
         let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
         let horizon = bundle.horizon().unwrap();
 
         chain.advance_to(3);
@@ -7786,7 +7747,7 @@ mod boundary_preparation {
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 4);
         let delta = chain.boundary_delta.clone().unwrap();
-        let plan = chain.plan(&[]).restrict_epochs(Some(3), None);
+        let plan = chain.plan().restrict_epochs(Some(3), None);
 
         let bundle = prepare::prepare(
             &store,
@@ -7939,7 +7900,7 @@ mod boundary_preparation {
         let chain = Chain::at(Shape::Shelley, 2);
         let refusal = export::export(
             &Discarding,
-            &chain.plan(&[]).with_scratch(&base),
+            &chain.plan().with_scratch(&base),
             &chain.archive,
             &chain.state,
             &export::First,
@@ -7965,9 +7926,9 @@ mod boundary_preparation {
         let (root, stage_root, seed_root, finished_root) =
             (tempdir(), tempdir(), tempdir(), tempdir());
         let store = store(root.path());
-        let seed = Chain::at(Shape::Shelley, 3).export(seed_root.path(), &[], &export::First);
+        let seed = Chain::at(Shape::Shelley, 3).export(seed_root.path(), &export::First);
         let mut chain = Chain::at(Shape::Shelley, 4);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
         let plan = bundle.plan();
 
         chain.advance_to(5);
@@ -8017,7 +7978,7 @@ mod boundary_preparation {
         let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
         let plan = bundle.plan();
 
         chain.advance_to(3);
@@ -8058,7 +8019,7 @@ mod boundary_preparation {
 
         let first = prepare::prepare(
             store,
-            &chain.plan(&[]),
+            &chain.plan(),
             &chain.archive,
             &chain.state,
             &Request {
@@ -8071,7 +8032,7 @@ mod boundary_preparation {
 
         chain.advance_to(6);
 
-        let second = chain.prepare(store, &[]).unwrap();
+        let second = chain.prepare(store).unwrap();
 
         chain.advance_to(frontier);
 
@@ -8112,13 +8073,12 @@ mod boundary_preparation {
         let other = self::store(other_root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
         let delta = chain.boundary_delta.clone().unwrap();
-        let first = chain.prepare(&store, &[]).unwrap();
+        let first = chain.prepare(&store).unwrap();
 
         let plan = Plan::new(
             &chain.summary,
             Network::for_magic(1),
             chain.tip.clone().unwrap(),
-            RetainedEpochs::default(),
             chain.mutable,
         )
         .unwrap();
@@ -8161,7 +8121,7 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(3);
         chain.stage(
@@ -8258,7 +8218,7 @@ mod boundary_preparation {
                 let store = store(root.path());
                 let chain = Chain::at(Shape::Shelley, 4);
 
-                chain.prepare(&store, &[]).unwrap();
+                chain.prepare(&store).unwrap();
 
                 rewrite_manifest(&root.path().join("bundles/4.json"), |manifest| {
                     let key = format!("\"{field}\":");
@@ -8270,7 +8230,7 @@ mod boundary_preparation {
                 });
 
                 !matches!(
-                    chain.prepare(&store, &[]),
+                    chain.prepare(&store),
                     Err(Error::Preparation(Refusal::SourceMismatch { sequence: 4, what }))
                         if what.contains("how far the boundary sealed")
                 )
@@ -8328,7 +8288,7 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(3);
 
@@ -8358,7 +8318,7 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(3);
 
@@ -8559,7 +8519,7 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(3);
 
@@ -8690,7 +8650,7 @@ mod boundary_preparation {
             let (root, stage_root) = (tempdir(), tempdir());
             let store = store(root.path());
             let mut chain = Chain::at(Shape::Shelley, 2);
-            let bundle = chain.prepare(&store, &[]).unwrap();
+            let bundle = chain.prepare(&store).unwrap();
 
             chain.advance_to(3);
 
@@ -8734,7 +8694,7 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(3);
 

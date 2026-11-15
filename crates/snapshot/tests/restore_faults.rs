@@ -48,7 +48,7 @@ fn published(
 ) -> (ToyDomain<MemoryStores>, u64) {
     let domain = harness::<MemoryStores>();
     let magic = u64::from(domain.genesis().network_magic());
-    let plan = plan_at_boundary(&domain, 1, Default::default());
+    let plan = plan_at_boundary(&domain, 1);
 
     registry::publish(
         registry::Publishing::new(&opened(registry, scratch)),

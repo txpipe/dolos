@@ -33,7 +33,7 @@ use dolos_core::{
 use dolos_snapshot::{
     export::{self, Predecessor},
     roles::{Anchor, Role, Rule, ANCHORS},
-    RetainedEpochs, ENTITY_KINDS, MAINNET_MAGIC,
+    ENTITY_KINDS, MAINNET_MAGIC,
 };
 use dolos_testing::blocks::make_conway_block_with_prev;
 use stelae::{
@@ -426,13 +426,7 @@ fn a_chained_publish_builds_its_diff_and_its_tip_and_inherits_the_rest() {
     for sequence in 1..=LAST {
         ledger.advance_to(sequence);
 
-        let plan = export::plan(
-            &ledger.state,
-            MAINNET_MAGIC,
-            RetainedEpochs::default(),
-            MUTABLE_SLOTS,
-        )
-        .unwrap();
+        let plan = export::plan(&ledger.state, MAINNET_MAGIC, MUTABLE_SLOTS).unwrap();
         assert_eq!(plan.sequence, sequence);
 
         let settling =
