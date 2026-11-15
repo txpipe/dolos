@@ -988,10 +988,10 @@ fn select_epochs(inscription: &Inscription) -> Result<Vec<EpochLayers>, Error> {
 
 /// The state tip: every state layer whose descriptor scope is `{"shard": n}`.
 ///
-/// A state layer whose scope names an epoch is a retained dump, which a
-/// publisher with retained epochs writes beside the tip and published
-/// lineages carry. It is skipped unread: counted with the tip it would be a
-/// duplicate shard and refuse the restore.
+/// A state layer whose scope names an epoch is a retained dump, which earlier
+/// publishers wrote beside the tip and published lineages still carry. It is
+/// skipped unread: counted with the tip it would be a duplicate shard and
+/// refuse the restore.
 ///
 /// Completeness is structural, in both dimensions. Every state kind must be
 /// there, and per kind exactly the shards its spec'd count promises, empty
@@ -2334,6 +2334,7 @@ mod tests {
                 &crate::Network::for_magic(MAINNET_MAGIC),
                 &ChainPoint::Specific(250, [0x0b; 32].into()),
                 2,
+                None,
             )
             .unwrap(),
             crate::parameters(&Default::default()),

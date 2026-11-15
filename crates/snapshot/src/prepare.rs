@@ -146,6 +146,11 @@ struct Identity {
     retained: Vec<u64>,
     windows: Vec<EpochWindow>,
     mutable_slots: u64,
+    /// The plan's `position.blocks`. Left out when absent, so a manifest
+    /// without it is the format-1 manifest it always was, and an older build
+    /// refuses one with it: the field it drops breaks the checksum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    blocks: Option<Digest>,
 }
 
 impl Identity {
@@ -164,6 +169,7 @@ impl Identity {
                 "mutable slot count",
                 self.mutable_slots != other.mutable_slots,
             ),
+            ("blocks reference", self.blocks != other.blocks),
         ]
         .into_iter()
         .find_map(|(what, differs)| differs.then_some(what))
@@ -318,7 +324,8 @@ impl Bundle {
         by_blob.values().sum()
     }
 
-    /// The plan this boundary was prepared for, without its execution knobs.
+    /// The plan this boundary was prepared for, with the blocks reference it
+    /// was prepared with and without its execution knobs.
     pub fn plan(&self) -> Plan {
         Plan {
             network: Network::for_magic(self.network_magic()),
@@ -328,6 +335,7 @@ impl Bundle {
             retained: self.retained.clone(),
             scratch: None,
             producers: Producers::DEFAULT,
+            blocks: self.manifest.identity.blocks,
         }
     }
 
@@ -677,8 +685,7 @@ pub fn prepare<A: ArchiveStore, S: StateStore>(
     // and its settled account rows, whatever the seal says.
     let capture_from = oldest_unsealed.min(plan.sequence.saturating_sub(1));
 
-    // The tip is the retained dump a publication cuts at this boundary: one
-    // payload, described twice when the publication is assembled.
+    // The retained list writes no layer, so the capture carries none.
     let capture = Plan {
         epochs: plan
             .epochs
@@ -816,7 +823,6 @@ where
                 ns,
                 shards,
                 shard_byte,
-                &First,
                 cursor_ref,
             )
         }));
@@ -911,6 +917,7 @@ fn identity_of(plan: &Plan, request: &Request<'_>) -> Result<Identity, Error> {
         retained: plan.retained.as_slice().to_vec(),
         windows: plan.epochs.clone(),
         mutable_slots: request.mutable_slots,
+        blocks: plan.blocks,
     })
 }
 

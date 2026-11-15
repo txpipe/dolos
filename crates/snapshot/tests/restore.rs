@@ -1815,9 +1815,9 @@ fn kill_and_resume<B: ToyStores>() {
     assert_stores_match(&blank, &domain);
 }
 
-/// Retained state dumps that a publisher with retained epochs writes beside
-/// the tip: the tip's own blobs under a second descriptor whose scope names an
-/// epoch, the stele's own for a dump cut at this publish, or a past one.
+/// Retained state dumps as earlier publishers wrote them beside the tip: the
+/// tip's own blobs under a second descriptor whose scope names an epoch, the
+/// stele's own for a dump cut at that publish, or a past one.
 ///
 /// `published_order` lists each kind's dumps, by ascending epoch, before its
 /// tip, as a publisher does; otherwise they follow every other layer.

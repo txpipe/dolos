@@ -77,8 +77,6 @@ when the boundary is prepared:
 | Layer | Window | Source |
 |---|---|---|
 | `state-*` tip shards | | The bundle. |
-| retained dump at `P` | | The tip's payload, described a second time (`carry_again`). |
-| retained dump below `P` | | The predecessor, or left out with a warning, as before. |
 | `blocks` | `P` | The bundle. |
 | `blocks` | closed | The final archive: closed blocks do not change. |
 | `indexes` | `P`, the live-boundary tail | The bundle. |
