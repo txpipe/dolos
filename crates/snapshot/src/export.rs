@@ -53,9 +53,7 @@
 //!
 //! ## What is deliberately not here
 //!
-//! No `digests` layer is *sourced* — [`export`] writes one when handed the
-//! records, but obtaining them means a Mithril aggregator and a certificate
-//! check, which is publisher plumbing. No restore, no signatures.
+//! No restore, no signatures.
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -76,7 +74,6 @@ use stelae::{
     transport::{LayerSpec, RecordSink, SnapshotWriter, WrittenLayer},
     Digest,
 };
-use stelae_driver::digests;
 
 use crate::{
     layers::{blocks, logs, state},
@@ -84,9 +81,9 @@ use crate::{
     prepare::{Captured, Prepared},
     reporting::{Cursor, Records},
     staging::{self, Family, Runs, Spooling},
-    state_layer_count, DigestsScope, DolosProfile, EpochScope, Error, Network, RetainedEpochs,
-    Scope, StateScope, BLOCKS, COMPRESSION_LEVEL, DENSE_EPOCH_KINDS, DIGESTS, ENTITY_INDEX_KINDS,
-    ENTITY_KINDS, EPOCH_KINDS, INDEXES, LOG_KINDS, LOG_NAMESPACES, STATE_KINDS, UTXOS,
+    state_layer_count, DolosProfile, EpochScope, Error, Network, RetainedEpochs, Scope, StateScope,
+    BLOCKS, COMPRESSION_LEVEL, DENSE_EPOCH_KINDS, ENTITY_INDEX_KINDS, ENTITY_KINDS, EPOCH_KINDS,
+    INDEXES, LOG_KINDS, LOG_NAMESPACES, STATE_KINDS, UTXOS,
 };
 
 /// The slot window one epoch layer covers.
@@ -197,6 +194,12 @@ pub struct Plan {
     pub sequence: u64,
     /// The epochs whose layers this export writes, ascending.
     pub epochs: Vec<EpochWindow>,
+    /// The genesis stability window, `3k/f` (`dolos_cardano::mutable_slots`).
+    ///
+    /// Geometry the stores do not record: with the epoch bounds it says which
+    /// epochs the seal at this boundary newly writes, the question
+    /// [`crate::roles::Rule`] answers.
+    pub mutable_slots: u64,
     /// The epochs this publisher names as retained, validated.
     ///
     /// Signed input rather than geometry: it rides into `parameters`, so it is
@@ -232,12 +235,13 @@ impl Plan {
     /// `0..E-1` complete, plus epoch E's boundary sliver. The last window's
     /// `end_slot` is clamped to the cursor, so a stele cut on the first block
     /// of E is still byte-identical between two publishers standing at the
-    /// same point.
+    /// same point. `mutable_slots` is the genesis's `3k/f`.
     pub fn new(
         summary: &ChainSummary,
         network: Network,
         cursor: ChainPoint,
         retained: RetainedEpochs,
+        mutable_slots: u64,
     ) -> Result<Self, Error> {
         // Refused here rather than at `position()`, so a plan that could never
         // produce an inscription is not first walked over a mainnet store.
@@ -263,6 +267,7 @@ impl Plan {
             cursor,
             sequence: tip_epoch,
             epochs,
+            mutable_slots,
             retained,
             scratch: None,
             producers: Producers::DEFAULT,
@@ -362,13 +367,14 @@ impl Plan {
 
 /// Build the publish plan from a live state store.
 ///
-/// The magic is the caller's: it is a property of the node's configuration and
-/// genesis, not of anything in the state. The *name* is not — see
-/// [`Network::for_magic`].
+/// The magic and the genesis's `mutable_slots` are the caller's: they are
+/// properties of the node's configuration and genesis, not of anything in the
+/// state. The network's *name* is not — see [`Network::for_magic`].
 pub fn plan<S: StateStore>(
     state: &S,
     network_magic: u64,
     retained: RetainedEpochs,
+    mutable_slots: u64,
 ) -> Result<Plan, Error> {
     let summary = dolos_cardano::eras::load_chain_summary_from_state(state)?;
 
@@ -381,6 +387,7 @@ pub fn plan<S: StateStore>(
         Network::for_magic(network_magic),
         cursor,
         retained,
+        mutable_slots,
     )
 }
 
@@ -592,10 +599,6 @@ pub use stelae_driver::Standing;
 /// position its layers hold in the document, whatever order the jobs finish
 /// in. See [`Producers`] for what the pool changes and what it must not.
 ///
-/// `digest_records` is optional and has no source in this slice — a stele
-/// without a `digests` layer is valid, since ADR-004 makes every layer
-/// individually non-mandatory.
-///
 /// `previous` is the stele this one follows; pass [`First`] when there is none.
 /// A layer it adopts is *attested without being reproduced*: this function
 /// never opens a sink for it and never touches a store on its behalf, which is
@@ -613,7 +616,6 @@ pub fn export<W, A, S>(
     plan: &Plan,
     archive: &A,
     state: &S,
-    digest_records: Option<&[digests::ImmutableDigests]>,
     previous: &dyn Predecessor,
     observer: &Observer,
 ) -> Result<Inscription, Error>
@@ -657,7 +659,6 @@ where
         &Source::Stores(state),
         Runs::new(&staged, None),
         &adopted,
-        digest_records,
         previous,
         observer,
     )
@@ -748,7 +749,6 @@ pub(crate) fn assemble<W, A, S>(
     source: &Source<'_, S>,
     staged: Runs<'_>,
     adopted: &Adopted,
-    digest_records: Option<&[digests::ImmutableDigests]>,
     previous: &dyn Predecessor,
     observer: &Observer,
 ) -> Result<Inscription, Error>
@@ -764,8 +764,7 @@ where
     let total = plan.epochs.len() * DENSE_EPOCH_KINDS.len()
         + log_layers(plan, archive, prepared, previous)?
         + staged_entity_layers(plan, prepared, staged, adopted)?
-        + state_layer_count()
-        + usize::from(digest_records.is_some());
+        + state_layer_count();
 
     let cursor = Cursor::new(observer, total);
     let cursor = &cursor;
@@ -827,12 +826,6 @@ where
         }));
     }
 
-    if let Some(records) = digest_records {
-        jobs.push(Box::new(move || {
-            Ok(vec![write_digests(stele, plan, records, cursor)?])
-        }));
-    }
-
     let layers = produce(jobs, plan.producers)?;
 
     debug_assert_eq!(
@@ -883,7 +876,6 @@ pub fn publish<A, S>(
     plan: &Plan,
     archive: &A,
     state: &S,
-    digest_records: Option<&[digests::ImmutableDigests]>,
     observer: &Observer,
 ) -> Result<Inscription, Error>
 where
@@ -892,15 +884,7 @@ where
 {
     let stele = stelae::dir::SnapshotDir::create(root)?;
 
-    export(
-        &stele,
-        plan,
-        archive,
-        state,
-        digest_records,
-        &First,
-        observer,
-    )
+    export(&stele, plan, archive, state, &First, observer)
 }
 
 /// Reproduce a stele from `plan` and keep nothing.
@@ -926,7 +910,6 @@ pub fn reproduce<A, S>(
     plan: &Plan,
     archive: &A,
     state: &S,
-    digest_records: Option<&[digests::ImmutableDigests]>,
     previous: &dyn Predecessor,
 ) -> Result<Inscription, Error>
 where
@@ -943,7 +926,6 @@ where
         plan,
         archive,
         state,
-        digest_records,
         previous,
         &Observer::silent(),
     )
@@ -985,7 +967,7 @@ where
     A: ArchiveStore,
     S: StateStore,
 {
-    Document::of(reproduce(plan, archive, state, None, previous)?)
+    Document::of(reproduce(plan, archive, state, previous)?)
 }
 
 impl Document {
@@ -1028,7 +1010,6 @@ pub fn verify_reproduction<A, S>(
     plan: &Plan,
     archive: &A,
     state: &S,
-    digest_records: Option<&[digests::ImmutableDigests]>,
 ) -> Result<Inscription, Error>
 where
     A: ArchiveStore,
@@ -1055,7 +1036,6 @@ where
         plan,
         archive,
         state,
-        digest_records,
         &Attested::of(published),
         &Observer::silent(),
     )?;
@@ -1493,19 +1473,16 @@ pub fn forecast<A: ArchiveStore>(
     plan: &Plan,
     archive: &A,
     previous: &dyn Predecessor,
-    digest_records: Option<&[digests::ImmutableDigests]>,
 ) -> Result<Forecast, Error> {
     // Every epoch selected contributes one `blocks` and one `indexes` layer and
-    // as many log layers as it has namespaces with logs, the state tip
-    // contributes every shard of every kind however the epochs were restricted,
-    // and the digests layer is there exactly when its records are.
+    // as many log layers as it has namespaces with logs, and the state tip
+    // contributes every shard of every kind however the epochs were restricted.
     let presence = entity_presence(plan, archive)?;
 
     let total = plan.epochs.len() * DENSE_EPOCH_KINDS.len()
         + log_layers(plan, archive, None, previous)?
         + entity_layers(plan, &presence, previous)?
-        + state_layer_count()
-        + usize::from(digest_records.is_some());
+        + state_layer_count();
 
     // A failure here is the scope refusing a kind it does not describe, and it
     // propagates rather than counting as a miss: a dry run that quietly
@@ -2019,58 +1996,6 @@ fn route<K: RecordSink>(
     Ok(())
 }
 
-/// The optional `digests` layer.
-///
-/// `lastImmutable` is read off the records rather than taken as a second input:
-/// it is the last immutable file the layer covers, so deriving it removes the
-/// only way the scope and the records could disagree.
-fn write_digests<W: SnapshotWriter>(
-    stele: &W,
-    plan: &Plan,
-    records: &[digests::ImmutableDigests],
-    cursor: &Cursor<'_>,
-) -> Result<LayerDescriptor, Error> {
-    let mut order = digests::OrderCheck::default();
-
-    for record in records {
-        order.check(record)?;
-    }
-
-    let last_immutable = records
-        .last()
-        .ok_or_else(|| {
-            Error::malformed(
-                DIGESTS,
-                "a digests layer with no records names no immutable file; omit the layer instead",
-            )
-        })?
-        .immutable_number;
-
-    let scope = DigestsScope {
-        network_magic: plan.network.magic(),
-        epoch: plan.sequence,
-        last_immutable,
-    };
-
-    let spec = scope.layer_spec(DIGESTS)?;
-    let at = cursor.open(DIGESTS, &spec.scope);
-
-    let mut sink = sink(stele, &spec)?;
-    let mut ticks = cursor.records();
-
-    for record in records {
-        sink.write_record(&digests::encode(record)?)?;
-        ticks.tick();
-    }
-
-    ticks.flush();
-
-    let descriptor = sink.finish()?.descriptor;
-    cursor.close(at, DIGESTS, Outcome::Transferred);
-
-    Ok(descriptor)
-}
-
 #[cfg(test)]
 mod tests {
     use dolos_core::BlockHash;
@@ -2102,6 +2027,10 @@ mod tests {
         chain
     }
 
+    /// Half an epoch of [`summary`]: the seal at a boundary writes the epoch
+    /// two before it.
+    const MUTABLE_SLOTS: u64 = 50;
+
     /// The geometry tests are about windows, which the retained list does not
     /// move.
     fn retained() -> RetainedEpochs {
@@ -2117,7 +2046,14 @@ mod tests {
     /// `0..=sequence`.
     #[test]
     fn the_sequence_is_the_epoch_the_cursor_has_just_entered() {
-        let plan = Plan::new(&summary(), Network::for_magic(2), point(250), retained()).unwrap();
+        let plan = Plan::new(
+            &summary(),
+            Network::for_magic(2),
+            point(250),
+            retained(),
+            MUTABLE_SLOTS,
+        )
+        .unwrap();
 
         assert_eq!(plan.sequence, 2);
         assert_eq!(plan.tag().unwrap(), "epoch-2");
@@ -2137,7 +2073,14 @@ mod tests {
     #[test]
     fn the_last_window_is_the_boundary_sliver_of_the_sequence_epoch() {
         // Epoch 3 opens at slot 300; the anchoring block lands just inside it.
-        let plan = Plan::new(&summary(), Network::for_magic(2), point(301), retained()).unwrap();
+        let plan = Plan::new(
+            &summary(),
+            Network::for_magic(2),
+            point(301),
+            retained(),
+            MUTABLE_SLOTS,
+        )
+        .unwrap();
 
         assert_eq!(plan.sequence, 3);
         assert_eq!(plan.tag().unwrap(), "epoch-3");
@@ -2182,7 +2125,14 @@ mod tests {
     /// the export refuses this one.
     #[test]
     fn the_last_window_is_clamped_to_the_cursor() {
-        let plan = Plan::new(&summary(), Network::for_magic(2), point(250), retained()).unwrap();
+        let plan = Plan::new(
+            &summary(),
+            Network::for_magic(2),
+            point(250),
+            retained(),
+            MUTABLE_SLOTS,
+        )
+        .unwrap();
 
         assert_eq!(
             plan.epochs,
@@ -2206,7 +2156,14 @@ mod tests {
         );
 
         // On a true boundary the clamp is a no-op.
-        let plan = Plan::new(&summary(), Network::for_magic(2), point(299), retained()).unwrap();
+        let plan = Plan::new(
+            &summary(),
+            Network::for_magic(2),
+            point(299),
+            retained(),
+            MUTABLE_SLOTS,
+        )
+        .unwrap();
         assert_eq!(plan.epochs.last().unwrap().end_slot, 299);
     }
 
@@ -2227,17 +2184,29 @@ mod tests {
     #[test]
     fn an_unanchored_cursor_has_no_plan() {
         for unanchored in [ChainPoint::Origin, ChainPoint::Slot(250)] {
-            let err =
-                Plan::new(&summary(), Network::for_magic(2), unanchored, retained()).unwrap_err();
+            let err = Plan::new(
+                &summary(),
+                Network::for_magic(2),
+                unanchored,
+                retained(),
+                MUTABLE_SLOTS,
+            )
+            .unwrap_err();
             assert!(matches!(err, Error::UnanchoredPoint(_)), "{err:?}");
         }
     }
 
     #[test]
     fn restricting_epochs_keeps_the_window_bounds() {
-        let plan = Plan::new(&summary(), Network::for_magic(2), point(250), retained())
-            .unwrap()
-            .restrict_epochs(Some(1), Some(1));
+        let plan = Plan::new(
+            &summary(),
+            Network::for_magic(2),
+            point(250),
+            retained(),
+            MUTABLE_SLOTS,
+        )
+        .unwrap()
+        .restrict_epochs(Some(1), Some(1));
 
         assert_eq!(
             plan.sequence, 2,
@@ -2283,6 +2252,7 @@ mod chain_tests {
             cursor: ChainPoint::Specific(250, BlockHash::from([0xab; 32])),
             sequence: 3,
             epochs: vec![],
+            mutable_slots: 0,
             retained: RetainedEpochs::default(),
             scratch: None,
             producers: Producers::DEFAULT,

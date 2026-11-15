@@ -35,7 +35,6 @@ use stelae::{
     },
     Digest,
 };
-use stelae_driver::digests;
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::{
@@ -334,6 +333,7 @@ impl Bundle {
             cursor: self.cursor.clone(),
             sequence: self.sequence(),
             epochs: self.manifest.identity.windows.clone(),
+            mutable_slots: self.mutable_slots(),
             retained: self.retained.clone(),
             scratch: None,
             producers: Producers::DEFAULT,
@@ -1265,7 +1265,6 @@ pub fn finalize<W, A>(
     stele: &W,
     finalizing: &Finalizing<'_>,
     archive: &A,
-    digest_records: Option<&[digests::ImmutableDigests]>,
     previous: &dyn Predecessor,
     observer: &Observer,
 ) -> Result<Inscription, Error>
@@ -1301,7 +1300,6 @@ where
         &Source::<MemoryStateStore>::Prepared(&prepared),
         Runs::new(staged, declined.as_ref().map(|declined| declined.staged())),
         &adopted,
-        digest_records,
         previous,
         observer,
     )

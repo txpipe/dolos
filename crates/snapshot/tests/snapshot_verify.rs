@@ -269,7 +269,6 @@ fn a_reproduction_passes_at_the_published_epoch_and_fails_at_another() {
         &node.second,
         node.domain.archive(),
         node.domain.state(),
-        None,
     )
     .unwrap();
 
@@ -280,7 +279,6 @@ fn a_reproduction_passes_at_the_published_epoch_and_fails_at_another() {
         &node.first,
         node.earlier.archive(),
         node.earlier.state(),
-        None,
     )
     .unwrap_err();
 
@@ -326,7 +324,6 @@ fn a_registry_publish_and_its_dry_run_refuse_a_cursor_past_the_boundary() {
         &plan,
         past.archive(),
         past.state(),
-        None,
     );
     assert_eq!(refused(preview.unwrap_err()), expected);
 
@@ -335,7 +332,6 @@ fn a_registry_publish_and_its_dry_run_refuse_a_cursor_past_the_boundary() {
         &plan,
         past.archive(),
         past.state(),
-        None,
         &stelae::progress::Observer::silent(),
     );
     assert_eq!(refused(publish.unwrap_err()), expected);
@@ -376,7 +372,6 @@ fn a_registry_refusal_comes_before_any_request() {
         &plan,
         past.archive(),
         past.state(),
-        None,
     );
     assert_eq!(refused(preview.unwrap_err()), expected);
 
@@ -385,7 +380,6 @@ fn a_registry_refusal_comes_before_any_request() {
         &plan,
         past.archive(),
         past.state(),
-        None,
         &stelae::progress::Observer::silent(),
     );
     assert_eq!(refused(publish.unwrap_err()), expected);
@@ -432,19 +426,12 @@ fn a_resumed_registry_publish_rebuilds_an_account_window_the_manifest_lacks() {
         &cut_at_2,
         host_a.archive(),
         host_a.state(),
-        None,
         &stelae::progress::Observer::silent(),
     );
     assert!(interrupted.is_err(), "the seal was meant to fail");
 
-    let stale = export::reproduce(
-        &cut_at_2,
-        host_a.archive(),
-        host_a.state(),
-        None,
-        &export::First,
-    )
-    .unwrap();
+    let stale =
+        export::reproduce(&cut_at_2, host_a.archive(), host_a.state(), &export::First).unwrap();
     let stale = account_layer(&stale, 1);
 
     // The record was written through the wrapper the registry publishes with.
@@ -482,7 +469,6 @@ fn a_resumed_registry_publish_rebuilds_an_account_window_the_manifest_lacks() {
             &plan,
             host_b.archive(),
             host_b.state(),
-            None,
             &stelae::progress::Observer::silent(),
         )
         .unwrap();
@@ -509,20 +495,13 @@ fn a_resumed_registry_publish_rebuilds_an_account_window_the_manifest_lacks() {
 
     let resumed = process();
     let resuming = || Publishing::new(&resumed).recording_in(&record_path);
-    let preview = registry::preview(
-        resuming(),
-        &cut_at_4,
-        host_a.archive(),
-        host_a.state(),
-        None,
-    )
-    .unwrap();
+    let preview =
+        registry::preview(resuming(), &cut_at_4, host_a.archive(), host_a.state()).unwrap();
     let published = registry::publish(
         resuming(),
         &cut_at_4,
         host_a.archive(),
         host_a.state(),
-        None,
         &stelae::progress::Observer::silent(),
     )
     .unwrap();
@@ -539,7 +518,6 @@ fn a_resumed_registry_publish_rebuilds_an_account_window_the_manifest_lacks() {
         &cut_at_4,
         host_a.archive(),
         host_a.state(),
-        None,
     )
     .unwrap();
     assert_eq!(reproduced.digest().unwrap(), published.identity);
@@ -609,7 +587,6 @@ fn a_prepared_batch_publishes_what_direct_publishes_do() {
                 producers: export::Producers::DEFAULT,
             },
             node.domain.archive(),
-            None,
             &silent,
         )
         .unwrap();
@@ -723,7 +700,6 @@ fn an_inspection_reports_the_manifest_and_its_json_chains_a_digest() {
         &node.second,
         node.domain.archive(),
         node.domain.state(),
-        None,
         &following,
     )
     .unwrap();

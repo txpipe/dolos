@@ -146,7 +146,6 @@ impl Node {
             plan,
             stores.archive(),
             stores.state(),
-            None,
             &Observer::silent(),
         )
         .unwrap();
@@ -251,7 +250,6 @@ fn a_registry_restore_is_a_directory_restore() {
             &node.first,
             node.earlier.archive(),
             node.earlier.state(),
-            None,
             &dolos_snapshot::export::First,
             &Observer::silent(),
         )

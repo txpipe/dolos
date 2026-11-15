@@ -243,14 +243,7 @@ mod registry_node {
         ) -> Result<Published, Error> {
             let stores = self.stores(plan);
 
-            registry::publish(
-                publishing,
-                plan,
-                stores.archive(),
-                stores.state(),
-                None,
-                observer,
-            )
+            registry::publish(publishing, plan, stores.archive(), stores.state(), observer)
         }
 
         /// The same publish, through a writer of the caller's — the interrupted
@@ -269,7 +262,6 @@ mod registry_node {
                 plan,
                 stores.archive(),
                 stores.state(),
-                None,
                 &Observer::silent(),
             )
         }
@@ -355,7 +347,6 @@ pub fn export_plan<B: ToyStores>(
         plan,
         domain.archive(),
         domain.state(),
-        None,
         &First,
         &Observer::silent(),
     )
@@ -368,6 +359,7 @@ pub fn plan_retaining<B: ToyStores>(domain: &ToyDomain<B>, retained: RetainedEpo
         domain.state(),
         domain.genesis().network_magic() as u64,
         retained,
+        dolos_cardano::mutable_slots(&domain.genesis()),
     )
     .unwrap()
 }
