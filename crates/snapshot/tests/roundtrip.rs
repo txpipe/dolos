@@ -12,7 +12,7 @@ use common::*;
 use dolos_core::{ExactKind, ExactRecord, IndexRecord, MAX_EXACT_KEY_LEN};
 use dolos_snapshot::{
     layers::{blocks, indexes, logs, state},
-    shard_byte_for, shards_for, DolosProfile, Error, Scope, BLOCKS, DIGESTS, INDEXES, LOG_KINDS,
+    shard_byte_for, shards_for, DolosProfile, Error, Scope, BLOCKS, INDEXES, LOG_KINDS,
 };
 use stelae::{
     dir::SteleDir,
@@ -20,7 +20,6 @@ use stelae::{
     profile::MediaType,
     Profile, SteleReader, SteleWriter,
 };
-use stelae_driver::digests;
 
 /// Write one layer, read it back both ways, and decode what comes out.
 fn roundtrip<T>(
@@ -169,23 +168,6 @@ fn state_round_trips_through_a_layer_per_kind_and_shard() {
     }
 }
 
-#[test]
-fn digests_round_trip_through_a_layer() {
-    let records = common::digests();
-    let decoded = roundtrip(
-        DIGESTS,
-        &digests_scope(),
-        &records,
-        |record| Ok(digests::encode(record)?),
-        |bytes| Ok(digests::decode(bytes)?),
-    );
-
-    let mut order = digests::OrderCheck::default();
-    for record in &decoded {
-        order.check(record).unwrap();
-    }
-}
-
 /// A key wider than any exact kind's is refused *after* a clean layer read.
 ///
 /// The framing layer has no opinion about it — the bytes are canonical CBOR and
@@ -228,7 +210,7 @@ fn an_over_wide_exact_key_survives_the_layer_and_is_refused_by_the_codec() {
 
 /// A layer read under the wrong kind is refused before a record is handed out.
 ///
-/// The blob's header names `blocks`; the descriptor claims `digests`. Both
+/// The blob's header names `blocks`; the descriptor claims `indexes`. Both
 /// kinds are this profile's, so what refuses it is the kind check and not the
 /// profile check — `a_layer_of_another_profile_is_refused` covers the other
 /// half.
@@ -247,9 +229,9 @@ fn a_layer_read_under_the_wrong_kind_is_refused() {
     let index = stele.blob_index().unwrap();
 
     let mut mislabelled = written.descriptor.clone();
-    mislabelled.kind = DIGESTS.to_owned();
+    mislabelled.kind = INDEXES.to_owned();
     mislabelled.media_type = DolosProfile
-        .layer_media_type(DIGESTS)
+        .layer_media_type(INDEXES)
         .expect("a kind this profile defines");
 
     let err = stele

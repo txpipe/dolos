@@ -1240,7 +1240,6 @@ fn publish_staged<S: CoreArchiveStore>(
         &plan,
         store,
         &state,
-        None,
         &dolos_snapshot::progress::Observer::silent(),
     )
     .expect("publish");

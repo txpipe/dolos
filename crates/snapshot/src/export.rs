@@ -53,9 +53,7 @@
 //!
 //! ## What is deliberately not here
 //!
-//! No `digests` layer is *sourced* — [`export`] writes one when handed the
-//! records, but obtaining them means a Mithril aggregator and a certificate
-//! check, which is publisher plumbing. No restore, no signatures.
+//! No restore, no signatures.
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -76,7 +74,6 @@ use stelae::{
     transport::{LayerSpec, RecordSink, SteleWriter, WrittenLayer},
     Digest,
 };
-use stelae_driver::digests;
 
 use crate::{
     layers::{blocks, logs, state},
@@ -84,9 +81,9 @@ use crate::{
     prepare::{Captured, Prepared},
     reporting::{Cursor, Records},
     staging::{self, Family, Runs, Spooling},
-    state_layer_count, DigestsScope, DolosProfile, EpochScope, Error, Network, RetainedEpochs,
-    Scope, StateScope, BLOCKS, COMPRESSION_LEVEL, DENSE_EPOCH_KINDS, DIGESTS, ENTITY_INDEX_KINDS,
-    ENTITY_KINDS, EPOCH_KINDS, INDEXES, LOG_KINDS, LOG_NAMESPACES, STATE_KINDS, UTXOS,
+    state_layer_count, DolosProfile, EpochScope, Error, Network, RetainedEpochs, Scope, StateScope,
+    BLOCKS, COMPRESSION_LEVEL, DENSE_EPOCH_KINDS, ENTITY_INDEX_KINDS, ENTITY_KINDS, EPOCH_KINDS,
+    INDEXES, LOG_KINDS, LOG_NAMESPACES, STATE_KINDS, UTXOS,
 };
 
 /// The slot window one epoch layer covers.
@@ -592,10 +589,6 @@ pub use stelae_driver::Standing;
 /// position its layers hold in the document, whatever order the jobs finish
 /// in. See [`Producers`] for what the pool changes and what it must not.
 ///
-/// `digest_records` is optional and has no source in this slice — a stele
-/// without a `digests` layer is valid, since ADR-004 makes every layer
-/// individually non-mandatory.
-///
 /// `previous` is the stele this one follows; pass [`First`] when there is none.
 /// A layer it adopts is *attested without being reproduced*: this function
 /// never opens a sink for it and never touches a store on its behalf, which is
@@ -613,7 +606,6 @@ pub fn export<W, A, S>(
     plan: &Plan,
     archive: &A,
     state: &S,
-    digest_records: Option<&[digests::ImmutableDigests]>,
     previous: &dyn Predecessor,
     observer: &Observer,
 ) -> Result<Inscription, Error>
@@ -657,7 +649,6 @@ where
         &Source::Stores(state),
         Runs::new(&staged, None),
         &adopted,
-        digest_records,
         previous,
         observer,
     )
@@ -748,7 +739,6 @@ pub(crate) fn assemble<W, A, S>(
     source: &Source<'_, S>,
     staged: Runs<'_>,
     adopted: &Adopted,
-    digest_records: Option<&[digests::ImmutableDigests]>,
     previous: &dyn Predecessor,
     observer: &Observer,
 ) -> Result<Inscription, Error>
@@ -764,8 +754,7 @@ where
     let total = plan.epochs.len() * DENSE_EPOCH_KINDS.len()
         + log_layers(plan, archive, prepared, previous)?
         + staged_entity_layers(plan, prepared, staged, adopted)?
-        + state_layer_count()
-        + usize::from(digest_records.is_some());
+        + state_layer_count();
 
     let cursor = Cursor::new(observer, total);
     let cursor = &cursor;
@@ -827,12 +816,6 @@ where
         }));
     }
 
-    if let Some(records) = digest_records {
-        jobs.push(Box::new(move || {
-            Ok(vec![write_digests(stele, plan, records, cursor)?])
-        }));
-    }
-
     let layers = produce(jobs, plan.producers)?;
 
     debug_assert_eq!(
@@ -883,7 +866,6 @@ pub fn publish<A, S>(
     plan: &Plan,
     archive: &A,
     state: &S,
-    digest_records: Option<&[digests::ImmutableDigests]>,
     observer: &Observer,
 ) -> Result<Inscription, Error>
 where
@@ -892,15 +874,7 @@ where
 {
     let stele = stelae::dir::SteleDir::create(root)?;
 
-    export(
-        &stele,
-        plan,
-        archive,
-        state,
-        digest_records,
-        &First,
-        observer,
-    )
+    export(&stele, plan, archive, state, &First, observer)
 }
 
 /// Reproduce a stele from `plan` and keep nothing.
@@ -926,7 +900,6 @@ pub fn reproduce<A, S>(
     plan: &Plan,
     archive: &A,
     state: &S,
-    digest_records: Option<&[digests::ImmutableDigests]>,
     previous: &dyn Predecessor,
 ) -> Result<Inscription, Error>
 where
@@ -943,7 +916,6 @@ where
         plan,
         archive,
         state,
-        digest_records,
         previous,
         &Observer::silent(),
     )
@@ -985,7 +957,7 @@ where
     A: ArchiveStore,
     S: StateStore,
 {
-    Document::of(reproduce(plan, archive, state, None, previous)?)
+    Document::of(reproduce(plan, archive, state, previous)?)
 }
 
 impl Document {
@@ -1028,7 +1000,6 @@ pub fn verify_reproduction<A, S>(
     plan: &Plan,
     archive: &A,
     state: &S,
-    digest_records: Option<&[digests::ImmutableDigests]>,
 ) -> Result<Inscription, Error>
 where
     A: ArchiveStore,
@@ -1055,7 +1026,6 @@ where
         plan,
         archive,
         state,
-        digest_records,
         &Attested::of(published),
         &Observer::silent(),
     )?;
@@ -1493,19 +1463,16 @@ pub fn forecast<A: ArchiveStore>(
     plan: &Plan,
     archive: &A,
     previous: &dyn Predecessor,
-    digest_records: Option<&[digests::ImmutableDigests]>,
 ) -> Result<Forecast, Error> {
     // Every epoch selected contributes one `blocks` and one `indexes` layer and
-    // as many log layers as it has namespaces with logs, the state tip
-    // contributes every shard of every kind however the epochs were restricted,
-    // and the digests layer is there exactly when its records are.
+    // as many log layers as it has namespaces with logs, and the state tip
+    // contributes every shard of every kind however the epochs were restricted.
     let presence = entity_presence(plan, archive)?;
 
     let total = plan.epochs.len() * DENSE_EPOCH_KINDS.len()
         + log_layers(plan, archive, None, previous)?
         + entity_layers(plan, &presence, previous)?
-        + state_layer_count()
-        + usize::from(digest_records.is_some());
+        + state_layer_count();
 
     // A failure here is the scope refusing a kind it does not describe, and it
     // propagates rather than counting as a miss: a dry run that quietly
@@ -2017,58 +1984,6 @@ fn route<K: RecordSink>(
     sinks[shard].write_record(&state::encode(ns, &record)?)?;
 
     Ok(())
-}
-
-/// The optional `digests` layer.
-///
-/// `lastImmutable` is read off the records rather than taken as a second input:
-/// it is the last immutable file the layer covers, so deriving it removes the
-/// only way the scope and the records could disagree.
-fn write_digests<W: SteleWriter>(
-    stele: &W,
-    plan: &Plan,
-    records: &[digests::ImmutableDigests],
-    cursor: &Cursor<'_>,
-) -> Result<LayerDescriptor, Error> {
-    let mut order = digests::OrderCheck::default();
-
-    for record in records {
-        order.check(record)?;
-    }
-
-    let last_immutable = records
-        .last()
-        .ok_or_else(|| {
-            Error::malformed(
-                DIGESTS,
-                "a digests layer with no records names no immutable file; omit the layer instead",
-            )
-        })?
-        .immutable_number;
-
-    let scope = DigestsScope {
-        network_magic: plan.network.magic(),
-        epoch: plan.sequence,
-        last_immutable,
-    };
-
-    let spec = scope.layer_spec(DIGESTS)?;
-    let at = cursor.open(DIGESTS, &spec.scope);
-
-    let mut sink = sink(stele, &spec)?;
-    let mut ticks = cursor.records();
-
-    for record in records {
-        sink.write_record(&digests::encode(record)?)?;
-        ticks.tick();
-    }
-
-    ticks.flush();
-
-    let descriptor = sink.finish()?.descriptor;
-    cursor.close(at, DIGESTS, Outcome::Transferred);
-
-    Ok(descriptor)
 }
 
 #[cfg(test)]

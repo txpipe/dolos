@@ -194,16 +194,15 @@ fn a_bare_boundary_exports_the_pinned_skeleton() {
         &plan,
         &archive,
         &state,
-        None,
         &export::First,
         &Observer::silent(),
     )
     .unwrap();
 
-    // Three epochs of blocks and indexes, then every state layer. No
-    // `digests` layer: nothing supplies one — and **no log layers at all**,
-    // which is the omit-if-empty rule seen from the other side: a store with no
-    // logs in it publishes no layer claiming there are none.
+    // Three epochs of blocks and indexes, then every state layer, and **no
+    // log layers at all**, which is the omit-if-empty rule seen from the other
+    // side: a store with no logs in it publishes no layer claiming there are
+    // none.
     assert_eq!(inscription.layers.len(), 3 * 2 + state_layer_count());
 
     for (kind, _) in LOG_KINDS {
@@ -273,7 +272,6 @@ fn a_log_under_an_uncovered_namespace_fails_the_export() {
         &plan,
         &archive,
         &state,
-        None,
         &export::First,
         &Observer::silent(),
     )
@@ -361,8 +359,8 @@ fn a_harness_domain_exports_a_complete_stele() {
     inscription.validate().unwrap();
     inscription.check_profile(&DolosProfile).unwrap();
 
-    // Every kind but the log kinds and `digests`, which have no source in this
-    // slice. The state kinds are all here, seeded or not: a namespace the
+    // Every kind but the log kinds, which have no source in this slice. The
+    // state kinds are all here, seeded or not: a namespace the
     // harness never wrote still publishes its shards, empty.
     for kind in [BLOCKS, INDEXES]
         .into_iter()
@@ -384,10 +382,6 @@ fn a_harness_domain_exports_a_complete_stele() {
         .collect();
 
     assert_eq!(carried, ["log-account-epochs", "log-epochs"]);
-    assert_eq!(
-        inscription.layers_of_kind(dolos_snapshot::DIGESTS).count(),
-        0
-    );
 
     // The whole directory verifies: every blob hashes to its own name and
     // decompresses to a layer the inscription points at.
@@ -973,7 +967,6 @@ fn a_failing_producer_fails_the_pooled_export() {
         &plan,
         domain.archive(),
         domain.state(),
-        None,
         &export::First,
         &Observer::silent(),
     )
@@ -1141,7 +1134,7 @@ impl Lending {
         domain: &ToyDomain<MemoryStores>,
         exported: &stelae::inscription::Inscription,
     ) {
-        let forecast = export::forecast(plan, domain.archive(), self, None).unwrap();
+        let forecast = export::forecast(plan, domain.archive(), self).unwrap();
         let lent = self.lent.load(Ordering::Relaxed);
 
         assert_eq!(
@@ -1197,7 +1190,7 @@ fn reproduce_fresh(
     plan: &Plan,
     domain: &ToyDomain<MemoryStores>,
 ) -> stelae::inscription::Inscription {
-    export::reproduce(plan, domain.archive(), domain.state(), None, &export::First).unwrap()
+    export::reproduce(plan, domain.archive(), domain.state(), &export::First).unwrap()
 }
 
 /// Finding 1 of the QA review of dolos#1499: a stele cut at 2 carries window
@@ -1220,8 +1213,7 @@ fn a_chained_publish_rebuilds_the_account_rows_ewrap_rewrote() {
     let cut_at_3 = plan_at_boundary(&domain, 3, RetainedEpochs::default());
     let lending = Lending::following(&predecessor, &cut_at_3);
 
-    let chained =
-        export::reproduce(&cut_at_3, domain.archive(), domain.state(), None, &lending).unwrap();
+    let chained = export::reproduce(&cut_at_3, domain.archive(), domain.state(), &lending).unwrap();
 
     assert_eq!(chained.layers, reproduce_fresh(&cut_at_3, &domain).layers);
 
@@ -1256,7 +1248,7 @@ fn a_resumed_first_publish_builds_every_account_window() {
     let resuming = Lending::resuming(&interrupted);
 
     let resumed =
-        export::reproduce(&cut_at_4, domain.archive(), domain.state(), None, &resuming).unwrap();
+        export::reproduce(&cut_at_4, domain.archive(), domain.state(), &resuming).unwrap();
 
     assert_eq!(resumed.layers, reproduce_fresh(&cut_at_4, &domain).layers);
     assert_ne!(account_layer(&resumed, 1), account_layer(&interrupted, 1));
@@ -1303,15 +1295,13 @@ fn a_record_never_supplies_an_account_window_the_manifest_lacks() {
         &cut_at_4,
         domain.archive(),
         domain.state(),
-        None,
         &lending_record(),
     )
     .unwrap();
     assert_eq!(account_layer(&unheld, 1), account_layer(&interrupted, 1));
 
     let settling = export::Settling::new(lending_record(), Some(&restricted)).unwrap();
-    let held =
-        export::reproduce(&cut_at_4, domain.archive(), domain.state(), None, &settling).unwrap();
+    let held = export::reproduce(&cut_at_4, domain.archive(), domain.state(), &settling).unwrap();
 
     assert_eq!(held.layers, reproduce_fresh(&cut_at_4, &domain).layers);
     assert_eq!(account_layer(&held, 1), window_1);
@@ -1320,7 +1310,7 @@ fn a_record_never_supplies_an_account_window_the_manifest_lacks() {
     // record's lender.
     assert_eq!(settling.inner().account_windows(), vec![0]);
 
-    let forecast = export::forecast(&cut_at_4, domain.archive(), &settling, None).unwrap();
+    let forecast = export::forecast(&cut_at_4, domain.archive(), &settling).unwrap();
     let lent = settling.inner().lent.load(Ordering::Relaxed);
 
     assert_eq!(
@@ -1344,14 +1334,7 @@ fn a_settling_predecessor_passes_each_landed_layer_on() {
 
     let cut_at_3 = plan_at_boundary(&domain, 3, RetainedEpochs::default());
     let landed = |predecessor: &dyn export::Predecessor| {
-        export::reproduce(
-            &cut_at_3,
-            domain.archive(),
-            domain.state(),
-            None,
-            predecessor,
-        )
-        .unwrap()
+        export::reproduce(&cut_at_3, domain.archive(), domain.state(), predecessor).unwrap()
     };
 
     let bare = Lending::following(&predecessor, &cut_at_3);
@@ -1391,8 +1374,7 @@ fn a_forecast_counts_no_unsettled_account_window_the_stores_lack() {
     let cut_at_3 = plan_at_boundary(&domain, 3, RetainedEpochs::default());
     let lending = Lending::following(&predecessor, &cut_at_3);
 
-    let chained =
-        export::reproduce(&cut_at_3, domain.archive(), domain.state(), None, &lending).unwrap();
+    let chained = export::reproduce(&cut_at_3, domain.archive(), domain.state(), &lending).unwrap();
 
     assert!(!chained.layers.iter().any(|layer| {
         layer.kind == "log-account-epochs"
@@ -1523,7 +1505,6 @@ fn a_discarding_export_reproduces_what_a_publish_stores() {
         &plan,
         domain.archive(),
         domain.state(),
-        None,
         &export::First,
         &Observer::silent(),
     )
@@ -1585,7 +1566,6 @@ fn a_tip_with_unfinished_bookkeeping_is_refused_before_a_layer() {
             &plan,
             domain.archive(),
             domain.state(),
-            None,
             &export::First,
             &watcher.observer(),
         );
@@ -1674,7 +1654,6 @@ fn every_path_refuses_a_cursor_past_the_boundary_before_a_layer() {
             &plan,
             domain.archive(),
             domain.state(),
-            None,
             &export::First,
             &watcher.observer(),
         )),
@@ -1690,7 +1669,6 @@ fn every_path_refuses_a_cursor_past_the_boundary_before_a_layer() {
             &plan,
             domain.archive(),
             domain.state(),
-            None,
             &Observer::silent(),
         )),
         expected
@@ -1711,7 +1689,6 @@ fn every_path_refuses_a_cursor_past_the_boundary_before_a_layer() {
             &plan,
             domain.archive(),
             domain.state(),
-            None,
             &export::First,
         )),
         expected
@@ -1733,7 +1710,6 @@ fn every_path_refuses_a_cursor_past_the_boundary_before_a_layer() {
             &plan,
             domain.archive(),
             domain.state(),
-            None,
         )),
         expected
     );
@@ -1775,7 +1751,6 @@ fn a_plan_the_stores_have_moved_past_is_refused_before_a_layer() {
         &plan,
         domain.archive(),
         domain.state(),
-        None,
         &export::First,
         &watcher.observer(),
     );
@@ -1833,7 +1808,6 @@ fn an_archive_past_a_boundary_state_is_refused_before_a_layer() {
             &plan,
             domain.archive(),
             domain.state(),
-            None,
             &export::First,
             &watcher.observer(),
         );
@@ -1913,7 +1887,6 @@ fn a_block_beside_the_cursor_at_its_slot_is_refused_before_a_layer() {
         &plan,
         domain.archive(),
         domain.state(),
-        None,
         &export::First,
         &watcher.observer(),
     );
@@ -1952,7 +1925,6 @@ fn a_restricted_reproduction_matches_the_same_restricted_publish() {
         &plan,
         domain.archive(),
         domain.state(),
-        None,
         &Observer::silent(),
     )
     .unwrap();
@@ -1962,7 +1934,6 @@ fn a_restricted_reproduction_matches_the_same_restricted_publish() {
         &plan,
         domain.archive(),
         domain.state(),
-        None,
         &export::First,
         &Observer::silent(),
     )
@@ -1984,7 +1955,6 @@ fn a_restricted_reproduction_matches_the_same_restricted_publish() {
         &plan_for(&domain),
         domain.archive(),
         domain.state(),
-        None,
         &export::First,
         &Observer::silent(),
     )
@@ -2029,7 +1999,6 @@ fn a_directory_publish_reports_every_layer_and_record() {
         &plan,
         domain.archive(),
         domain.state(),
-        None,
         &watcher.observer(),
     )
     .unwrap();
@@ -2093,7 +2062,6 @@ fn a_silent_publish_writes_exactly_what_a_watched_one_does() {
         &plan,
         domain.archive(),
         domain.state(),
-        None,
         &watcher.observer(),
     )
     .unwrap();
@@ -2103,7 +2071,6 @@ fn a_silent_publish_writes_exactly_what_a_watched_one_does() {
         &plan,
         domain.archive(),
         domain.state(),
-        None,
         &Observer::silent(),
     )
     .unwrap();
@@ -2400,7 +2367,6 @@ fn an_export_costs_one_index_traversal_however_many_epochs_it_covers() {
             &plan,
             &archive,
             &state,
-            None,
             &export::First,
             &watcher.observer(),
         )
@@ -2472,7 +2438,6 @@ fn entity_layers_exist_only_where_an_entity_was_first_seen() {
         &plan,
         &archive,
         &state,
-        None,
         &export::First,
         &Observer::silent(),
     )
@@ -2554,7 +2519,6 @@ fn export_entities(previous: &dyn export::Predecessor) -> (usize, Vec<u8>) {
         &plan,
         &archive,
         &state,
-        None,
         previous,
         &watcher.observer(),
     )
@@ -2595,7 +2559,6 @@ fn an_entity_layer_a_predecessor_carries_is_inherited_and_not_rebuilt() {
         &plan,
         &archive,
         &state,
-        None,
         &export::First,
         &Observer::silent(),
     )
@@ -2641,14 +2604,13 @@ fn the_forecast_counts_the_entity_layers_a_publish_builds_and_inherits() {
         &plan,
         &archive,
         &state,
-        None,
         &export::First,
         &Observer::silent(),
     )
     .unwrap();
 
     assert_eq!(
-        export::forecast(&plan, &archive, &export::First, None).unwrap(),
+        export::forecast(&plan, &archive, &export::First).unwrap(),
         export::Forecast {
             layers_built: first.layers.len(),
             layers_reused: 0,
@@ -2662,7 +2624,6 @@ fn the_forecast_counts_the_entity_layers_a_publish_builds_and_inherits() {
         &plan,
         &archive,
         &state,
-        None,
         &lending,
         &Observer::silent(),
     )
@@ -2671,7 +2632,7 @@ fn the_forecast_counts_the_entity_layers_a_publish_builds_and_inherits() {
     let lent = lending.lent.load(Ordering::Relaxed);
 
     assert_eq!(
-        export::forecast(&plan, &archive, &lending, None).unwrap(),
+        export::forecast(&plan, &archive, &lending).unwrap(),
         export::Forecast {
             layers_built: carried.layers.len() - lent,
             layers_reused: lent,
@@ -2690,7 +2651,6 @@ fn the_forecast_counts_the_entity_layers_a_publish_builds_and_inherits() {
         &plan,
         &bare,
         &state,
-        None,
         &lender,
         &Observer::silent(),
     )
@@ -2700,7 +2660,7 @@ fn the_forecast_counts_the_entity_layers_a_publish_builds_and_inherits() {
 
     assert_eq!(adopted.layers.len(), first.layers.len());
     assert_eq!(
-        export::forecast(&plan, &bare, &lender, None).unwrap(),
+        export::forecast(&plan, &bare, &lender).unwrap(),
         export::Forecast {
             layers_built: adopted.layers.len() - lent,
             layers_reused: lent,
@@ -2974,7 +2934,6 @@ mod index_staging {
                 &skeleton_plan(),
                 &archive,
                 &skeleton_state(),
-                None,
                 &export::First,
                 &Observer::silent(),
             )
@@ -4222,7 +4181,6 @@ mod boundary_preparation {
                 &self.plan(retained),
                 &self.archive,
                 &self.state,
-                None,
                 previous,
                 &Observer::silent(),
             )
@@ -4246,7 +4204,6 @@ mod boundary_preparation {
                     producers: export::Producers::DEFAULT,
                 },
                 &self.archive,
-                None,
                 previous,
                 &Observer::silent(),
             )
@@ -4964,7 +4921,6 @@ mod boundary_preparation {
             &plan,
             &chain.archive,
             &chain.state,
-            None,
             &export::First,
             &Observer::silent(),
         )
@@ -5056,7 +5012,6 @@ mod boundary_preparation {
                 producers: export::Producers::DEFAULT,
             },
             &other.archive,
-            None,
             &export::First,
             &Observer::silent(),
         );
@@ -5263,7 +5218,6 @@ mod boundary_preparation {
                 producers: export::Producers::DEFAULT,
             },
             &pruned,
-            None,
             &export::First,
             &Observer::silent(),
         );
@@ -5403,7 +5357,6 @@ mod boundary_preparation {
             &plan,
             &chain.archive,
             &chain.state,
-            None,
             &export::First,
             &Observer::silent(),
         )
@@ -5544,7 +5497,6 @@ mod boundary_preparation {
                 producers: export::Producers::DEFAULT,
             },
             &chain.archive,
-            None,
             &export::First,
             &watcher.observer(),
         )
@@ -5936,7 +5888,6 @@ mod boundary_preparation {
                 producers: export::Producers::DEFAULT,
             },
             archive,
-            None,
             &export::First,
             &Observer::silent(),
         )
@@ -6081,7 +6032,6 @@ mod boundary_preparation {
             &plan,
             &chain.archive,
             &chain.state,
-            None,
             &export::First,
             &Observer::silent(),
         )
@@ -6321,7 +6271,6 @@ mod boundary_preparation {
             &chain.plan(&[]).with_scratch(scratch),
             &chain.archive,
             &chain.state,
-            None,
             &export::First,
             observer,
         )
@@ -7428,7 +7377,6 @@ mod boundary_preparation {
                 &seed_plan,
                 &seed_chain.archive,
                 &seed_chain.state,
-                None,
                 &export::First,
                 &Observer::silent(),
             )
@@ -7447,7 +7395,6 @@ mod boundary_preparation {
             &plan,
             &chain.archive,
             &chain.state,
-            None,
             previous().as_ref(),
             &Observer::silent(),
         )
@@ -7492,7 +7439,6 @@ mod boundary_preparation {
                     producers: export::Producers::DEFAULT,
                 },
                 &fjall,
-                None,
                 previous().as_ref(),
                 &Observer::silent(),
             )?
@@ -7516,7 +7462,6 @@ mod boundary_preparation {
                     producers: export::Producers::DEFAULT,
                 },
                 &chain.archive,
-                None,
                 previous().as_ref(),
                 &Observer::silent(),
             )?
@@ -7979,7 +7924,6 @@ mod boundary_preparation {
             &chain.plan(&[]).with_scratch(&base),
             &chain.archive,
             &chain.state,
-            None,
             &export::First,
             &Observer::silent(),
         )

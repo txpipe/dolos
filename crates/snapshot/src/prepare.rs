@@ -33,7 +33,6 @@ use stelae::{
     transport::{BlobIndex, LayerSpec, RecordSink, SteleReader as _, SteleWriter, WrittenLayer},
     Digest,
 };
-use stelae_driver::digests;
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::{
@@ -1263,7 +1262,6 @@ pub fn finalize<W, A>(
     stele: &W,
     finalizing: &Finalizing<'_>,
     archive: &A,
-    digest_records: Option<&[digests::ImmutableDigests]>,
     previous: &dyn Predecessor,
     observer: &Observer,
 ) -> Result<Inscription, Error>
@@ -1299,7 +1297,6 @@ where
         &Source::<MemoryStateStore>::Prepared(&prepared),
         Runs::new(staged, declined.as_ref().map(|declined| declined.staged())),
         &adopted,
-        digest_records,
         previous,
         observer,
     )

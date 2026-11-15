@@ -849,7 +849,6 @@ fn roundtrip<B: ToyStores>() {
             &plan,
             &blank.archive,
             blank.state(),
-            None,
             &dolos_snapshot::export::First,
             &Observer::silent(),
         )
@@ -964,7 +963,6 @@ fn entity_index_round_trip<B: ToyStores>() {
             &plan,
             &blank.archive,
             blank.state(),
-            None,
             &dolos_snapshot::export::First,
             &Observer::silent(),
         )

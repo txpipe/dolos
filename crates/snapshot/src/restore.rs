@@ -987,9 +987,9 @@ fn select_epochs(inscription: &Inscription) -> Result<Vec<EpochLayers>, Error> {
         let log_ns = log_ns_for(kind);
         let entity = entity_kind_for(kind);
 
-        // The tip kinds and `digests`, which are not epoch-scoped, plus any
-        // kind this build does not define — `plan` has already collected those
-        // into `Plan.skipped_unknown` and refused the required ones.
+        // The tip kinds, which are not epoch-scoped, plus any kind this build
+        // does not define — `plan` has already collected those into
+        // `Plan.skipped_unknown` and refused the required ones.
         if log_ns.is_none() && entity.is_none() && !matches!(kind, BLOCKS | INDEXES) {
             continue;
         }
@@ -2411,7 +2411,7 @@ mod tests {
     use stelae::{inscription::LayerDescriptor, Digest, RestoreProgress};
 
     use super::*;
-    use crate::{DIGESTS, MAINNET_MAGIC};
+    use crate::MAINNET_MAGIC;
 
     fn descriptor(kind: &str, scope: serde_json::Value, byte: u8) -> LayerDescriptor {
         LayerDescriptor {
@@ -2786,10 +2786,10 @@ mod tests {
         );
     }
 
-    /// Every scope shape leads with the magic, so one reader covers all three.
+    /// Every scope shape leads with the magic, so one reader covers both.
     #[test]
     fn the_magic_check_reads_every_scope_shape() {
-        use crate::{DigestsScope, EpochScope, Scope as _, StateScope};
+        use crate::{EpochScope, Scope as _, StateScope};
 
         let shapes: Vec<(&str, stelae::CanonicalCbor)> = vec![
             (
@@ -2806,16 +2806,6 @@ mod tests {
             (
                 crate::state_kind_for(UTXOS).unwrap(),
                 StateScope::tip(MAINNET_MAGIC, 1, 9).header().unwrap(),
-            ),
-            (
-                DIGESTS,
-                DigestsScope {
-                    network_magic: MAINNET_MAGIC,
-                    epoch: 1,
-                    last_immutable: 42,
-                }
-                .header()
-                .unwrap(),
             ),
         ];
 
@@ -2861,7 +2851,6 @@ mod tests {
         // nothing at all.
         let mut known = state_layers();
         known.push(epoch_descriptor(BLOCKS, 0, 0xa0));
-        known.push(descriptor(DIGESTS, json!({"lastImmutable": 4}), 0xa1));
 
         assert!(unknown_layers(&inscription(known)).unwrap().is_empty());
     }

@@ -139,10 +139,6 @@ pub const PROFILE_VERSION: u64 = 1;
 pub const BLOCKS: &str = "blocks";
 pub const INDEXES: &str = "indexes";
 
-/// Spelled by the codec that reads and writes the kind, so the vocabulary has
-/// one definition on both sides of the crate boundary.
-pub use stelae_driver::digests::DIGESTS;
-
 /// The namespaces the ledger writes epoch-boundary logs under: the namespace
 /// column of [`LOG_KINDS`], byte-sorted.
 ///
@@ -473,8 +469,6 @@ impl RetainedEpochs {
 /// a `blocks` layer and told apart from every other publish's by the same
 /// scope equality; a state layer whose scope names only a shard is the moving
 /// tip, and every publish's shard `n` compares equal to every other's.
-///
-/// `digests` is in neither set: it has no source in this slice.
 pub fn is_inheritable(kind: &str, scope: &serde_json::Value) -> bool {
     if EPOCH_KINDS.contains(&kind) {
         return true;
@@ -529,17 +523,16 @@ pub(crate) fn settles_late(kind: &str) -> bool {
 pub const DENSE_EPOCH_KINDS: [&str; 2] = [BLOCKS, INDEXES];
 
 /// Every layer kind, in the order the inscription lists them.
-pub const KINDS: [&str; EPOCH_KINDS.len() + STATE_KIND_NAMES.len() + 1] = {
-    let mut kinds = [""; EPOCH_KINDS.len() + STATE_KIND_NAMES.len() + 1];
+pub const KINDS: [&str; EPOCH_KINDS.len() + STATE_KIND_NAMES.len()] = {
+    let mut kinds = [""; EPOCH_KINDS.len() + STATE_KIND_NAMES.len()];
     let at = fill(&mut kinds, 0, &EPOCH_KINDS);
-    let at = fill(&mut kinds, at, &STATE_KIND_NAMES);
-    kinds[at] = DIGESTS;
+    fill(&mut kinds, at, &STATE_KIND_NAMES);
 
     kinds
 };
 
-/// The kinds whose scope is an epoch range. The state kinds and `digests` carry
-/// their own scope shapes.
+/// The kinds whose scope is an epoch range. The state kinds carry their own
+/// scope shape.
 ///
 /// The namespace lives in the kind rather than in the scope, so a log layer
 /// wears the same [`EpochScope`] as `blocks` and `indexes` do — which is what
@@ -1457,14 +1450,6 @@ impl StateScope {
     }
 }
 
-/// Scope of the optional `digests` layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DigestsScope {
-    pub network_magic: u64,
-    pub epoch: u64,
-    pub last_immutable: u64,
-}
-
 /// A layer's scope, in the two encodings the protocol carries.
 ///
 /// The header scope rides in the layer's own first record, so a blob detached
@@ -1559,30 +1544,6 @@ impl Scope for StateScope {
     }
 }
 
-impl Scope for DigestsScope {
-    fn header(&self) -> Result<CanonicalCbor, Error> {
-        Ok(frame::encode(|e| {
-            e.array(3)?
-                .u64(self.network_magic)?
-                .u64(self.epoch)?
-                .u64(self.last_immutable)?;
-            Ok(())
-        })?)
-    }
-
-    fn descriptor(&self) -> serde_json::Value {
-        json!({"lastImmutable": self.last_immutable})
-    }
-
-    fn kinds(&self) -> &'static [&'static str] {
-        &[DIGESTS]
-    }
-
-    fn shape(&self) -> &'static str {
-        "a digests scope"
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use dolos_core::BlockHash;
@@ -1619,7 +1580,10 @@ mod tests {
 
     #[test]
     fn an_undefined_kind_is_refused() {
-        for kind in ["utxos", "state", "logs", "receipts", "", "Blocks"] {
+        // `digests` moved to the blocks profile by decision 0080.
+        for kind in [
+            "utxos", "state", "logs", "receipts", "", "Blocks", "digests",
+        ] {
             assert!(DolosProfile.layer_media_type(kind).is_err(), "{kind:?}");
             assert!(
                 checked_layer_media_type(&DolosProfile, kind).is_err(),
@@ -1852,11 +1816,6 @@ mod tests {
             end_slot: 199,
         };
         let state = StateScope::tip(2, 7, 3);
-        let digests = DigestsScope {
-            network_magic: 2,
-            epoch: 7,
-            last_immutable: 42,
-        };
 
         for kind in EPOCH_KINDS {
             epoch.layer_spec(kind).unwrap();
@@ -1864,14 +1823,11 @@ mod tests {
         for kind in STATE_KIND_NAMES {
             state.layer_spec(kind).unwrap();
         }
-        digests.layer_spec(DIGESTS).unwrap();
 
         for (spec, kind) in [
             (epoch.layer_spec(STATE_KIND_NAMES[0]), STATE_KIND_NAMES[0]),
-            (epoch.layer_spec(DIGESTS), DIGESTS),
             (state.layer_spec(BLOCKS), BLOCKS),
             (state.layer_spec("state"), "state"),
-            (digests.layer_spec(LOG_KINDS[0].0), LOG_KINDS[0].0),
         ] {
             let err = spec.unwrap_err();
             assert!(
@@ -1911,17 +1867,6 @@ mod tests {
         let dump = StateScope::dump(1, 2, 15);
         assert_eq!(dump.header().unwrap(), state.header().unwrap());
         assert_eq!(dump.descriptor(), json!({"epoch": 2, "shard": 15}));
-
-        let digests = DigestsScope {
-            network_magic: 1,
-            epoch: 2,
-            last_immutable: 6187,
-        };
-        assert_eq!(
-            digests.header().unwrap().as_bytes(),
-            &[0x83, 0x01, 0x02, 0x19, 0x18, 0x2b]
-        );
-        assert_eq!(digests.descriptor(), json!({"lastImmutable": 6187}));
     }
 
     /// Done criterion 4: the list is refused where it is read, not where a
@@ -1970,10 +1915,6 @@ mod tests {
         for kind in EPOCH_KINDS {
             assert!(is_inheritable(kind, &json!({"epoch": 7})), "{kind}");
         }
-
-        // `digests` names an epoch nowhere in its descriptor and has no source
-        // in this slice either way.
-        assert!(!is_inheritable(DIGESTS, &json!({"lastImmutable": 3})));
 
         // A kind this profile does not define never inherits, whatever its
         // scope claims.
