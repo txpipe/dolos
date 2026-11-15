@@ -425,6 +425,7 @@ mod tests {
             Network::for_magic(2),
             at.clone(),
             RetainedEpochs::default(),
+            0,
         )
         .unwrap()
     }

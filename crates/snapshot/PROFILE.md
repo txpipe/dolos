@@ -269,16 +269,16 @@ So the epoch windows a stele covers are `0..=E`: epochs `0..E-1` **complete**, p
 
 It is load-bearing because of how boundary data is keyed. Every log row keys at the start of an epoch, but not always the epoch its boundary opens or closes: each log kind's anchor is in the table below. ESTART opening E writes E's stake-only `account-epochs` rows at `epoch_start(E)`, so they live inside the sliver and nowhere else: a stele that dropped the sliver in the name of a clean boundary would ship a state tip whose opening rows are in no layer at all, and a restored node would never regenerate them.
 
-Log anchors. For each log kind: what writes epoch `e`'s rows, the slot they key at, and the first stele whose `e` window carries them. A window's layer does not change after that stele, except `log-account-epochs`.
+Log anchors. For each log kind: what writes epoch `e`'s rows, the first stele whose `e` window carries them, and the first that carries them final. Every row keys at `epoch_start(e)`, and a window's layer does not change once it is final. The table is `ANCHORS` in `crates/snapshot/src/roles.rs`, which also holds the other epoch kinds: `blocks` and `indexes`, carried from `e` (the boundary sliver) and final from `e + 1`, and the `entity-{kind}` layers, carried and final from the seal, as the period logs are.
 
-| Log | Written by | Key slot | First stele with window `e` |
+| Log | Written by | First stele with window `e` | Final from |
 |---|---|---|---|
-| `epochs` | EWRAP closing `e` | `epoch_start(e)` | `e + 1` |
-| `drep-epochs` | EWRAP closing `e`, the distribution it completes | `epoch_start(e)` | `e + 1` |
-| `account-epochs` | ESTART opening `e` (stake leg alone), then EWRAP closing `e + 1` (full rows, same keys) | `epoch_start(e)` | `e` with the stake-only rows; settled from `e + 2` |
-| `pool-epochs` | RUPD during `e + 1`, settled by EWRAP closing `e + 1` on what the boundary paid | `epoch_start(e)` | `e + 2` |
-| `pools`, `dreps`, `proposals` (final rows) | ESTART opening `e + 1`, `e` the closed epoch | `epoch_start(e)` | `e + 1` |
-| period logs (`*-chunks`, `account-stats`, `address-stats`) | the seal at boundary `b` (see "The seal") | `epoch_start(e)` | `b`; `e + 2` when epoch `e + 1` is at least a stability window long |
+| `epochs` | EWRAP closing `e` | `e + 1` | `e + 1` |
+| `drep-epochs` | EWRAP closing `e`, the distribution it completes | `e + 1` | `e + 1` |
+| `account-epochs` | ESTART opening `e` (stake leg alone), then EWRAP closing `e + 1` (full rows, same keys) | `e` | `e + 2` |
+| `pool-epochs` | RUPD during `e + 1`, settled by EWRAP closing `e + 1` on what the boundary paid | `e + 2` | `e + 2` |
+| `pools`, `dreps`, `proposals` (final rows) | ESTART opening `e + 1`, `e` the closed epoch | `e + 1` | `e + 1` |
+| period logs: `account-address-epochs`, `account-stats`, `address-stats`, `asset-mint-chunks`, `first-mint-chunks`, `first-script-chunks`, `payment-address-epochs`, `policy-first-mint-chunks` | the seal at boundary `b` (see "The seal") | `b`; `e + 2` when epoch `e + 1` is at least a stability window long | `b` |
 
 EWRAP closing `e` therefore also writes rows at `epoch_start(e - 1)`: the full `account-epochs` rows of `e - 1`, and the settled `pool-epochs` rows of `e - 1`.
 

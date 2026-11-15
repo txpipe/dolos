@@ -359,6 +359,7 @@ pub fn plan_retaining<B: ToyStores>(domain: &ToyDomain<B>, retained: RetainedEpo
         domain.state(),
         domain.genesis().network_magic() as u64,
         retained,
+        dolos_cardano::mutable_slots(&domain.genesis()),
     )
     .unwrap()
 }

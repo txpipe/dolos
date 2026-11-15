@@ -840,9 +840,13 @@ fn roundtrip<B: ToyStores>() {
 
     let restored = {
         let stele = SteleDir::create(from_restored.path()).unwrap();
-        let plan =
-            dolos_snapshot::export::plan(blank.state(), magic_of(&domain), Default::default())
-                .unwrap();
+        let plan = dolos_snapshot::export::plan(
+            blank.state(),
+            magic_of(&domain),
+            Default::default(),
+            dolos_cardano::mutable_slots(&domain.genesis()),
+        )
+        .unwrap();
 
         dolos_snapshot::export::export(
             &stele,
@@ -954,9 +958,13 @@ fn entity_index_round_trip<B: ToyStores>() {
     let again = tempfile::tempdir().unwrap();
     let republished = {
         let stele = SteleDir::create(again.path()).unwrap();
-        let plan =
-            dolos_snapshot::export::plan(blank.state(), magic_of(&domain), Default::default())
-                .unwrap();
+        let plan = dolos_snapshot::export::plan(
+            blank.state(),
+            magic_of(&domain),
+            Default::default(),
+            dolos_cardano::mutable_slots(&domain.genesis()),
+        )
+        .unwrap();
 
         dolos_snapshot::export::export(
             &stele,

@@ -102,6 +102,10 @@ fn skeleton_summary() -> ChainSummary {
     chain
 }
 
+/// Half a skeleton epoch: the seal at a boundary writes the epoch two before
+/// it.
+const SKELETON_MUTABLE_SLOTS: u64 = 50;
+
 fn skeleton_era() -> EraState {
     EraState {
         start: EraBoundary {
@@ -186,6 +190,7 @@ fn a_bare_boundary_exports_the_pinned_skeleton() {
         Network::for_magic(dolos_snapshot::MAINNET_MAGIC),
         skeleton_point(),
         Default::default(),
+        SKELETON_MUTABLE_SLOTS,
     )
     .unwrap();
 
@@ -264,6 +269,7 @@ fn a_log_under_an_uncovered_namespace_fails_the_export() {
         Network::for_magic(dolos_snapshot::MAINNET_MAGIC),
         skeleton_point(),
         Default::default(),
+        SKELETON_MUTABLE_SLOTS,
     )
     .unwrap();
 
@@ -295,6 +301,7 @@ fn an_unnamed_network_renders_from_its_magic() {
         Network::for_magic(42),
         skeleton_point(),
         Default::default(),
+        SKELETON_MUTABLE_SLOTS,
     )
     .unwrap();
 
@@ -1714,7 +1721,11 @@ fn every_path_refuses_a_cursor_past_the_boundary_before_a_layer() {
         expected
     );
 
-    let source = StoreSnapshot::new(domain.archive(), domain.state());
+    let source = StoreSnapshot::new(
+        domain.archive(),
+        domain.state(),
+        dolos_cardano::mutable_slots(&domain.genesis()),
+    );
 
     assert_eq!(reason(source.boundary(&plan)), expected);
     assert_eq!(
@@ -2356,6 +2367,7 @@ fn an_export_costs_one_index_traversal_however_many_epochs_it_covers() {
             Network::for_magic(dolos_snapshot::MAINNET_MAGIC),
             skeleton_point(),
             Default::default(),
+            SKELETON_MUTABLE_SLOTS,
         )
         .unwrap()
         .restrict_epochs(first, None);
@@ -2417,6 +2429,7 @@ fn skeleton_plan() -> Plan {
         Network::for_magic(dolos_snapshot::MAINNET_MAGIC),
         skeleton_point(),
         Default::default(),
+        SKELETON_MUTABLE_SLOTS,
     )
     .unwrap()
 }
@@ -2673,7 +2686,11 @@ fn the_forecast_counts_the_entity_layers_a_publish_builds_and_inherits() {
 #[test]
 fn the_headless_facade_plans_encodes_and_reproduces_one_document() {
     let domain: ToyDomain = harness();
-    let source = StoreSnapshot::new(domain.archive(), domain.state());
+    let source = StoreSnapshot::new(
+        domain.archive(),
+        domain.state(),
+        dolos_cardano::mutable_slots(&domain.genesis()),
+    );
     let plan = source
         .selected_plan(
             u64::from(domain.genesis().network_magic()),
@@ -4128,6 +4145,7 @@ mod boundary_preparation {
                 Network::for_magic(MAINNET_MAGIC),
                 self.tip.clone().unwrap(),
                 RetainedEpochs::new(retained.to_vec()).unwrap(),
+                self.mutable,
             )
             .unwrap()
         }
@@ -5400,7 +5418,7 @@ mod boundary_preparation {
         let delta = chain.boundary_delta.clone().unwrap();
         let plan = chain.plan(&[]);
 
-        let source = StoreSnapshot::new(&chain.archive, &chain.state);
+        let source = StoreSnapshot::new(&chain.archive, &chain.state, chain.mutable);
         let bundle = source
             .prepare_boundary(
                 &store,
@@ -5417,7 +5435,7 @@ mod boundary_preparation {
 
         chain.advance_to(4);
 
-        let source = StoreSnapshot::new(&chain.archive, &chain.state);
+        let source = StoreSnapshot::new(&chain.archive, &chain.state, chain.mutable);
         let staged = source
             .stage_batch(
                 stage_root.path(),
@@ -8101,6 +8119,7 @@ mod boundary_preparation {
             Network::for_magic(1),
             chain.tip.clone().unwrap(),
             RetainedEpochs::default(),
+            chain.mutable,
         )
         .unwrap();
 
@@ -8345,7 +8364,7 @@ mod boundary_preparation {
 
         let heard = Heard::over(&chain);
 
-        StoreSnapshot::new(&chain.archive, &chain.state)
+        StoreSnapshot::new(&chain.archive, &chain.state, chain.mutable)
             .stage_batch(
                 stage_root.path(),
                 std::slice::from_ref(&bundle),
