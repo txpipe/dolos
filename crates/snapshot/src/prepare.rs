@@ -25,12 +25,14 @@ use dolos_core::{
 };
 use serde::{Deserialize, Serialize};
 use stelae::{
-    dir::{SteleDir, BLOBS_DIR},
+    dir::{SnapshotDir, BLOBS_DIR},
     frame::{CanonicalCbor, Limits},
     inscription::{Inscription, LayerDescriptor},
     profile::Profile,
     progress::{Observer, Outcome},
-    transport::{BlobIndex, LayerSpec, RecordSink, SteleReader as _, SteleWriter, WrittenLayer},
+    transport::{
+        BlobIndex, LayerSpec, RecordSink, SnapshotReader as _, SnapshotWriter, WrittenLayer,
+    },
     Digest,
 };
 use xxhash_rust::xxh3::xxh3_64;
@@ -344,7 +346,7 @@ impl Bundle {
 pub struct Store {
     root: PathBuf,
     owner: String,
-    blobs: SteleDir,
+    blobs: SnapshotDir,
 }
 
 impl Store {
@@ -352,7 +354,7 @@ impl Store {
     /// dropping any payload a crash left half-written.
     pub fn open(root: impl Into<PathBuf>, owner: impl Into<String>) -> Result<Self, Error> {
         let root = root.into();
-        let blobs = SteleDir::create(&root)?;
+        let blobs = SnapshotDir::create(&root)?;
 
         fs::create_dir_all(root.join(BUNDLES_DIR)).map_err(io)?;
 
@@ -601,7 +603,7 @@ impl<S: RecordSink> RecordSink for CapturingSink<S> {
     }
 }
 
-impl<W: SteleWriter> SteleWriter for Capturing<'_, W> {
+impl<W: SnapshotWriter> SnapshotWriter for Capturing<'_, W> {
     type Sink = CapturingSink<W::Sink>;
 
     fn layer_sink(
@@ -753,7 +755,7 @@ fn capture_layers<W, A, S>(
     observer: &Observer,
 ) -> Result<Vec<WrittenLayer>, Error>
 where
-    W: SteleWriter + Sync,
+    W: SnapshotWriter + Sync,
     A: ArchiveStore,
     S: StateStore,
 {
@@ -930,7 +932,7 @@ fn check_delta(delta: &ArchiveIndexDelta, plan: &Plan) -> Result<(), Error> {
 
 /// The boundary's own `indexes` layer: the one block the boundary check proved
 /// is all its window holds.
-fn write_tail<W: SteleWriter, A: ArchiveStore>(
+fn write_tail<W: SnapshotWriter, A: ArchiveStore>(
     stele: &W,
     plan: &Plan,
     archive: &A,
@@ -1063,7 +1065,7 @@ impl Prepared<'_> {
     /// Stream a payload into `spec`'s layer of `stele`. The payload is held to
     /// its descriptor before the sink is finished, so a damaged one produces no
     /// layer.
-    pub(crate) fn replay<W: SteleWriter>(
+    pub(crate) fn replay<W: SnapshotWriter>(
         &self,
         stele: &W,
         spec: &LayerSpec,
@@ -1254,7 +1256,7 @@ pub fn finalize<W, A>(
     observer: &Observer,
 ) -> Result<Inscription, Error>
 where
-    W: SteleWriter + Sync,
+    W: SnapshotWriter + Sync,
     A: ArchiveStore,
 {
     let Finalizing {

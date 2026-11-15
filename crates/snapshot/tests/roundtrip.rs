@@ -2,7 +2,7 @@
 //!
 //! Not `encode` against `decode` — that pair can agree with each other and with
 //! nothing else. Each kind goes typed record → encode → **layer written to a
-//! `SteleDir`** → layer read back → decode → compared, through both of the
+//! `SnapshotDir`** → layer read back → decode → compared, through both of the
 //! protocol's read paths. A record only counts as round-tripped once it has
 //! been framed, compressed, digested, decompressed and re-framed.
 
@@ -15,10 +15,10 @@ use dolos_snapshot::{
     shard_byte_for, shards_for, DolosProfile, Error, Scope, BLOCKS, INDEXES, LOG_KINDS,
 };
 use stelae::{
-    dir::SteleDir,
+    dir::SnapshotDir,
     frame::{self, CanonicalCbor},
     profile::MediaType,
-    Profile, SteleReader, SteleWriter,
+    Profile, SnapshotReader, SnapshotWriter,
 };
 
 /// Write one layer, read it back both ways, and decode what comes out.
@@ -33,7 +33,7 @@ where
     T: std::fmt::Debug + PartialEq,
 {
     let temp = tempfile::tempdir().unwrap();
-    let stele = SteleDir::create(temp.path()).unwrap();
+    let stele = SnapshotDir::create(temp.path()).unwrap();
 
     let encoded = encode_all(records, encode);
     let written = write_layer(&stele, kind, scope, &encoded);
@@ -178,7 +178,7 @@ fn state_round_trips_through_a_layer_per_kind_and_shard() {
 #[test]
 fn an_over_wide_exact_key_survives_the_layer_and_is_refused_by_the_codec() {
     let temp = tempfile::tempdir().unwrap();
-    let stele = SteleDir::create(temp.path()).unwrap();
+    let stele = SnapshotDir::create(temp.path()).unwrap();
 
     let forged = frame::encode(|e| {
         e.array(4)?
@@ -217,7 +217,7 @@ fn an_over_wide_exact_key_survives_the_layer_and_is_refused_by_the_codec() {
 #[test]
 fn a_layer_read_under_the_wrong_kind_is_refused() {
     let temp = tempfile::tempdir().unwrap();
-    let stele = SteleDir::create(temp.path()).unwrap();
+    let stele = SnapshotDir::create(temp.path()).unwrap();
 
     let written = write_layer(
         &stele,
@@ -283,7 +283,7 @@ fn a_layer_of_another_profile_is_refused() {
     }
 
     let temp = tempfile::tempdir().unwrap();
-    let stele = SteleDir::create(temp.path()).unwrap();
+    let stele = SnapshotDir::create(temp.path()).unwrap();
 
     let scope = epoch_scope();
     let written = stele

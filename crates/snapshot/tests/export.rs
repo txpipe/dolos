@@ -11,7 +11,7 @@
 //!    ledger change cannot move it, which is what makes it a golden rather than
 //!    a value that gets re-pinned as a matter of routine.
 //! 2. **A live node exports a complete stele.** Built by the harness domain
-//!    from synthetic blocks, read back through `SteleDir`, verified clean.
+//!    from synthetic blocks, read back through `SnapshotDir`, verified clean.
 //! 3. **Read-back equality.** Every layer, decoded through its own codec, is
 //!    what walking the store yields — compared against an expectation that is
 //!    *sorted independently* rather than produced by the same registry walk the
@@ -69,9 +69,9 @@ use node::{
     plan_for, settled, stake_only, step_past_boundary, write_account_row,
 };
 use stelae::{
-    dir::SteleDir,
+    dir::SnapshotDir,
     progress::{Observer, Outcome},
-    Discarding, SteleReader,
+    Discarding, SnapshotReader,
 };
 
 use watcher::Watcher;
@@ -181,7 +181,7 @@ fn skeleton_stores() -> (MemoryArchiveStore, MemoryStateStore) {
 #[test]
 fn a_bare_boundary_exports_the_pinned_skeleton() {
     let temp = tempfile::tempdir().unwrap();
-    let stele = SteleDir::create(temp.path()).unwrap();
+    let stele = SnapshotDir::create(temp.path()).unwrap();
 
     let (archive, state) = skeleton_stores();
 
@@ -223,7 +223,7 @@ fn a_bare_boundary_exports_the_pinned_skeleton() {
     assert_eq!(inscription.digest().unwrap().to_string(), GOLDEN_SKELETON);
 
     // And the directory it wrote is a stele by the protocol's own reckoning.
-    let reopened = SteleDir::open(temp.path()).unwrap();
+    let reopened = SnapshotDir::open(temp.path()).unwrap();
     let read = reopened.read_inscription().unwrap();
 
     assert_eq!(read, inscription);
@@ -240,7 +240,7 @@ fn a_bare_boundary_exports_the_pinned_skeleton() {
 #[test]
 fn a_log_under_an_uncovered_namespace_fails_the_export() {
     let temp = tempfile::tempdir().unwrap();
-    let stele = SteleDir::create(temp.path()).unwrap();
+    let stele = SnapshotDir::create(temp.path()).unwrap();
 
     let state = skeleton_state();
 
@@ -389,7 +389,7 @@ fn a_harness_domain_exports_a_complete_stele() {
 
     // The whole directory verifies: every blob hashes to its own name and
     // decompresses to a layer the inscription points at.
-    let stele = SteleDir::open(temp.path()).unwrap();
+    let stele = SnapshotDir::open(temp.path()).unwrap();
     let index = stele.blob_index().unwrap();
 
     for descriptor in &inscription.layers {
@@ -419,7 +419,7 @@ fn every_layer_reads_back_as_the_store_yields_it() {
     let temp = tempfile::tempdir().unwrap();
     let inscription = export_to(temp.path(), &domain);
 
-    let stele = SteleDir::open(temp.path()).unwrap();
+    let stele = SnapshotDir::open(temp.path()).unwrap();
     let index = stele.blob_index().unwrap();
 
     let windows: Vec<EpochWindow> = plan.epochs.clone();
@@ -607,7 +607,7 @@ fn accounts_export_into_the_shard_of_their_hash() {
     let temp = tempfile::tempdir().unwrap();
     let inscription = export_to(temp.path(), &domain);
 
-    let stele = SteleDir::open(temp.path()).unwrap();
+    let stele = SnapshotDir::open(temp.path()).unwrap();
     let index = stele.blob_index().unwrap();
 
     let mut found: BTreeMap<Vec<u8>, u8> = BTreeMap::new();
@@ -819,11 +819,11 @@ fn same_inscription_from_both_backends(at: Option<u64>) {
         std::fs::read(fjall_root.path().join("inscription.json")).unwrap(),
     );
 
-    let left = SteleDir::open(memory_root.path())
+    let left = SnapshotDir::open(memory_root.path())
         .unwrap()
         .blob_index()
         .unwrap();
-    let right = SteleDir::open(fjall_root.path())
+    let right = SnapshotDir::open(fjall_root.path())
         .unwrap()
         .blob_index()
         .unwrap();
@@ -886,11 +886,11 @@ fn a_pooled_production_is_byte_identical_to_the_serial_walk() {
         std::fs::read(pooled_root.path().join("inscription.json")).unwrap(),
     );
 
-    let left = SteleDir::open(serial_root.path())
+    let left = SnapshotDir::open(serial_root.path())
         .unwrap()
         .blob_index()
         .unwrap();
-    let right = SteleDir::open(pooled_root.path())
+    let right = SnapshotDir::open(pooled_root.path())
         .unwrap()
         .blob_index()
         .unwrap();
@@ -911,12 +911,12 @@ fn a_pooled_production_is_byte_identical_to_the_serial_walk() {
 /// The directory twin of `tests/publish.rs`'s `Interrupted`: everything else
 /// goes straight through.
 struct DyingAt<'a> {
-    inner: &'a SteleDir,
+    inner: &'a SnapshotDir,
     kind: &'static str,
 }
 
-impl stelae::SteleWriter for DyingAt<'_> {
-    type Sink = <SteleDir as stelae::SteleWriter>::Sink;
+impl stelae::SnapshotWriter for DyingAt<'_> {
+    type Sink = <SnapshotDir as stelae::SnapshotWriter>::Sink;
 
     fn layer_sink(
         &self,
@@ -953,7 +953,7 @@ fn a_failing_producer_fails_the_pooled_export() {
     let domain: ToyDomain = harness();
 
     let root = tempfile::tempdir().unwrap();
-    let stele = SteleDir::create(root.path()).unwrap();
+    let stele = SnapshotDir::create(root.path()).unwrap();
     let dying = DyingAt {
         inner: &stele,
         kind: BLOCKS,
@@ -1513,7 +1513,7 @@ fn a_tip_with_unfinished_bookkeeping_is_refused_before_a_layer() {
     let refusal = || {
         let watcher = Arc::new(Watcher::default());
         let temp = tempfile::tempdir().unwrap();
-        let stele = SteleDir::create(temp.path()).unwrap();
+        let stele = SnapshotDir::create(temp.path()).unwrap();
 
         let refused = export::export(
             &stele,
@@ -1600,7 +1600,7 @@ fn every_path_refuses_a_cursor_past_the_boundary_before_a_layer() {
 
     let temp = tempfile::tempdir().unwrap();
     let watcher = Arc::new(Watcher::default());
-    let stele = SteleDir::create(temp.path().join("export")).unwrap();
+    let stele = SnapshotDir::create(temp.path().join("export")).unwrap();
 
     assert_eq!(
         reason(export::export(
@@ -1702,7 +1702,7 @@ fn a_plan_the_stores_have_moved_past_is_refused_before_a_layer() {
 
     let watcher = Arc::new(Watcher::default());
     let temp = tempfile::tempdir().unwrap();
-    let stele = SteleDir::create(temp.path()).unwrap();
+    let stele = SnapshotDir::create(temp.path()).unwrap();
 
     let refused = export::export(
         &stele,
@@ -1759,7 +1759,7 @@ fn an_archive_past_a_boundary_state_is_refused_before_a_layer() {
     ] {
         let watcher = Arc::new(Watcher::default());
         let temp = tempfile::tempdir().unwrap();
-        let stele = SteleDir::create(temp.path()).unwrap();
+        let stele = SnapshotDir::create(temp.path()).unwrap();
 
         let refused = export::export(
             &stele,
@@ -1838,7 +1838,7 @@ fn a_block_beside_the_cursor_at_its_slot_is_refused_before_a_layer() {
 
     let watcher = Arc::new(Watcher::default());
     let temp = tempfile::tempdir().unwrap();
-    let stele = SteleDir::create(temp.path()).unwrap();
+    let stele = SnapshotDir::create(temp.path()).unwrap();
 
     let refused = export::export(
         &stele,
@@ -1941,9 +1941,9 @@ fn distinct_layers(inscription: &stelae::Inscription) -> usize {
 /// counts agreeing and not a recording compared with itself.
 ///
 /// A directory is the interesting transport for this half precisely because it
-/// implements none of the byte reporting: `SteleDir` inherits the default no-op
-/// attach, so what comes back here is exactly the profile driver's own stream,
-/// with nothing from a transport mixed into it.
+/// implements none of the byte reporting: `SnapshotDir` inherits the default
+/// no-op attach, so what comes back here is exactly the profile driver's own
+/// stream, with nothing from a transport mixed into it.
 #[test]
 fn a_directory_publish_reports_every_layer_and_record() {
     let domain: ToyDomain = harness();
@@ -2304,7 +2304,7 @@ fn index_across_the_skeleton() -> MemoryArchiveStore {
 fn an_export_costs_one_index_traversal_however_many_epochs_it_covers() {
     for (first, windows) in [(None, 3usize), (Some(2), 1)] {
         let temp = tempfile::tempdir().unwrap();
-        let stele = SteleDir::create(temp.path()).unwrap();
+        let stele = SnapshotDir::create(temp.path()).unwrap();
 
         let state = skeleton_state();
         let archive = Counted::new(with_skeleton_blocks(index_across_the_skeleton()));
@@ -2385,7 +2385,7 @@ fn skeleton_plan() -> Plan {
 #[test]
 fn entity_layers_exist_only_where_an_entity_was_first_seen() {
     let temp = tempfile::tempdir().unwrap();
-    let stele = SteleDir::create(temp.path()).unwrap();
+    let stele = SnapshotDir::create(temp.path()).unwrap();
 
     let archive = with_skeleton_blocks(entities_across_the_skeleton());
     let state = skeleton_state();
@@ -2506,7 +2506,7 @@ fn every_entity_kind_shares_one_traversal_with_no_presence_scan() {
 #[test]
 fn an_entity_layer_a_predecessor_carries_is_inherited_and_not_rebuilt() {
     let temp = tempfile::tempdir().unwrap();
-    let stele = SteleDir::create(temp.path()).unwrap();
+    let stele = SnapshotDir::create(temp.path()).unwrap();
 
     let archive = with_skeleton_blocks(entities_across_the_skeleton());
     let state = skeleton_state();
@@ -2551,7 +2551,7 @@ fn an_entity_layer_a_predecessor_carries_is_inherited_and_not_rebuilt() {
 #[test]
 fn the_forecast_counts_the_entity_layers_a_publish_builds_and_inherits() {
     let temp = tempfile::tempdir().unwrap();
-    let stele = SteleDir::create(temp.path()).unwrap();
+    let stele = SnapshotDir::create(temp.path()).unwrap();
 
     let archive = with_skeleton_blocks(entities_across_the_skeleton());
     let state = skeleton_state();
@@ -2670,7 +2670,7 @@ mod index_staging {
     use dolos_testing::blocks::{byron_ebb_slot, make_byron_ebb, BYRON_EPOCH_LENGTH};
     use stelae::{
         frame::CanonicalCbor, inscription::LayerDescriptor, DiscardingSink, RecordSink,
-        SteleWriter as _, WrittenLayer,
+        SnapshotWriter as _, WrittenLayer,
     };
 
     use super::*;
@@ -3709,7 +3709,7 @@ mod index_staging {
         }
     }
 
-    impl stelae::SteleWriter for Sinks {
+    impl stelae::SnapshotWriter for Sinks {
         type Sink = Live;
 
         fn layer_sink(
@@ -4133,7 +4133,7 @@ mod boundary_preparation {
         /// The ordinary export of the stores as they stand.
         fn export(&self, root: &Path, previous: &dyn export::Predecessor) -> Inscription {
             export::export(
-                &SteleDir::create(root).unwrap(),
+                &SnapshotDir::create(root).unwrap(),
                 &self.plan(),
                 &self.archive,
                 &self.state,
@@ -4152,7 +4152,7 @@ mod boundary_preparation {
             previous: &dyn export::Predecessor,
         ) -> Result<Inscription, Error> {
             prepare::finalize(
-                &SteleDir::create(root).unwrap(),
+                &SnapshotDir::create(root).unwrap(),
                 &Finalizing {
                     store,
                     bundle,
@@ -4894,7 +4894,7 @@ mod boundary_preparation {
         assert_eq!(store.load(2).unwrap().plan().blocks, Some(some_blocks()));
 
         let frozen = export::export(
-            &SteleDir::create(frozen_root.path()).unwrap(),
+            &SnapshotDir::create(frozen_root.path()).unwrap(),
             &plan,
             &chain.archive,
             &chain.state,
@@ -4981,7 +4981,7 @@ mod boundary_preparation {
         let other = Chain::at(Shape::Byron, 3);
         let finished_root = tempdir();
         let refused = prepare::finalize(
-            &SteleDir::create(finished_root.path()).unwrap(),
+            &SnapshotDir::create(finished_root.path()).unwrap(),
             &Finalizing {
                 store: &store,
                 bundle: &bundle,
@@ -5187,7 +5187,7 @@ mod boundary_preparation {
         writer.commit().unwrap();
 
         let refused = prepare::finalize(
-            &SteleDir::create(tempdir().path()).unwrap(),
+            &SnapshotDir::create(tempdir().path()).unwrap(),
             &Finalizing {
                 store: &store,
                 bundle: &bundle,
@@ -5330,7 +5330,7 @@ mod boundary_preparation {
         assert_eq!(bundle.horizon(), None);
 
         let frozen = export::export(
-            &SteleDir::create(frozen_root.path()).unwrap(),
+            &SnapshotDir::create(frozen_root.path()).unwrap(),
             &plan,
             &chain.archive,
             &chain.state,
@@ -5868,7 +5868,7 @@ mod boundary_preparation {
         archive: &MemoryArchiveStore,
     ) -> Result<Inscription, Error> {
         prepare::finalize(
-            &SteleDir::create(root).unwrap(),
+            &SnapshotDir::create(root).unwrap(),
             &Finalizing {
                 store,
                 bundle,
@@ -6016,7 +6016,7 @@ mod boundary_preparation {
         assert_eq!(bundle.horizon(), None);
 
         let frozen = export::export(
-            &SteleDir::create(frozen_root.path()).unwrap(),
+            &SnapshotDir::create(frozen_root.path()).unwrap(),
             &plan,
             &chain.archive,
             &chain.state,
@@ -7352,7 +7352,7 @@ mod boundary_preparation {
             let seed_plan = seed_chain.plan().restrict_epochs(case.first_window, None);
 
             export::export(
-                &SteleDir::create(seed_root.path()).unwrap(),
+                &SnapshotDir::create(seed_root.path()).unwrap(),
                 &seed_plan,
                 &seed_chain.archive,
                 &seed_chain.state,
@@ -7370,7 +7370,7 @@ mod boundary_preparation {
         };
 
         let frozen = export::export(
-            &SteleDir::create(frozen_root.path()).unwrap(),
+            &SnapshotDir::create(frozen_root.path()).unwrap(),
             &plan,
             &chain.archive,
             &chain.state,
@@ -7394,7 +7394,7 @@ mod boundary_preparation {
 
         let tip = chain.tip.as_ref().unwrap().slot();
         let max_slots = tip - cut_at(&chain, horizon);
-        let stele = SteleDir::create(finished_root.path()).unwrap();
+        let stele = SnapshotDir::create(finished_root.path()).unwrap();
 
         let staged = (!case.before_staging).then(|| {
             chain.stage(

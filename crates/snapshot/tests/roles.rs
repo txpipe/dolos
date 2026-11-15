@@ -37,7 +37,7 @@ use dolos_snapshot::{
 };
 use dolos_testing::blocks::make_conway_block_with_prev;
 use stelae::{
-    dir::SteleDir,
+    dir::SnapshotDir,
     inscription::{HistoryEntry, Inscription, LayerDescriptor},
     progress::Observer,
 };
@@ -434,7 +434,7 @@ fn a_chained_publish_builds_its_diff_and_its_tip_and_inherits_the_rest() {
                 .unwrap();
 
         let inscription = export::export(
-            &SteleDir::create(root.path().join(sequence.to_string())).unwrap(),
+            &SnapshotDir::create(root.path().join(sequence.to_string())).unwrap(),
             &plan,
             &ledger.archive,
             &ledger.state,

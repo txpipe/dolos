@@ -28,12 +28,12 @@ use fault_registry::FaultRegistry;
 use node::{export_to, harness, plan_at_boundary, Blank};
 use recorder::{contents_digest, Journal, Op, RecordedArchive, RecordedState};
 use stelae::{
-    dir::SteleDir,
+    dir::SnapshotDir,
     inscription::LayerDescriptor,
-    oci::{Options, Registry, Stele, DEFAULT_READ_ATTEMPTS},
+    oci::{Options, Registry, Snapshot, DEFAULT_READ_ATTEMPTS},
     plan::{RestoreProgress, Resume},
     progress::Observer,
-    transport::{BlobIndex, SteleReader},
+    transport::{BlobIndex, SnapshotReader},
     Digest,
 };
 use watcher::Watcher;
@@ -75,7 +75,7 @@ struct Published {
     registry: FaultRegistry,
     /// Where the restore's registry stages its pulls.
     scratch: tempfile::TempDir,
-    stele: Stele,
+    stele: Snapshot,
     index: BlobIndex,
     plan: Plan,
     identity: Digest,
@@ -496,7 +496,7 @@ fn exported() -> (tempfile::TempDir, u64) {
 #[test]
 fn the_staging_preflight_charges_the_largest_layers_a_read_ahead_holds() {
     let (root, magic) = exported();
-    let dir = SteleDir::open(root.path()).unwrap();
+    let dir = SnapshotDir::open(root.path()).unwrap();
     let plan = restore::plan(&dir, magic, None).unwrap();
     let index = dir.blob_index().unwrap();
 

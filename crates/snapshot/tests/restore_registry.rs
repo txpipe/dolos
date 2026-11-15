@@ -70,11 +70,11 @@ use registry_fixture::{Distribution, Fixture};
 use stelae::{
     frame::Limits,
     inscription::LayerDescriptor,
-    oci::{Auth, Registry, Stele},
+    oci::{Auth, Registry, Snapshot},
     plan::RestoreProgress,
     progress::{Observer, Outcome},
     transport::BlobIndex,
-    Digest, LayerReader, Profile, SteleReader,
+    Digest, LayerReader, Profile, SnapshotReader,
 };
 
 use watcher::Watcher;
@@ -243,7 +243,7 @@ fn a_registry_restore_is_a_directory_restore() {
     let from_dir = Blank::<MemoryStores>::open();
 
     {
-        let stele = stelae::dir::SteleDir::create(dir.path()).unwrap();
+        let stele = stelae::dir::SnapshotDir::create(dir.path()).unwrap();
 
         dolos_snapshot::export::export(
             &stele,
@@ -803,11 +803,11 @@ fn a_node_authenticates_with_the_credentials_it_was_given() {
 /// so the interrupted run committed exactly the layers ahead of that one and
 /// nothing of it.
 struct Interrupted<'a> {
-    inner: &'a Stele,
+    inner: &'a Snapshot,
     stop_at: Digest,
 }
 
-impl SteleReader for Interrupted<'_> {
+impl SnapshotReader for Interrupted<'_> {
     type Blob = std::fs::File;
 
     fn read_inscription(&self) -> Result<stelae::inscription::Inscription, stelae::Error> {

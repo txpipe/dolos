@@ -32,9 +32,9 @@
 //! A registry transport downloads a layer's whole blob before it yields a
 //! record, so read one at a time a restore waits on the network once per
 //! layer. A restore therefore reads through one
-//! [`SteleReader::stream_layers`], opened over the layers it will drain (every
-//! layer of the plan the checkpoint has not recorded, in plan order) at its
-//! read-ahead depth `K`. A registry downloads up to `K` of them on its own
+//! [`SnapshotReader::stream_layers`], opened over the layers it will drain
+//! (every layer of the plan the checkpoint has not recorded, in plan order) at
+//! its read-ahead depth `K`. A registry downloads up to `K` of them on its own
 //! runtime while the restore drains the current one; a directory, whose blobs
 //! are already local, reads each when it is taken. The restore takes each
 //! layer from the stream at its turn, refuses one that is not the layer whose
@@ -121,12 +121,12 @@
 //! ## Memory
 //!
 //! Nothing here holds a layer. Every layer is read through
-//! [`SteleReader::stream_layers`] under [`Limits`] and drained into bounded
+//! [`SnapshotReader::stream_layers`] under [`Limits`] and drained into bounded
 //! chunks — a mainnet state shard is 402 MB and one epoch of blocks runs past
-//! a gigabyte, so [`stelae::dir::SteleDir::read_layer`] is never on this path.
-//! A registry reading ahead holds at most `K` staged blobs beside the layer
-//! being drained, each a scratch file and nothing more: a layer's header is
-//! read and its decoder built only when the restore takes it.
+//! a gigabyte, so [`stelae::dir::SnapshotDir::read_layer`] is never on this
+//! path. A registry reading ahead holds at most `K` staged blobs beside the
+//! layer being drained, each a scratch file and nothing more: a layer's header
+//! is read and its decoder built only when the restore takes it.
 //!
 //! Tags are derived from the incoming UTxO chunks, without scanning the state
 //! store. Holding `iter_utxos()` open while writing tags to the same Fjall
@@ -170,7 +170,7 @@ use stelae::{
     inscription::{Compression, Inscription, LayerDescriptor},
     plan::{Remaining, Resume},
     progress::{Event, Observer, Outcome},
-    transport::{BlobIndex, LayerStream, SteleReader},
+    transport::{BlobIndex, LayerStream, SnapshotReader},
     Digest, LayerHeader, LayerReader,
 };
 use tracing::info;
@@ -333,7 +333,7 @@ impl Plan {
     /// Numbers only. Rendering them is a caller's, and belongs with
     /// [`stelae::progress`] — the seam the export and restore commands share,
     /// and the one [`restore`] reports this run's own byte deltas through.
-    pub fn remaining<R: SteleReader>(
+    pub fn remaining<R: SnapshotReader>(
         &self,
         stele: &R,
         index: &BlobIndex,
@@ -380,7 +380,7 @@ impl Plan {
     /// as dead space in its segment file. That is past spend: free space is
     /// read at check time, so those bytes are already out of it, and the layer
     /// is not recorded as done, so it is charged again in full.
-    pub fn estimate<R: SteleReader>(
+    pub fn estimate<R: SnapshotReader>(
         &self,
         stele: &R,
         index: &BlobIndex,
@@ -475,7 +475,7 @@ impl Plan {
     ///
     /// `None` when the transport can size none of them. Layers it cannot size
     /// are left out, as [`Remaining`] leaves them out of its total.
-    pub fn staging_peak<R: SteleReader>(
+    pub fn staging_peak<R: SnapshotReader>(
         &self,
         stele: &R,
         index: &BlobIndex,
@@ -696,7 +696,7 @@ fn scaled(bytes: u64, per_mille: u64) -> u64 {
 
 /// Where a restore stages pulled layers, and how much it stages at once.
 ///
-/// Absent for a directory restore, which stages nothing: a `SteleDir` reads
+/// Absent for a directory restore, which stages nothing: a `SnapshotDir` reads
 /// its blobs where they already are. A registry restore pulls each layer to a
 /// file first and drops it once drained, so the peak it has to fit is the
 /// layers it holds at once ([`Staging::at_once`]) and not the download.
@@ -740,7 +740,7 @@ impl Staging<'_> {
 /// epochs whose layers fall entirely below `cursor - max_history` are dropped,
 /// which is what ADR-004 replaced the old `full`/`ledger` snapshot variants
 /// with.
-pub fn plan<R: SteleReader>(
+pub fn plan<R: SnapshotReader>(
     stele: &R,
     network_magic: u64,
     max_history: Option<u64>,
@@ -1464,7 +1464,7 @@ pub fn restore<R, A, S>(
     observer: &Observer,
 ) -> Result<Summary, Error>
 where
-    R: SteleReader,
+    R: SnapshotReader,
     A: ArchiveStore,
     S: StateStore,
 {
@@ -1633,7 +1633,7 @@ pub(crate) fn restore_stele<R, A, S>(
     observer: &Observer,
 ) -> Result<(Plan, Outlook, Summary), Error>
 where
-    R: SteleReader,
+    R: SnapshotReader,
     A: ArchiveStore,
     S: StateStore,
 {
@@ -1756,7 +1756,7 @@ where
     A: ArchiveStore,
     S: StateStore,
 {
-    let stele = match stelae::dir::SteleDir::open(root) {
+    let stele = match stelae::dir::SnapshotDir::open(root) {
         Ok(stele) => stele,
         Err(error) => return Err(pinned(&node)?.map_or(error.into(), gone)),
     };
@@ -1827,7 +1827,7 @@ where
 /// Carried as one value because every layer is read the same way, and because
 /// the alternative is threading the stream and three unchanging arguments
 /// through each of the four per-kind drivers.
-struct Reader<'a, R: SteleReader> {
+struct Reader<'a, R: SnapshotReader> {
     /// The magic every layer's header has to name. Taken from the stele's
     /// `position`, which [`plan`] has already held against the node's — so
     /// checking a layer against it checks the layer against the node.
@@ -1844,7 +1844,7 @@ struct Turns<'a, B: std::io::Read> {
     stream: LayerStream<'a, B>,
 }
 
-impl<'a, R: SteleReader> Reader<'a, R> {
+impl<'a, R: SnapshotReader> Reader<'a, R> {
     /// A reader of `layers`, in that order, through one stream that reads
     /// `read_ahead` of them ahead where the transport can.
     fn new(
@@ -2002,7 +2002,7 @@ fn check_layer_magic(
 }
 
 /// One epoch's blocks, appended to the archive in stream order.
-fn restore_blocks<R: SteleReader, A: ArchiveStore>(
+fn restore_blocks<R: SnapshotReader, A: ArchiveStore>(
     reader: &Reader<'_, R>,
     descriptor: &LayerDescriptor,
     archive: &A,
@@ -2032,7 +2032,7 @@ fn restore_blocks<R: SteleReader, A: ArchiveStore>(
 /// `ns` comes from the layer's kind, not from its records — the split moved it
 /// there — so a layer restores into exactly the namespace the inscription said
 /// it holds.
-fn restore_logs<R: SteleReader, A: ArchiveStore>(
+fn restore_logs<R: SnapshotReader, A: ArchiveStore>(
     reader: &Reader<'_, R>,
     descriptor: &LayerDescriptor,
     archive: &A,
@@ -2062,7 +2062,7 @@ fn restore_logs<R: SteleReader, A: ArchiveStore>(
 /// `kind` comes from the layer's kind, as a log layer's namespace does, and
 /// the codec holds every id to its width. An entry is keyed by its id, so a
 /// redone layer rewrites the entries it wrote before.
-fn restore_entities<R: SteleReader, A: ArchiveStore>(
+fn restore_entities<R: SnapshotReader, A: ArchiveStore>(
     reader: &Reader<'_, R>,
     descriptor: &LayerDescriptor,
     archive: &A,
@@ -2097,7 +2097,7 @@ fn restore_entities<R: SteleReader, A: ArchiveStore>(
 ///
 /// The records go into the archive, beside the blocks they project — the same
 /// store `restore_blocks` wrote the epoch's `blocks` layer into.
-fn restore_indexes<R: SteleReader, A: ArchiveStore>(
+fn restore_indexes<R: SnapshotReader, A: ArchiveStore>(
     reader: &Reader<'_, R>,
     descriptor: &LayerDescriptor,
     archive: &A,
@@ -2127,7 +2127,7 @@ fn restore_indexes<R: SteleReader, A: ArchiveStore>(
 /// Returns the entities and the UTxOs it wrote, separately, because they are
 /// the two halves the cross-check compares and a layer that restored one and
 /// silently dropped the other would still add up.
-fn restore_state<R: SteleReader, S: StateStore>(
+fn restore_state<R: SnapshotReader, S: StateStore>(
     reader: &Reader<'_, R>,
     descriptor: &LayerDescriptor,
     state: &S,
@@ -2761,8 +2761,8 @@ mod tests {
         bare.parameters["schemas"][retired] = json!(RETIRED_SCHEMA_REV);
 
         let temp = tempfile::tempdir().unwrap();
-        let stele = stelae::dir::SteleDir::create(temp.path()).unwrap();
-        stelae::SteleWriter::seal(&stele, &DolosProfile, &bare).unwrap();
+        let stele = stelae::dir::SnapshotDir::create(temp.path()).unwrap();
+        stelae::SnapshotWriter::seal(&stele, &DolosProfile, &bare).unwrap();
 
         assert!(matches!(
             plan(&stele, MAINNET_MAGIC, None),
@@ -2892,8 +2892,8 @@ mod tests {
         bare.parameters.as_object_mut().unwrap().remove("entities");
 
         let temp = tempfile::tempdir().unwrap();
-        let stele = stelae::dir::SteleDir::create(temp.path()).unwrap();
-        stelae::SteleWriter::seal(&stele, &DolosProfile, &bare).unwrap();
+        let stele = stelae::dir::SnapshotDir::create(temp.path()).unwrap();
+        stelae::SnapshotWriter::seal(&stele, &DolosProfile, &bare).unwrap();
 
         assert!(matches!(
             plan(&stele, MAINNET_MAGIC, None),
@@ -3231,7 +3231,7 @@ mod tests {
     /// the first byte of its diff id, and is asked nothing else.
     struct Stated(BTreeMap<u8, u64>);
 
-    impl SteleReader for Stated {
+    impl SnapshotReader for Stated {
         type Blob = std::io::Empty;
 
         fn read_inscription(&self) -> Result<Inscription, stelae::Error> {
@@ -3485,7 +3485,7 @@ mod tests {
     /// it was asked for, and nothing else is ever asked of it.
     struct Unopenable;
 
-    impl SteleReader for Unopenable {
+    impl SnapshotReader for Unopenable {
         type Blob = std::io::Empty;
 
         fn read_inscription(&self) -> Result<Inscription, stelae::Error> {

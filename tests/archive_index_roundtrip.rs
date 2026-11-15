@@ -1064,13 +1064,13 @@ fn mib(bytes: u64) -> f64 {
 #[test]
 #[ignore = "measurement, not an assertion"]
 fn measure_layer_sink_residency() {
-    use dolos_snapshot::transport::{RecordSink as _, SteleWriter as _};
+    use dolos_snapshot::transport::{RecordSink as _, SnapshotWriter as _};
     use dolos_snapshot::{DolosProfile, EpochScope, Scope as _, COMPRESSION_LEVEL, INDEXES};
 
     const SINKS: u64 = 32;
 
     let temp = tempfile::tempdir().expect("tempdir");
-    let stele = dolos_snapshot::dir::SteleDir::create(temp.path()).expect("create stele");
+    let stele = dolos_snapshot::dir::SnapshotDir::create(temp.path()).expect("create stele");
 
     // A record for every sink to chew on, built once: the point is the
     // compressor's resident state, not the bytes handed to it.

@@ -32,10 +32,10 @@ use dolos_snapshot::{
     log_ns_for, state_ns_for, DolosProfile, BLOCKS, INDEXES,
 };
 use stelae::{
-    dir::SteleDir,
+    dir::SnapshotDir,
     frame::Limits,
     inscription::{canonical_json, HistoryEntry, Inscription},
-    Digest, SteleReader, SteleWriter,
+    Digest, SnapshotReader, SnapshotWriter,
 };
 
 /// `(kind, diffId, records, uncompressedSize)`, in inscription order.
@@ -346,7 +346,7 @@ fn write_stele(root: &std::path::Path) -> (Inscription, Digest) {
 
 /// [`write_stele`], with `blocks` in its `position`.
 fn write_stele_naming(root: &std::path::Path, blocks: Option<&Digest>) -> (Inscription, Digest) {
-    let stele = SteleDir::create(root).unwrap();
+    let stele = SnapshotDir::create(root).unwrap();
 
     let point = ChainPoint::Specific(END_SLOT, BlockHash::new(POINT_HASH));
 
@@ -419,7 +419,7 @@ fn a_complete_stele_reads_back_and_reproduces_its_digest() {
 
     // The document survives the trip to disk in canonical form, and belongs to
     // this profile.
-    let stele = SteleDir::open(first.path()).unwrap();
+    let stele = SnapshotDir::open(first.path()).unwrap();
     let read = stele.read_inscription().unwrap();
 
     assert_eq!(read, inscription);
@@ -470,7 +470,10 @@ fn a_complete_stele_reads_back_and_reproduces_its_digest() {
         std::fs::read(second.path().join("inscription.json")).unwrap(),
     );
 
-    let second_index = SteleDir::open(second.path()).unwrap().blob_index().unwrap();
+    let second_index = SnapshotDir::open(second.path())
+        .unwrap()
+        .blob_index()
+        .unwrap();
     for descriptor in &inscription.layers {
         assert_eq!(
             index.blob_for(&descriptor.diff_id),
@@ -481,7 +484,7 @@ fn a_complete_stele_reads_back_and_reproduces_its_digest() {
     }
 }
 
-/// The descriptors a `SteleDir` writes are the numbers the per-kind goldens
+/// The descriptors a `SnapshotDir` writes are the numbers the per-kind goldens
 /// pin — so the two tests cannot drift apart and quietly agree with themselves.
 #[test]
 fn descriptors_match_the_per_kind_goldens() {
@@ -548,7 +551,7 @@ fn a_stele_naming_its_blocks_is_pinned() {
 
     assert_eq!(digest.to_string(), GOLDEN_INSCRIPTION_WITH_BLOCKS);
 
-    let read = SteleDir::open(temp.path())
+    let read = SnapshotDir::open(temp.path())
         .unwrap()
         .read_inscription()
         .unwrap();
