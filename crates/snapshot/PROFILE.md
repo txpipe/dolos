@@ -59,7 +59,7 @@ Framing is the protocol's (SPEC.md, "Layer format"): zstd-compressed CBOR sequen
 
 `scope` is opaque to the protocol. The Dolos profile encodes `[network_magic, epoch, start_slot, end_slot]` for epoch layers, `[network_magic, epoch, shard]` for every state layer — one shape across every state kind, single-blob namespaces included, whose one layer is shard 0.
 
-The state layers carry **two roles over that one header shape**, and only the *descriptor* scope tells them apart: a tip is `{"shard": n}`, a retained dump is `{"epoch": E, "shard": n}`. The header is deliberately blind to the distinction. See "State history" below.
+Every state layer is the tip, and its *descriptor* scope is `{"shard": n}`: the epoch rides in the header alone. See "State history" below.
 
 Content records per kind (Dolos profile):
 
@@ -69,7 +69,7 @@ Content records per kind (Dolos profile):
 | `indexes` (per epoch) | tags: `[0, dimension: tstr, key_hash: bytes(8), slot]` with `key_hash = xxh3_64(key)` BE for every dimension; exact: `[1, kind: tstr, key: bytes, slot]` for block-hash/block-number/tx | sorted, deduped | new `ArchiveWriter::append_prehashed` |
 | `log-{ns}` (per epoch, per log namespace, omitted when empty) | `[log_key: bytes, value: bytes]`, log_key = `slot(8, BE) ‖` the namespace's typed key (see key layouts), value = stored EntityValue verbatim | `log_key` | `ArchiveWriter::write_log` into the namespace the kind names |
 | `entity-{kind}` (per epoch, per entity kind, omitted when empty) | `[id: bytes, slot]`, id = the entity's id verbatim at its kind's width, slot = where it was first seen, inside the window | `id`, strictly ascending | `ArchiveWriter::write_entity` under the kind the layer kind names |
-| `state-{ns}` (tip or retained dump, per state namespace, `scope.shard` = 0..`parameters.shards[ns]`-1) | `[key: bytes, value: bytes]` | `key`; shard = first nibble of the namespace's shard byte for a 16-way namespace (`key[0]` for `utxos` and `datums`, `key[4]`, the first credential-hash byte, for `accounts`), 0 for a single blob | dispatch on the kind: `state-utxos` → chunked `StateWriter::apply_utxoset` and derived `apply_utxo_tags` in the same commit, else `write_entity` into the namespace the kind names |
+| `state-{ns}` (tip, per state namespace, `scope.shard` = 0..`parameters.shards[ns]`-1) | `[key: bytes, value: bytes]` | `key`; shard = first nibble of the namespace's shard byte for a 16-way namespace (`key[0]` for `utxos` and `datums`, `key[4]`, the first credential-hash byte, for `accounts`), 0 for a single blob | dispatch on the kind: `state-utxos` → chunked `StateWriter::apply_utxoset` and derived `apply_utxo_tags` in the same commit, else `write_entity` into the namespace the kind names |
 
 Every tag dimension carries `xxh3_64` of its logical key in `key_hash`, so `parameters.indexKeyHash` describes every dimension. The stores keep only that hash, and the layer ships the stored form — that is the whole point of the pre-hashed design.
 
@@ -174,11 +174,7 @@ Namespace names follow one grammar. A name says what a row is, and the suffix sa
 
 State kinds: one per state namespace, and the set is closed — each spelled `state-` followed by the namespace with `_` rewritten to `-`, by the same rule and for the same reasons as the log kinds below. The namespace is therefore **not** in the record — it is the layer — which is what puts the fail-closed edge of a breaking change on exactly the namespace that broke, and lets a reader skip a namespace this profile does not define at the transport rather than choking on one shared layer. The shard count is **specification, never tuning**: `utxos`, `accounts` and `datums` split 16 ways, every other namespace is a single blob, and `parameters.shards` reports the map so a reader never has to discover it from the data. A 16-way namespace shards on the high nibble of its **shard byte**, the first key byte that comes from a hash: byte 0 for `utxos` (the transaction hash) and `datums` (the datum hash), byte 4 for `accounts`, whose keys open with the stake credential's CBOR header `0x82 ‖ variant ‖ 0x58 0x1c` and so carry no entropy until the hash. The shard bytes are fixed by the profile, like the counts, and are not declared in `parameters`. Re-sharding a namespace is a media-type-version event for that namespace's kind. Every shard of every kind is published, empty ones included, so tip completeness is structural: a restore requires every state kind and, per kind, exactly the shards its count promises.
 
-**State history: retained dumps at configured epochs, plus the moving tip.** A stele's state is the tip — the ledger as of `sequence`, swapped whole by every publish — and, for each epoch a publisher retains, an immutable **dump** of the state as of that epoch. The two are the same kinds, the same records and the same shard geometry; a dump differs from a tip in its descriptor scope, which names the epoch, and in nothing else.
-
-- **The retained set is a publisher input, not derivation.** The publisher names it (`--state-epochs` on `stelae-publisher digest` and `verify --reproduce`). Era boundaries are one sensible criterion and cherry-picked epochs another; which epochs are worth a dump is operational, so nothing derives the list from the chain summary. The list is strictly ascending and never names epoch 0, and it is refused where it is read rather than where a dump is cut — it reaches `parameters` before any layer is written. Publishers are expected to keep it around 10–20: a dump per epoch would put ~50k descriptors in a mainnet manifest against a ~12k ceiling.
-- **The list is signed input.** It is echoed verbatim into `parameters.stateEpochs`, so two publishers of one network configured differently produce different parameters, different inscription digests, and a divergence an operator reads out of a one-field diff instead of hunting through layers for. It is therefore **normative per network** and belongs pinned wherever the default repository is pinned: a publisher quietly running a different list self-ejects from co-signing.
-- **Inheritance.** A tip layer is never inherited, for two independent reasons: the tip changes every publish, and its scope names no epoch, so scope equality could not tell one publish's shard from another's. A dump's scope does name its epoch, so it inherits, checkpoints and resumes exactly as a `blocks` layer does — including through the resumption record an interrupted publish leaves.
+**State history: the tip alone.** A stele's state is the tip: the ledger as of `sequence`, swapped whole by every publish. A tip layer is never inherited, for two independent reasons: the tip changes every publish, and its scope names no epoch, so scope equality could not tell one publish's shard from another's. A past epoch's state is restored from a tip the registry kept. Which tips a registry keeps is registry policy and not signed input, so nothing in `parameters` names them.
 
 Entity kinds: one per entity kind the chain declares for the archive's entity index (decision 0064) — `entity-asset`, `entity-script` and `entity-stake`. The entity index maps an entity's id to the slot it was first seen at; it is complete for all history, written by the seal of an immutable epoch in the same commit as the epoch's sealed logs, and never undone. It is what tells a script or asset's first appearance from a repeat, and whether a stake credential was ever seen. `asset` ids are the 32-byte `AssetKey`, `script` ids the 28-byte script hash, `stake` ids the 29-byte stake address the `stake` archive tag files a credential's addresses under, stored verbatim. The kind token is `entity-` followed by the kind's name, and the kind is **not** in the record — it is the layer — so a reader that does not register a kind skips its layers at the transport (rule 3) and reports them. A window's layer holds the entities first seen in it, in id order, and exists if and only if it holds a record. Epoch `e`'s entries are written by the seal (see "The seal" below) at the boundary that seals `e`, so the stele cut there is the first whose `e` window carries them, exactly as for `log-first-script-chunks`; until then the epoch's first sightings ride in the state tip as `state-first-scripts`, `state-first-mints` and `state-account-addresses`. A stele at sequence `E` therefore holds entries for the windows the boundary opening `E` or an earlier one sealed. An epoch seals in one ESTART, so a window's layer is whole or absent and inherits per `(kind, scope)` like every other closed window. An entry's slot is its value, so no traversal can seek to an epoch: export stages the index in one scan, routing each entry to its window, and learns which windows hold an entry from what the scan staged.
 
@@ -332,8 +328,7 @@ and the meaning of `sequence`:
   "parameters": { "entities": {"asset": 32, "script": 28, "stake": 29},
                    "indexKeyHash": "xxh3-64",
                    "shards": {"accounts": 16, "datums": 16, "utxos": 16, "…": 1},
-                   "schemas": {"accounts": 1, "utxos": 1, "…": 1},
-                   "stateEpochs": [208, 236, 290, 365] },
+                   "schemas": {"accounts": 1, "utxos": 1, "…": 1} },
   "compression": {"algo": "zstd", "level": 9},
   "history": [
     {"sequence": 548, "inscriptionDigest": "sha256:…"},
@@ -347,15 +342,12 @@ and the meaning of `sequence`:
      "scope": {"shard": 0}},
     {"kind": "state-pools", "mediaType": "application/vnd.dolos.stelae.state-pools.v1+zstd",
      "diffId": "sha256:…", "records": 3210, "uncompressedSize": 1048576,
-     "scope": {"shard": 0}},
-    {"kind": "state-pools", "mediaType": "application/vnd.dolos.stelae.state-pools.v1+zstd",
-     "diffId": "sha256:…", "records": 2980, "uncompressedSize": 972800,
-     "scope": {"epoch": 365, "shard": 0}} ] }
+     "scope": {"shard": 0}} ] }
 ```
 
 `position` says where the stele stands: the network by magic and by the name `Network::for_magic` derives from it, the anchored chain point it was cut at, and `epoch`, which equals `sequence`. `blocks`, when present, is the inscription digest of the `io.txpipe.cardano.blocks` snapshot at the same sequence, as `sha256:<64 lowercase hex>` (decision 0080). It is optional: a position without it is byte-identical to one written before the field existed, and a reader refuses a `blocks` that is not a digest string. Restore does not check the reference yet.
 
-`parameters` is the profile's compatibility declaration. Every value but one is a consequence of publisher code rather than a free choice: `entities` declares the entity kinds and their id widths (`ENTITY_KINDS`); `indexKeyHash` names the hash behind the pre-hashed index keys; `shards` is the per-namespace shard count map above, each namespace splitting on the shard byte the state-kinds rule fixes; and `schemas` is a per-namespace revision of the *record content* — the stored value a `state-{ns}` or `log-{ns}` layer carries verbatim — which moves when that namespace's stored shape changes, plus one entry at revision `0` per retired namespace, per the removed-kind rule above. `SCHEMA_REVS` in `crates/snapshot/src/namespaces.rs` holds each live namespace's current revision, and the namespace's entry in `crates/snapshot/tests/registry/mod.rs` records why it moved. Every live revision is pinned by a canary in `crates/snapshot/tests/field_registry.rs`, which fails the build when a record's field table moves without its revision, or the other way round. The split between the two is deliberate: a change to how a layer is *framed* moves that kind's media type and fails closed at the transport, while a change to what a record *contains* moves its schema revision, which a reader consults to decide whether it can interpret what it can already parse. The exception, `stateEpochs`, proves the rule: it is the publisher's configured retained set, and it is here precisely *because* it is a choice — declaring it is what turns a configuration difference between two publishers into a visible parameters difference instead of a silently divergent history.
+`parameters` is the profile's compatibility declaration. Every value is a consequence of publisher code rather than a free choice: `entities` declares the entity kinds and their id widths (`ENTITY_KINDS`); `indexKeyHash` names the hash behind the pre-hashed index keys; `shards` is the per-namespace shard count map above, each namespace splitting on the shard byte the state-kinds rule fixes; and `schemas` is a per-namespace revision of the *record content* — the stored value a `state-{ns}` or `log-{ns}` layer carries verbatim — which moves when that namespace's stored shape changes, plus one entry at revision `0` per retired namespace, per the removed-kind rule above. `SCHEMA_REVS` in `crates/snapshot/src/namespaces.rs` holds each live namespace's current revision, and the namespace's entry in `crates/snapshot/tests/registry/mod.rs` records why it moved. Every live revision is pinned by a canary in `crates/snapshot/tests/field_registry.rs`, which fails the build when a record's field table moves without its revision, or the other way round. The split between the two is deliberate: a change to how a layer is *framed* moves that kind's media type and fails closed at the transport, while a change to what a record *contains* moves its schema revision, which a reader consults to decide whether it can interpret what it can already parse.
 
 `sequence` is the protocol's ordering key; this profile sets it to the epoch. The three opaque objects are canonicalized by JCS like every generic key (SPEC.md), so determinism holds without the protocol interpreting them — which is why every value in them must itself be deterministic, the property the compatibility contract above enforces.
 
@@ -367,16 +359,13 @@ ceiling, and it stays here: a descriptor with its annotations costs ~350
 bytes, so the ceiling falls near 12,000 layers. A stele is bounded above by
 its epochs × the epoch kinds (`blocks`, `indexes`, one `log-{ns}` per log
 namespace and one `entity-{kind}` per entity kind), plus one state tip's worth of layers (16 per sixteen-way
-namespace, 1 per single-blob namespace) for the tip and again for every
-retained state dump; `EPOCH_KINDS` and `STATE_KINDS` give the current terms.
-For mainnet at 20 retained epochs, the ceiling of what a publisher is
-expected to configure, that bound sits well inside the ceiling, and it is
-loose in the direction that helps: log and entity layers are omitted when
-empty, and early eras carry few kinds of log and no entity of any kind at
-all — mainnet's `asset` and `script` layers add 793 descriptors to epoch 646,
-and its `stake` layers at most one per window from Shelley's first epoch, 208. **This is the arithmetic that
-bounds the retained list**: a dump per epoch would put the state layers
-alone at several times the ceiling.
+namespace, 1 per single-blob namespace); `EPOCH_KINDS` and `STATE_KINDS`
+give the current terms. For mainnet that bound sits well inside the
+ceiling, and it is loose in the direction that helps: log and entity layers
+are omitted when empty, and early eras carry few kinds of log and no entity
+of any kind at all — mainnet's `asset` and `script` layers add 793
+descriptors to epoch 646, and its `stake` layers at most one per window from
+Shelley's first epoch, 208.
 
 ### Publisher pipeline
 

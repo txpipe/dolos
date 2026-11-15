@@ -81,9 +81,9 @@ use crate::{
     prepare::{Captured, Prepared},
     reporting::{Cursor, Records},
     staging::{self, Family, Runs, Spooling},
-    state_layer_count, DolosProfile, EpochScope, Error, Network, RetainedEpochs, Scope, StateScope,
-    BLOCKS, COMPRESSION_LEVEL, DENSE_EPOCH_KINDS, ENTITY_INDEX_KINDS, ENTITY_KINDS, EPOCH_KINDS,
-    INDEXES, LOG_KINDS, LOG_NAMESPACES, STATE_KINDS, UTXOS,
+    state_layer_count, DolosProfile, EpochScope, Error, Network, Scope, StateScope, BLOCKS,
+    COMPRESSION_LEVEL, DENSE_EPOCH_KINDS, ENTITY_INDEX_KINDS, ENTITY_KINDS, EPOCH_KINDS, INDEXES,
+    LOG_KINDS, LOG_NAMESPACES, STATE_KINDS, UTXOS,
 };
 
 /// The slot window one epoch layer covers.
@@ -200,12 +200,6 @@ pub struct Plan {
     /// epochs the seal at this boundary newly writes, the question
     /// [`crate::roles::Rule`] answers.
     pub mutable_slots: u64,
-    /// The epochs this publisher names as retained, validated.
-    ///
-    /// Signed input rather than geometry: it rides into `parameters`, so it is
-    /// part of what makes two publishers' documents comparable. Export writes
-    /// no layer for it; every state layer is the tip's.
-    pub retained: RetainedEpochs,
     /// Where an export stages its `indexes` and entity runs. `None` is the
     /// system temporary directory; a mainnet first publish spools tens of
     /// gigabytes, so a host names a volume sized for it, and writable by no one
@@ -222,8 +216,8 @@ pub struct Plan {
     /// [`Producers`].
     pub producers: Producers,
     /// The inscription digest of the blocks snapshot at this sequence, which
-    /// `position.blocks` names. Signed input the host supplies, like
-    /// `retained`; `None` leaves the field out of `position`.
+    /// `position.blocks` names. Signed input the host supplies; `None` leaves
+    /// the field out of `position`.
     pub blocks: Option<Digest>,
 }
 
@@ -240,7 +234,6 @@ impl Plan {
         summary: &ChainSummary,
         network: Network,
         cursor: ChainPoint,
-        retained: RetainedEpochs,
         mutable_slots: u64,
     ) -> Result<Self, Error> {
         // Refused here rather than at `position()`, so a plan that could never
@@ -268,7 +261,6 @@ impl Plan {
             sequence: tip_epoch,
             epochs,
             mutable_slots,
-            retained,
             scratch: None,
             producers: Producers::DEFAULT,
             blocks: None,
@@ -373,7 +365,6 @@ impl Plan {
 pub fn plan<S: StateStore>(
     state: &S,
     network_magic: u64,
-    retained: RetainedEpochs,
     mutable_slots: u64,
 ) -> Result<Plan, Error> {
     let summary = dolos_cardano::eras::load_chain_summary_from_state(state)?;
@@ -386,7 +377,6 @@ pub fn plan<S: StateStore>(
         &summary,
         Network::for_magic(network_magic),
         cursor,
-        retained,
         mutable_slots,
     )
 }
@@ -838,7 +828,7 @@ where
         &DolosProfile,
         plan.sequence,
         plan.position()?,
-        crate::parameters(&plan.retained),
+        crate::parameters(),
         crate::compression(),
     );
 
@@ -2031,12 +2021,6 @@ mod tests {
     /// two before it.
     const MUTABLE_SLOTS: u64 = 50;
 
-    /// The geometry tests are about windows, which the retained list does not
-    /// move.
-    fn retained() -> RetainedEpochs {
-        RetainedEpochs::default()
-    }
-
     fn point(slot: u64) -> ChainPoint {
         ChainPoint::Specific(slot, BlockHash::new([0xab; 32]))
     }
@@ -2046,14 +2030,7 @@ mod tests {
     /// `0..=sequence`.
     #[test]
     fn the_sequence_is_the_epoch_the_cursor_has_just_entered() {
-        let plan = Plan::new(
-            &summary(),
-            Network::for_magic(2),
-            point(250),
-            retained(),
-            MUTABLE_SLOTS,
-        )
-        .unwrap();
+        let plan = Plan::new(&summary(), Network::for_magic(2), point(250), MUTABLE_SLOTS).unwrap();
 
         assert_eq!(plan.sequence, 2);
         assert_eq!(plan.tag().unwrap(), "epoch-2");
@@ -2073,14 +2050,7 @@ mod tests {
     #[test]
     fn the_last_window_is_the_boundary_sliver_of_the_sequence_epoch() {
         // Epoch 3 opens at slot 300; the anchoring block lands just inside it.
-        let plan = Plan::new(
-            &summary(),
-            Network::for_magic(2),
-            point(301),
-            retained(),
-            MUTABLE_SLOTS,
-        )
-        .unwrap();
+        let plan = Plan::new(&summary(), Network::for_magic(2), point(301), MUTABLE_SLOTS).unwrap();
 
         assert_eq!(plan.sequence, 3);
         assert_eq!(plan.tag().unwrap(), "epoch-3");
@@ -2125,14 +2095,7 @@ mod tests {
     /// the export refuses this one.
     #[test]
     fn the_last_window_is_clamped_to_the_cursor() {
-        let plan = Plan::new(
-            &summary(),
-            Network::for_magic(2),
-            point(250),
-            retained(),
-            MUTABLE_SLOTS,
-        )
-        .unwrap();
+        let plan = Plan::new(&summary(), Network::for_magic(2), point(250), MUTABLE_SLOTS).unwrap();
 
         assert_eq!(
             plan.epochs,
@@ -2156,14 +2119,7 @@ mod tests {
         );
 
         // On a true boundary the clamp is a no-op.
-        let plan = Plan::new(
-            &summary(),
-            Network::for_magic(2),
-            point(299),
-            retained(),
-            MUTABLE_SLOTS,
-        )
-        .unwrap();
+        let plan = Plan::new(&summary(), Network::for_magic(2), point(299), MUTABLE_SLOTS).unwrap();
         assert_eq!(plan.epochs.last().unwrap().end_slot, 299);
     }
 
@@ -2184,29 +2140,17 @@ mod tests {
     #[test]
     fn an_unanchored_cursor_has_no_plan() {
         for unanchored in [ChainPoint::Origin, ChainPoint::Slot(250)] {
-            let err = Plan::new(
-                &summary(),
-                Network::for_magic(2),
-                unanchored,
-                retained(),
-                MUTABLE_SLOTS,
-            )
-            .unwrap_err();
+            let err = Plan::new(&summary(), Network::for_magic(2), unanchored, MUTABLE_SLOTS)
+                .unwrap_err();
             assert!(matches!(err, Error::UnanchoredPoint(_)), "{err:?}");
         }
     }
 
     #[test]
     fn restricting_epochs_keeps_the_window_bounds() {
-        let plan = Plan::new(
-            &summary(),
-            Network::for_magic(2),
-            point(250),
-            retained(),
-            MUTABLE_SLOTS,
-        )
-        .unwrap()
-        .restrict_epochs(Some(1), Some(1));
+        let plan = Plan::new(&summary(), Network::for_magic(2), point(250), MUTABLE_SLOTS)
+            .unwrap()
+            .restrict_epochs(Some(1), Some(1));
 
         assert_eq!(
             plan.sequence, 2,
@@ -2231,7 +2175,7 @@ mod chain_tests {
             &DolosProfile,
             sequence,
             json!({"epoch": sequence}),
-            crate::parameters(&RetainedEpochs::default()),
+            crate::parameters(),
             crate::compression(),
         );
 
@@ -2253,7 +2197,6 @@ mod chain_tests {
             sequence: 3,
             epochs: vec![],
             mutable_slots: 0,
-            retained: RetainedEpochs::default(),
             scratch: None,
             producers: Producers::DEFAULT,
             blocks: None,

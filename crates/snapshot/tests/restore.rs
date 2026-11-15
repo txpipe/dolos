@@ -843,7 +843,6 @@ fn roundtrip<B: ToyStores>() {
         let plan = dolos_snapshot::export::plan(
             blank.state(),
             magic_of(&domain),
-            Default::default(),
             dolos_cardano::mutable_slots(&domain.genesis()),
         )
         .unwrap();
@@ -961,7 +960,6 @@ fn entity_index_round_trip<B: ToyStores>() {
         let plan = dolos_snapshot::export::plan(
             blank.state(),
             magic_of(&domain),
-            Default::default(),
             dolos_cardano::mutable_slots(&domain.genesis()),
         )
         .unwrap();

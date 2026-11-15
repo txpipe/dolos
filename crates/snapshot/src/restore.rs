@@ -2337,7 +2337,7 @@ mod tests {
                 None,
             )
             .unwrap(),
-            crate::parameters(&Default::default()),
+            crate::parameters(),
             crate::compression(),
         );
 

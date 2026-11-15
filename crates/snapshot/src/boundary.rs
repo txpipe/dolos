@@ -367,7 +367,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::{Network, RetainedEpochs};
+    use crate::Network;
 
     /// One era of `length`-slot epochs from slot zero.
     fn summary(length: u64) -> ChainSummary {
@@ -420,14 +420,7 @@ mod tests {
     }
 
     fn plan(summary: &ChainSummary, at: &ChainPoint) -> Plan {
-        Plan::new(
-            summary,
-            Network::for_magic(2),
-            at.clone(),
-            RetainedEpochs::default(),
-            0,
-        )
-        .unwrap()
+        Plan::new(summary, Network::for_magic(2), at.clone(), 0).unwrap()
     }
 
     fn judge(

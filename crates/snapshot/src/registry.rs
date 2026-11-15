@@ -818,7 +818,7 @@ fn chained<'a>(
     let origin = Origin::of(
         publishing.registry,
         plan.network.magic(),
-        crate::parameters(&plan.retained),
+        crate::parameters(),
         crate::compression(),
     );
 
@@ -853,7 +853,7 @@ mod tests {
             &DolosProfile,
             sequence,
             json!({"epoch": sequence}),
-            crate::parameters(&Default::default()),
+            crate::parameters(),
             crate::compression(),
         );
 
@@ -1013,7 +1013,7 @@ mod tests {
         Origin {
             repository: repository.to_owned(),
             dataset_id: 2,
-            parameters: crate::parameters(&Default::default()),
+            parameters: crate::parameters(),
             compression: crate::compression(),
         }
     }

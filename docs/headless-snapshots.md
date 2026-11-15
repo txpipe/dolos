@@ -18,7 +18,7 @@ revision `703cc34b`.
 ## Planning and reproduction
 
 `ReplayWorkspace::snapshot()` returns a read-only `SnapshotSource`. The host
-supplies the network magic, retained epochs and `facade::Selection`; the
+supplies the network magic and `facade::Selection`; the
 library applies epoch restriction and producer sizing in the same order for
 publication, digest and verification. The resulting plan can
 be passed to:
