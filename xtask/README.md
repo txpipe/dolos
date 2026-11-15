@@ -8,6 +8,10 @@ If `cargo xtask` isn't available yet, install the helper once:
 cargo install --path xtask
 ```
 
+An installed helper stays at the commit it was built from. Reinstall it with
+`--force` after pulling, or run `cargo run -p xtask -- <command>` from the
+checkout instead.
+
 ## Configuration
 
 Most commands read settings from `xtask.toml` at the repo root:
@@ -80,6 +84,8 @@ cargo xtask bootstrap-mithril-local --network <NETWORK> --stop-epoch <EPOCH>
 | `--stop-epoch` | Epoch at which to stop syncing |
 | `--name` | Optional instance name (defaults to `test-{network}-{epoch}`) |
 | `--force` | Overwrite existing instance data |
+| `--skip-seed` | Bootstrap from scratch, ignoring a configured `[seeds]` entry |
+| `--verbose` | Enable verbose output |
 
 What it does:
 
@@ -93,16 +99,17 @@ What it does:
 Generate ground-truth CSV fixtures by querying cardano-db-sync. Requires a running DBSync instance and the corresponding URL in `xtask.toml`.
 
 ```
-cargo xtask ground-truth generate --network <NETWORK> --epoch <EPOCH>
+cargo xtask ground-truth generate --network <NETWORK> --subject-epoch <EPOCH> --output-dir <DIR>
 ```
 
 | Flag | Description |
 |---|---|
 | `--network` | Target network |
-| `--epoch` | Generate ground-truth from origin up to this epoch (inclusive) |
+| `--subject-epoch` | Generate ground-truth from origin up to this epoch (inclusive) |
+| `--output-dir` | Directory the CSV files are written to |
 | `--force` | Overwrite existing ground-truth files |
 
-The instance directory must already exist. Output is written to `<instance>/ground-truth/`:
+Output is written to `--output-dir`, the layout of one `ground-truth/{network}-{epoch}` directory of the [epoch tests](../tests/epoch_pots/README.md):
 
 | File | Description |
 |---|---|
@@ -184,19 +191,21 @@ Executes:
 ## Typical workflow
 
 1. Download a Mithril snapshot for the target network into the snapshots directory.
-2. Create a test instance:
+2. Create a test instance to serve as the seed. It stops on the first block
+   of `--epoch`, after the boundary before it, so stop it before the subject
+   epoch:
    ```
-   cargo xtask test-instance create --network preview --epoch 233
+   cargo xtask test-instance create --network preview --epoch 231
    ```
 3. Generate ground-truth fixtures (requires DBSync):
    ```
-   cargo xtask ground-truth generate --network preview --epoch 233
+   cargo xtask ground-truth generate --network preview --subject-epoch 233 --output-dir fixtures/ground-truth/preview-233
    ```
-4. Compare Dolos output against ground-truth by running the cardano integration tests:
+4. With a seed and an upstream range beside it (see the [epoch tests README](../tests/epoch_pots/README.md)), compare Dolos output against the ground truth:
    ```
-   cargo test --test cardano
+   DOLOS_FIXTURE_DIR=fixtures cargo test --test epoch_pots -- --nocapture
    ```
 5. Clean up when done:
    ```
-   cargo xtask test-instance delete --network preview --epoch 233 --yes
+   cargo xtask test-instance delete --network preview --epoch 231 --yes
    ```
