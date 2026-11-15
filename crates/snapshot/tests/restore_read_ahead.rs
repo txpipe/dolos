@@ -90,7 +90,7 @@ impl Published {
         let publishing = tempfile::tempdir().unwrap();
         registry::publish(
             registry::Publishing::new(&opened(&registry, publishing.path())),
-            &plan_at_boundary(&domain, 1, Default::default()),
+            &plan_at_boundary(&domain, 1),
             domain.archive(),
             domain.state(),
             &Observer::silent(),

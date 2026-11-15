@@ -117,8 +117,8 @@ impl Node {
 
         let magic = u64::from(domain.genesis().network_magic());
 
-        let first = plan_at_boundary(&earlier, 1, Default::default());
-        let second = plan_at_boundary(&domain, 2, Default::default());
+        let first = plan_at_boundary(&earlier, 1);
+        let second = plan_at_boundary(&domain, 2);
 
         Self {
             earlier,

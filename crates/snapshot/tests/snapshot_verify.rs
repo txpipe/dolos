@@ -42,7 +42,7 @@ use dolos_snapshot::{
     boundary::Ineligible,
     export::{self, Following, Predecessor as _},
     registry::{self, Point, PublishRecord, Publishing},
-    DolosProfile, Error, RetainedEpochs,
+    DolosProfile, Error,
 };
 use dolos_testing::toy_domain::{MemoryStores, ToyDomain};
 use serde_json::json;
@@ -418,7 +418,7 @@ fn a_resumed_registry_publish_rebuilds_an_account_window_the_manifest_lacks() {
     let host_a: ToyDomain<MemoryStores> = node::harness();
     write_account_row(&host_a, 1, stake_only());
 
-    let cut_at_2 = plan_at_boundary(&host_a, 2, RetainedEpochs::default());
+    let cut_at_2 = plan_at_boundary(&host_a, 2);
     let dying = process();
     let interrupted = registry::publish_into(
         &SealFails(&dying),
@@ -463,7 +463,7 @@ fn a_resumed_registry_publish_rebuilds_an_account_window_the_manifest_lacks() {
 
     let host_b: ToyDomain<MemoryStores> = node::harness();
     for sequence in [2, 3] {
-        let plan = plan_at_boundary(&host_b, sequence, RetainedEpochs::default());
+        let plan = plan_at_boundary(&host_b, sequence);
         registry::publish(
             Publishing::new(&process()),
             &plan,
@@ -491,7 +491,7 @@ fn a_resumed_registry_publish_rebuilds_an_account_window_the_manifest_lacks() {
     // Through 3 as B went, so the two hosts hold the same chain.
     node::stand_at_boundary(&host_a, 3);
     write_account_row(&host_a, 1, settled());
-    let cut_at_4 = plan_at_boundary(&host_a, 4, RetainedEpochs::default());
+    let cut_at_4 = plan_at_boundary(&host_a, 4);
 
     let resumed = process();
     let resuming = || Publishing::new(&resumed).recording_in(&record_path);

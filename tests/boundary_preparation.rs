@@ -43,7 +43,6 @@ const FORFEIT_BLOCK: usize = 11;
 
 const BOUNDARIES: [u64; 4] = [3, 4, 5, 6];
 const FRONTIER: u64 = 8;
-const RETAINED: [u64; 1] = [3];
 
 struct Fixture {
     blocks: Vec<RawBlock>,
@@ -78,17 +77,13 @@ impl Fixture {
         (session, next)
     }
 
-    fn retained() -> dolos_snapshot::RetainedEpochs {
-        dolos_snapshot::planning::retained_epochs(&RETAINED).unwrap()
-    }
-
     /// An independent replay into fresh stores, stopped at `stop`, and its
     /// ordinary export.
     fn frozen(&self, stop: u64, previous: Option<&Document>) -> Document {
         let node = self.node();
         let (session, _) = self.replay_to(&node, 0, stop);
         let snapshot = session.snapshot();
-        let plan = snapshot.plan(self.magic, Self::retained()).unwrap();
+        let plan = snapshot.plan(self.magic).unwrap();
 
         let document = match previous {
             None => snapshot.digest_document(&plan, &First).unwrap(),
@@ -254,7 +249,7 @@ fn prepare_and_finish(fixture: &Fixture, node: &node::Node) -> Run {
 
         let delta = session.boundary_index_delta().unwrap().clone();
         let snapshot = session.snapshot();
-        let plan = snapshot.plan(fixture.magic, Fixture::retained()).unwrap();
+        let plan = snapshot.plan(fixture.magic).unwrap();
         let request = Request {
             store_contract: dolos::core::compat::SUPPORTED_CONTRACTS[0].to_owned(),
             mutable_slots: dolos_cardano::mutable_slots(&fixture.genesis),
@@ -289,7 +284,7 @@ fn prepare_and_finish(fixture: &Fixture, node: &node::Node) -> Run {
     let workspace = ReplayWorkspace::open(&node.config, fixture.genesis.clone()).unwrap();
     let snapshot = workspace.snapshot();
 
-    let plan = snapshot.plan(fixture.magic, Fixture::retained()).unwrap();
+    let plan = snapshot.plan(fixture.magic).unwrap();
     let at_frontier = snapshot.digest_document(&plan, &First).unwrap();
 
     let staged = snapshot

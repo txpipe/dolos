@@ -1231,7 +1231,6 @@ fn publish_staged<S: CoreArchiveStore>(
         &summary,
         Network::for_magic(dolos_snapshot::MAINNET_MAGIC),
         tip.clone(),
-        Default::default(),
         EPOCH_LEN / 2,
     )
     .expect("plan");

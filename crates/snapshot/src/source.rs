@@ -17,7 +17,7 @@ use crate::{
     prepare::{self, Bundle, Finalizing},
     registry::{self, Preview, Published, Publishing},
     staging::{Budget, Staged},
-    Error, RetainedEpochs,
+    Error,
 };
 
 /// The selection shared by publication, digest and reproduction.
@@ -43,16 +43,11 @@ impl Selection {
 pub trait SnapshotSource {
     fn committed_position(&self) -> Result<Option<ChainPoint>, Error>;
     fn epoch(&self) -> Result<Option<u64>, Error>;
-    fn plan(&self, network_magic: u64, retained: RetainedEpochs) -> Result<Plan, Error>;
+    fn plan(&self, network_magic: u64) -> Result<Plan, Error>;
 
     /// Build and select a plan in the same way for every snapshot operation.
-    fn selected_plan(
-        &self,
-        network_magic: u64,
-        retained: RetainedEpochs,
-        selection: Selection,
-    ) -> Result<Plan, Error> {
-        Ok(selection.apply(self.plan(network_magic, retained)?))
+    fn selected_plan(&self, network_magic: u64, selection: Selection) -> Result<Plan, Error> {
+        Ok(selection.apply(self.plan(network_magic)?))
     }
 
     /// Establish that `plan` stands on the first block of its sequence epoch.
@@ -169,8 +164,8 @@ impl<A: ArchiveStore, S: StateStore> SnapshotSource for StoreSnapshot<'_, A, S> 
         Ok(Some(summary.slot_epoch(position.slot()).0))
     }
 
-    fn plan(&self, network_magic: u64, retained: RetainedEpochs) -> Result<Plan, Error> {
-        export::plan(self.state, network_magic, retained, self.mutable_slots)
+    fn plan(&self, network_magic: u64) -> Result<Plan, Error> {
+        export::plan(self.state, network_magic, self.mutable_slots)
     }
 
     fn boundary(&self, plan: &Plan) -> Result<Boundary, Error> {
