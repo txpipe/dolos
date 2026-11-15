@@ -1820,7 +1820,7 @@ fn kill_and_resume<B: ToyStores>() {
 /// stele's own for a dump cut at that publish, or a past one.
 ///
 /// `published_order` lists each kind's dumps, by ascending epoch, before its
-/// tip, as a publisher does; otherwise they follow every other layer.
+/// tip, as earlier publishers did; otherwise they follow every other layer.
 fn add_dump_descriptors(
     root: &std::path::Path,
     inscription: &mut Inscription,
@@ -1877,8 +1877,8 @@ fn a_stele_with_dump_descriptors_restores_the_tip_and_ignores_them() {
     restores_like_the_plain_stele(false);
 }
 
-/// The same, with the dumps where a publisher lists them: before the tip
-/// shards they share a shard number with.
+/// The same, with the dumps where earlier publishers listed them: before the
+/// tip shards they share a shard number with.
 #[test]
 fn a_stele_with_dumps_in_the_published_order_restores_the_tip_and_ignores_them() {
     restores_like_the_plain_stele(true);

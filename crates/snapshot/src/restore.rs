@@ -2445,9 +2445,9 @@ mod tests {
 
         assert_eq!(tip, plain);
 
-        // The order a publisher lists a kind's layers in: its dumps by
-        // ascending epoch, then its tip. Each dump comes before the tip shard
-        // it shares a shard number with.
+        // The order earlier publishers listed a kind's layers in: its dumps
+        // by ascending epoch, then its tip. Each dump comes before the tip
+        // shard it shares a shard number with.
         let mut published = Vec::new();
         for (kind, ..) in STATE_KINDS {
             for layers in [dump_layers(1, 0xc0), dump_layers(3, 0x80), state_layers()] {
