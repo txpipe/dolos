@@ -54,15 +54,15 @@ use dolos_core::{
 use dolos_snapshot::{
     is_state_kind,
     restore::{self, default_budget, progress_path_in, Budget, Checkpoint},
-    state_layer_count, state_ns_for, DolosProfile, Error, RetainedEpochs, COMPRESSION_LEVEL,
-    ENTITY_INDEX_KINDS, ENTITY_KINDS, KINDS, LOG_NAMESPACES, MEDIA_TYPE_CODEC, MEDIA_TYPE_VENDOR,
-    MEDIA_TYPE_VERSION, NAMESPACES, STATE_KINDS, UTXOS,
+    state_layer_count, state_ns_for, DolosProfile, Error, COMPRESSION_LEVEL, ENTITY_INDEX_KINDS,
+    ENTITY_KINDS, KINDS, LOG_NAMESPACES, MEDIA_TYPE_CODEC, MEDIA_TYPE_VENDOR, MEDIA_TYPE_VERSION,
+    NAMESPACES, STATE_KINDS, UTXOS,
 };
 use dolos_testing::{
     faults::{FaultyStateStore, TestFault},
     toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores},
 };
-use node::{export_plan, export_to, harness, plan_at_boundary, stand_at_boundary, Blank};
+use node::{export_to, harness, stand_at_boundary, Blank};
 use serde_json::json;
 use stelae::{
     dir::{LayerSpec, SteleDir},
@@ -1813,79 +1813,94 @@ fn kill_and_resume<B: ToyStores>() {
     assert_stores_match(&blank, &domain);
 }
 
-/// Re-seal the stele at `root` with its tip also described as `epoch`'s
-/// retained dump, the shape steles cut at a retained epoch carry: per kind,
-/// every dump shard ascending and then the tip's, one blob under both.
-fn describe_tip_as_dump(root: &std::path::Path, epoch: u64) -> Inscription {
-    let stele = SteleDir::open(root).unwrap();
-    let mut inscription = stele.read_inscription().unwrap();
-    let original = std::mem::take(&mut inscription.layers);
+/// Retained state dumps as earlier publishers wrote them beside the tip: the
+/// tip's own blobs under a second descriptor whose scope names an epoch, the
+/// stele's own for a dump cut at that publish, or a past one.
+///
+/// `published_order` lists each kind's dumps, by ascending epoch, before its
+/// tip, as earlier publishers did; otherwise they follow every other layer.
+fn add_dump_descriptors(
+    root: &std::path::Path,
+    inscription: &mut Inscription,
+    published_order: bool,
+) {
+    let mut epochs = vec![inscription.sequence.saturating_sub(1), inscription.sequence];
+    epochs.dedup();
 
-    for (index, layer) in original.iter().enumerate() {
-        let first_of_kind = index == 0 || original[index - 1].kind != layer.kind;
+    let dumps_of = |kind: &str| -> Vec<LayerDescriptor> {
+        epochs
+            .iter()
+            .flat_map(|epoch| {
+                inscription
+                    .layers
+                    .iter()
+                    .filter(move |layer| layer.kind == kind)
+                    .map(move |layer| {
+                        let mut dump = layer.clone();
+                        dump.scope = json!({"epoch": epoch, "shard": layer.scope["shard"]});
+                        dump
+                    })
+            })
+            .collect()
+    };
 
-        if state_ns_for(&layer.kind).is_some() && first_of_kind {
-            for tip in original.iter().filter(|tip| tip.kind == layer.kind) {
-                let mut dump = tip.clone();
-                dump.scope = json!({"epoch": epoch, "shard": tip.scope["shard"]});
-                inscription.layers.push(dump);
+    let mut layers = Vec::new();
+    let mut trailing = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+
+    for layer in &inscription.layers {
+        if state_ns_for(&layer.kind).is_some() && seen.insert(layer.kind.clone()) {
+            match published_order {
+                true => layers.extend(dumps_of(&layer.kind)),
+                false => trailing.extend(dumps_of(&layer.kind)),
             }
         }
 
-        inscription.layers.push(layer.clone());
+        layers.push(layer.clone());
     }
 
-    stele.seal(&DolosProfile, &inscription).unwrap();
+    layers.extend(trailing);
+    inscription.layers = layers;
 
-    inscription
+    SteleDir::open(root)
+        .unwrap()
+        .seal(&DolosProfile, inscription)
+        .unwrap();
 }
 
-/// Done criterion 3: a stele carrying retained dumps restores the tip, reports
-/// the dumps, and pays nothing for them.
-///
-/// Two steles over one ledger from one point, differing only in whether the
-/// publisher retained epoch 1 — so anything the restore does differently is
-/// the dumps and nothing else. What it must do differently is *report* them
-/// and nothing more: same layers read, same bytes planned, same node.
+/// A stele that carries dump descriptors restores its tip and ignores them:
+/// same layers read, same bytes planned, same node as the stele without them.
 #[test]
-fn a_stele_with_retained_dumps_restores_the_tip_and_reports_the_dumps() {
+fn a_stele_with_dump_descriptors_restores_the_tip_and_ignores_them() {
+    restores_like_the_plain_stele(false);
+}
+
+/// The same, with the dumps where earlier publishers listed them: before the
+/// tip shards they share a shard number with.
+#[test]
+fn a_stele_with_dumps_in_the_published_order_restores_the_tip_and_ignores_them() {
+    restores_like_the_plain_stele(true);
+}
+
+fn restores_like_the_plain_stele(published_order: bool) {
     let domain: ToyDomain<MemoryStores> = harness();
     let magic = magic_of(&domain);
 
     let plain_root = tempfile::tempdir().unwrap();
     let dumped_root = tempfile::tempdir().unwrap();
 
-    export_plan(
-        plain_root.path(),
-        &domain,
-        &plan_at_boundary(&domain, 1, RetainedEpochs::default()),
-    );
+    export_to(plain_root.path(), &domain);
+    let mut dumped = export_to(dumped_root.path(), &domain);
+    let plain_count = dumped.layers.len();
 
-    export_plan(
-        dumped_root.path(),
-        &domain,
-        &plan_at_boundary(&domain, 1, RetainedEpochs::new(vec![1]).unwrap()),
-    );
-    let dumped = describe_tip_as_dump(dumped_root.path(), 1);
+    add_dump_descriptors(dumped_root.path(), &mut dumped, published_order);
+    assert!(dumped.layers.len() > plain_count, "no dump was added");
 
     let plain_plan =
         restore::plan(&SteleDir::open(plain_root.path()).unwrap(), magic, None).unwrap();
     let dumped_plan =
         restore::plan(&SteleDir::open(dumped_root.path()).unwrap(), magic, None).unwrap();
 
-    // Reported: every kind's shards, under the epoch their scope names.
-    assert!(plain_plan.state_dumps.is_empty());
-    assert_eq!(
-        dumped_plan.state_dumps.keys().copied().collect::<Vec<_>>(),
-        vec![1]
-    );
-    assert_eq!(dumped_plan.dump_layers().count(), state_layer_count());
-
-    // The document carries them; the plan does not consume them.
-    assert_eq!(
-        dumped.layers.len(),
-        plain_plan.layers().count() + state_layer_count(),
-    );
     assert_eq!(dumped_plan.layers().count(), plain_plan.layers().count());
     assert_eq!(dumped_plan.tip_layers().count(), state_layer_count());
     assert_eq!(
@@ -1894,15 +1909,10 @@ fn a_stele_with_retained_dumps_restores_the_tip_and_reports_the_dumps() {
         "a dump was counted against the disk a restore needs",
     );
 
-    // Not in the tip either: a dump that leaked into `state` would be restored
-    // *over* the tip, one shard at a time, and the node would still look right.
-    for layers in dumped_plan.state.values() {
-        for layer in layers {
-            assert!(layer.scope.get("epoch").is_none(), "{}", layer.kind);
-        }
+    for layer in dumped_plan.layers() {
+        assert!(layer.scope.get("epoch").is_none() || state_ns_for(&layer.kind).is_none());
     }
 
-    // And the run itself is the same run.
     let plain_blank = Blank::<MemoryStores>::open();
     let dumped_blank = Blank::<MemoryStores>::open();
 
@@ -1914,88 +1924,6 @@ fn a_stele_with_retained_dumps_restores_the_tip_and_reports_the_dumps() {
     assert_eq!(from_plain, from_dumped);
     assert_state_matches(dumped_blank.state(), plain_blank.state());
     assert_archive_matches(&dumped_blank.archive, &plain_blank.archive);
-}
-
-/// The resume half of done criterion 3, and the rule the module documentation
-/// states: a dump is checkpointable and the tip is not, and today neither is
-/// checkpointed because neither is read — what a resumed restore records is
-/// the epoch layers alone.
-#[test]
-fn a_resumed_restore_of_a_dumped_stele_records_only_the_epoch_layers() {
-    let domain: ToyDomain<MemoryStores> = harness();
-    let magic = magic_of(&domain);
-
-    let root = tempfile::tempdir().unwrap();
-    let storage = tempfile::tempdir().unwrap();
-
-    export_plan(
-        root.path(),
-        &domain,
-        &plan_at_boundary(&domain, 1, RetainedEpochs::new(vec![1]).unwrap()),
-    );
-    let inscription = describe_tip_as_dump(root.path(), 1);
-
-    let blank = Blank::<MemoryStores>::open();
-
-    // Killed at the first state layer, so every epoch layer has committed and
-    // the tip has not.
-    let first_tip = inscription
-        .layers
-        .iter()
-        .find(|layer| state_ns_for(&layer.kind).is_some())
-        .unwrap();
-
-    let err = restore_checkpointed(
-        root.path(),
-        storage.path(),
-        magic,
-        &blank,
-        false,
-        Some(first_tip.diff_id),
-    )
-    .unwrap_err();
-
-    assert!(
-        matches!(err, Error::Stelae(stelae::Error::Io(_))),
-        "{err:?}"
-    );
-
-    let progress = RestoreProgress::load(&progress_path_in(storage.path()))
-        .unwrap()
-        .expect("a killed restore left no progress file");
-
-    // Every recorded layer is an epoch layer. No dump is in it, and neither is
-    // a tip shard — the two for opposite reasons, and the same outcome.
-    for recorded in &progress.completed {
-        let layer = inscription
-            .layers
-            .iter()
-            .find(|layer| layer.diff_id == *recorded)
-            .expect("a recorded diffId this stele does not carry");
-
-        assert!(
-            state_ns_for(&layer.kind).is_none(),
-            "a state layer was checkpointed: {} at {}",
-            layer.kind,
-            layer.scope,
-        );
-    }
-
-    let resumed =
-        restore_checkpointed(root.path(), storage.path(), magic, &blank, true, None).unwrap();
-
-    assert_eq!(resumed.layers_skipped, progress.completed.len());
-    assert_eq!(
-        resumed.layers_fetched + resumed.layers_skipped,
-        inscription.layers.len() - state_layer_count(),
-        "the resume fetched a retained dump, which no restore reads",
-    );
-
-    assert_eq!(
-        RestoreProgress::load(&progress_path_in(storage.path())).unwrap(),
-        None,
-        "a finished restore left its progress file behind"
-    );
 }
 
 #[test]
