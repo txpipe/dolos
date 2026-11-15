@@ -72,6 +72,7 @@ use stelae::{
     inscription::{HistoryEntry, Inscription, LayerDescriptor},
     progress::{Observer, Outcome},
     transport::{LayerSpec, RecordSink, SteleWriter, WrittenLayer},
+    Digest,
 };
 
 use crate::{
@@ -193,12 +194,11 @@ pub struct Plan {
     pub sequence: u64,
     /// The epochs whose layers this export writes, ascending.
     pub epochs: Vec<EpochWindow>,
-    /// The epochs this publisher retains a state dump of, validated.
+    /// The epochs this publisher names as retained, validated.
     ///
     /// Signed input rather than geometry: it rides into `parameters`, so it is
-    /// part of what makes two publishers' documents comparable, and it is not
-    /// derived from `summary` — which epochs are worth a dump is operational
-    /// (decision 0026).
+    /// part of what makes two publishers' documents comparable. Export writes
+    /// no layer for it; every state layer is the tip's.
     pub retained: RetainedEpochs,
     /// Where an export stages its `indexes` and entity runs. `None` is the
     /// system temporary directory; a mainnet first publish spools tens of
@@ -215,6 +215,10 @@ pub struct Plan {
     /// that walks these stores pays the same serial cost without it. See
     /// [`Producers`].
     pub producers: Producers,
+    /// The inscription digest of the blocks snapshot at this sequence, which
+    /// `position.blocks` names. Signed input the host supplies, like
+    /// `retained`; `None` leaves the field out of `position`.
+    pub blocks: Option<Digest>,
 }
 
 impl Plan {
@@ -259,6 +263,7 @@ impl Plan {
             retained,
             scratch: None,
             producers: Producers::DEFAULT,
+            blocks: None,
         })
     }
 
@@ -282,6 +287,13 @@ impl Plan {
         self
     }
 
+    /// Name the blocks snapshot at this sequence in `position.blocks`.
+    pub fn with_blocks(mut self, blocks: Digest) -> Self {
+        self.blocks = Some(blocks);
+
+        self
+    }
+
     /// Keep only the epoch layers within `first..=last`.
     ///
     /// A partial publish: the state tip is unaffected, since it is the tip
@@ -298,7 +310,12 @@ impl Plan {
 
     /// The profile's `position` for this plan.
     pub fn position(&self) -> Result<serde_json::Value, Error> {
-        crate::position(&self.network, &self.cursor, self.sequence)
+        crate::position(
+            &self.network,
+            &self.cursor,
+            self.sequence,
+            self.blocks.as_ref(),
+        )
     }
 
     /// The immutable tag this stele would publish under.
@@ -311,29 +328,6 @@ impl Plan {
 
     fn state_scope(&self, shard: u8) -> StateScope {
         StateScope::tip(self.network.magic(), self.sequence, shard)
-    }
-
-    fn dump_scope(&self, epoch: u64, shard: u8) -> StateScope {
-        StateScope::dump(self.network.magic(), epoch, shard)
-    }
-
-    /// The retained epochs this publish inherits or skips rather than cuts:
-    /// every due one below the sequence.
-    ///
-    /// The one *at* the sequence is not here because it is not a lookup — it
-    /// falls out of the tip walk, and [`Plan::cuts_a_dump`] is the question
-    /// that path asks.
-    fn adoptable_dumps(&self) -> impl Iterator<Item = u64> + '_ {
-        let sequence = self.sequence;
-
-        self.retained
-            .due(sequence)
-            .filter(move |epoch| *epoch < sequence)
-    }
-
-    /// Whether this publish's own sequence is a retained epoch.
-    fn cuts_a_dump(&self) -> bool {
-        self.retained.cuts(self.sequence)
     }
 
     /// A fresh spool under this plan's scratch, removed when dropped. Whatever
@@ -406,21 +400,9 @@ pub use stelae_driver::{First, Predecessor};
 /// the same rule a publish does. Two implementations of contiguity is two
 /// things to keep honest, and the one that drifts is the one nobody publishes
 /// with.
-///
-/// **A reproduction predecessor, and only that.** It answers
-/// [`Predecessor::adopt`] for one layer — a retained state dump for a closed
-/// epoch — without arranging for any transport to carry the blob, which is a
-/// contract this type can only meet because the one path that reaches it,
-/// [`reproduce`], writes into [`stelae::Discarding`]: there is no transport,
-/// so there is nothing to arrange. Handing one of these to an [`export`] that
-/// writes a real stele would produce a document describing a blob nothing
-/// carries. Nothing does, and nothing should.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Following {
     history: Vec<HistoryEntry>,
-    /// The predecessor's retained state dumps, which a reproduction carries
-    /// forward rather than builds — see [`Following::adopt`].
-    dumps: BTreeMap<(String, String), LayerDescriptor>,
 }
 
 impl Following {
@@ -464,7 +446,6 @@ impl Following {
 
         Ok(Self {
             history: history_for(Some(previous), plan.sequence)?,
-            dumps: retained_dumps(previous, plan.sequence),
         })
     }
 }
@@ -472,39 +453,6 @@ impl Following {
 impl Predecessor for Following {
     fn history(&self) -> &[HistoryEntry] {
         &self.history
-    }
-
-    /// A retained dump for a closed epoch, taken from the document this one
-    /// follows.
-    ///
-    /// The one thing a store-only reproduction cannot build, and the reason
-    /// this type declines to adopt anything else. Every other layer describes
-    /// a window whose data is still in the stores — a `blocks` layer for epoch
-    /// 12 can be rebuilt at any sequence — so rebuilding it is both possible
-    /// and the whole point. **The state as of a closed epoch is not in a store
-    /// standing at the tip**, and no amount of walking will produce it: it
-    /// exists only in the stele that cut it. A reproduction that insisted on
-    /// building one would report a divergence on every stele that carries any
-    /// history at all, which would make the check useless rather than strict.
-    ///
-    /// So it is carried forward by scope equality, exactly as a publisher
-    /// carries it, and the honest statement of what a reproduction proves
-    /// narrows by precisely this much: the dumps are attested, not recomputed.
-    /// See [`retained_dumps`].
-    fn adopt(
-        &self,
-        kind: &str,
-        scope: &serde_json::Value,
-    ) -> Result<Option<LayerDescriptor>, stelae_driver::Error> {
-        Ok(self.dumps.get(&crate::scope_key(kind, scope)?).cloned())
-    }
-
-    fn carried_forward(
-        &self,
-        kind: &str,
-        scope: &serde_json::Value,
-    ) -> Result<bool, stelae_driver::Error> {
-        Ok(self.dumps.contains_key(&crate::scope_key(kind, scope)?))
     }
 }
 
@@ -520,24 +468,13 @@ impl Predecessor for Following {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attested {
     history: Vec<HistoryEntry>,
-    dumps: BTreeMap<(String, String), LayerDescriptor>,
 }
 
 impl Attested {
-    /// The history `published` carries, as a reproduction's input — and, for
-    /// the same reason and on worse terms, its retained state dumps.
-    ///
-    /// Worse terms because a dump is taken from the very document under
-    /// verification rather than from the one before it: there is nowhere else
-    /// for it to come from, since a store at the tip does not hold a closed
-    /// epoch's state. `verify --reproduce` therefore says nothing about a
-    /// retained dump beyond that the published document is self-consistent
-    /// about it. That is the same category `history` is already in, and it is
-    /// closed by the same thing: a signature.
+    /// The history `published` carries, as a reproduction's input.
     pub fn of(published: &Inscription) -> Self {
         Self {
             history: published.history.clone(),
-            dumps: retained_dumps(published, published.sequence),
         }
     }
 }
@@ -546,54 +483,6 @@ impl Predecessor for Attested {
     fn history(&self) -> &[HistoryEntry] {
         &self.history
     }
-
-    /// See [`Attested::of`] and [`Following::adopt`].
-    fn adopt(
-        &self,
-        kind: &str,
-        scope: &serde_json::Value,
-    ) -> Result<Option<LayerDescriptor>, stelae_driver::Error> {
-        Ok(self.dumps.get(&crate::scope_key(kind, scope)?).cloned())
-    }
-
-    fn carried_forward(
-        &self,
-        kind: &str,
-        scope: &serde_json::Value,
-    ) -> Result<bool, stelae_driver::Error> {
-        Ok(self.dumps.contains_key(&crate::scope_key(kind, scope)?))
-    }
-}
-
-/// The retained state dumps `document` attests for epochs **below**
-/// `sequence`, keyed the way a predecessor is asked about a layer.
-///
-/// Below and not at: the dump at `sequence` is cut from the tip by the walk
-/// itself, so a reproduction builds it out of the stores like everything else
-/// and offering it here would replace a check with a copy. That boundary is
-/// the whole difference between what a reproduction proves and what it takes
-/// on trust, so it is drawn once, here.
-fn retained_dumps(
-    document: &Inscription,
-    sequence: u64,
-) -> BTreeMap<(String, String), LayerDescriptor> {
-    document
-        .layers
-        .iter()
-        .filter(|layer| crate::state_ns_for(&layer.kind).is_some())
-        .filter(|layer| {
-            matches!(
-                layer.scope.get("epoch").and_then(serde_json::Value::as_u64),
-                Some(epoch) if epoch < sequence,
-            )
-        })
-        .filter_map(|layer| {
-            Some((
-                crate::scope_key(&layer.kind, &layer.scope).ok()?,
-                layer.clone(),
-            ))
-        })
-        .collect()
 }
 
 /// A predecessor held to its manifest for `log-account-epochs`.
@@ -865,7 +754,7 @@ where
     let total = plan.epochs.len() * DENSE_EPOCH_KINDS.len()
         + log_layers(plan, archive, prepared, previous)?
         + staged_entity_layers(plan, prepared, staged, adopted)?
-        + state_layers(plan, previous)?;
+        + state_layer_count();
 
     let cursor = Cursor::new(observer, total);
     let cursor = &cursor;
@@ -919,14 +808,11 @@ where
     }
 
     // One job per state kind: each walks its own namespace once, so the walks
-    // that ran in sequence overlap instead. The tip shards are
-    // not offered to the predecessor; the dumps among them are. See
-    // [`Predecessor::landed`].
+    // that ran in sequence overlap instead. The tip shards are not offered to
+    // the predecessor.
     for (kind, ns, shards, shard_byte) in STATE_KINDS {
         jobs.push(Box::new(move || {
-            write_state_kind(
-                stele, plan, source, kind, ns, shards, shard_byte, previous, cursor,
-            )
+            write_state_kind(stele, plan, source, kind, ns, shards, shard_byte, cursor)
         }));
     }
 
@@ -1557,55 +1443,6 @@ pub(crate) fn write_logs<W: SteleWriter, A: ArchiveStore>(
     Ok(Some(descriptor))
 }
 
-/// How many log layers a publish of `plan` will produce.
-///
-/// One per (window, namespace) pair the predecessor carries forward or the
-/// archive holds a record for — the same two questions [`write_logs`] asks, in
-/// the same order, against the same range. The store side is one seek per pair:
-/// the walk's first step, taken and dropped.
-///
-/// It exists because a layer count that multiplied epochs by kinds would be an
-/// upper bound once log layers became sparse, and the number a publisher reads
-/// off a dry run has to be the number the publish then writes.
-/// How many retained dumps this publish can carry forward — the forecast, not
-/// the outcome.
-///
-/// [`Predecessor::carried_forward`]'s question, asked per shard, because the
-/// answer is per shard: a dump the predecessor holds fifteen shards of
-/// contributes fifteen layers. It may be wrong in the one direction that
-/// method documents — a recorded blob the repository has since dropped — and
-/// here that turns a forecast layer into no layer at all rather than into a
-/// rebuild, because a past epoch's state is not in this publish's stores.
-fn carried_dumps(plan: &Plan, previous: &dyn Predecessor) -> Result<usize, Error> {
-    let mut total = 0;
-
-    for epoch in plan.adoptable_dumps() {
-        for (kind, _, shards, _) in STATE_KINDS {
-            for shard in 0..shards {
-                let spec = plan.dump_scope(epoch, shard).layer_spec(kind)?;
-
-                if previous.carried_forward(kind, &spec.scope)? {
-                    total += 1;
-                }
-            }
-        }
-    }
-
-    Ok(total)
-}
-
-/// Every state layer this publish writes: the tip, the dump it cuts out of the
-/// tip where its own sequence is retained, and the past dumps it can adopt.
-///
-/// The tip's count is structural — every shard of every kind, empty ones
-/// included — and so is the cut dump's, since it is the same layers under a
-/// second scope. Only the adopted past is a lookup.
-fn state_layers(plan: &Plan, previous: &dyn Predecessor) -> Result<usize, Error> {
-    let cut = usize::from(plan.cuts_a_dump());
-
-    Ok(state_layer_count() * (1 + cut) + carried_dumps(plan, previous)?)
-}
-
 /// What a publish of `plan` chained onto `previous` would write, counted
 /// without writing it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1628,23 +1465,20 @@ pub fn forecast<A: ArchiveStore>(
     previous: &dyn Predecessor,
 ) -> Result<Forecast, Error> {
     // Every epoch selected contributes one `blocks` and one `indexes` layer and
-    // as many log layers as it has namespaces with logs, the state tip
-    // contributes every shard of every kind however the epochs were restricted,
-    // and the retained dumps contribute what `state_layers` counts.
+    // as many log layers as it has namespaces with logs, and the state tip
+    // contributes every shard of every kind however the epochs were restricted.
     let presence = entity_presence(plan, archive)?;
 
     let total = plan.epochs.len() * DENSE_EPOCH_KINDS.len()
         + log_layers(plan, archive, None, previous)?
         + entity_layers(plan, &presence, previous)?
-        + state_layers(plan, previous)?;
+        + state_layer_count();
 
     // A failure here is the scope refusing a kind it does not describe, and it
     // propagates rather than counting as a miss: a dry run that quietly
     // reported "build it" for a layer nobody could build would be the one
-    // number a publisher trusts, wrong. A dump this publish adopts is a layer
-    // nothing walks a store for; the one it cuts out of its own tip is not,
-    // because the tip is walked either way.
-    let mut layers_reused = carried_dumps(plan, previous)?;
+    // number a publisher trusts, wrong.
+    let mut layers_reused = 0;
 
     for window in &plan.epochs {
         let scope = window.scope(plan.network.magic());
@@ -1669,6 +1503,16 @@ pub fn forecast<A: ArchiveStore>(
     })
 }
 
+/// How many log layers a publish of `plan` will produce.
+///
+/// One per (window, namespace) pair the predecessor carries forward or the
+/// archive holds a record for — the same two questions [`write_logs`] asks, in
+/// the same order, against the same range. The store side is one seek per pair:
+/// the walk's first step, taken and dropped.
+///
+/// It exists because a layer count that multiplied epochs by kinds would be an
+/// upper bound once log layers became sparse, and the number a publisher reads
+/// off a dry run has to be the number the publish then writes.
 pub(crate) fn log_layers<A: ArchiveStore>(
     plan: &Plan,
     archive: &A,
@@ -2012,42 +1856,9 @@ fn log_key_range(slots: &Range<BlockSlot>) -> KeyRange {
 /// set a reader sees is fixed by [`STATE_KINDS`] and never a function of what
 /// the data happened to contain — tip completeness stays structural.
 ///
-/// ## The tip is never inherited, and a dump always is
-///
-/// The rule used to be "no state layer is ever inherited", for two reasons.
-/// The first is what a reader expects: the state is the *tip*, so it changes
-/// every publish and there is nothing to inherit. The second is that scope
-/// equality — the rule a [`Predecessor`] decides by — could not detect it if
-/// there were: a tip's [`StateScope::descriptor`](crate::StateScope) is
-/// `{"shard": n}` and carries no epoch, so every previous publish's shard `n`
-/// compares equal to this one's.
-///
-/// Both hold, and both are about the **tip role** rather than about state
-/// layers (decision 0026). A [retained dump](crate::StateRole::Dump) is the
-/// state as of a closed epoch — it cannot be republished differently later —
-/// and its descriptor scope is `{"epoch": E, "shard": n}`, which identifies
-/// the publish it describes just as an epoch layer's does. So a dump is
-/// inherited by the same rule as everything else immutable, and the tip is
-/// still uninheritable *necessarily*, not by policy.
-///
-/// ## The tee, and why the two blobs are one blob
-///
-/// A dump at the epoch this publish stands in is not built: it is the tip.
-/// The header record — magic, epoch, shard — is role-blind, and at
-/// `sequence == E` the tip's epoch *is* E, so the two layers are the same
-/// bytes and the same `diffId`. This function therefore walks the store once,
-/// finishes each shard's sink once, and asks the transport to attest the
-/// result a second time under the dump's scope
-/// ([`SteleWriter::carry_again`]). Nothing is compressed twice and nothing
-/// crosses the wire twice, and the identity is not a property this code has to
-/// maintain — there is only one write, so there is nothing for a second one to
-/// diverge from.
-///
-/// A dump for an epoch *below* the sequence is never built here at all: this
-/// publish's stores hold the tip and not that epoch's state. It is adopted
-/// from the predecessor, or — where the predecessor has no such layer — warned
-/// about and left out, which is a publish that carries less history rather
-/// than a failure. Producing a missing one is a backfill run's job.
+/// The tip is never inherited: it changes every publish, and its descriptor
+/// scope, `{"shard": n}`, names no epoch, so scope equality could not tell one
+/// publish's shard from another's.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_state_kind<W: SteleWriter, S: StateStore>(
     stele: &W,
@@ -2057,32 +1868,8 @@ pub(crate) fn write_state_kind<W: SteleWriter, S: StateStore>(
     ns: Namespace,
     shards: u8,
     shard_byte: usize,
-    previous: &dyn Predecessor,
     cursor: &Cursor<'_>,
 ) -> Result<Vec<LayerDescriptor>, Error> {
-    // Ascending epoch, then the tip: the order the inscription lists a
-    // kind's layers in, fixed here rather than left to the loops below.
-    let mut dumps = Vec::new();
-
-    for epoch in plan.adoptable_dumps() {
-        dumps.extend(adopt_dump(plan, kind, shards, epoch, previous, cursor)?);
-    }
-
-    // Announced before the tip's, because that is where they sit in the
-    // document; they are closed after it, because that is when the bytes
-    // they name exist.
-    let cut: Vec<LayerSpec> = match plan.cuts_a_dump() {
-        true => (0..shards)
-            .map(|shard| plan.dump_scope(plan.sequence, shard).layer_spec(kind))
-            .collect::<Result<_, Error>>()?,
-        false => Vec::new(),
-    };
-
-    let cut_positions: Vec<usize> = cut
-        .iter()
-        .map(|spec| cursor.open(kind, &spec.scope))
-        .collect();
-
     let tip = match source {
         Source::Stores(store) => {
             walk_state_kind(stele, plan, *store, kind, ns, shards, shard_byte, cursor)?
@@ -2103,18 +1890,7 @@ pub(crate) fn write_state_kind<W: SteleWriter, S: StateStore>(
         }
     };
 
-    for ((spec, at), written) in cut.iter().zip(cut_positions).zip(&tip) {
-        let again = stele.carry_again(written, spec.scope.clone())?;
-        cursor.close(at, kind, Outcome::Transferred);
-
-        previous.landed(&again.descriptor)?;
-        dumps.push(again.descriptor);
-    }
-
-    let mut layers = dumps;
-    layers.extend(tip.into_iter().map(|written| written.descriptor));
-
-    Ok(layers)
+    Ok(tip.into_iter().map(|written| written.descriptor).collect())
 }
 
 /// Walk one state kind's namespace once, routing each record to its shard.
@@ -2187,62 +1963,6 @@ fn walk_state_kind<W: SteleWriter, S: StateStore>(
     Ok(tip)
 }
 
-/// One kind's retained dump at a closed `epoch`, carried forward from the
-/// publish that cut it.
-///
-/// Shard by shard rather than all-or-nothing, and that is the safe direction
-/// rather than the lax one. [`Predecessor::adopt`] *acts*: by the time it
-/// answers, the transport is already carrying the blob. A caller that adopted
-/// fifteen shards, found the sixteenth gone and then dropped the epoch would
-/// leave fifteen blobs in the transport that the inscription does not
-/// describe — which is a refused seal, and a publish lost over history that
-/// was never load-bearing. So each shard that is there is carried, each that
-/// is not is counted, and a restore reads a short dump as a short dump.
-///
-/// One warning per (kind, epoch) rather than per shard: sixteen lines saying
-/// the same thing is how a real one gets scrolled past.
-fn adopt_dump(
-    plan: &Plan,
-    kind: &'static str,
-    shards: u8,
-    epoch: u64,
-    previous: &dyn Predecessor,
-    cursor: &Cursor<'_>,
-) -> Result<Vec<LayerDescriptor>, Error> {
-    let mut adopted = Vec::with_capacity(shards as usize);
-
-    for shard in 0..shards {
-        let spec = plan.dump_scope(epoch, shard).layer_spec(kind)?;
-
-        if let Some(descriptor) = previous.adopt(kind, &spec.scope)? {
-            adopted.push((spec, descriptor));
-        }
-    }
-
-    if adopted.len() < shards as usize {
-        tracing::warn!(
-            kind,
-            epoch,
-            carried = adopted.len(),
-            shards,
-            "the stele this one follows does not carry the retained state dump for this epoch; \
-             publishing without it — a backfill run is what produces one"
-        );
-    }
-
-    let mut layers = Vec::with_capacity(adopted.len());
-
-    for (spec, descriptor) in adopted {
-        let at = cursor.open(kind, &spec.scope);
-        cursor.close(at, kind, Outcome::Inherited);
-
-        previous.landed(&descriptor)?;
-        layers.push(descriptor);
-    }
-
-    Ok(layers)
-}
-
 /// Send one state record to the shard its key belongs to under `ns`'s count
 /// and shard byte.
 ///
@@ -2297,8 +2017,8 @@ mod tests {
         chain
     }
 
-    /// The geometry tests are about windows, which retained dumps do not
-    /// move; the state-dump behaviour has its own tests in `tests/export.rs`.
+    /// The geometry tests are about windows, which the retained list does not
+    /// move.
     fn retained() -> RetainedEpochs {
         RetainedEpochs::default()
     }
@@ -2481,6 +2201,7 @@ mod chain_tests {
             retained: RetainedEpochs::default(),
             scratch: None,
             producers: Producers::DEFAULT,
+            blocks: None,
         }
     }
 
@@ -2509,6 +2230,7 @@ mod chain_tests {
                 network,
                 &ChainPoint::Specific(250, BlockHash::from([0xab; 32])),
                 2,
+                None,
             )
             .unwrap();
 
@@ -2540,6 +2262,7 @@ mod chain_tests {
             &network,
             &ChainPoint::Specific(150, BlockHash::from([0xcd; 32])),
             1,
+            None,
         )
         .unwrap();
 
@@ -2592,6 +2315,7 @@ mod chain_tests {
             &network,
             &ChainPoint::Specific(150, BlockHash::from([0xcd; 32])),
             1,
+            None,
         )
         .unwrap();
 
@@ -2647,6 +2371,7 @@ mod chain_tests {
             &network,
             &ChainPoint::Specific(150, BlockHash::from([0xcd; 32])),
             1,
+            None,
         )
         .unwrap();
 

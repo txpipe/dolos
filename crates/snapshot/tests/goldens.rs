@@ -34,7 +34,7 @@ use dolos_snapshot::{
 use stelae::{
     dir::SteleDir,
     frame::Limits,
-    inscription::{HistoryEntry, Inscription},
+    inscription::{canonical_json, HistoryEntry, Inscription},
     Digest, SteleReader, SteleWriter,
 };
 
@@ -481,8 +481,21 @@ fn history() -> Vec<HistoryEntry> {
     ]
 }
 
+/// The blocks snapshot a fixture stele names in `position.blocks`.
+const BLOCKS_INSCRIPTION: [u8; 32] = [0x77; 32];
+
+/// The identity of the same stele when its `position` names
+/// [`BLOCKS_INSCRIPTION`].
+const GOLDEN_INSCRIPTION_WITH_BLOCKS: &str =
+    "sha256:01ae630a11866a92cbbf8b5dde202a606bb83809d6993675253d7c700f98b07e";
+
 /// Write the whole fixture stele into `root`: its layers and an inscription.
 fn write_stele(root: &std::path::Path) -> (Inscription, Digest) {
+    write_stele_naming(root, None)
+}
+
+/// [`write_stele`], with `blocks` in its `position`.
+fn write_stele_naming(root: &std::path::Path, blocks: Option<&Digest>) -> (Inscription, Digest) {
     let stele = SteleDir::create(root).unwrap();
 
     let point = ChainPoint::Specific(END_SLOT, BlockHash::new(POINT_HASH));
@@ -490,7 +503,7 @@ fn write_stele(root: &std::path::Path) -> (Inscription, Digest) {
     let mut inscription = Inscription::new(
         &DolosProfile,
         EPOCH,
-        dolos_snapshot::position(&network(), &point, EPOCH).unwrap(),
+        dolos_snapshot::position(&network(), &point, EPOCH, blocks).unwrap(),
         dolos_snapshot::parameters(&RetainedEpochs::new(vec![DUMP_EPOCH]).unwrap()),
         dolos_snapshot::compression(),
     );
@@ -657,6 +670,54 @@ fn the_canonical_inscription_is_pinned() {
     assert!(canonical.contains("application/vnd.dolos.stelae.blocks.v1+zstd"));
     assert!(!canonical.contains("vnd.stelae.stelae"));
 }
+
+/// `position.blocks` (decision 0080): its spelling and form, and that a
+/// position without it is the one the inscription golden above already pins.
+#[test]
+fn the_position_is_pinned_with_and_without_its_blocks_reference() {
+    let point = ChainPoint::Specific(END_SLOT, BlockHash::new(POINT_HASH));
+    let blocks = Digest::from_bytes(BLOCKS_INSCRIPTION);
+
+    let canonical = |blocks: Option<&Digest>| {
+        let position = dolos_snapshot::position(&network(), &point, EPOCH, blocks).unwrap();
+        String::from_utf8(canonical_json(&position).unwrap()).unwrap()
+    };
+
+    assert_eq!(canonical(None), CANONICAL_POSITION);
+    assert_eq!(canonical(Some(&blocks)), CANONICAL_POSITION_WITH_BLOCKS);
+    assert!(CANONICAL_INSCRIPTION.contains(&format!(r#""position":{CANONICAL_POSITION}"#)));
+}
+
+/// The stele that names its blocks snapshot, end to end: the field moves the
+/// identity, and the document reads back with it.
+#[test]
+fn a_stele_naming_its_blocks_is_pinned() {
+    let temp = tempfile::tempdir().unwrap();
+    let blocks = Digest::from_bytes(BLOCKS_INSCRIPTION);
+    let (inscription, digest) = write_stele_naming(temp.path(), Some(&blocks));
+
+    assert_eq!(digest.to_string(), GOLDEN_INSCRIPTION_WITH_BLOCKS);
+
+    let read = SteleDir::open(temp.path())
+        .unwrap()
+        .read_inscription()
+        .unwrap();
+    assert_eq!(read, inscription);
+
+    let position = dolos_snapshot::read_position(&read.position).unwrap();
+    assert_eq!(position.blocks, Some(blocks));
+}
+
+const CANONICAL_POSITION: &str = concat!(
+    r#"{"epoch":7,"network":{"magic":764824073,"name":"mainnet"},"#,
+    r#""point":{"hash":"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b","slot":101}}"#,
+);
+
+const CANONICAL_POSITION_WITH_BLOCKS: &str = concat!(
+    r#"{"blocks":"sha256:7777777777777777777777777777777777777777777777777777777777777777","#,
+    r#""epoch":7,"network":{"magic":764824073,"name":"mainnet"},"#,
+    r#""point":{"hash":"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b","slot":101}}"#,
+);
 
 /// The whole document, so the diff of a format change is readable.
 ///
