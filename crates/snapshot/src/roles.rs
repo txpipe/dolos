@@ -483,9 +483,10 @@ mod tests {
         let (summary, window) = preview();
         let rule = Rule::new(&summary, window);
 
-        assert!(KINDS.contains(&crate::DIGESTS));
+        // the retired `digests` kind is no longer a kind, so it has no role
+        assert!(!KINDS.contains(&"digests"));
         assert!(matches!(
-            rule.role(crate::DIGESTS, None, 3),
+            rule.role("digests", None, 3),
             Err(Error::Unassigned(_))
         ));
         assert!(matches!(

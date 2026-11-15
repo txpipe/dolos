@@ -444,7 +444,6 @@ fn a_chained_publish_builds_its_diff_and_its_tip_and_inherits_the_rest() {
             &plan,
             &ledger.archive,
             &ledger.state,
-            None,
             &settling,
             &Observer::silent(),
         )
