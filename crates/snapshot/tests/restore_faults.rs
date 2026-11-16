@@ -280,10 +280,11 @@ fn a_retried_manifest_read_is_announced() {
         registry.fail_next_manifest(1);
     });
 
+    // The diff manifest twice, then the tip manifest beside it.
     assert_eq!(
         registry.manifest_gets() - published.get(),
-        2,
-        "the manifest is fetched twice"
+        3,
+        "the diff manifest is fetched twice"
     );
     assert_eq!(retries, 1, "the manifest retry reaches the observer");
 }

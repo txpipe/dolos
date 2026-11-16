@@ -45,6 +45,7 @@ where
         "{kind}: the header record counts too"
     );
 
+    let stele = common::seal_alone(&stele, vec![written.descriptor.clone()]);
     let index = stele.blob_index().unwrap();
     let raw = read_both_ways(&stele, &index, &written.descriptor);
 
@@ -196,6 +197,7 @@ fn an_over_wide_exact_key_survives_the_layer_and_is_refused_by_the_codec() {
         &epoch_scope(),
         std::slice::from_ref(&forged),
     );
+    let stele = common::seal_alone(&stele, vec![written.descriptor.clone()]);
     let index = stele.blob_index().unwrap();
     let raw = read_both_ways(&stele, &index, &written.descriptor);
 
@@ -226,6 +228,7 @@ fn a_layer_read_under_the_wrong_kind_is_refused() {
         &encode_all(&common::blocks(), blocks::encode),
     );
 
+    let stele = common::seal_alone(&stele, vec![written.descriptor.clone()]);
     let index = stele.blob_index().unwrap();
 
     let mut mislabelled = written.descriptor.clone();
@@ -295,6 +298,18 @@ fn a_layer_of_another_profile_is_refused() {
         )
         .unwrap();
 
+    // Sealed and read under the other profile, whose media types these are.
+    let mut inscription = stelae::Inscription::new(
+        &Other,
+        EPOCH,
+        serde_json::json!({}),
+        serde_json::json!({}),
+        dolos_snapshot::compression(),
+    );
+    inscription.tip = vec![written.descriptor.clone()];
+    stele.seal(&Other, &inscription).unwrap();
+
+    let stele = stele.pull_sequence(&Other, EPOCH).unwrap();
     let index = stele.blob_index().unwrap();
 
     let buffered = stele

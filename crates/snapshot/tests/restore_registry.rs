@@ -138,7 +138,7 @@ impl Node {
         }
     }
 
-    fn publish(&self, repository: &Registry, plan: &Plan) {
+    fn publish(&self, repository: &Registry, plan: &Plan) -> registry::Published {
         let stores = self.stores(plan);
 
         registry::publish(
@@ -148,7 +148,7 @@ impl Node {
             stores.state(),
             &Observer::silent(),
         )
-        .unwrap();
+        .unwrap()
     }
 }
 
@@ -219,6 +219,80 @@ fn target<B: ToyStores>(blank: &Blank<B>) -> restore::Target<'_, impl ArchiveSto
 // ---------------------------------------------------------------------------
 // Done criterion 1
 // ---------------------------------------------------------------------------
+
+/// Six steles published into one repository resolve to the layers a lineage
+/// started at the sixth boundary lists, digest for digest, and restore what it
+/// restores: the same records of every kind, into the same stores.
+#[test]
+#[ignore]
+fn a_six_stele_chain_restores_what_a_lineage_started_at_its_head_does() {
+    let fixture = Fixture::spawn();
+    let domain = harness::<MemoryStores>();
+    let magic = u64::from(domain.genesis().network_magic());
+
+    let publish = |repository: &Registry, plan: &Plan| {
+        registry::publish(
+            registry::Publishing::new(repository),
+            plan,
+            domain.archive(),
+            domain.state(),
+            &Observer::silent(),
+        )
+        .unwrap()
+    };
+
+    let chain = fixture.repository("dolos/chain");
+
+    for sequence in 1..=6 {
+        let published = publish(&chain, &plan_at_boundary(&domain, sequence));
+
+        assert_eq!(
+            published.inscription.previous.map(|link| link.sequence),
+            Some(sequence - 1).filter(|previous| *previous > 0),
+        );
+    }
+
+    let alone = fixture.repository("dolos/lineage-start");
+    let started = publish(&alone, &plan_at_boundary(&domain, 6));
+    assert!(started.inscription.previous.is_none());
+
+    let resolved = Point::Latest.resolve(&chain).unwrap();
+    let resolved = resolved.chain().unwrap();
+
+    let keyed = |layers: &mut dyn Iterator<Item = &LayerDescriptor>| {
+        layers
+            .map(|layer| (layer.kind.clone(), layer.scope.to_string(), layer.diff_id))
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+
+    assert_eq!(resolved.inscriptions().len(), 6);
+    assert_eq!(
+        keyed(&mut resolved.descriptors()),
+        keyed(&mut started.inscription.layers())
+    );
+
+    let restore = |repository: &Registry| {
+        let blank = Blank::<MemoryStores>::open();
+        let storage = tempfile::tempdir().unwrap();
+        let summary = restore_from(
+            repository,
+            Point::Latest,
+            storage.path(),
+            magic,
+            &blank,
+            false,
+        )
+        .unwrap();
+
+        (summary, blank)
+    };
+
+    let (by_chain, from_chain) = restore(&chain);
+    let (by_start, from_start) = restore(&alone);
+
+    assert_eq!(by_chain, by_start);
+    assert_stores_match(&from_chain, &from_start);
+}
 
 /// A stele restored from a registry is the stele restored from a directory.
 ///
@@ -350,9 +424,9 @@ fn a_killed_registry_restore_resumes_where_it_stopped() {
     let storage = tempfile::tempdir().unwrap();
     let blank = Blank::<MemoryStores>::open();
 
-    let stele = Point::Latest.pull(&repository).unwrap();
-    let identity = stele.read_inscription().unwrap().digest().unwrap();
-    let plan = restore::plan(&stele, node.magic, None).unwrap();
+    let stele = Point::Latest.resolve(&repository).unwrap();
+    let identity = stele.chain().unwrap().identity();
+    let plan = restore::plan(stele.chain().unwrap(), node.magic, None).unwrap();
     let index = stele.blob_index().unwrap();
 
     let epoch_layers: Vec<Digest> = plan.immutable_layers().map(|l| l.diff_id).collect();
@@ -464,9 +538,9 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
 
     // Sequence 1, interrupted at its first state shard: every epoch layer it
     // carries commits, the tip does not.
-    let first = Point::Epoch(1).pull(&repository).unwrap();
-    let identity = first.read_inscription().unwrap().digest().unwrap();
-    let plan = restore::plan(&first, node.magic, None).unwrap();
+    let first = Point::Epoch(1).resolve(&repository).unwrap();
+    let identity = first.chain().unwrap().identity();
+    let plan = restore::plan(first.chain().unwrap(), node.magic, None).unwrap();
     let index = first.blob_index().unwrap();
 
     let shards: Vec<Digest> = plan.tip_layers().map(|l| l.diff_id).collect();
@@ -527,7 +601,7 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
 
     // The point resolved to what it claimed. `latest` is sequence 2 here, and
     // `epoch-1` is still the stele the first half of this test read.
-    let latest = Point::Latest.pull(&repository).unwrap();
+    let latest = Point::Latest.resolve(&repository).unwrap();
     assert_eq!(latest.read_inscription().unwrap().sequence, 2);
     assert_eq!(
         Point::Epoch(1)
@@ -544,7 +618,7 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
         "delta restore: {} layers already held, {} fetched (of {} in the stele)",
         resumed.layers_skipped,
         resumed.layers_fetched,
-        latest.read_inscription().unwrap().layers.len(),
+        latest.chain().unwrap().layers().len(),
     );
 }
 
@@ -1121,9 +1195,9 @@ fn a_resumed_registry_restore_reports_what_it_skipped() {
     // uses, and for the same reason: a wall-clock kill against a loopback
     // registry holding a kilobyte-scale stele interrupts nothing.
     {
-        let stele = Point::Latest.pull(&repository).unwrap();
-        let identity = stele.read_inscription().unwrap().digest().unwrap();
-        let plan = restore::plan(&stele, node.magic, None).unwrap();
+        let stele = Point::Latest.resolve(&repository).unwrap();
+        let identity = stele.chain().unwrap().identity();
+        let plan = restore::plan(stele.chain().unwrap(), node.magic, None).unwrap();
         let index = stele.blob_index().unwrap();
 
         let epoch_layers: Vec<Digest> = plan.immutable_layers().map(|l| l.diff_id).collect();
@@ -1360,6 +1434,59 @@ fn a_stopped_registry_restore_resumes_through_its_record() {
             "stopped at call {stop}"
         );
     }
+}
+
+/// A recorded restore of a head that links to an earlier stele, stopped and
+/// resumed: the record names the head, and the resume reads that head's chain
+/// into the node an uninterrupted restore builds.
+#[test]
+#[ignore]
+fn a_stopped_restore_of_a_chained_head_resumes_through_its_record() {
+    let fixture = Fixture::spawn();
+    let node = Node::build();
+    let name = "dolos/record-resume-chain";
+
+    let first = node.publish(&fixture.repository(name), &node.first);
+    let head = node.publish(&fixture.repository(name), &node.second);
+    assert_eq!(
+        head.inscription.previous.unwrap().sequence,
+        first.inscription.sequence
+    );
+
+    let source = Recorded::open(&fixture, name, node.magic);
+
+    let control = Blank::<FjallStores>::open();
+    let ops = source.stopped_at(
+        Point::Latest,
+        tempfile::tempdir().unwrap().path(),
+        &control,
+        None,
+    );
+    let control = contents_digest(&control.archive, control.state());
+
+    // The tip's first commit, with the epoch layers before it recorded.
+    let stop = ops.iter().position(|at| *at == Op::StateCommit).unwrap() + 1;
+
+    let storage = tempfile::tempdir().unwrap();
+    let blank = Blank::<FjallStores>::open();
+    source.stopped_at(Point::Latest, storage.path(), &blank, Some(stop));
+
+    let record = source_record(storage.path()).expect("no source record");
+    assert_eq!(record.sequence, node.second.sequence);
+    assert_eq!(record.inscription_digest, head.identity);
+
+    let recorded = RestoreProgress::load(&progress_path_in(storage.path()))
+        .unwrap()
+        .map_or(0, |progress| progress.completed.len());
+    assert!(recorded > 0, "the stop recorded no layer to skip");
+
+    let resumed = source
+        .restore(Point::Epoch(record.sequence), storage.path(), &blank, true)
+        .unwrap();
+
+    assert_eq!(resumed.summary.layers_skipped, recorded);
+    assert_eq!(source_record(storage.path()), None);
+    assert_eq!(contents_digest(&blank.archive, blank.state()), control);
 }
 
 /// Interrupt a recorded restore of the repository's first stele at its tip,

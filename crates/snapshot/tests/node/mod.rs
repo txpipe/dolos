@@ -357,6 +357,14 @@ pub fn export_to<B: ToyStores>(root: &std::path::Path, domain: &ToyDomain<B>) ->
     export_plan(root, domain, &plan_for(domain))
 }
 
+/// The latest stele of the image layout at `root`, resolved through its chain.
+pub fn resolved(root: &std::path::Path) -> stelae::dir::Snapshot {
+    SnapshotDir::open(root)
+        .unwrap()
+        .resolve_latest(&dolos_snapshot::DolosProfile)
+        .unwrap()
+}
+
 /// An account's row of `window`, written straight to `domain`'s archive.
 pub fn write_account_row(
     domain: &ToyDomain<MemoryStores>,
@@ -397,8 +405,7 @@ pub fn account_layer(
     epoch: u64,
 ) -> stelae::inscription::LayerDescriptor {
     inscription
-        .layers
-        .iter()
+        .layers()
         .find(|layer| {
             layer.kind == "log-account-epochs"
                 && layer.scope.get("epoch").and_then(serde_json::Value::as_u64) == Some(epoch)

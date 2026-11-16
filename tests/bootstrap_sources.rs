@@ -1274,8 +1274,8 @@ fn force_refuses_a_stele_it_would_lose_the_node_over() {
         }
 
         for (view, linked) in [
-            ("stele-inscription", dolos_snapshot::dir::INSCRIPTION_FILE),
-            ("stele-blob-index", dolos_snapshot::dir::BLOB_INDEX_FILE),
+            ("stele-layout", dolos_snapshot::dir::LAYOUT_FILE),
+            ("stele-index", dolos_snapshot::dir::INDEX_FILE),
         ] {
             let view = node.root.path().join(view);
             copy_tree(&stele, &view);

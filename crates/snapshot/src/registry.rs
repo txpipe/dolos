@@ -8,62 +8,42 @@
 //!
 //! ## A publish is chained, or it is refused
 //!
-//! Every stele carries a `history`: one entry per prior publication,
-//! contiguous, ending at `sequence - 1`. A publish therefore reads the
-//! repository's moving tag before it writes anything, and there are exactly
-//! three outcomes — the repository is empty and this stele starts a chain, the
-//! latest stele is this one's predecessor and the chain extends, or **the
-//! publish is refused**. A publisher that skipped an epoch has an operational
-//! fault, and silently starting a second chain in one repository is precisely
-//! what the field exists to prevent. There is no flag here that overrides that.
+//! Every stele but the first of a lineage carries `previous`: the sequence and
+//! inscription digest of the stele it follows, which is `sequence - 1`. A
+//! publish therefore reads the repository's moving tag before it writes
+//! anything, and there are exactly three outcomes — the repository is empty
+//! and this stele starts a lineage, the latest stele is this one's predecessor
+//! and the chain extends, or **the publish is refused**. A publisher that
+//! skipped an epoch has an operational fault, and silently starting a second
+//! lineage in one repository is precisely what the link exists to prevent.
+//! There is no flag here that overrides that.
 //!
-//! The rule itself is [`crate::export::history_for`], one function shared with
+//! The rule itself is [`crate::export::link_for`], one function shared with
 //! the verifier that reproduces a chained digest without a registry.
 //!
 //! ## "Nothing has closed since last time" is not a fault
 //!
 //! One of those refusals was carrying two meanings. A publisher on a timer
 //! whose node has not entered a new epoch is in the *ordinary* case, and it
-//! reached [`publish`] as the same `HistoryBreak` a skipped epoch raises.
+//! reached [`publish`] as the same `LinkBreak` a skipped epoch raises.
 //! [`standing`] separates them before anything is built, out of the two numbers
 //! a publish already has: the sequence the moving tag carries and the one the
 //! cursor implies. A node that is not past the repository has nothing to do,
 //! which a caller reports and exits zero on; a node further ahead than one
 //! sequence still meets the refusal, now with the distance in it.
 //!
-//! ## A reused layer is attested without being reproduced
+//! ## A publish uploads its own layers
 //!
-//! The layers of an epoch that has closed cannot change, so a publish that
-//! already published them has no reason to build them again. The one
-//! exception is `log-account-epochs`, whose rows settle one boundary after the
-//! window closes ([`crate::is_settled`]). Otherwise the publish points its
-//! manifest at the blobs the previous manifest pointed at and never opens the
-//! store. That is worth a plain sentence, because it changes what a publish
-//! asserts. The new inscription describes those layers, and this node did not
-//! read a single byte of them out of its own stores to check. Three things make
-//! the trade defensible and all three are load-bearing:
-//!
-//! - **Scope equality is the entire test** — for an epoch layer that is
-//!   `epoch`, `startSlot` and `endSlot`, all three. It is what makes a
-//!   previously *clamped* final epoch — one whose window stopped at the cursor
-//!   rather than at the epoch boundary — correctly fail to match the same epoch
-//!   published later in full, and be rebuilt.
-//! - **The blob is checked to still exist**, one `HEAD` per layer, inside
-//!   `Registry::adopt_layer`. ADR-004 argues epoch blobs stay referenced by
-//!   later manifests and so survive garbage collection; a descriptor pointing
-//!   at a blob that is gone is a stele nobody can restore, and the argument is
-//!   not a substitute for the check.
-//! - **A publisher can always choose to reproduce**, with `rebuild`. It
-//!   suppresses inheritance and nothing else — the history still chains,
-//!   because rebuilding what you published is not the same act as forgetting
-//!   that you published it.
-//!
-//! State shards are never inherited; [`crate::export`] says why, and the second
-//! of its two reasons is the one that matters.
+//! An inscription lists only the layers its own sequence adds to the lineage
+//! and the ones that belong to it alone (decision 0080), so a publish never
+//! re-lists, adopts or carries a layer of an earlier stele: those stay in the
+//! inscriptions that listed them, and a reader resolves them through the chain.
+//! What a publish builds is [`crate::roles::Listing`]'s, and its manifests are
+//! as large as one epoch makes them, whatever the length of the chain.
 //!
 //! ## Two consequences a publisher should hear from the documentation
 //!
-//! **A repository's identity is path-dependent.** `history` is inside the
+//! **A repository's identity is path-dependent.** `previous` is inside the
 //! canonical document, so a stele's digest depends on the chain it extends.
 //! Two repositories that were published into differently — even once, even by
 //! the same node from the same stores — never agree on a digest again at any
@@ -74,7 +54,7 @@
 //! checks.
 //!
 //! **A publish that dies half way leaves blobs behind.** Layers upload one at a
-//! time and the manifest is written last, so an interrupted publish leaves
+//! time and the manifests are written last, so an interrupted publish leaves
 //! uploaded blobs that no manifest references. They are harmless — a registry's
 //! garbage collection reclaims exactly that — and the moving tag still resolves
 //! to the previous stele, which is a stele, and restores. Publishing again
@@ -85,36 +65,33 @@
 //! The blob check makes that retry cheap in *bytes* and not in *work*: a
 //! `diffId` is the digest of bytes that do not exist until they are built, so
 //! rediscovering that the registry already has a layer costs the whole walk of
-//! the stores that produced it. For an interrupted mainnet publish that is the
-//! same hours again, and nothing in the format asks for it — the manifest is
+//! the stores that produced it. For an interrupted mainnet first publish that
+//! is hours again, and nothing in the format asks for it — the manifests are
 //! written last precisely so an interrupted publish is safe to repeat.
 //!
 //! [`PublishRecord`] closes it, and it is the mirror of the restore's progress
-//! file: a host-local note beside the stores, naming each **epoch layer** whose
-//! upload succeeded. A restart reads it and adopts those layers through
-//! [`Registry::adopt_carried`] — the same move an inherited layer makes, one
-//! `HEAD` and no store read. The state layers are never in it, for the reason
-//! they are never inherited.
+//! file: a host-local note beside the stores, naming each **`diff` layer**
+//! whose upload succeeded. A restart reads it and resumes those layers through
+//! [`Registry::adopt_carried`] — one `HEAD` and no store read. Tip layers are
+//! never in it: they describe the moment of the cut, and a restart rebuilds
+//! them.
 //!
-//! The record is **a stand-in for the predecessor manifest an unfinished
-//! publish never got to write, and nothing more.** Four properties keep it from
-//! becoming a second source of truth:
+//! The record is **a stand-in for the manifest an unfinished publish never got
+//! to write, and nothing more.** Four properties keep it from becoming a
+//! second source of truth:
 //!
 //! - **a skip is gated on the registry's own blob check**, so the record alone
-//!   can never place a digest in a manifest the registry cannot serve. Where a
-//!   manifest naming a reclaimed blob is a refusal, a record naming one is a
-//!   rebuild;
-//! - **a recorded digest equals a rebuilt one**, because an epoch layer is
-//!   deterministic for a closed epoch — the property the export golden and the
+//!   can never place a digest in a manifest the registry cannot serve. A record
+//!   naming a reclaimed blob is a rebuild;
+//! - **a recorded digest equals a rebuilt one**, because a `diff` layer is
+//!   final, and so deterministic — the property the export golden and the
 //!   two-backend determinism test already pin — and the record refuses itself
-//!   if anything the bytes depend on has moved ([`Origin`]). The one kind it
-//!   does not hold for is `log-account-epochs`, whose window settles one
-//!   boundary after it closes, and the record does not say at which sequence it
-//!   built a layer. A publish therefore never takes that kind from a record,
-//!   only from the predecessor manifest ([`export::Settling`]);
-//! - **`--rebuild` ignores it wholesale**, exactly as it already ignores
-//!   inheritance, and overwrites it rather than reading it;
-//! - **the manifest remains the only statement of what the repository holds.**
+//!   if anything the bytes depend on has moved ([`Origin`]), or if a build that
+//!   recorded other layers wrote it. A record offers a layer only where the
+//!   sequence being published places it in `diff`;
+//! - **`--rebuild` ignores it wholesale**, and overwrites it rather than
+//!   reading it;
+//! - **the manifests remain the only statement of what the repository holds.**
 //!   A stale or deleted record costs a rebuild, never a wrong publish.
 //!
 //! ## Reading one back
@@ -122,7 +99,8 @@
 //! [`restore_registry`] is the other half, and almost all of it is
 //! [`crate::restore`]'s: the same plan, the same checkpoints, the same store
 //! writes. What only this side knows is how a repository is addressed — a
-//! [`Point`], resolved into a tag — and that is the whole of the difference.
+//! [`Point`], resolved into a tag and walked through its chain — and that is
+//! the whole of the difference.
 //!
 //! A tag is **rendered by the profile and never composed here**. `epoch-500` is
 //! `DolosProfile::tag_for_sequence(500)` and `latest` is its moving tag; the
@@ -149,7 +127,7 @@ use stelae::{
     oci::{Snapshot, Transfer},
     progress::Observer,
     transport::BlobIndex,
-    Digest, SnapshotReader as _, SnapshotWriter,
+    Chain, Digest, SnapshotReader as _, SnapshotWriter,
 };
 
 /// How a repository is named, re-exported so the binary can take one from an
@@ -168,7 +146,7 @@ pub use stelae::oci::{Auth, Registry, Repository, DEFAULT_CONCURRENCY, SCHEME};
 use stelae_driver::publish::Chained;
 
 use crate::{
-    export::{self, Plan, Predecessor as _, Settling, Standing},
+    export::{self, Plan, Standing},
     prepare,
     restore::{Outlook, Restoring, Summary, Target},
     DolosProfile, Error,
@@ -195,11 +173,21 @@ pub enum Point {
 }
 
 impl Point {
-    /// Resolve this point into a readable stele.
+    /// Read this point's own sequence: its manifests and inscription, and so
+    /// the layers that sequence lists alone.
     pub fn pull(&self, registry: &Registry) -> Result<Snapshot, Error> {
         Ok(match self {
             Self::Latest => registry.pull_latest(&DolosProfile)?,
             Self::Epoch(epoch) => registry.pull_sequence(&DolosProfile, *epoch)?,
+        })
+    }
+
+    /// Resolve this point into the whole stele: its sequence and every
+    /// inscription its chain reaches back to the first of its lineage.
+    pub fn resolve(&self, registry: &Registry) -> Result<Snapshot, Error> {
+        Ok(match self {
+            Self::Latest => registry.resolve_latest(&DolosProfile)?,
+            Self::Epoch(epoch) => registry.resolve_sequence(&DolosProfile, *epoch)?,
         })
     }
 }
@@ -245,16 +233,16 @@ impl std::str::FromStr for Point {
 /// Restore a node from a stele in `registry`.
 ///
 /// The registry counterpart of [`crate::restore::restore_dir`], and everything
-/// after the pull is the same code: an inscription that names another network
-/// is refused before a store is opened, the plan is preflighted against free
-/// space, and each epoch layer is checkpointed as it commits so `resume` can
-/// pick the run back up.
+/// after the chain is resolved is the same code: an inscription that names
+/// another network is refused before a store is opened, the plan is
+/// preflighted against free space, and each epoch layer is checkpointed as it
+/// commits so `resume` can pick the run back up.
 ///
-/// The one thing this transport does better is free. A directory has no
-/// manifest and so rebuilds the `diffId`→blob map by decompressing every blob
-/// before the restore reads any of it; a registry states it, and states each
-/// layer's compressed size along with it — which is what makes the
-/// remaining-download figure in [`Outlook`] exact rather than an extrapolation.
+/// A stele whose tip the repository no longer holds is [`Error::TipGone`]:
+/// its diff is still there, but it cannot be restored as a node. A resume
+/// whose recorded stele the tag no longer names, absent or another, is the
+/// resume's [`crate::restore::ResumeRefusal::Gone`], decided from the head
+/// before its chain is walked.
 ///
 /// **Never call this from inside an async context.** See [`open`].
 pub fn restore_registry<A, S>(
@@ -272,17 +260,40 @@ where
     // the operator too; the stele shares this connection's observer.
     registry.observe(observer.clone());
 
-    let stele = match point.pull(registry) {
+    let record = crate::restore::pinned(&node)?;
+
+    if let Some(record) = &record {
+        let head = match point.pull(registry) {
+            Ok(head) => head.read_inscription()?.digest()?,
+            Err(error) if is_absent(&error) => return Err(crate::restore::gone(record.clone())),
+            Err(error) => return Err(error),
+        };
+
+        if head != record.inscription_digest {
+            return Err(crate::restore::gone(record.clone()));
+        }
+    }
+
+    let stele = match point.resolve(registry) {
         Ok(stele) => stele,
         Err(error) => {
-            return Err(match crate::restore::pinned(&node)? {
+            return Err(match record {
                 Some(record) if is_absent(&error) => crate::restore::gone(record),
                 _ => error,
             })
         }
     };
 
-    crate::restore::restore_stele(&stele, node, registry.scratch_dir(), target, observer)
+    let chain = crate::restore::chain_of(stele.chain())?;
+
+    crate::restore::restore_stele(
+        &stele,
+        chain,
+        node,
+        registry.scratch_dir(),
+        target,
+        observer,
+    )
 }
 
 /// Whether a pull failed because the repository holds no manifest under the
@@ -411,7 +422,7 @@ pub fn record_path_in(storage_path: &Path) -> PathBuf {
 }
 
 /// What an interrupted publish left behind and what it has to agree with
-/// before a single layer of it is adopted, which is
+/// before a single layer of it is resumed, which is
 /// [`stelae_driver::publish`]'s: a note about blobs in a repository, keyed by
 /// the pair that identifies a layer. Their serialized shape is frozen by the
 /// fixtures that carry it.
@@ -425,7 +436,8 @@ pub struct Published {
     pub identity: Digest,
     /// Layers this publish read out of the stores and compressed.
     pub layers_built: usize,
-    /// Layers it inherited from the stele before it, and never built.
+    /// Layers an interrupted attempt of this publish had uploaded, carried
+    /// rather than built.
     pub layers_reused: usize,
     /// What the transport moved, as it counted it.
     pub transfer: Transfer,
@@ -434,19 +446,16 @@ pub struct Published {
 /// What a publish into a repository *would* do.
 ///
 /// The `--dry-run` half, and it answers the question a publisher wants before
-/// committing hours: how much of this is new. It reports what the scopes
-/// permit and deliberately spends no `HEAD` per layer — the publish itself
-/// verifies every blob it inherits, and a dry run that promised a reuse the
-/// publish then refused would be worse than one that does not promise.
+/// committing hours: what this sequence lists. It spends no `HEAD` per layer,
+/// so the layers an interrupted attempt already uploaded count as built here;
+/// the publish finds them.
 #[derive(Debug, Clone)]
 pub struct Preview {
     /// The sequence this publish would write.
     pub sequence: u64,
     /// The stele it would chain to, if the repository holds one.
     pub predecessor: Option<(u64, Digest)>,
-    /// How many entries the new `history` would carry.
-    pub history: usize,
-    pub layers_reused: usize,
+    /// The layers the stele would list, in its `diff` and its `tip`.
     pub layers_built: usize,
 }
 
@@ -475,35 +484,37 @@ pub fn standing(registry: &Registry, plan: &Plan) -> Result<Standing, Error> {
 ///
 /// By the time this exists, every check that needs no store has run:
 ///
-/// - **the two documents agree.** The pull itself proved it: the inscription is
-///   canonical, its digest is the config digest the manifest names, and every
+/// - **the documents agree.** The resolve itself proved it: each inscription is
+///   canonical, its digest is the config digest its manifests name, and every
 ///   manifest layer matches the inscription's at the same position and `diffId`
-///   — `stelae::oci::read_manifest`, the contract the manifest golden freezes.
-/// - **the history chain is contiguous back to its first entry** and ends at
-///   `sequence - 1`. The protocol refuses to parse an inscription whose chain
-///   skips, so a gapped history never reaches the layer checks at all.
-/// - **every blob was streamed end to end.** Its bytes hash to the blob digest
-///   the manifest addresses it by and stay within the compressed size the
-///   manifest claims; what they decompress to stays within the size the
-///   descriptor claims and hashes to the layer's `diffId`, with the record
-///   count the inscription states.
+///   — `stelae::manifest::read_manifest`.
+/// - **the chain links back to the first of its lineage.** Each link's digest
+///   is the inscription found at its sequence, and no layer is listed twice
+///   across the chain (`stelae::Chain::walk`).
+/// - **every blob of the layer set was streamed end to end.** Its bytes hash to
+///   the blob digest the manifest addresses it by and stay within the
+///   compressed size the manifest claims; what they decompress to stays within
+///   the size the descriptor claims and hashes to the layer's `diffId`, with
+///   the record count the inscription states.
 ///
-/// What none of this establishes is *who published any of it*. The history's
+/// What none of this establishes is *who published any of it*. The chain's
 /// digests are attested by the newest inscription and nothing here verifies a
 /// signature over that inscription — signatures are Phase 5, and a verifier
 /// claiming provenance from digests alone would be worse than this sentence.
 #[derive(Debug, Clone)]
 pub struct Verified {
-    /// The inscription every layer was checked against.
+    /// The head's inscription, the one the point names.
     pub inscription: Inscription,
+    /// The chain every layer was checked through.
+    pub chain: Chain,
     /// The stele's identity — what a Phase 5 signature will be over.
     pub identity: Digest,
     /// Compressed bytes streamed and checked, counted off the wire.
     pub compressed_bytes: u64,
 }
 
-/// Check a published stele's digests: manifest against inscription, then every
-/// blob against both of its digests.
+/// Check a published stele's digests: its chain, manifests against
+/// inscriptions, then every blob of its layer set against both of its digests.
 ///
 /// The whole report is [`Verified`]; the whole verdict is the `Result`. A
 /// failing layer comes back as [`Error::LayerVerification`], naming the layer's
@@ -512,7 +523,8 @@ pub struct Verified {
 ///
 /// **Never call this from inside an async context.** See [`open`].
 pub fn verify(registry: &Registry, point: Point) -> Result<Verified, Error> {
-    let stele = point.pull(registry)?;
+    let stele = point.resolve(registry)?;
+    let chain = crate::restore::chain_of(stele.chain())?.clone();
     let inscription = stele.read_inscription()?;
     let blobs = stele.blob_index()?;
 
@@ -526,7 +538,7 @@ pub fn verify(registry: &Registry, point: Point) -> Result<Verified, Error> {
 
     let mut compressed_bytes = 0u64;
 
-    for descriptor in &inscription.layers {
+    for descriptor in chain.descriptors() {
         let digests = check_layer(&stele, &blobs, descriptor, limits).map_err(|source| {
             Error::LayerVerification {
                 kind: descriptor.kind.clone(),
@@ -539,8 +551,9 @@ pub fn verify(registry: &Registry, point: Point) -> Result<Verified, Error> {
     }
 
     Ok(Verified {
-        identity: inscription.digest()?,
+        identity: chain.identity(),
         inscription,
+        chain,
         compressed_bytes,
     })
 }
@@ -596,42 +609,46 @@ fn check_layer(
 /// What a repository holds at a point, read without pulling a single layer.
 #[derive(Debug, Clone)]
 pub struct Inspected {
+    /// The head's inscription, the one the point names.
     pub inscription: Inscription,
-    /// The stele's identity: sha256 of the canonical inscription.
+    /// Every inscription back to the first of the lineage, and the layer set
+    /// they make.
+    pub chain: Chain,
+    /// The stele's identity: sha256 of the head's canonical inscription.
     pub identity: Digest,
-    /// Each layer's compressed size as the manifest carries it, in inscription
-    /// order. `None` where the manifest claims something impossible — a
-    /// negative size — which a report prints as unknown rather than as a
-    /// number.
+    /// Each layer's compressed size as its manifest carries it, in the order
+    /// of the chain's layer set. `None` where the manifest claims something
+    /// impossible — a negative size — which a report prints as unknown rather
+    /// than as a number.
     pub compressed: Vec<Option<u64>>,
-    /// Compressed bytes across every layer, as the manifest reports them.
+    /// Compressed bytes across the layer set, as the manifests report them.
     pub total_compressed: u64,
 }
 
-/// Read a stele's two documents and nothing else.
+/// Read a stele's documents and nothing else.
 ///
 /// The first thing an operator does when a restore behaves oddly, priced
-/// accordingly: two small GETs — the manifest and the config blob — and no
-/// layer is fetched. Everything the pull verifies ([`Registry::pull`]) is
-/// verified here too, so what is reported is a stele, not merely a manifest
-/// that looked like one.
+/// accordingly: the manifests and inscriptions of its chain, read ahead
+/// several sequences at a time, and no layer is fetched. Everything the
+/// resolve verifies ([`Registry::resolve`]) is verified here too, so what is
+/// reported is a stele, not merely a manifest that looked like one.
 ///
 /// **Never call this from inside an async context.** See [`open`].
 pub fn inspect(registry: &Registry, point: Point) -> Result<Inspected, Error> {
-    let stele = point.pull(registry)?;
-    let inscription = stele.read_inscription()?;
+    let stele = point.resolve(registry)?;
+    let chain = crate::restore::chain_of(stele.chain())?.clone();
     let blobs = stele.blob_index()?;
 
-    let compressed = inscription
-        .layers
-        .iter()
+    let compressed = chain
+        .descriptors()
         .map(|descriptor| stele.compressed_size(&blobs, descriptor))
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(Inspected {
-        identity: inscription.digest()?,
+        identity: chain.identity(),
         total_compressed: stele.total_compressed_size(),
-        inscription,
+        inscription: stele.read_inscription()?,
+        chain,
         compressed,
     })
 }
@@ -647,11 +664,11 @@ pub use stelae_driver::publish::{preflight, staging_peak, StagingPeak};
 /// Publish `plan` into the repository `publishing` names, chained to whatever
 /// is already there.
 ///
-/// Reads the repository's moving tag first: an absent one starts a history, a
+/// Reads the repository's moving tag first: an absent one starts a lineage, a
 /// predecessor at `sequence - 1` extends it, and anything else is refused
-/// before a single layer is built. [`Publishing::rebuild`] reproduces every
-/// layer instead of inheriting the ones whose scope is unchanged, and
-/// [`Publishing::storage_path`] is where the resumption record lives — see the
+/// before a single layer is built. [`Publishing::rebuild`] builds every layer
+/// instead of resuming an interrupted attempt's, and
+/// [`Publishing::record_path`] is where the resumption record lives — see the
 /// module documentation for both.
 ///
 /// `observer` is who hears about it while it runs, and [`Observer::silent`] is
@@ -706,8 +723,8 @@ where
     // without touching the network. `export` asks again, for its other callers.
     crate::boundary::check(plan, archive, state)?;
 
-    publish_chained(publishing, plan, |settling| {
-        export::export(stele, plan, archive, state, settling, observer)
+    publish_chained(publishing, plan, |previous| {
+        export::export(stele, plan, archive, state, previous, observer)
     })
 }
 
@@ -724,8 +741,8 @@ pub fn publish_prepared<A: ArchiveStore>(
 ) -> Result<Published, Error> {
     let registry = publishing.registry;
 
-    publish_chained(publishing, &finalizing.bundle.plan(), |settling| {
-        prepare::finalize(registry, finalizing, archive, settling, observer)
+    publish_chained(publishing, &finalizing.bundle.plan(), |previous| {
+        prepare::finalize(registry, finalizing, archive, previous, observer)
     })
 }
 
@@ -734,18 +751,17 @@ pub fn publish_prepared<A: ArchiveStore>(
 fn publish_chained(
     publishing: Publishing<'_>,
     plan: &Plan,
-    build: impl FnOnce(&Settling<Chained<'_>>) -> Result<stelae::inscription::Inscription, Error>,
+    build: impl FnOnce(&Chained<'_>) -> Result<stelae::inscription::Inscription, Error>,
 ) -> Result<Published, Error> {
     let registry = publishing.registry;
     let latest = registry.latest(&DolosProfile)?;
-    let settling = chained(publishing, latest.as_ref(), plan)?;
-    let previous = settling.inner();
+    let previous = chained(publishing, latest.as_ref(), plan)?;
 
     // Reset before the export, so what comes back is this publish's cost and
     // not a total carried over from an earlier one through the same transport.
     registry.take_transfer();
 
-    let inscription = build(&settling)?;
+    let inscription = build(&previous)?;
 
     // Only here: the stele is sealed, so the note about what was uploaded on the
     // way to it has nothing left to say. Before the seal it would be a record
@@ -753,10 +769,10 @@ fn publish_chained(
     previous.forget_record()?;
 
     let identity = inscription.digest()?;
-    let layers_reused = previous.adopted();
+    let layers_reused = previous.resumed();
 
     Ok(Published {
-        layers_built: inscription.layers.len() - layers_reused,
+        layers_built: inscription.layers().count() - layers_reused,
         layers_reused,
         transfer: registry.transfer(),
         identity,
@@ -785,185 +801,76 @@ pub fn preview<A: ArchiveStore, S: StateStore>(
 
     let registry = publishing.registry;
     let latest = registry.latest(&DolosProfile)?;
-    let settling = chained(publishing, latest.as_ref(), plan)?;
-    let previous = settling.inner();
-    let forecast = export::forecast(plan, archive, &settling)?;
+    let previous = chained(publishing, latest.as_ref(), plan)?;
+    let summary = dolos_cardano::eras::load_chain_summary_from_state(state)?;
+    let forecast = export::forecast(plan, &plan.listing(&summary, &previous), archive)?;
 
     Ok(Preview {
         sequence: plan.sequence,
         predecessor: previous.predecessor(),
-        history: previous.history().len(),
         layers_built: forecast.layers_built,
-        layers_reused: forecast.layers_reused,
     })
 }
 
 /// The publish `plan` follows in `publishing`'s repository.
 ///
-/// [`stelae_driver::publish::Chained`] holds the history the new inscription
-/// carries and the two tables of layers it may take rather than build; nothing
-/// in it is this profile's but the policy it asks for, which arrives through
+/// [`stelae_driver::publish::Chained`] holds the link the new inscription
+/// carries and the layers an interrupted attempt recorded; nothing in it is
+/// this profile's but the policy it asks for, which arrives through
 /// [`stelae_driver::DriverProfile`]. This is the whole of the wiring: the parts
 /// the driver takes are the ones this profile composes — the sequence, the
 /// `position` document, the [`Origin`] a record is filed under, and the
 /// record's path, which is [`record_path_in`]'s and never derived down there.
-/// [`export::Settling`] keeps the record from supplying `log-account-epochs`.
 fn chained<'a>(
     publishing: Publishing<'a>,
-    latest: Option<&'a Snapshot>,
+    latest: Option<&Snapshot>,
     plan: &Plan,
-) -> Result<Settling<Chained<'a>>, Error> {
-    // This profile identifies a dataset by its network magic; the driver holds
-    // the number and never reads it.
-    let origin = Origin::of(
-        publishing.registry,
+) -> Result<Chained<'a>, Error> {
+    let origin = record_origin(
+        publishing.registry.repository().to_string(),
         plan.network.magic(),
-        crate::parameters(),
-        crate::compression(),
     );
 
-    let chained = Chained::new(
+    Ok(Chained::new(
         &DolosProfile,
         publishing,
         latest,
         plan.sequence,
         &plan.position()?,
         origin,
-    )?;
-    let manifest = latest.map(Snapshot::read_inscription).transpose()?;
+    )?)
+}
 
-    Settling::new(chained, manifest.as_ref())
+/// The revision of what a resumption record may hold.
+///
+/// Filed in the record's [`Origin`] parameters, which no inscription carries.
+/// Records from before the diff chain have none, and they held tip layers too,
+/// such as window N-1's account rows at N, which are stake-only there and
+/// final in the diff at N+1. A record without this revision offers nothing.
+const RECORD_REVISION: u64 = 2;
+
+/// The [`Origin`] a publish of the dataset `magic` into `repository` files its
+/// record under. This profile identifies a dataset by its network magic; the
+/// driver holds the number and never reads it.
+fn record_origin(repository: String, magic: u64) -> Origin {
+    let mut parameters = crate::parameters();
+    parameters["recordRevision"] = serde_json::json!(RECORD_REVISION);
+
+    Origin {
+        repository,
+        dataset_id: magic,
+        parameters,
+        compression: crate::compression(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use stelae::{
-        inscription::{Compression, HistoryEntry},
-        transport::WrittenLayer,
-        Profile as _,
-    };
-    use stelae_driver::publish::inheritable_layers;
+    use stelae::{inscription::Compression, transport::WrittenLayer, Profile as _};
 
     use super::*;
     use crate::scope_key;
-
-    fn inscription(sequence: u64, history: Vec<HistoryEntry>) -> Inscription {
-        let mut inscription = Inscription::new(
-            &DolosProfile,
-            sequence,
-            json!({"epoch": sequence}),
-            crate::parameters(),
-            crate::compression(),
-        );
-
-        inscription.history = history;
-        inscription
-    }
-
-    /// Only the epoch kinds are inheritable, and a state shard is excluded by
-    /// this table rather than by the caller remembering to.
-    #[test]
-    fn only_epoch_layers_are_inheritable() {
-        let mut previous = inscription(3, vec![]);
-
-        previous.layers = vec![
-            layer(
-                crate::BLOCKS,
-                json!({"epoch": 2, "startSlot": 200, "endSlot": 299}),
-                1,
-            ),
-            layer(
-                crate::state_kind_for(crate::UTXOS).unwrap(),
-                json!({"shard": 0}),
-                2,
-            ),
-        ];
-
-        let table = inheritable_layers(&previous, &DolosProfile).unwrap();
-
-        assert_eq!(table.len(), 1);
-        assert!(table.contains_key(
-            &scope_key(
-                crate::BLOCKS,
-                &json!({"epoch": 2, "startSlot": 200, "endSlot": 299})
-            )
-            .unwrap()
-        ));
-    }
-
-    /// The clamp rule, as a table lookup: a window that stopped at the cursor
-    /// is a different scope from the same epoch published in full, so it is a
-    /// miss and the layer is rebuilt.
-    #[test]
-    fn a_clamped_window_does_not_match_the_full_epoch() {
-        let mut previous = inscription(3, vec![]);
-
-        previous.layers = vec![layer(
-            crate::BLOCKS,
-            json!({"epoch": 2, "startSlot": 200, "endSlot": 250}),
-            1,
-        )];
-
-        let table = inheritable_layers(&previous, &DolosProfile).unwrap();
-
-        let full = scope_key(
-            crate::BLOCKS,
-            &json!({"epoch": 2, "startSlot": 200, "endSlot": 299}),
-        )
-        .unwrap();
-
-        assert!(!table.contains_key(&full));
-    }
-
-    #[test]
-    fn one_scope_described_twice_two_ways_is_refused() {
-        let mut previous = inscription(3, vec![]);
-        let scope = json!({"epoch": 2, "startSlot": 200, "endSlot": 299});
-
-        previous.layers = vec![
-            layer(crate::BLOCKS, scope.clone(), 1),
-            layer(crate::BLOCKS, scope, 2),
-        ];
-
-        let err: Error = inheritable_layers(&previous, &DolosProfile)
-            .unwrap_err()
-            .into();
-
-        assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
-    }
-
-    /// The quieter half of the same contradiction: one identity, two
-    /// descriptions of what it contains.
-    ///
-    /// `records` and `uncompressed_size` are determined by the bytes a
-    /// `diff_id` names, so a stele describing them two ways is describing
-    /// bytes that cannot exist. It matters because `adopt_layer` carries
-    /// `uncompressed_size` into the new stele without reading the blob, so
-    /// whichever of the two came first would be published forward as fact.
-    #[test]
-    fn one_identity_described_two_ways_is_refused() {
-        let mut previous = inscription(3, vec![]);
-        let scope = json!({"epoch": 2, "startSlot": 200, "endSlot": 299});
-
-        let mut second = layer(crate::BLOCKS, scope.clone(), 1);
-        second.records = 2;
-        second.uncompressed_size = 4096;
-
-        previous.layers = vec![layer(crate::BLOCKS, scope, 1), second];
-
-        let err: Error = inheritable_layers(&previous, &DolosProfile)
-            .unwrap_err()
-            .into();
-
-        assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
-
-        // Both descriptions are in the message: naming the shared identity
-        // twice would describe nothing.
-        let message = err.to_string();
-        assert!(message.contains("1 records"), "{message}");
-        assert!(message.contains("2 records"), "{message}");
-    }
 
     /// A point round-trips through the profile's own tag rendering, in both
     /// directions.
@@ -1010,12 +917,7 @@ mod tests {
     // in `tests/publish.rs`, with the interruption that raises it.
 
     fn origin(repository: &str) -> Origin {
-        Origin {
-            repository: repository.to_owned(),
-            dataset_id: 2,
-            parameters: crate::parameters(),
-            compression: crate::compression(),
-        }
+        record_origin(repository.to_owned(), 2)
     }
 
     fn written(kind: &str, scope: serde_json::Value, identity: u8) -> WrittenLayer {
@@ -1030,6 +932,9 @@ mod tests {
         }
     }
 
+    /// What the snapshot at 3 would offer: the closed window 2's blocks, in
+    /// its diff, beside its tip's account rows for window 2 and a state shard,
+    /// which no record names and the record refuses to offer.
     fn record(origin: Origin) -> PublishRecord {
         PublishRecord {
             origin,
@@ -1040,13 +945,13 @@ mod tests {
                     1,
                 ),
                 written(
-                    crate::state_kind_for(crate::UTXOS).unwrap(),
-                    json!({"shard": 0}),
+                    "log-account-epochs",
+                    json!({"epoch": 2, "startSlot": 200, "endSlot": 299}),
                     2,
                 ),
                 written(
                     crate::state_kind_for(crate::UTXOS).unwrap(),
-                    json!({"epoch": 1, "shard": 0}),
+                    json!({"shard": 0}),
                     3,
                 ),
             ],
@@ -1089,48 +994,43 @@ mod tests {
         PublishRecord::remove(&path).unwrap();
     }
 
-    /// Only what a scope names an epoch for comes out of a record, whatever
-    /// went into one.
+    /// Only what the publishing sequence places in its diff comes out of a
+    /// record, whatever went into one.
     ///
-    /// Both halves of what [`crate::is_inheritable`] decides, and on the same
-    /// kind for the second: the fixture records shard 0 of one state kind
-    /// twice, once as the moving tip and once as a retained dump. The kind is
-    /// identical, so nothing but the scope can separate them — which is the
-    /// distinction decision 0026 moved from the kind to the scope, and the one
-    /// a record honouring a tip would publish a stale shard through.
+    /// A record offering a tip layer would publish a stale one: window 2's
+    /// account rows are still the tip at 3, and final, under the same scope,
+    /// only at 4.
     #[test]
-    fn a_record_offers_epoch_layers_and_nothing_else() {
+    fn a_record_offers_what_is_diff_at_the_publishing_sequence() {
         let origin = origin("oci://example.test/dolos");
-        let table = record(origin.clone())
-            .table(&origin, &DolosProfile)
-            .unwrap();
+        let offered = |sequence| {
+            record(origin.clone())
+                .table(&origin, &DolosProfile, sequence)
+                .unwrap()
+        };
 
-        assert_eq!(table.len(), 2);
-        assert!(table.contains_key(
-            &scope_key(
-                crate::BLOCKS,
-                &json!({"epoch": 2, "startSlot": 200, "endSlot": 299})
-            )
-            .unwrap()
-        ));
+        let blocks = scope_key(
+            crate::BLOCKS,
+            &json!({"epoch": 2, "startSlot": 200, "endSlot": 299}),
+        )
+        .unwrap();
+        let accounts = scope_key(
+            "log-account-epochs",
+            &json!({"epoch": 2, "startSlot": 200, "endSlot": 299}),
+        )
+        .unwrap();
 
-        // The dump is in.
-        assert!(table.contains_key(
-            &scope_key(
-                crate::state_kind_for(crate::UTXOS).unwrap(),
-                &json!({"epoch": 1, "shard": 0})
-            )
-            .unwrap()
-        ));
+        assert_eq!(
+            offered(3).into_keys().collect::<Vec<_>>(),
+            vec![blocks.clone()]
+        );
 
-        // The tip of the same kind is not.
-        assert!(!table.contains_key(
-            &scope_key(
-                crate::state_kind_for(crate::UTXOS).unwrap(),
-                &json!({"shard": 0})
-            )
-            .unwrap()
-        ));
+        let at_4: Vec<_> = offered(4).into_keys().collect();
+        assert!(
+            at_4.contains(&blocks) && at_4.contains(&accounts),
+            "{at_4:?}"
+        );
+        assert_eq!(at_4.len(), 2);
     }
 
     /// Done criterion 2's second half, decided without a registry: a record
@@ -1176,7 +1076,9 @@ mod tests {
             assert_ne!(theirs, mine);
             assert_eq!(theirs.differences_from(&mine), vec![named]);
 
-            let table = record(theirs.clone()).table(&mine, &DolosProfile).unwrap();
+            let table = record(theirs.clone())
+                .table(&mine, &DolosProfile, 3)
+                .unwrap();
 
             assert!(table.is_empty(), "{theirs:?}");
 
@@ -1185,10 +1087,10 @@ mod tests {
             // record.
             assert_eq!(
                 record(theirs.clone())
-                    .table(&theirs, &DolosProfile)
+                    .table(&theirs, &DolosProfile, 3)
                     .unwrap()
                     .len(),
-                2
+                1
             );
         }
 
@@ -1206,6 +1108,31 @@ mod tests {
                 ..mine.clone()
             }),
             vec!["repository", "dataset id", "parameters", "compression"]
+        );
+    }
+
+    /// A record written before the diff chain was filed under the inscription
+    /// parameters alone, and offers nothing, though the account rows it holds
+    /// for window 2 are a diff layer at 4.
+    #[test]
+    fn a_record_from_before_the_diff_chain_offers_nothing() {
+        let mine = origin("oci://example.test/dolos");
+        let before = Origin {
+            parameters: crate::parameters(),
+            ..mine.clone()
+        };
+
+        assert_eq!(before.differences_from(&mine), vec!["parameters"]);
+        assert!(record(before)
+            .table(&mine, &DolosProfile, 4)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            record(mine.clone())
+                .table(&mine, &DolosProfile, 4)
+                .unwrap()
+                .len(),
+            2
         );
     }
 

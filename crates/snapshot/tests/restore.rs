@@ -62,17 +62,17 @@ use dolos_testing::{
     faults::{FaultyStateStore, TestFault},
     toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores},
 };
-use node::{export_to, harness, stand_at_boundary, Blank};
+use node::{export_to, harness, plan_at_boundary, resolved, stand_at_boundary, Blank};
 use serde_json::json;
 use stelae::{
-    dir::{LayerSpec, SnapshotDir},
+    dir::{LayerSpec, Snapshot, SnapshotDir, WrittenLayer, INDEX_FILE, REF_NAME_ANNOTATION},
     frame::{encode, Limits},
-    inscription::{Inscription, LayerDescriptor},
+    inscription::{link_for, Inscription, LayerDescriptor},
     plan::RestoreProgress,
     profile::MediaType,
     progress::{Event, Observer, Outcome, Progress},
     transport::BlobIndex,
-    Digest, LayerReader, Profile, SnapshotReader, SnapshotWriter,
+    Chain, Digest, LayerDigests, LayerReader, Profile, SnapshotReader, SnapshotWriter,
 };
 
 use watcher::Watcher;
@@ -100,6 +100,71 @@ fn magic_of<B: ToyStores>(domain: &ToyDomain<B>) -> u64 {
     u64::from(domain.genesis().network_magic())
 }
 
+fn chain(stele: &Snapshot) -> &Chain {
+    stele.chain().expect("a resolved stele holds its chain")
+}
+
+/// Drop every tag of the layout at `root` and carry `layers` from its blobs
+/// into the next seal, so an inscription edited over them seals afresh.
+fn retag<'a>(
+    root: &std::path::Path,
+    layers: impl IntoIterator<Item = &'a LayerDescriptor>,
+) -> SnapshotDir {
+    let (layout, index) = untag(root);
+    carry(&layout, &index, layers);
+
+    layout
+}
+
+/// The layout at `root` with its tags dropped and its blobs kept, and where
+/// it kept the layers of every sequence it held, tips included.
+fn untag(root: &std::path::Path) -> (SnapshotDir, BlobIndex) {
+    let held = SnapshotDir::open(root).unwrap();
+    let mut index = BlobIndex::default();
+
+    for tag in held.tags().unwrap().keys() {
+        if !tag.ends_with(stelae::TIP_SUFFIX) {
+            index.extend(held.pull(&DolosProfile, tag).unwrap().blob_index().unwrap());
+        }
+    }
+
+    std::fs::write(
+        root.join(INDEX_FILE),
+        br#"{"schemaVersion":2,"manifests":[]}"#,
+    )
+    .unwrap();
+
+    (SnapshotDir::create(root).unwrap(), index)
+}
+
+/// Carry `layers`, whose blobs `index` places in `layout`, into its next seal.
+fn carry<'a>(
+    layout: &SnapshotDir,
+    index: &BlobIndex,
+    layers: impl IntoIterator<Item = &'a LayerDescriptor>,
+) {
+    for descriptor in layers {
+        let blob = index
+            .blob_for(&descriptor.diff_id)
+            .expect("a layer of the layout");
+        let compressed_size = std::fs::metadata(layout.blob_path(&blob)).unwrap().len();
+
+        let carried = layout
+            .adopt_carried(WrittenLayer {
+                descriptor: descriptor.clone(),
+                digests: LayerDigests {
+                    diff_id: descriptor.diff_id,
+                    blob_digest: blob,
+                    uncompressed_size: descriptor.uncompressed_size,
+                    compressed_size,
+                },
+            })
+            .unwrap();
+
+        assert!(carried, "{} is not in the layout", descriptor.kind);
+    }
+}
+
 /// Export `domain` into a fresh directory and restore it into an empty store
 /// set.
 fn round_trip<B: ToyStores>(budget: Budget) -> (ToyDomain<B>, Blank<B>, restore::Summary) {
@@ -123,9 +188,9 @@ fn restore_into<B: ToyStores>(
     blank: &Blank<B>,
     budget: Budget,
 ) -> Result<restore::Summary, Error> {
-    let stele = SnapshotDir::open(root)?;
+    let stele = SnapshotDir::open(root)?.resolve_latest(&DolosProfile)?;
 
-    let plan = restore::plan(&stele, magic, None)?;
+    let plan = restore::plan(chain(&stele), magic, None)?;
     let index = stele.blob_index()?;
 
     // A directory stele stages nothing — its blobs are read where they are —
@@ -248,8 +313,8 @@ fn a_restored_fixture_fits_within_its_estimate() {
     let journals =
         (preset.state().database.journal_mb + preset.archive().database.journal_mb) << 20;
 
-    let stele = SnapshotDir::open(source.path()).unwrap();
-    let plan = restore::plan(&stele, magic_of(&domain), None).unwrap();
+    let stele = resolved(source.path());
+    let plan = restore::plan(chain(&stele), magic_of(&domain), None).unwrap();
     let index = stele.blob_index().unwrap();
     let estimate = plan
         .estimate(&stele, &index, &stelae::Resume::none(), journals)
@@ -421,7 +486,7 @@ fn export_one_kind_ahead<B: ToyStores>(
 ) -> Inscription {
     let mut inscription = export_to(root, domain);
 
-    let stele = SnapshotDir::open(root).unwrap();
+    let stele = retag(root, inscription.layers());
     let ahead = AheadProfile::new();
 
     // Shapes this build has no reader for, which is the situation: an unknown
@@ -449,7 +514,7 @@ fn export_one_kind_ahead<B: ToyStores>(
         )
         .unwrap();
 
-    inscription.layers.push(written.descriptor);
+    inscription.diff.push(written.descriptor);
     stele.seal(&ahead, &inscription).unwrap();
 
     inscription
@@ -469,8 +534,8 @@ fn an_unknown_layer_kind_is_skipped_and_reported() {
     let temp = tempfile::tempdir().unwrap();
     let inscription = export_one_kind_ahead(temp.path(), &domain, json!({"epoch": 0}));
 
-    let stele = SnapshotDir::open(temp.path()).unwrap();
-    let plan = restore::plan(&stele, magic, None).unwrap();
+    let stele = resolved(temp.path());
+    let plan = restore::plan(chain(&stele), magic, None).unwrap();
 
     assert_eq!(plan.skipped_unknown.len(), 1);
     assert_eq!(plan.skipped_unknown[0].kind, AHEAD_KIND);
@@ -481,10 +546,13 @@ fn an_unknown_layer_kind_is_skipped_and_reported() {
     // still a blob on disk — it is simply never read into a store.
     assert!(plan.layers().all(|layer| layer.kind != AHEAD_KIND));
     assert_eq!(
-        inscription.layers.len(),
+        inscription.layers().count(),
         plan.layers().count() + plan.skipped_unknown.len()
     );
-    assert_eq!(stele.blob_index().unwrap().len(), inscription.layers.len());
+    assert_eq!(
+        stele.blob_index().unwrap().len(),
+        inscription.layers().count()
+    );
 
     let blank = Blank::<MemoryStores>::open();
     let summary = restore_into(temp.path(), magic, &blank, default_budget()).unwrap();
@@ -539,19 +607,19 @@ fn a_restore_that_fails_partway_leaves_no_cursor() {
     // The last state layer, so the failure lands after every other one has
     // committed.
     let last = inscription
-        .layers
+        .tip
         .iter()
         .rfind(|layer| is_state_kind(&layer.kind))
         .expect("a stele has state layers");
 
-    let stele = SnapshotDir::open(temp.path()).unwrap();
+    let stele = resolved(temp.path());
     let blob = stele
         .blob_index()
         .unwrap()
         .blob_for(&last.diff_id)
         .expect("the shard's blob");
 
-    std::fs::remove_file(stele.blob_path(&blob)).unwrap();
+    std::fs::remove_file(SnapshotDir::open(temp.path()).unwrap().blob_path(&blob)).unwrap();
 
     let blank = Blank::<MemoryStores>::open();
     let err = restore_into(temp.path(), magic_of(&domain), &blank, default_budget()).unwrap_err();
@@ -593,8 +661,8 @@ fn a_restore_interrupted_in_utxo_tags_commits_neither_utxos_nor_cursor_and_resum
     let blank = Blank::<MemoryStores>::open();
     let state = FaultyStateStore::new(blank.state().clone(), TestFault::StateTagsApplyError);
 
-    let stele = SnapshotDir::open(temp.path()).unwrap();
-    let plan = restore::plan(&stele, magic_of(&domain), None).unwrap();
+    let stele = resolved(temp.path());
+    let plan = restore::plan(chain(&stele), magic_of(&domain), None).unwrap();
     let index = stele.blob_index().unwrap();
     let storage = tempfile::tempdir().unwrap();
     let mut checkpoint = Checkpoint::open(
@@ -698,8 +766,8 @@ fn utxo_tags_commit_with_each_batch<B: ToyStores>() {
         state: blank.state().clone(),
         checked: std::sync::atomic::AtomicUsize::new(0),
     });
-    let stele = SnapshotDir::open(temp.path()).unwrap();
-    let plan = restore::plan(&stele, magic_of(&domain), None).unwrap();
+    let stele = resolved(temp.path());
+    let plan = restore::plan(chain(&stele), magic_of(&domain), None).unwrap();
 
     let summary = restore::restore(
         &stele,
@@ -924,16 +992,27 @@ fn entity_index_of<A: ArchiveStore>(store: &A) -> Vec<EntityRecord> {
 /// The entity index survives the trip: one layer per kind and window that
 /// first saw an entity, written back through `write_entity`, and the restored
 /// node publishes the same stele.
+///
+/// An entity layer first appears at the seal of its window, so the stele is
+/// cut at boundary 3, which on preview's geometry has sealed windows 0 and 1;
+/// the one at boundary 1 has sealed neither and lists none.
 fn entity_index_round_trip<B: ToyStores>() {
     let domain: ToyDomain<B> = harness();
     let seeded = seed_entity_index(&domain);
+
+    let unsealed = tempfile::tempdir().unwrap();
+    let early = export_to(unsealed.path(), &domain);
+    assert!(early
+        .layers()
+        .all(|layer| !layer.kind.starts_with("entity-")));
+
+    stand_at_boundary(&domain, 3);
 
     let temp = tempfile::tempdir().unwrap();
     let original = export_to(temp.path(), &domain);
 
     let layers: Vec<(&str, u64)> = original
-        .layers
-        .iter()
+        .layers()
         .filter(|layer| layer.kind.starts_with("entity-"))
         .map(|layer| (layer.kind.as_str(), layer.scope["epoch"].as_u64().unwrap()))
         .collect();
@@ -997,11 +1076,10 @@ fn refuse_edited_stele(edit: impl FnOnce(&mut Inscription)) -> Error {
     let temp = tempfile::tempdir().unwrap();
     let mut inscription = export_to(temp.path(), &domain);
 
+    let layout = retag(temp.path(), inscription.layers());
+
     edit(&mut inscription);
-    SnapshotDir::open(temp.path())
-        .unwrap()
-        .seal(&DolosProfile, &inscription)
-        .unwrap();
+    layout.seal(&DolosProfile, &inscription).unwrap();
 
     let blank = Blank::<MemoryStores>::open();
     let err = restore_into(temp.path(), magic, &blank, default_budget()).unwrap_err();
@@ -1113,6 +1191,9 @@ fn stats_survive_a_restore<B: ToyStores>() {
                 .unwrap()
                 .count();
             assert_eq!(staged, 0, "epoch 0 did not seal");
+
+            // the seal's own boundary, the first stele that lists its logs
+            stand_at_boundary(&domain, 2);
         }
 
         let temp = tempfile::tempdir().unwrap();
@@ -1559,6 +1640,198 @@ fn exact_of<A: ArchiveStore>(store: &A) -> Vec<ExactRecord> {
 }
 
 // --------------------------------------------------------------------------
+// The chain
+// --------------------------------------------------------------------------
+
+/// Publish `domain` into the layout at `root` on each of `boundaries`, each
+/// stele chained onto the one before.
+fn publish_chain<B: ToyStores>(
+    root: &std::path::Path,
+    domain: &ToyDomain<B>,
+    boundaries: impl IntoIterator<Item = u64>,
+) -> Vec<Inscription> {
+    boundaries
+        .into_iter()
+        .map(|epoch| {
+            let plan = plan_at_boundary(domain, epoch);
+
+            dolos_snapshot::export::publish(
+                root,
+                &plan,
+                domain.archive(),
+                domain.state(),
+                &Observer::silent(),
+            )
+            .unwrap()
+        })
+        .collect()
+}
+
+/// Layers by kind and scope, with the bytes each names.
+fn by_scope<'a>(
+    layers: impl IntoIterator<Item = &'a LayerDescriptor>,
+) -> std::collections::BTreeMap<(String, String), Digest> {
+    layers
+        .into_iter()
+        .map(|layer| ((layer.kind.clone(), layer.scope.to_string()), layer.diff_id))
+        .collect()
+}
+
+/// Three steles chained in one layout restore the union of their layers:
+/// every diff up to the head, then the head's tip. That is what a lineage
+/// starting at the head lists, and the node they were published from.
+fn a_chain_restores_its_layer_set<B: ToyStores>() {
+    let domain: ToyDomain<B> = harness();
+    let magic = magic_of(&domain);
+
+    let chained = tempfile::tempdir().unwrap();
+    let steles = publish_chain(chained.path(), &domain, 1..=3);
+
+    assert_eq!(steles[0].previous, None);
+
+    for (at, stele) in steles.iter().enumerate().skip(1) {
+        assert_eq!(
+            stele.previous,
+            link_for(Some(&steles[at - 1]), stele.sequence).unwrap()
+        );
+    }
+
+    let head = resolved(chained.path());
+    assert_eq!(chain(&head).inscriptions(), &steles[..]);
+
+    let alone = tempfile::tempdir().unwrap();
+    let whole = export_to(alone.path(), &domain);
+
+    assert_eq!((whole.sequence, whole.previous), (3, None));
+    assert_eq!(
+        by_scope(chain(&head).descriptors()),
+        by_scope(whole.layers())
+    );
+    assert!(
+        steles[2].layers().count() < whole.layers().count(),
+        "the head lists only its own layers"
+    );
+
+    let blank = Blank::<B>::open();
+    let summary = restore_into(chained.path(), magic, &blank, shredded()).unwrap();
+
+    assert_eq!(summary.layers_fetched, whole.layers().count());
+    assert_stores_match(&blank, &domain);
+}
+
+#[test]
+fn a_chain_restores_its_layer_set_on_memory() {
+    a_chain_restores_its_layer_set::<MemoryStores>();
+}
+
+#[test]
+fn a_chain_restores_its_layer_set_on_fjall() {
+    a_chain_restores_its_layer_set::<FjallStores>();
+}
+
+/// A two-stele lineage sealed again with `ns` left out of the
+/// `parameters.schemas` of the first stele, of the head, or of neither.
+fn lineage_without(ns: &str, first: bool, head: bool) -> tempfile::TempDir {
+    let domain: ToyDomain = harness();
+    let temp = tempfile::tempdir().unwrap();
+    let mut steles = publish_chain(temp.path(), &domain, 1..=2);
+
+    let (layout, index) = untag(temp.path());
+
+    for (at, without) in [first, head].into_iter().enumerate() {
+        if without {
+            steles[at].parameters["schemas"]
+                .as_object_mut()
+                .unwrap()
+                .remove(ns);
+        }
+
+        if at > 0 {
+            let link = link_for(Some(&steles[at - 1]), steles[at].sequence).unwrap();
+            steles[at].previous = link;
+        }
+
+        carry(&layout, &index, steles[at].layers());
+        layout.seal(&DolosProfile, &steles[at]).unwrap();
+    }
+
+    temp
+}
+
+/// The head's map speaks for the snapshot, and each earlier one only for its
+/// own layers: a lineage continues across a namespace added partway, and a
+/// head that does not declare one is refused whatever came before it.
+#[test]
+fn a_lineage_continues_across_an_added_namespace() {
+    let magic = magic_of(&harness::<MemoryStores>());
+    let ns = NAMESPACES[0];
+
+    let added = lineage_without(ns, true, false);
+    let blank = Blank::<MemoryStores>::open();
+
+    restore_into(added.path(), magic, &blank, default_budget()).unwrap();
+    assert!(blank.state().read_cursor().unwrap().is_some());
+
+    let dropped = lineage_without(ns, false, true);
+    let blank = Blank::<MemoryStores>::open();
+
+    let err = restore_into(dropped.path(), magic, &blank, default_budget()).unwrap_err();
+
+    assert!(
+        matches!(err, Error::RetiredNamespace { namespace } if namespace == ns),
+        "{err:?}"
+    );
+    assert_untouched(&blank);
+}
+
+/// A stele whose tip manifest is gone is refused with its own error, before
+/// anything is written: its diff is still published, so it is not absent.
+#[test]
+fn a_stele_whose_tip_is_gone_is_refused() {
+    let domain: ToyDomain = harness();
+
+    let temp = tempfile::tempdir().unwrap();
+    export_to(temp.path(), &domain);
+
+    let path = temp.path().join(INDEX_FILE);
+    let mut index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+
+    let manifests = index["manifests"].as_array_mut().unwrap();
+    let tagged = manifests.len();
+    manifests.retain(|entry| entry["annotations"][REF_NAME_ANNOTATION] != "epoch-1.tip");
+    assert_eq!(manifests.len(), tagged - 1, "the fixture has no tip tag");
+
+    std::fs::write(&path, serde_json::to_vec(&index).unwrap()).unwrap();
+
+    let storage = tempfile::tempdir().unwrap();
+    let blank = Blank::<MemoryStores>::open();
+
+    let err = restore::execute(
+        restore::Input::Directory(temp.path()),
+        restore::Restoring {
+            network_magic: magic_of(&domain),
+            max_history: None,
+            storage_path: storage.path(),
+            resume: false,
+            skip_space_check: false,
+            journals: 0,
+            read_ahead: restore::DEFAULT_READ_AHEAD,
+            source: None,
+        },
+        target(&blank),
+        None,
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(&err, Error::TipGone { sequence: 1, tag } if tag == "epoch-1.tip"),
+        "{err:?}"
+    );
+    assert_untouched(&blank);
+}
+
+// --------------------------------------------------------------------------
 // 4. Resume
 // --------------------------------------------------------------------------
 
@@ -1575,7 +1848,7 @@ fn exact_of<A: ArchiveStore>(store: &A) -> Vec<ExactRecord> {
 /// as a difference in the stores rather than being masked by a partial write
 /// that happened to be enough.
 struct Interrupted<'a> {
-    inner: &'a SnapshotDir,
+    inner: &'a Snapshot,
     stop_at: Digest,
 }
 
@@ -1651,10 +1924,10 @@ fn restore_watched<B: ToyStores>(
     stop_at: Option<Digest>,
     observer: &Observer,
 ) -> Result<restore::Summary, Error> {
-    let stele = SnapshotDir::open(root)?;
-    let identity = stele.read_inscription()?.digest()?;
+    let stele = SnapshotDir::open(root)?.resolve_latest(&DolosProfile)?;
+    let identity = chain(&stele).identity();
 
-    let plan = restore::plan(&stele, magic, None)?;
+    let plan = restore::plan(chain(&stele), magic, None)?;
     let index = stele.blob_index()?;
 
     let mut checkpoint = Checkpoint::open(progress_path_in(storage), identity, resume)?;
@@ -1804,7 +2077,7 @@ fn kill_and_resume<B: ToyStores>() {
     );
     assert_eq!(
         resumed.layers_fetched,
-        inscription.layers.len() - 1,
+        inscription.layers().count() - 1,
         "and refetched everything else, the state tip included"
     );
 
@@ -1838,7 +2111,7 @@ fn add_dump_descriptors(
             .iter()
             .flat_map(|epoch| {
                 inscription
-                    .layers
+                    .tip
                     .iter()
                     .filter(move |layer| layer.kind == kind)
                     .map(move |layer| {
@@ -1854,7 +2127,7 @@ fn add_dump_descriptors(
     let mut trailing = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
 
-    for layer in &inscription.layers {
+    for layer in &inscription.tip {
         if state_ns_for(&layer.kind).is_some() && seen.insert(layer.kind.clone()) {
             match published_order {
                 true => layers.extend(dumps_of(&layer.kind)),
@@ -1866,12 +2139,11 @@ fn add_dump_descriptors(
     }
 
     layers.extend(trailing);
-    inscription.layers = layers;
 
-    SnapshotDir::open(root)
-        .unwrap()
-        .seal(&DolosProfile, inscription)
-        .unwrap();
+    let layout = retag(root, inscription.diff.iter().chain(&layers));
+
+    inscription.tip = layers;
+    layout.seal(&DolosProfile, inscription).unwrap();
 }
 
 /// A stele that carries dump descriptors restores its tip and ignores them:
@@ -1897,15 +2169,13 @@ fn restores_like_the_plain_stele(published_order: bool) {
 
     export_to(plain_root.path(), &domain);
     let mut dumped = export_to(dumped_root.path(), &domain);
-    let plain_count = dumped.layers.len();
+    let plain_count = dumped.layers().count();
 
     add_dump_descriptors(dumped_root.path(), &mut dumped, published_order);
-    assert!(dumped.layers.len() > plain_count, "no dump was added");
+    assert!(dumped.layers().count() > plain_count, "no dump was added");
 
-    let plain_plan =
-        restore::plan(&SnapshotDir::open(plain_root.path()).unwrap(), magic, None).unwrap();
-    let dumped_plan =
-        restore::plan(&SnapshotDir::open(dumped_root.path()).unwrap(), magic, None).unwrap();
+    let plain_plan = restore::plan(chain(&resolved(plain_root.path())), magic, None).unwrap();
+    let dumped_plan = restore::plan(chain(&resolved(dumped_root.path())), magic, None).unwrap();
 
     assert_eq!(dumped_plan.layers().count(), plain_plan.layers().count());
     assert_eq!(dumped_plan.tip_layers().count(), state_layer_count());
@@ -1981,10 +2251,11 @@ fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
 
     // And the two sides of the rule, as bytes. Epoch 0's layers carry forward;
     // every state layer is new.
-    let epoch_zero = |stele: &Inscription| -> Vec<Digest> {
+    // A set: the first stele lists window 0's account rows in its tip, and
+    // the second, which starts its lineage, in its diff.
+    let epoch_zero = |stele: &Inscription| -> std::collections::BTreeSet<Digest> {
         stele
-            .layers
-            .iter()
+            .layers()
             .filter(|l| !is_state_kind(&l.kind) && l.scope["epoch"] == 0)
             .map(|l| l.diff_id)
             .collect()
@@ -2036,7 +2307,7 @@ fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
 
     assert_eq!(
         seeded,
-        first.layers.len() - state_layer_count(),
+        first.layers().count() - state_layer_count(),
         "every epoch layer committed before the tip was reached"
     );
 
@@ -2053,7 +2324,7 @@ fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
 
     assert_eq!(
         resumed.layers_fetched,
-        second.layers.len() - kept,
+        second.layers().count() - kept,
         "and everything else the newer stele carries was fetched: epoch 1 whole, \
          epoch 2's sliver, and every state layer because a state layer is never inherited"
     );
@@ -2118,7 +2389,7 @@ fn a_restore_that_is_not_resuming_honours_no_progress_file() {
         summary.layers_skipped, 0,
         "a restore that was not asked to resume skipped a layer anyway"
     );
-    assert_eq!(summary.layers_fetched, inscription.layers.len());
+    assert_eq!(summary.layers_fetched, inscription.layers().count());
 
     // And the node is whole, which is the point: had the file been honoured
     // here, this comparison is what would have failed.
@@ -2137,15 +2408,15 @@ fn the_remaining_download_excludes_what_is_already_done() {
     let temp = tempfile::tempdir().unwrap();
     let inscription = export_to(temp.path(), &domain);
 
-    let stele = SnapshotDir::open(temp.path()).unwrap();
+    let stele = resolved(temp.path());
     let index = stele.blob_index().unwrap();
-    let plan = restore::plan(&stele, magic_of(&domain), None).unwrap();
+    let plan = restore::plan(chain(&stele), magic_of(&domain), None).unwrap();
 
     let fresh = plan
         .remaining(&stele, &index, &stelae::Resume::none())
         .unwrap();
 
-    assert_eq!(fresh.layers, inscription.layers.len());
+    assert_eq!(fresh.layers, inscription.layers().count());
     assert_eq!(
         fresh.unsized_layers, 0,
         "every blob is on disk to be stat'd"
@@ -2204,8 +2475,8 @@ fn the_remaining_download_excludes_what_is_already_done() {
 /// committed by the time this layer is asked for", which is the question every
 /// interruption below is built on.
 fn layers_in_driver_order(root: &std::path::Path, magic: u64) -> (Vec<Digest>, Vec<Digest>) {
-    let stele = SnapshotDir::open(root).unwrap();
-    let plan = restore::plan(&stele, magic, None).unwrap();
+    let stele = resolved(root);
+    let plan = restore::plan(chain(&stele), magic, None).unwrap();
 
     (
         plan.immutable_layers().map(|l| l.diff_id).collect(),
@@ -2215,8 +2486,7 @@ fn layers_in_driver_order(root: &std::path::Path, magic: u64) -> (Vec<Digest>, V
 
 fn state_diff_ids(inscription: &Inscription) -> Vec<Digest> {
     inscription
-        .layers
-        .iter()
+        .layers()
         .filter(|layer| is_state_kind(&layer.kind))
         .map(|layer| layer.diff_id)
         .collect()
@@ -2224,8 +2494,7 @@ fn state_diff_ids(inscription: &Inscription) -> Vec<Digest> {
 
 fn epoch_diff_ids(inscription: &Inscription) -> Vec<Digest> {
     inscription
-        .layers
-        .iter()
+        .layers()
         .filter(|layer| !is_state_kind(&layer.kind))
         .map(|layer| layer.diff_id)
         .collect()
@@ -2244,12 +2513,12 @@ fn max_history_selects_epochs_and_never_the_tip() {
     let temp = tempfile::tempdir().unwrap();
     export_to(temp.path(), &domain);
 
-    let stele = SnapshotDir::open(temp.path()).unwrap();
+    let stele = resolved(temp.path());
 
     // Epochs dropped and kept, per window: the fixture covers epoch 0 whole and
     // epoch 1's boundary sliver.
     for (max_history, dropped, kept) in [(None, 0, 2), (Some(0), 1, 1), (Some(u64::MAX), 0, 2)] {
-        let plan = restore::plan(&stele, magic_of(&domain), max_history).unwrap();
+        let plan = restore::plan(chain(&stele), magic_of(&domain), max_history).unwrap();
 
         // Keyed by namespace now, so the tip is one entry per state kind and
         // every layer under them.
@@ -2312,7 +2581,7 @@ fn a_resumed_restore_reports_what_it_skipped<B: ToyStores>() {
 
     // The plan is every layer the restore will consider, skipped ones included,
     // and it is what a bar's length has to be for the bar to be honest.
-    watcher.assert_well_formed(inscription.layers.len());
+    watcher.assert_well_formed(inscription.layers().count());
 
     assert_eq!(
         watcher.ended(Outcome::Skipped),
@@ -2338,11 +2607,7 @@ fn a_resumed_restore_reports_what_it_skipped<B: ToyStores>() {
     // Records are the ones that reached a store, so a skipped layer contributes
     // none of them — which is what makes the total below smaller than the
     // document's and not equal to it.
-    let content: u64 = inscription
-        .layers
-        .iter()
-        .map(|layer| layer.records - 1)
-        .sum();
+    let content: u64 = inscription.layers().map(|layer| layer.records - 1).sum();
 
     assert!(watcher.records() > 0);
     assert!(
@@ -2390,16 +2655,12 @@ fn a_whole_restore_reports_every_record_the_document_carries() {
     )
     .unwrap();
 
-    watcher.assert_well_formed(inscription.layers.len());
+    watcher.assert_well_formed(inscription.layers().count());
 
     assert_eq!(watcher.ended(Outcome::Transferred), summary.layers_fetched);
     assert_eq!(watcher.ended(Outcome::Skipped), 0);
 
-    let content: u64 = inscription
-        .layers
-        .iter()
-        .map(|layer| layer.records - 1)
-        .sum();
+    let content: u64 = inscription.layers().map(|layer| layer.records - 1).sum();
 
     assert_eq!(
         watcher.records(),

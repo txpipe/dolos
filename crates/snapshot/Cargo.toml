@@ -18,10 +18,12 @@ edition.workspace = true
 # it turns the transport on unconditionally rather than forwarding a feature
 # nothing in dolos ever left off.
 #
-# Pinned at 80c85a5, the stelae main commit after v0.6.0 that names the
-# protocol's artifact a snapshot (txpipe/stelae#28).
-stelae = { git = "https://github.com/txpipe/stelae", rev = "80c85a51a8dd470bed071b02cade1e061111c3ee", features = ["oci"] }
-stelae-driver = { git = "https://github.com/txpipe/stelae", rev = "80c85a51a8dd470bed071b02cade1e061111c3ee", features = ["oci"] }
+# Pinned at b2735ed, the stelae main commit that holds a repository in a
+# directory as an OCI image layout (txpipe/stelae#36), over the diff chain:
+# inscriptions listing their own layers in `diff` and `tip`, linked by
+# `previous`.
+stelae = { git = "https://github.com/txpipe/stelae", rev = "b2735ed829cbafdc57273a42871510aa564b00b3", features = ["oci"] }
+stelae-driver = { git = "https://github.com/txpipe/stelae", rev = "b2735ed829cbafdc57273a42871510aa564b00b3", features = ["oci"] }
 dolos-core = { path = "../core" }
 dolos-cardano = { path = "../cardano" }
 

@@ -103,8 +103,7 @@ impl Fixture {
 fn layers(document: &Document) -> BTreeMap<(String, String), (String, Option<u64>)> {
     Inscription::parse(&document.canonical)
         .unwrap()
-        .layers
-        .iter()
+        .layers()
         .map(|layer| {
             (
                 (layer.kind.clone(), layer.scope.to_string()),
