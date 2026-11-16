@@ -577,7 +577,7 @@ What the node writes to stderr. See [Logging](../operations/logging).
 | `level` | string: `trace`, `debug`, `info`, `warn` or `error` | `info` |
 | `filter` | string of `target=level` directives, comma-separated | none |
 
-`level` applies to Dolos's own events. Other components log nothing unless `filter` names them; a bare level in `filter` applies to every target it does not name. A directive that does not parse is refused.
+`level` applies to Dolos's own events. Other components log only errors unless `filter` names them; a bare level in `filter` applies to every target it does not name, in place of `error`. A directive that does not parse is refused.
 
 ```toml
 [logging]

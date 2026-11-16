@@ -268,9 +268,14 @@ pub fn setup_tracing_warnings() -> miette::Result<()> {
     Ok(())
 }
 
-/// Dolos's own targets at `level`, then the `filter` directives over them.
+/// Dolos's own targets at `level`, every other target at `error`, then the
+/// `filter` directives over them.
+///
+/// The `error` floor keeps a library's own account of a failure, such as the
+/// storage engine naming the OS error behind a failed sync.
 fn log_filter(config: &LoggingConfig) -> Result<Targets, ConfigError> {
     let mut filter = Targets::new()
+        .with_default(tracing::Level::ERROR)
         .with_target("dolos", config.level)
         .with_target("gasket", config.level);
 
@@ -524,7 +529,25 @@ mod tests {
         assert!(filter.would_enable("gasket", &tracing::Level::WARN));
         assert!(!filter.would_enable("gasket", &tracing::Level::INFO));
         assert!(filter.would_enable("fjall", &tracing::Level::INFO));
-        assert!(!filter.would_enable("tonic", &tracing::Level::ERROR));
+        assert!(filter.would_enable("fjall::db", &tracing::Level::ERROR));
+        assert!(filter.would_enable("tonic", &tracing::Level::ERROR));
+        assert!(!filter.would_enable("tonic", &tracing::Level::WARN));
+
+        let config = LoggingConfig {
+            filter: Some("warn".into()),
+            ..Default::default()
+        };
+        let filter = log_filter(&config).unwrap();
+        assert!(filter.would_enable("tonic", &tracing::Level::WARN));
+        assert!(filter.would_enable("dolos", &tracing::Level::INFO));
+
+        let config = LoggingConfig {
+            filter: Some("off".into()),
+            ..Default::default()
+        };
+        assert!(!log_filter(&config)
+            .unwrap()
+            .would_enable("tonic", &tracing::Level::ERROR));
 
         let config = LoggingConfig {
             filter: Some("dolos=loud".into()),
