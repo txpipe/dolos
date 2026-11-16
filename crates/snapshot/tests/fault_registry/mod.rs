@@ -76,6 +76,9 @@ struct State {
     /// Layer blob `GET`s being answered now, and the most there were at once.
     active: usize,
     peak: usize,
+    /// The same, by the repository each `GET` named.
+    active_in: HashMap<String, usize>,
+    peak_in: HashMap<String, usize>,
 }
 
 pub struct FaultRegistry {
@@ -208,12 +211,18 @@ impl FaultRegistry {
         self.state().peak
     }
 
-    /// Forget the layer `GET`s logged so far, and the peak.
+    /// The most layer blob `GET`s of the repository `name` answered at once.
+    pub fn peak_in(&self, name: &str) -> usize {
+        self.state().peak_in.get(name).copied().unwrap_or(0)
+    }
+
+    /// Forget the layer `GET`s logged so far, and the peaks.
     pub fn forget(&self) {
         let mut state = self.state();
         state.arrived.clear();
         state.served.clear();
         state.peak = state.active;
+        state.peak_in = state.active_in.clone();
     }
 }
 
@@ -346,6 +355,7 @@ fn handle(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
     }
 
     if let Some(index) = rest.find("/blobs/") {
+        let repository = rest[..index].to_owned();
         let digest = rest[index + "/blobs/".len()..].to_owned();
         let head = request.method == "HEAD";
 
@@ -370,6 +380,12 @@ fn handle(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                 state.arrived.push(digest.clone());
                 state.active += 1;
                 state.peak = state.peak.max(state.active);
+
+                let active = state.active_in.entry(repository.clone()).or_default();
+                *active += 1;
+                let active = *active;
+                let peak = state.peak_in.entry(repository.clone()).or_default();
+                *peak = (*peak).max(active);
                 (
                     state.delays.get(&digest).copied(),
                     state.holds.get(&digest).cloned(),
@@ -410,6 +426,7 @@ fn handle(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
         if layer {
             let mut state = lock();
             state.active -= 1;
+            *state.active_in.get_mut(&repository).unwrap() -= 1;
             state.served.push(digest);
         }
 

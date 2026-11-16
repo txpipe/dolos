@@ -15,7 +15,7 @@ mod watcher;
 
 use std::{collections::BTreeSet, path::Path, sync::Arc, time::Duration};
 
-use dolos_core::Domain as _;
+use dolos_core::{Domain as _, StateStore as _};
 use dolos_snapshot::{
     registry::{self, Point},
     restore::{
@@ -89,19 +89,25 @@ struct Published {
     blocks: Option<(Snapshot, BlobIndex)>,
     plan: Plan,
     identity: Digest,
+    magic: u64,
 }
 
 impl Published {
     /// The harness published on boundaries 1 and 2, paired ([`paired`]) into
     /// [`REPOSITORY`] and [`BLOCKS_REPOSITORY`] of a fresh registry.
     fn paired() -> Self {
+        Self::paired_to(2)
+    }
+
+    /// [`Published::paired`], on boundaries 1 to `head`.
+    fn paired_to(head: u64) -> Self {
         let registry = FaultRegistry::spawn();
         let domain = harness::<MemoryStores>();
         let magic = u64::from(domain.genesis().network_magic());
 
         let source = tempfile::tempdir().unwrap();
 
-        for epoch in [1, 2] {
+        for epoch in 1..=head {
             dolos_snapshot::export::publish(
                 source.path(),
                 &plan_at_boundary(&domain, epoch),
@@ -140,6 +146,7 @@ impl Published {
             scratch,
             stele,
             plan,
+            magic,
         }
     }
 
@@ -174,6 +181,7 @@ impl Published {
             blocks: None,
             plan,
             identity,
+            magic,
         }
     }
 
@@ -654,6 +662,135 @@ fn both_repositories_are_read_ahead_under_one_depth() {
 
     assert_eq!(ahead, serial, "the writes and records left plan order");
     assert_eq!(ahead_node, serial_node);
+}
+
+/// Each stream keeps to its share of the depth, whatever it has left to read:
+/// at the default, the blocks stream fetches two layers at once and the
+/// stele's own six, which is what the staging preflight charges them.
+#[test]
+fn each_stream_reads_ahead_at_its_share_of_the_depth() {
+    let published = Published::paired_to(3);
+    let registry = &published.registry;
+    let plan = &published.plan;
+    let depths = ReadAhead::split(DEFAULT_READ_AHEAD, true);
+
+    let blocks = published.blobs(plan.remaining_in(Repo::Blocks, &Resume::none()));
+    let others = published.blobs(plan.remaining_in(Repo::Dolos, &Resume::none()));
+    assert!(
+        blocks.len() > depths.blocks,
+        "{} blocks layers",
+        blocks.len()
+    );
+    assert!(others.len() > DEFAULT_READ_AHEAD, "{} layers", others.len());
+
+    // Every layer waits before its first byte, so the pulls a stream starts
+    // together are in flight together.
+    registry.delay(&[blocks, others].concat(), Duration::from_millis(200));
+    registry.forget();
+
+    let blank = Blank::<MemoryStores>::open();
+    published
+        .restore(
+            Target::new(&blank.archive, blank.state()),
+            DEFAULT_READ_AHEAD,
+            &mut Checkpoint::none(),
+            &Observer::silent(),
+        )
+        .unwrap();
+
+    assert_eq!(registry.peak_in(BLOCKS_REPOSITORY), depths.blocks);
+
+    // One over the share is a pull started as the registry was still closing
+    // the answer the restore had just taken.
+    let own = registry.peak_in(REPOSITORY);
+    assert!(
+        (depths.dolos..=depths.dolos + 1).contains(&own),
+        "the stele's stream fetched {own} layers at once at a share of {}",
+        depths.dolos
+    );
+}
+
+/// The registry transport resolves the blocks repository at the stele's
+/// sequence and restores the node the direct restore does; a blocks
+/// repository holding nothing there is refused, naming the snapshot.
+#[test]
+fn a_registry_restore_reads_the_blocks_repository_it_is_given() {
+    let published = Published::paired();
+    let reference = published.plan.blocks.unwrap();
+
+    let direct = Blank::<MemoryStores>::open();
+    published
+        .restore(
+            Target::new(&direct.archive, direct.state()),
+            DEFAULT_READ_AHEAD,
+            &mut Checkpoint::none(),
+            &Observer::silent(),
+        )
+        .unwrap();
+
+    let scratch = tempfile::tempdir().unwrap();
+    let repository = |name: &str| {
+        install_crypto_provider();
+
+        registry::SnapshotRepository::open(
+            &published.registry.repository(name),
+            true,
+            registry::Auth::default(),
+            scratch.path().to_path_buf(),
+            registry::Tuning::default(),
+        )
+        .unwrap()
+    };
+
+    let restored = |blocks: &registry::SnapshotRepository| {
+        let storage = tempfile::tempdir().unwrap();
+        let blank = Blank::<MemoryStores>::open();
+
+        let outcome = restore::execute(
+            restore::Input::Repository {
+                repository: &repository(REPOSITORY),
+                point: Point::Latest,
+                blocks: Some(blocks),
+            },
+            restore::Restoring {
+                network_magic: published.magic,
+                max_history: None,
+                storage_path: storage.path(),
+                resume: false,
+                skip_space_check: false,
+                journals: 0,
+                read_ahead: DEFAULT_READ_AHEAD,
+                source: None,
+            },
+            Target::new(&blank.archive, blank.state()),
+            None,
+        );
+
+        (outcome, blank)
+    };
+
+    let (outcome, blank) = restored(&repository(BLOCKS_REPOSITORY));
+    assert_eq!(outcome.unwrap().plan.blocks, Some(reference));
+    assert_eq!(
+        contents_digest(&blank.archive, blank.state()),
+        contents_digest(&direct.archive, direct.state())
+    );
+
+    let (outcome, blank) = restored(&repository("dolos/read-ahead/nothing"));
+    let error = outcome.map(|o| o.plan.blocks).unwrap_err();
+
+    let Error::BlocksMissing {
+        reference: named, ..
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(*named, reference);
+    assert!(
+        error.to_string().contains("holds no snapshot at epoch-"),
+        "{error}"
+    );
+    assert_eq!(blank.state().read_cursor().unwrap(), None);
 }
 
 /// At a depth of 0 or 1 a paired restore asks for one layer at a time, from

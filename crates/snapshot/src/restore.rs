@@ -194,7 +194,7 @@ use stelae::{
     transport::{BlobIndex, LayerStream, SnapshotReader},
     Chain, Digest, LayerHeader, LayerReader, Profile,
 };
-use stelae_blocks::BlocksProfile;
+use stelae_blocks::{BlocksProfile, EpochScope, OrderCheck};
 use tracing::info;
 
 use crate::{
@@ -2446,17 +2446,22 @@ impl<'a, R: SnapshotReader> Reader<'a, R> {
     /// header's network magic is checked against the node's before a record
     /// is handed out, and the layer's own `finish` — which is what proves its
     /// identity digest, its size and its record count — runs *before* the
-    /// final chunk is written.
+    /// final chunk is written. A blocks-repository layer's header scope must
+    /// also be its descriptor's ([`check_blocks_scope`]).
     fn drain<T>(
         &self,
         descriptor: &LayerDescriptor,
-        decode: impl Fn(&[u8]) -> Result<T, Error>,
+        mut decode: impl FnMut(&[u8]) -> Result<T, Error>,
         size: impl Fn(&T) -> usize,
         mut flush: impl FnMut(Vec<T>) -> Result<(), Error>,
     ) -> Result<u64, Error> {
         let mut layer = self.take(descriptor)?;
 
         check_layer_magic(descriptor, layer.header(), self.magic)?;
+
+        if self.repo == Repo::Blocks {
+            check_blocks_scope(descriptor, layer.header(), self.magic)?;
+        }
 
         let mut count = 0u64;
         let mut chunk: Vec<T> = Vec::new();
@@ -2565,24 +2570,74 @@ fn check_layer_magic(
     Ok(())
 }
 
+/// A blocks-repository layer whose header scope is not its descriptor's,
+/// refused before its records reach a store, as the blocks profile's reader
+/// rule asks. [`plan`] held the descriptor's bounds against the stele's
+/// epoch; the header is in the blob alone.
+fn check_blocks_scope(
+    descriptor: &LayerDescriptor,
+    header: &LayerHeader,
+    magic: u64,
+) -> Result<(), Error> {
+    let found = EpochScope::read_header(header.scope.as_bytes())?;
+
+    if found != EpochScope::read_descriptor(magic, &descriptor.scope)? {
+        return Err(stelae::Error::LayerMismatch {
+            kind: descriptor.kind.clone(),
+            reason: format!(
+                "header scope {found:?} disagrees with descriptor scope {}",
+                descriptor.scope
+            ),
+        }
+        .into());
+    }
+
+    Ok(())
+}
+
 /// One epoch's blocks, appended to the archive in stream order: a layer of
 /// this profile's, or a closed epoch's from the blocks repository, read with
 /// that profile's decoder. Both carry each block's slot, hash and body.
+///
+/// A blocks-repository layer is also held to that profile's record rules:
+/// every block inside the layer's epoch, and no slot going backwards.
 fn restore_blocks<R: SnapshotReader, A: ArchiveStore>(
     reader: &Reader<'_, R>,
     descriptor: &LayerDescriptor,
     archive: &A,
 ) -> Result<u64, Error> {
-    let decode: fn(&[u8]) -> Result<blocks::BlockRecord, Error> = match reader.repo {
-        Repo::Dolos => blocks::decode,
-        Repo::Blocks => |bytes| {
-            let block = stelae_blocks::record::decode(bytes)?;
-            Ok(blocks::BlockRecord::new(
-                block.slot,
-                block.hash.into(),
-                block.body,
-            ))
-        },
+    let mut rules = match reader.repo {
+        Repo::Dolos => None,
+        Repo::Blocks => Some((
+            EpochScope::read_descriptor(reader.magic, &descriptor.scope)?,
+            OrderCheck::default(),
+        )),
+    };
+
+    let decode = move |bytes: &[u8]| {
+        let Some((scope, order)) = &mut rules else {
+            return blocks::decode(bytes);
+        };
+
+        let block = stelae_blocks::record::decode(bytes)?;
+
+        if !scope.covers(block.slot) {
+            return Err(stelae_blocks::Error::OutsideEpoch {
+                slot: block.slot,
+                epoch: scope.epoch,
+                start_slot: scope.start_slot,
+                end_slot: scope.end_slot,
+            }
+            .into());
+        }
+
+        order.check(block.slot)?;
+
+        Ok(blocks::BlockRecord::new(
+            block.slot,
+            block.hash.into(),
+            block.body,
+        ))
     };
 
     reader.drain(
@@ -2943,6 +2998,14 @@ mod tests {
     /// A blocks snapshot at `sequence` on `magic`, as the whole of its lineage,
     /// with a `blocks` layer for each `(epoch, start_slot, end_slot)`.
     fn blocks_chain(magic: u64, sequence: u64, epochs: &[(u64, u64, u64)]) -> Chain {
+        Chain::walk(&BlocksProfile, blocks_head(magic, sequence, epochs), |_| {
+            Ok(None)
+        })
+        .unwrap()
+    }
+
+    /// The inscription of [`blocks_chain`].
+    fn blocks_head(magic: u64, sequence: u64, epochs: &[(u64, u64, u64)]) -> Inscription {
         let mut head = Inscription::new(
             &BlocksProfile,
             sequence,
@@ -2967,7 +3030,7 @@ mod tests {
             })
             .collect();
 
-        Chain::walk(&BlocksProfile, head, |_| Ok(None)).unwrap()
+        head
     }
 
     /// A stele's kept epochs at sequence 2: 0 and 1 closed, 100 slots each,
@@ -3046,6 +3109,83 @@ mod tests {
             &[(0, 0, 99), (1, 100, 199), (1, 100, 198)],
         ));
         assert!(err.to_string().contains("described twice"), "{err}");
+    }
+
+    /// A plan reading a blocks snapshot sizes each closed epoch's `blocks`
+    /// layer through that snapshot's transport and the cut's through the
+    /// stele's, in the space estimate and in what is left to download. A
+    /// blocks inscription compressed at another level has its layers
+    /// estimated from what they declare.
+    #[test]
+    fn a_blocks_snapshot_is_sized_through_its_own_transport() {
+        let closed = [(0, 0, 99), (1, 100, 199), (2, 200, 299)];
+
+        let mut head = blocks_head(MAINNET_MAGIC, 3, &closed);
+        head.compression.level = 3;
+        let blocks = Chain::walk(&BlocksProfile, head, |_| Ok(None)).unwrap();
+
+        let mut stele = inscription(state_layers());
+        stele.position = crate::position(
+            &crate::Network::for_magic(MAINNET_MAGIC),
+            &ChainPoint::Specific(350, [0x0b; 32].into()),
+            3,
+            Some(&blocks.identity()),
+        )
+        .unwrap();
+        stele.diff = (0..4)
+            .map(|epoch| epoch_descriptor(INDEXES, epoch, 0xd0 + epoch as u8))
+            .chain([epoch_descriptor(BLOCKS, 3, 0xe3)])
+            .collect();
+
+        let mut plan = plan(&alone(stele), Some(&blocks), MAINNET_MAGIC, None).unwrap();
+        assert_eq!(plan.blocks, Some(blocks.identity()));
+        assert_eq!(
+            plan.foreign_compression,
+            blocks.descriptors().map(|layer| layer.diff_id).collect()
+        );
+
+        let lookup = |repo: Repo, _: &LayerDescriptor| {
+            Ok(Some(match repo {
+                Repo::Blocks => 1_000_000,
+                Repo::Dolos => 1_000,
+            }))
+        };
+        let own = scaled(1_000, BLOCKS_ON_DISK.per_compressed);
+
+        let elsewhere = plan.estimate_with(&Resume::none(), 0, lookup).unwrap();
+        assert_eq!(
+            elsewhere.blocks,
+            3 * scaled(100, BLOCKS_ON_DISK.per_uncompressed) + own
+        );
+        assert_eq!(elsewhere.fallback_layers, 3);
+
+        plan.foreign_compression.clear();
+
+        let sized = plan.estimate_with(&Resume::none(), 0, lookup).unwrap();
+        assert_eq!(
+            sized.blocks,
+            3 * scaled(1_000_000, BLOCKS_ON_DISK.per_compressed) + own
+        );
+        assert_eq!(sized.fallback_layers, 0);
+
+        // What is left to download adds both transports up, and its largest
+        // layer is the blocks snapshot's. The tip is stated by neither.
+        let stele = Stated((0xd0..=0xd3).chain([0xe3]).map(|b| (b, 1_000)).collect());
+        let snapshot = Stated((0xb0..=0xb2).map(|b| (b, 1_000_000)).collect());
+        let index: BlobIndex = std::iter::empty().collect();
+        let pair = Blocks {
+            snapshot: &snapshot,
+            index: &index,
+        };
+
+        let left = plan
+            .remaining(&stele, &index, Some(pair), &Resume::none())
+            .unwrap();
+
+        assert_eq!(left.layers, plan.layers().count());
+        assert_eq!(left.compressed_bytes, 3 * 1_000_000 + 5 * 1_000);
+        assert_eq!(left.largest_compressed, Some(1_000_000));
+        assert_eq!(left.unsized_layers, plan.tip_layers().count());
     }
 
     /// Every state layer a complete tip carries: each kind, shards ascending.

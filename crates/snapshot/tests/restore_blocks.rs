@@ -20,9 +20,11 @@ use dolos_snapshot::{
 };
 use dolos_testing::toy_domain::{MemoryStores, ToyDomain};
 use node::{harness, plan_at_boundary, Blank};
-use paired::Paired;
+use paired::{Paired, Tamper};
 use recorder::contents_digest;
-use stelae::{dir::SnapshotDir, progress::Observer, Resume, SnapshotReader as _};
+use stelae::{
+    dir::SnapshotDir, inscription::LayerDescriptor, progress::Observer, Resume, SnapshotReader,
+};
 
 /// The boundary the fixture's head is cut at; epochs 0 to 2 are closed.
 const HEAD: u64 = 3;
@@ -234,6 +236,36 @@ fn the_remaining_work_and_the_estimate_cover_both_repositories() {
         index: &blocks_index,
     };
 
+    // Each repository's layers, sized by its own transport.
+    let sizes = |repo| -> Vec<u64> {
+        let sized = |snapshot: &dyn SnapshotReader<Blob = std::fs::File>,
+                     index,
+                     layer: &LayerDescriptor| {
+            snapshot.compressed_size(index, layer).unwrap().unwrap()
+        };
+
+        outcome
+            .plan
+            .remaining_in(repo, &Resume::none())
+            .map(|layer| match repo {
+                Repo::Dolos => sized(&stele, &index, layer),
+                Repo::Blocks => sized(&blocks, &blocks_index, layer),
+            })
+            .collect()
+    };
+    let (own, theirs) = (sizes(Repo::Dolos), sizes(Repo::Blocks));
+    assert_eq!(theirs.len(), HEAD as usize);
+
+    let remaining = &outcome.outlook.remaining;
+    assert_eq!(
+        remaining.compressed_bytes,
+        own.iter().chain(&theirs).sum::<u64>()
+    );
+    assert_eq!(
+        remaining.largest_compressed,
+        own.iter().chain(&theirs).copied().max()
+    );
+
     let estimate = outcome
         .plan
         .estimate(&stele, &index, Some(pair), &Resume::none(), 0)
@@ -358,6 +390,16 @@ fn a_missing_blocks_repository_is_refused() {
         );
         assert!(untouched(&blank), "{blocks:?}");
     }
+
+    // A layout holding another profile's snapshot at that sequence is not a
+    // missing blocks repository, and is refused as what it is.
+    let (outcome, blank) = fixture.restore(fixture.dolos.path(), Some(fixture.dolos.path()), None);
+    let error = outcome.map(|o| o.plan.blocks).unwrap_err();
+    assert!(
+        matches!(error, Error::Stelae(stelae::Error::UnknownProfile { .. })),
+        "{error:?}"
+    );
+    assert!(untouched(&blank));
 }
 
 /// A stele that still lists its closed epochs' `blocks` layers restores from
@@ -398,5 +440,45 @@ fn a_stele_listing_its_own_blocks_reads_no_blocks_repository() {
         );
         assert_eq!(outcome.summary.blocks, control.summary.blocks);
         assert_eq!(blocks_of(&restored), blocks_of(&alone), "{blocks:?}");
+    }
+}
+
+/// A blocks-repository layer that breaks the blocks profile's reader rules is
+/// refused, and the restore never writes its cursor: a header scope that is
+/// not the descriptor's, a block outside its epoch, and a slot going
+/// backwards. Each layer was sealed past the plain writer, so its `diffId`
+/// and its descriptor's bounds are what the stele expects.
+#[test]
+fn a_blocks_layer_breaking_the_profiles_reader_rules_is_refused() {
+    let fixture = Fixture::new();
+
+    for tamper in [Tamper::HeaderScope, Tamper::OutsideEpoch, Tamper::Backwards] {
+        let (dolos, blocks) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        paired::pair_tampered(
+            fixture.source.path(),
+            &SnapshotDir::create(dolos.path()).unwrap(),
+            &SnapshotDir::create(blocks.path()).unwrap(),
+            Some((1, tamper)),
+        );
+
+        let (outcome, blank) = fixture.restore(dolos.path(), Some(blocks.path()), None);
+        let error = outcome.map(|o| o.summary).unwrap_err();
+
+        let refused = match tamper {
+            Tamper::HeaderScope => matches!(
+                &error,
+                Error::Stelae(stelae::Error::LayerMismatch { kind, .. }) if kind == BLOCKS
+            ),
+            Tamper::OutsideEpoch => matches!(
+                error,
+                Error::Blocks(stelae_blocks::Error::OutsideEpoch { epoch: 1, .. })
+            ),
+            Tamper::Backwards => {
+                matches!(error, Error::Blocks(stelae_blocks::Error::OutOfOrder(_)))
+            }
+        };
+
+        assert!(refused, "{tamper:?}: {error:?}");
+        assert_eq!(blank.state().read_cursor().unwrap(), None, "{tamper:?}");
     }
 }

@@ -46,10 +46,33 @@ impl Paired {
 /// `blocks` as a lineage from sequence 1, and its chain without them into
 /// `dolos`.
 pub fn pair<D: SnapshotWriter, B: SnapshotWriter>(source: &Path, dolos: &D, blocks: &B) -> Paired {
-    let blocks = blocks_lineage(source, blocks, 1);
+    pair_tampered(source, dolos, blocks, None)
+}
+
+/// [`pair`], with the blocks layer of the epoch `tampered` names written past
+/// the plain writer's checks ([`Tamper`]).
+pub fn pair_tampered<D: SnapshotWriter, B: SnapshotWriter>(
+    source: &Path,
+    dolos: &D,
+    blocks: &B,
+    tampered: Option<(u64, Tamper)>,
+) -> Paired {
+    let blocks = lineage(source, blocks, 1, tampered);
     let dolos = without_blocks(source, dolos, &blocks);
 
     Paired { blocks, dolos }
+}
+
+/// A blocks layer that breaks the profile's reader rules, as a careless
+/// publisher could write it by skipping `BlocksWriter`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tamper {
+    /// The header's end slot is one past the descriptor's.
+    HeaderScope,
+    /// The last block's slot is one past the epoch's end.
+    OutsideEpoch,
+    /// The blocks run in descending slot.
+    Backwards,
 }
 
 /// The closed epochs' blocks of the stele at `source`'s `latest`, sealed into
@@ -61,6 +84,15 @@ pub fn blocks_lineage<W: SnapshotWriter>(
     source: &Path,
     writer: &W,
     first: u64,
+) -> BTreeMap<u64, Digest> {
+    lineage(source, writer, first, None)
+}
+
+fn lineage<W: SnapshotWriter>(
+    source: &Path,
+    writer: &W,
+    first: u64,
+    tampered: Option<(u64, Tamper)>,
 ) -> BTreeMap<u64, Digest> {
     let layout = SnapshotDir::open(source).unwrap();
     let stele = layout.resolve_latest(&DolosProfile).unwrap();
@@ -88,9 +120,21 @@ pub fn blocks_lineage<W: SnapshotWriter>(
                 let scope = EpochScope::read_descriptor(magic, &layer.scope).unwrap();
                 let blocks = read_blocks(&layout, &index, layer);
 
-                stelae_blocks::write_layer(writer, scope, stelae_blocks::COMPRESSION_LEVEL, blocks)
-                    .unwrap()
-                    .descriptor
+                match tampered {
+                    Some((at, tamper)) if at == epoch => {
+                        write_tampered(writer, scope, blocks, tamper)
+                    }
+                    _ => {
+                        stelae_blocks::write_layer(
+                            writer,
+                            scope,
+                            stelae_blocks::COMPRESSION_LEVEL,
+                            blocks,
+                        )
+                        .unwrap()
+                        .descriptor
+                    }
+                }
             })
             .collect();
 
@@ -158,6 +202,45 @@ pub fn without_blocks<W: SnapshotWriter>(
     }
 
     heads
+}
+
+/// `blocks` as `scope`'s layer, broken as `tamper` says, through a raw sink
+/// that checks nothing a blocks reader does.
+fn write_tampered<W: SnapshotWriter>(
+    writer: &W,
+    scope: EpochScope,
+    mut blocks: Vec<BlockRecord>,
+    tamper: Tamper,
+) -> LayerDescriptor {
+    let mut header = scope;
+
+    assert!(
+        blocks.first().unwrap().slot < blocks.last().unwrap().slot,
+        "epoch {} needs blocks at two slots to be tampered with",
+        scope.epoch
+    );
+
+    match tamper {
+        Tamper::HeaderScope => header.end_slot += 1,
+        Tamper::OutsideEpoch => blocks.last_mut().unwrap().slot = scope.end_slot + 1,
+        Tamper::Backwards => blocks.reverse(),
+    }
+
+    let spec = LayerSpec::new(
+        stelae_blocks::BLOCKS,
+        header.header().unwrap(),
+        scope.descriptor(),
+    );
+    let mut sink = writer
+        .layer_sink(&BlocksProfile, &spec, stelae_blocks::COMPRESSION_LEVEL)
+        .unwrap();
+
+    for block in &blocks {
+        sink.write_record(&stelae_blocks::record::encode(block).unwrap())
+            .unwrap();
+    }
+
+    sink.finish().unwrap().descriptor
 }
 
 /// The blocks of one of the stele's own `blocks` layers. The two profiles'
