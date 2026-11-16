@@ -12,22 +12,26 @@
 //! of everything the stores hold.
 
 mod node;
+mod paired;
 mod recorder;
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 
 use dolos_core::{Domain as _, StateStore as _};
 use dolos_snapshot::{
     restore::{
-        self, progress_path_in, source_path_in, Input, Restoring, ResumeRefusal, Source,
+        self, progress_path_in, source_path_in, Input, Repo, Restoring, ResumeRefusal, Source,
         SourceRecord, Target,
     },
     Error,
 };
 use dolos_testing::toy_domain::{FjallStores, ToyDomain};
 use node::{export_to, harness, Blank};
-use recorder::{contents_digest, Journal, Op, RecordedArchive, RecordedState};
-use stelae::{plan::RestoreProgress, Digest};
+use recorder::{contents_digest, Entry, Journal, Op, RecordedArchive, RecordedState};
+use stelae::{inscription::LayerDescriptor, plan::RestoreProgress, Digest, Resume};
 
 fn magic_of(domain: &ToyDomain<FjallStores>) -> u64 {
     u64::from(dolos_core::Domain::genesis(domain).network_magic())
@@ -55,6 +59,8 @@ fn restoring<'a>(
 struct Stele {
     domain: ToyDomain<FjallStores>,
     dir: tempfile::TempDir,
+    /// The blocks repository a paired stele names.
+    blocks: Option<tempfile::TempDir>,
     source: Source,
     magic: u64,
 }
@@ -70,6 +76,7 @@ impl Stele {
             source: Source::Dir(dir.path().to_path_buf()),
             domain,
             dir,
+            blocks: None,
             magic,
         }
     }
@@ -96,12 +103,39 @@ impl Stele {
             source: Source::Dir(dir.path().to_path_buf()),
             domain,
             dir,
+            blocks: None,
             magic,
+        }
+    }
+
+    /// [`Stele::chained`], paired: the stele without its closed epochs'
+    /// blocks, which are in a blocks repository beside it.
+    fn paired() -> Self {
+        let chained = Self::chained();
+        let dir = tempfile::tempdir().unwrap();
+        let blocks = tempfile::tempdir().unwrap();
+
+        paired::pair(
+            chained.path(),
+            &stelae::dir::SnapshotDir::create(dir.path()).unwrap(),
+            &stelae::dir::SnapshotDir::create(blocks.path()).unwrap(),
+        );
+
+        Self {
+            source: Source::Dir(dir.path().to_path_buf()),
+            domain: chained.domain,
+            dir,
+            blocks: Some(blocks),
+            magic: chained.magic,
         }
     }
 
     fn path(&self) -> &Path {
         self.dir.path()
+    }
+
+    fn blocks_path(&self) -> Option<&Path> {
+        self.blocks.as_ref().map(|blocks| blocks.path())
     }
 
     fn digest(&self) -> Digest {
@@ -122,7 +156,10 @@ impl Stele {
         resume: bool,
     ) -> Result<restore::RestoreOutcome, Error> {
         restore::execute(
-            Input::Directory(self.path()),
+            Input::Directory {
+                path: self.path(),
+                blocks: self.blocks_path(),
+            },
             restoring(storage, self.magic, resume, Some(&self.source)),
             Target::new(&blank.archive, blank.state()),
             None,
@@ -143,7 +180,10 @@ impl Stele {
         };
 
         restore::execute(
-            Input::Directory(self.path()),
+            Input::Directory {
+                path: self.path(),
+                blocks: self.blocks_path(),
+            },
             restoring(storage, self.magic, false, Some(&self.source)),
             Target::new(&archive, &state),
             None,
@@ -154,6 +194,14 @@ impl Stele {
     /// The commits and persists of an uninterrupted recorded restore, in
     /// order, with the digest of the node it leaves.
     fn uninterrupted(&self) -> (Vec<Op>, Digest) {
+        let (entries, digest, _) = self.recorded_run();
+
+        (entries.into_iter().map(|entry| entry.op).collect(), digest)
+    }
+
+    /// [`Stele::uninterrupted`], each call with the layers the progress file
+    /// recorded when it returned, and the plan.
+    fn recorded_run(&self) -> (Vec<Entry>, Digest, restore::Plan) {
         let storage = tempfile::tempdir().unwrap();
         let blank = Blank::<FjallStores>::open();
         let journal = Journal::new(progress_path_in(storage.path()));
@@ -167,17 +215,22 @@ impl Stele {
             journal: journal.clone(),
         };
 
-        restore::execute(
-            Input::Directory(self.path()),
+        let outcome = restore::execute(
+            Input::Directory {
+                path: self.path(),
+                blocks: self.blocks_path(),
+            },
             restoring(storage.path(), self.magic, false, Some(&self.source)),
             Target::new(&archive, &state),
             None,
         )
         .unwrap();
 
-        let ops = journal.take().into_iter().map(|entry| entry.op).collect();
-
-        (ops, contents_digest(&blank.archive, blank.state()))
+        (
+            journal.take(),
+            contents_digest(&blank.archive, blank.state()),
+            outcome.plan,
+        )
     }
 }
 
@@ -461,7 +514,10 @@ fn a_resume_from_another_source_is_refused() {
     let elsewhere = Source::Dir(copy.path().to_path_buf());
 
     let error = restore::execute(
-        Input::Directory(copy.path()),
+        Input::Directory {
+            path: copy.path(),
+            blocks: None,
+        },
         restoring(storage.path(), stele.magic, true, Some(&elsewhere)),
         Target::new(&blank.archive, blank.state()),
         None,
@@ -582,7 +638,10 @@ fn a_restore_given_no_source_records_nothing() {
     let blank = Blank::<FjallStores>::open();
 
     restore::execute(
-        Input::Directory(stele.path()),
+        Input::Directory {
+            path: stele.path(),
+            blocks: None,
+        },
         restoring(storage.path(), stele.magic, false, None),
         Target::new(&blank.archive, blank.state()),
         None,
@@ -609,5 +668,90 @@ fn copy_dir(from: &Path, to: &Path) {
         } else {
             std::fs::copy(entry.path(), &target).unwrap();
         }
+    }
+}
+
+/// A paired restore stopped while it writes a layer of either repository
+/// resumes from its records into the node an uninterrupted one builds. The
+/// one progress file, keyed by the stele, records the blocks repository's
+/// layers beside the stele's own.
+#[test]
+fn a_paired_restore_stopped_in_either_stream_resumes_into_the_same_node() {
+    let stele = Stele::paired();
+    let (entries, control, plan) = stele.recorded_run();
+
+    let from_blocks: BTreeSet<Digest> = plan
+        .remaining_in(Repo::Blocks, &Resume::none())
+        .map(|layer| layer.diff_id)
+        .collect();
+    assert_eq!(from_blocks.len(), 2, "the fixture has two closed epochs");
+
+    let layers: Vec<&LayerDescriptor> = plan.immutable_layers().collect();
+    // The first layer `repo` serves from `after` on that holds a record past
+    // its header, so that writing it commits.
+    let first_of = |repo: Repo, after: usize| {
+        (after..layers.len())
+            .find(|k| {
+                from_blocks.contains(&layers[*k].diff_id) == (repo == Repo::Blocks)
+                    && layers[*k].records > 1
+            })
+            .unwrap()
+    };
+
+    // The second closed epoch's blocks, with the first's recorded ahead of
+    // them; then the stele's first layer with records after those blocks.
+    let in_blocks = first_of(Repo::Blocks, first_of(Repo::Blocks, 0) + 1);
+    let in_stele = first_of(Repo::Dolos, in_blocks + 1);
+
+    // The call that writes layer `k` first: the first archive commit while
+    // the progress file records exactly the layers before it.
+    let first_commit = |k: usize| {
+        let before: BTreeSet<Digest> = layers[..k].iter().map(|layer| layer.diff_id).collect();
+
+        entries
+            .iter()
+            .position(|entry| {
+                entry.op == Op::ArchiveCommit
+                    && entry
+                        .recorded
+                        .iter()
+                        .flatten()
+                        .copied()
+                        .collect::<BTreeSet<_>>()
+                        == before
+            })
+            .unwrap()
+            + 1
+    };
+
+    for k in [in_blocks, in_stele] {
+        let storage = tempfile::tempdir().unwrap();
+        let blank = Blank::<FjallStores>::open();
+
+        let error = stele.stopped_at(storage.path(), &blank, first_commit(k));
+        assert!(error.to_string().contains("stopped at call"), "{error}");
+
+        let done = progress(storage.path()).expect("a stopped restore left no progress");
+        assert_eq!(done.inscription_digest, stele.digest());
+        assert_eq!(
+            done.completed,
+            layers[..k].iter().map(|layer| layer.diff_id).collect()
+        );
+        assert!(
+            done.completed.iter().any(|d| from_blocks.contains(d)),
+            "no layer of the blocks repository was recorded"
+        );
+
+        let resumed = stele.restore(storage.path(), &blank, true).unwrap();
+
+        assert_eq!(resumed.summary.layers_skipped, k, "stopped in layer {k}");
+        assert_eq!(recorded(storage.path()), None);
+        assert_eq!(progress(storage.path()), None);
+        assert_eq!(
+            contents_digest(&blank.archive, blank.state()),
+            control,
+            "stopped in layer {k} ({})",
+            layers[k].kind
+        );
     }
 }

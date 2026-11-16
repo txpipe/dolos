@@ -307,6 +307,7 @@ fn restored(root: &std::path::Path) -> Summary {
 
     let (_, _, summary) = restore::restore_dir(
         root,
+        None,
         node,
         Target::new(&archive, &state),
         &Observer::silent(),

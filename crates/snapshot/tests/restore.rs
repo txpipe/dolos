@@ -190,17 +190,18 @@ fn restore_into<B: ToyStores>(
 ) -> Result<restore::Summary, Error> {
     let stele = SnapshotDir::open(root)?.resolve_latest(&DolosProfile)?;
 
-    let plan = restore::plan(chain(&stele), magic, None)?;
+    let plan = restore::plan(chain(&stele), None, magic, None)?;
     let index = stele.blob_index()?;
 
     // A directory stele stages nothing — its blobs are read where they are —
     // so the only volume this restore has a need on is the destination.
-    let estimate = plan.estimate(&stele, &index, &stelae::Resume::none(), 0)?;
+    let estimate = plan.estimate(&stele, &index, None, &stelae::Resume::none(), 0)?;
     plan.preflight(root, &estimate, None)?;
 
     restore::restore(
         &stele,
         &index,
+        None,
         &plan,
         target(blank),
         budget,
@@ -226,7 +227,10 @@ fn the_headless_facade_restores_a_directory_without_an_observer() {
 
     let blank = Blank::<MemoryStores>::open();
     let outcome = restore::execute(
-        restore::Input::Directory(source.path()),
+        restore::Input::Directory {
+            path: source.path(),
+            blocks: None,
+        },
         restore::Restoring {
             network_magic: magic_of(&domain),
             max_history: None,
@@ -271,7 +275,10 @@ fn the_headless_facade_charges_the_journals_it_is_given() {
 
     let blank = Blank::<MemoryStores>::open();
     let Err(err) = restore::execute(
-        restore::Input::Directory(source.path()),
+        restore::Input::Directory {
+            path: source.path(),
+            blocks: None,
+        },
         restore::Restoring {
             network_magic: magic_of(&domain),
             max_history: None,
@@ -314,10 +321,10 @@ fn a_restored_fixture_fits_within_its_estimate() {
         (preset.state().database.journal_mb + preset.archive().database.journal_mb) << 20;
 
     let stele = resolved(source.path());
-    let plan = restore::plan(chain(&stele), magic_of(&domain), None).unwrap();
+    let plan = restore::plan(chain(&stele), None, magic_of(&domain), None).unwrap();
     let index = stele.blob_index().unwrap();
     let estimate = plan
-        .estimate(&stele, &index, &stelae::Resume::none(), journals)
+        .estimate(&stele, &index, None, &stelae::Resume::none(), journals)
         .unwrap();
 
     // Export writes at the profile's level and a directory sizes every blob,
@@ -333,6 +340,7 @@ fn a_restored_fixture_fits_within_its_estimate() {
     restore::restore(
         &stele,
         &index,
+        None,
         &plan,
         restore::Target::new(stores.archive(), stores.state()),
         default_budget(),
@@ -535,7 +543,7 @@ fn an_unknown_layer_kind_is_skipped_and_reported() {
     let inscription = export_one_kind_ahead(temp.path(), &domain, json!({"epoch": 0}));
 
     let stele = resolved(temp.path());
-    let plan = restore::plan(chain(&stele), magic, None).unwrap();
+    let plan = restore::plan(chain(&stele), None, magic, None).unwrap();
 
     assert_eq!(plan.skipped_unknown.len(), 1);
     assert_eq!(plan.skipped_unknown[0].kind, AHEAD_KIND);
@@ -662,7 +670,7 @@ fn a_restore_interrupted_in_utxo_tags_commits_neither_utxos_nor_cursor_and_resum
     let state = FaultyStateStore::new(blank.state().clone(), TestFault::StateTagsApplyError);
 
     let stele = resolved(temp.path());
-    let plan = restore::plan(chain(&stele), magic_of(&domain), None).unwrap();
+    let plan = restore::plan(chain(&stele), None, magic_of(&domain), None).unwrap();
     let index = stele.blob_index().unwrap();
     let storage = tempfile::tempdir().unwrap();
     let mut checkpoint = Checkpoint::open(
@@ -675,6 +683,7 @@ fn a_restore_interrupted_in_utxo_tags_commits_neither_utxos_nor_cursor_and_resum
     let err = restore::restore(
         &stele,
         &index,
+        None,
         &plan,
         restore::Target::new(&blank.archive, &state),
         default_budget(),
@@ -767,11 +776,12 @@ fn utxo_tags_commit_with_each_batch<B: ToyStores>() {
         checked: std::sync::atomic::AtomicUsize::new(0),
     });
     let stele = resolved(temp.path());
-    let plan = restore::plan(chain(&stele), magic_of(&domain), None).unwrap();
+    let plan = restore::plan(chain(&stele), None, magic_of(&domain), None).unwrap();
 
     let summary = restore::restore(
         &stele,
         &stele.blob_index().unwrap(),
+        None,
         &plan,
         target(&blank),
         shredded(),
@@ -1808,7 +1818,10 @@ fn a_stele_whose_tip_is_gone_is_refused() {
     let blank = Blank::<MemoryStores>::open();
 
     let err = restore::execute(
-        restore::Input::Directory(temp.path()),
+        restore::Input::Directory {
+            path: temp.path(),
+            blocks: None,
+        },
         restore::Restoring {
             network_magic: magic_of(&domain),
             max_history: None,
@@ -1927,7 +1940,7 @@ fn restore_watched<B: ToyStores>(
     let stele = SnapshotDir::open(root)?.resolve_latest(&DolosProfile)?;
     let identity = chain(&stele).identity();
 
-    let plan = restore::plan(chain(&stele), magic, None)?;
+    let plan = restore::plan(chain(&stele), None, magic, None)?;
     let index = stele.blob_index()?;
 
     let mut checkpoint = Checkpoint::open(progress_path_in(storage), identity, resume)?;
@@ -1939,6 +1952,7 @@ fn restore_watched<B: ToyStores>(
                 stop_at,
             },
             &index,
+            None,
             &plan,
             target(blank),
             default_budget(),
@@ -1949,6 +1963,7 @@ fn restore_watched<B: ToyStores>(
         None => restore::restore(
             &stele,
             &index,
+            None,
             &plan,
             target(blank),
             default_budget(),
@@ -1983,7 +1998,10 @@ fn the_headless_facade_resumes_an_interrupted_directory_restore() {
     .unwrap_err();
 
     let resumed = restore::execute(
-        restore::Input::Directory(stele.path()),
+        restore::Input::Directory {
+            path: stele.path(),
+            blocks: None,
+        },
         restore::Restoring {
             network_magic: magic,
             max_history: None,
@@ -2174,8 +2192,9 @@ fn restores_like_the_plain_stele(published_order: bool) {
     add_dump_descriptors(dumped_root.path(), &mut dumped, published_order);
     assert!(dumped.layers().count() > plain_count, "no dump was added");
 
-    let plain_plan = restore::plan(chain(&resolved(plain_root.path())), magic, None).unwrap();
-    let dumped_plan = restore::plan(chain(&resolved(dumped_root.path())), magic, None).unwrap();
+    let plain_plan = restore::plan(chain(&resolved(plain_root.path())), None, magic, None).unwrap();
+    let dumped_plan =
+        restore::plan(chain(&resolved(dumped_root.path())), None, magic, None).unwrap();
 
     assert_eq!(dumped_plan.layers().count(), plain_plan.layers().count());
     assert_eq!(dumped_plan.tip_layers().count(), state_layer_count());
@@ -2410,10 +2429,10 @@ fn the_remaining_download_excludes_what_is_already_done() {
 
     let stele = resolved(temp.path());
     let index = stele.blob_index().unwrap();
-    let plan = restore::plan(chain(&stele), magic_of(&domain), None).unwrap();
+    let plan = restore::plan(chain(&stele), None, magic_of(&domain), None).unwrap();
 
     let fresh = plan
-        .remaining(&stele, &index, &stelae::Resume::none())
+        .remaining(&stele, &index, None, &stelae::Resume::none())
         .unwrap();
 
     assert_eq!(fresh.layers, inscription.layers().count());
@@ -2452,7 +2471,9 @@ fn the_remaining_download_excludes_what_is_already_done() {
         progress.record(*diff_id);
     }
 
-    let resumed = plan.remaining(&stele, &index, &progress.resume()).unwrap();
+    let resumed = plan
+        .remaining(&stele, &index, None, &progress.resume())
+        .unwrap();
 
     assert_eq!(resumed.layers, fresh.layers - epochs.len());
     assert!(resumed.compressed_bytes < fresh.compressed_bytes);
@@ -2476,7 +2497,7 @@ fn the_remaining_download_excludes_what_is_already_done() {
 /// interruption below is built on.
 fn layers_in_driver_order(root: &std::path::Path, magic: u64) -> (Vec<Digest>, Vec<Digest>) {
     let stele = resolved(root);
-    let plan = restore::plan(chain(&stele), magic, None).unwrap();
+    let plan = restore::plan(chain(&stele), None, magic, None).unwrap();
 
     (
         plan.immutable_layers().map(|l| l.diff_id).collect(),
@@ -2518,7 +2539,7 @@ fn max_history_selects_epochs_and_never_the_tip() {
     // Epochs dropped and kept, per window: the fixture covers epoch 0 whole and
     // epoch 1's boundary sliver.
     for (max_history, dropped, kept) in [(None, 0, 2), (Some(0), 1, 1), (Some(u64::MAX), 0, 2)] {
-        let plan = restore::plan(chain(&stele), magic_of(&domain), max_history).unwrap();
+        let plan = restore::plan(chain(&stele), None, magic_of(&domain), max_history).unwrap();
 
         // Keyed by namespace now, so the tip is one entry per state kind and
         // every layer under them.

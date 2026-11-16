@@ -1780,6 +1780,7 @@ dependencies = [
  "serde",
  "serde_json",
  "stelae",
+ "stelae-blocks",
  "stelae-driver",
  "tempfile",
  "thiserror 2.0.21",
@@ -5746,6 +5747,18 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "zstd",
+]
+
+[[package]]
+name = "stelae-blocks"
+version = "0.6.0"
+source = "git+https://github.com/txpipe/stelae?rev=b2735ed829cbafdc57273a42871510aa564b00b3#b2735ed829cbafdc57273a42871510aa564b00b3"
+dependencies = [
+ "minicbor 0.26.4",
+ "serde_json",
+ "stelae",
+ "stelae-driver",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
