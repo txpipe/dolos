@@ -16,7 +16,7 @@ mod recorder;
 
 use std::path::{Path, PathBuf};
 
-use dolos_core::StateStore as _;
+use dolos_core::{Domain as _, StateStore as _};
 use dolos_snapshot::{
     restore::{
         self, progress_path_in, source_path_in, Input, Restoring, ResumeRefusal, Source,
@@ -65,6 +65,32 @@ impl Stele {
         let magic = magic_of(&domain);
         let dir = tempfile::tempdir().unwrap();
         export_to(dir.path(), &domain);
+
+        Self {
+            source: Source::Dir(dir.path().to_path_buf()),
+            domain,
+            dir,
+            magic,
+        }
+    }
+
+    /// Steles published on boundaries 1 and 2, the second linked to the
+    /// first, so the head is not where its chain starts.
+    fn chained() -> Self {
+        let domain = harness::<FjallStores>();
+        let magic = magic_of(&domain);
+        let dir = tempfile::tempdir().unwrap();
+
+        for epoch in [1, 2] {
+            dolos_snapshot::export::publish(
+                dir.path(),
+                &node::plan_at_boundary(&domain, epoch),
+                domain.archive(),
+                domain.state(),
+                &stelae::progress::Observer::silent(),
+            )
+            .unwrap();
+        }
 
         Self {
             source: Source::Dir(dir.path().to_path_buf()),
@@ -225,6 +251,41 @@ fn a_restore_stopped_anywhere_resumes_from_its_records_into_the_same_node() {
             "stopped at call {stop} of {ops:?}"
         );
     }
+}
+
+/// A head that links to an earlier stele resumes the same way: the record
+/// names the head, not the inscription its chain starts at.
+#[test]
+fn a_stopped_restore_of_a_chained_head_resumes_from_its_records() {
+    let stele = Stele::chained();
+    let (ops, control) = stele.uninterrupted();
+
+    let head = {
+        use stelae::SnapshotReader as _;
+        node::resolved(stele.path()).read_inscription().unwrap()
+    };
+    assert_eq!(head.sequence, 2);
+    assert!(head.previous.is_some());
+
+    // The tip's first commit, with the epoch layers before it recorded.
+    let stop = ops.iter().position(|op| *op == Op::StateCommit).unwrap() + 1;
+
+    let storage = tempfile::tempdir().unwrap();
+    let blank = Blank::<FjallStores>::open();
+    stele.stopped_at(storage.path(), &blank, stop);
+
+    let record = recorded(storage.path()).expect("a stopped restore left no source record");
+    assert_eq!(record.sequence, head.sequence);
+    assert_eq!(record.inscription_digest, head.digest().unwrap());
+
+    let skipped = progress(storage.path()).map_or(0, |progress| progress.completed.len());
+    assert!(skipped > 0, "the stop recorded no layer to skip");
+
+    let resumed = stele.restore(storage.path(), &blank, true).unwrap();
+
+    assert_eq!(resumed.summary.layers_skipped, skipped);
+    assert_eq!(recorded(storage.path()), None);
+    assert_eq!(contents_digest(&blank.archive, blank.state()), control);
 }
 
 /// The record's fields are the published contract: the source URL, the

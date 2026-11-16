@@ -161,6 +161,73 @@ fn a_blob_that_is_not_the_layer_is_refused_with_the_layer_named() {
     eprintln!("corrupted blob: {message}");
 }
 
+/// The same corruption in a layer of the inscription `latest` links to fails a
+/// verification of `latest`, with that layer named: verify checks every layer
+/// of the chain, not only the head's own.
+#[test]
+#[ignore = "spawns a registry"]
+fn a_corrupt_layer_of_an_earlier_inscription_is_refused() {
+    let fixture = Fixture::spawn();
+    let distribution = Distribution::new(&fixture);
+    let node = Node::build();
+
+    let name = "dolos/verify-corrupt-earlier";
+    let repository = fixture.repository(name);
+
+    let first = node.publish(&repository, &node.first, false);
+    let second = node.publish(&repository, &node.second, false);
+    assert_eq!(second.inscription.previous, link_to(&first));
+
+    let blob = {
+        use std::io::Write as _;
+
+        let mut writer = stelae::LayerWriter::new(Vec::new(), 3).unwrap();
+        writer.write_all(b"not the layer anybody attested").unwrap();
+        writer.finish().unwrap().0
+    };
+
+    let planted = distribution.put_blob(name, &blob);
+
+    // The earlier sequence's diff manifest, under its own immutable tag.
+    let tag = Point::Epoch(first.inscription.sequence).to_string();
+    let mut manifest = distribution.manifest(name, &tag);
+    let diff_id: Digest = manifest["layers"][0]["annotations"]["store.stelae.layer.diffId"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    manifest["layers"][0]["digest"] = json!(planted);
+    manifest["layers"][0]["size"] = json!(blob.len());
+    distribution.put_manifest(name, &tag, &manifest);
+
+    let corrupted = first
+        .inscription
+        .diff
+        .iter()
+        .find(|layer| layer.diff_id == diff_id)
+        .unwrap()
+        .clone();
+    assert!(
+        !second
+            .inscription
+            .layers()
+            .any(|layer| layer.kind == corrupted.kind && layer.scope == corrupted.scope),
+        "the head lists the corrupted layer itself"
+    );
+
+    let err = registry::verify(&repository, Point::Latest).unwrap_err();
+    let corrupted_scope = corrupted.scope.to_string();
+
+    assert!(
+        matches!(
+            &err,
+            Error::LayerVerification { kind, scope, .. }
+                if *kind == corrupted.kind && *scope == corrupted_scope
+        ),
+        "{err:?}"
+    );
+}
+
 /// A manifest `diffId` annotation that disagrees with the inscription,
 /// refused at the pull with the layer position and both identities named.
 #[test]
@@ -493,6 +560,108 @@ fn a_resumed_registry_publish_carries_its_diff_and_builds_its_tip() {
     )
     .unwrap();
     assert_eq!(reproduced.digest().unwrap(), published.identity);
+}
+
+/// A record left by a build from before the diff chain is not resumed. That
+/// build recorded tip layers too: here window 1's account rows from an
+/// interrupted first publish at 2, stake-only there. EWRAP rewrites them, and
+/// a first publish at 3, which lists them in its diff, builds them from the
+/// store with every other layer.
+#[test]
+#[ignore = "spawns a registry"]
+fn a_record_from_before_the_diff_chain_is_rebuilt() {
+    let fixture = Fixture::spawn();
+    let process = || fixture.repository("dolos/old-record");
+    let record = tempfile::tempdir().unwrap();
+    let record_path = registry::record_path_in(record.path());
+    let silent = stelae::progress::Observer::silent();
+
+    let host: ToyDomain<MemoryStores> = node::harness();
+    node::write_account_row(&host, 1, node::stake_only());
+
+    let cut_at_2 = plan_at_boundary(&host, 2);
+    let dying = process();
+    let interrupted = registry::publish_into(
+        &SealFails(&dying),
+        Publishing::new(&dying).recording_in(&record_path),
+        &cut_at_2,
+        host.archive(),
+        host.state(),
+        &silent,
+    );
+    assert!(interrupted.is_err(), "the seal was meant to fail");
+
+    // The tip layer as the interrupted publish uploaded it, measured on the
+    // same stele exported to a directory.
+    let stele = tempfile::tempdir().unwrap();
+    let at_2 = node::export_plan(stele.path(), &host, &cut_at_2);
+    let stake_only = node::account_layer(&at_2, 1);
+    assert!(
+        at_2.tip.contains(&stake_only),
+        "window 1's rows are the tip at 2"
+    );
+
+    let blob_digest = node::resolved(stele.path())
+        .blob_index()
+        .unwrap()
+        .blob_for(&stake_only.diff_id)
+        .unwrap();
+    let blob_path = stelae::dir::SnapshotDir::open(stele.path())
+        .unwrap()
+        .blob_path(&blob_digest);
+
+    // Filed as that build filed it: under the inscription parameters alone,
+    // with the tip layer beside the diff.
+    let mut old = PublishRecord::load(&record_path).unwrap().unwrap();
+    old.origin.parameters = dolos_snapshot::parameters();
+    old.layers.push(stelae::transport::WrittenLayer {
+        descriptor: stake_only.clone(),
+        digests: stelae::digest::LayerDigests {
+            diff_id: stake_only.diff_id,
+            blob_digest,
+            uncompressed_size: stake_only.uncompressed_size,
+            compressed_size: std::fs::metadata(blob_path).unwrap().len(),
+        },
+    });
+    old.save(&record_path).unwrap();
+
+    // Every recorded blob is up, the stale one too, so only the record's
+    // origin can keep them out.
+    let probe = process();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    for layer in &old.layers {
+        while !probe.adopt_carried(layer.clone()).unwrap() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a recorded layer never finished uploading"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    node::write_account_row(&host, 1, node::settled());
+    let cut_at_3 = plan_at_boundary(&host, 3);
+
+    let resumed = process();
+    let published = registry::publish(
+        Publishing::new(&resumed).recording_in(&record_path),
+        &cut_at_3,
+        host.archive(),
+        host.state(),
+        &silent,
+    )
+    .unwrap();
+
+    let expected =
+        export::reproduce(&cut_at_3, host.archive(), host.state(), &export::First).unwrap();
+
+    assert_eq!(published.layers_reused, 0);
+    assert_eq!(published.identity, expected.digest().unwrap());
+    assert!(expected.diff.contains(&node::account_layer(&expected, 1)));
+    assert_ne!(
+        node::account_layer(&published.inscription, 1).diff_id,
+        stake_only.diff_id
+    );
 }
 
 /// A batch prepared and staged once, then published in sequence, is the chain

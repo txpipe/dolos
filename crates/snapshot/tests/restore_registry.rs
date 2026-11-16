@@ -138,7 +138,7 @@ impl Node {
         }
     }
 
-    fn publish(&self, repository: &Registry, plan: &Plan) {
+    fn publish(&self, repository: &Registry, plan: &Plan) -> registry::Published {
         let stores = self.stores(plan);
 
         registry::publish(
@@ -148,7 +148,7 @@ impl Node {
             stores.state(),
             &Observer::silent(),
         )
-        .unwrap();
+        .unwrap()
     }
 }
 
@@ -1434,6 +1434,59 @@ fn a_stopped_registry_restore_resumes_through_its_record() {
             "stopped at call {stop}"
         );
     }
+}
+
+/// A recorded restore of a head that links to an earlier stele, stopped and
+/// resumed: the record names the head, and the resume reads that head's chain
+/// into the node an uninterrupted restore builds.
+#[test]
+#[ignore]
+fn a_stopped_restore_of_a_chained_head_resumes_through_its_record() {
+    let fixture = Fixture::spawn();
+    let node = Node::build();
+    let name = "dolos/record-resume-chain";
+
+    let first = node.publish(&fixture.repository(name), &node.first);
+    let head = node.publish(&fixture.repository(name), &node.second);
+    assert_eq!(
+        head.inscription.previous.unwrap().sequence,
+        first.inscription.sequence
+    );
+
+    let source = Recorded::open(&fixture, name, node.magic);
+
+    let control = Blank::<FjallStores>::open();
+    let ops = source.stopped_at(
+        Point::Latest,
+        tempfile::tempdir().unwrap().path(),
+        &control,
+        None,
+    );
+    let control = contents_digest(&control.archive, control.state());
+
+    // The tip's first commit, with the epoch layers before it recorded.
+    let stop = ops.iter().position(|at| *at == Op::StateCommit).unwrap() + 1;
+
+    let storage = tempfile::tempdir().unwrap();
+    let blank = Blank::<FjallStores>::open();
+    source.stopped_at(Point::Latest, storage.path(), &blank, Some(stop));
+
+    let record = source_record(storage.path()).expect("no source record");
+    assert_eq!(record.sequence, node.second.sequence);
+    assert_eq!(record.inscription_digest, head.identity);
+
+    let recorded = RestoreProgress::load(&progress_path_in(storage.path()))
+        .unwrap()
+        .map_or(0, |progress| progress.completed.len());
+    assert!(recorded > 0, "the stop recorded no layer to skip");
+
+    let resumed = source
+        .restore(Point::Epoch(record.sequence), storage.path(), &blank, true)
+        .unwrap();
+
+    assert_eq!(resumed.summary.layers_skipped, recorded);
+    assert_eq!(source_record(storage.path()), None);
+    assert_eq!(contents_digest(&blank.archive, blank.state()), control);
 }
 
 /// Interrupt a recorded restore of the repository's first stele at its tip,
