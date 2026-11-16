@@ -666,7 +666,8 @@ fn both_repositories_are_read_ahead_under_one_depth() {
 
 /// Each stream keeps to its share of the depth, whatever it has left to read:
 /// at the default, the blocks stream fetches two layers at once and the
-/// stele's own six, which is what the staging preflight charges them.
+/// stele's own six. The staging preflight charges each stream one layer more
+/// than its share, the one it drains.
 #[test]
 fn each_stream_reads_ahead_at_its_share_of_the_depth() {
     let published = Published::paired_to(3);
@@ -712,7 +713,8 @@ fn each_stream_reads_ahead_at_its_share_of_the_depth() {
 
 /// The registry transport resolves the blocks repository at the stele's
 /// sequence and restores the node the direct restore does; a blocks
-/// repository holding nothing there is refused, naming the snapshot.
+/// repository holding nothing there is refused, naming the snapshot, and one
+/// holding another profile's snapshot is refused as what it is.
 #[test]
 fn a_registry_restore_reads_the_blocks_repository_it_is_given() {
     let published = Published::paired();
@@ -789,6 +791,14 @@ fn a_registry_restore_reads_the_blocks_repository_it_is_given() {
     assert!(
         error.to_string().contains("holds no snapshot at epoch-"),
         "{error}"
+    );
+    assert_eq!(blank.state().read_cursor().unwrap(), None);
+
+    let (outcome, blank) = restored(&repository(REPOSITORY));
+    let error = outcome.map(|o| o.plan.blocks).unwrap_err();
+    assert!(
+        matches!(error, Error::Stelae(stelae::Error::UnknownProfile { .. })),
+        "{error:?}"
     );
     assert_eq!(blank.state().read_cursor().unwrap(), None);
 }

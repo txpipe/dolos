@@ -69,8 +69,12 @@ pub fn pair_tampered<D: SnapshotWriter, B: SnapshotWriter>(
 pub enum Tamper {
     /// The header's end slot is one past the descriptor's.
     HeaderScope,
+    /// The header names the next epoch, over the descriptor's slots.
+    HeaderEpoch,
     /// The last block's slot is one past the epoch's end.
     OutsideEpoch,
+    /// The first block's slot is the one before the epoch's start.
+    BeforeEpoch,
     /// The blocks run in descending slot.
     Backwards,
 }
@@ -222,7 +226,9 @@ fn write_tampered<W: SnapshotWriter>(
 
     match tamper {
         Tamper::HeaderScope => header.end_slot += 1,
+        Tamper::HeaderEpoch => header.epoch += 1,
         Tamper::OutsideEpoch => blocks.last_mut().unwrap().slot = scope.end_slot + 1,
+        Tamper::BeforeEpoch => blocks.first_mut().unwrap().slot = scope.start_slot - 1,
         Tamper::Backwards => blocks.reverse(),
     }
 

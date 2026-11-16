@@ -3186,6 +3186,21 @@ mod tests {
         assert_eq!(left.compressed_bytes, 3 * 1_000_000 + 5 * 1_000);
         assert_eq!(left.largest_compressed, Some(1_000_000));
         assert_eq!(left.unsized_layers, plan.tip_layers().count());
+
+        // A blocks-snapshot layer its transport cannot size is counted as
+        // unsized beside the tip, and adds nothing to the bytes.
+        let partial = Stated((0xb0..=0xb1).map(|b| (b, 1_000_000)).collect());
+        let pair = Blocks {
+            snapshot: &partial,
+            index: &index,
+        };
+
+        let short = plan
+            .remaining(&stele, &index, Some(pair), &Resume::none())
+            .unwrap();
+
+        assert_eq!(short.compressed_bytes, 2 * 1_000_000 + 5 * 1_000);
+        assert_eq!(short.unsized_layers, plan.tip_layers().count() + 1);
     }
 
     /// Every state layer a complete tip carries: each kind, shards ascending.

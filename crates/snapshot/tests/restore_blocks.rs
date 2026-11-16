@@ -445,14 +445,21 @@ fn a_stele_listing_its_own_blocks_reads_no_blocks_repository() {
 
 /// A blocks-repository layer that breaks the blocks profile's reader rules is
 /// refused, and the restore never writes its cursor: a header scope that is
-/// not the descriptor's, a block outside its epoch, and a slot going
-/// backwards. Each layer was sealed past the plain writer, so its `diffId`
-/// and its descriptor's bounds are what the stele expects.
+/// not the descriptor's, in its end slot or its epoch, a block past either
+/// end of its epoch, and a slot going backwards. Each layer was sealed past
+/// the plain writer, so its `diffId` and its descriptor's bounds are what the
+/// stele expects.
 #[test]
 fn a_blocks_layer_breaking_the_profiles_reader_rules_is_refused() {
     let fixture = Fixture::new();
 
-    for tamper in [Tamper::HeaderScope, Tamper::OutsideEpoch, Tamper::Backwards] {
+    for tamper in [
+        Tamper::HeaderScope,
+        Tamper::HeaderEpoch,
+        Tamper::OutsideEpoch,
+        Tamper::BeforeEpoch,
+        Tamper::Backwards,
+    ] {
         let (dolos, blocks) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         paired::pair_tampered(
             fixture.source.path(),
@@ -465,11 +472,11 @@ fn a_blocks_layer_breaking_the_profiles_reader_rules_is_refused() {
         let error = outcome.map(|o| o.summary).unwrap_err();
 
         let refused = match tamper {
-            Tamper::HeaderScope => matches!(
+            Tamper::HeaderScope | Tamper::HeaderEpoch => matches!(
                 &error,
                 Error::Stelae(stelae::Error::LayerMismatch { kind, .. }) if kind == BLOCKS
             ),
-            Tamper::OutsideEpoch => matches!(
+            Tamper::OutsideEpoch | Tamper::BeforeEpoch => matches!(
                 error,
                 Error::Blocks(stelae_blocks::Error::OutsideEpoch { epoch: 1, .. })
             ),
