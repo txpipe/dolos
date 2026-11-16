@@ -89,8 +89,9 @@ pub enum Refusal {
     #[error("the index delta is not the boundary block's: {reason}")]
     ForeignTail { reason: String },
     #[error(
-        "bundle {sequence} reads closed windows from the archive, and it starts at block \
-         #{number}, slot {first}, not at the chain's first block"
+        "bundle {sequence} reads closed windows from the archive, but the archive starts at \
+         block #{number}, slot {first}, not at the chain's first block; finish the batch on an \
+         archive that keeps full history"
     )]
     PrunedArchive {
         sequence: u64,
@@ -1340,18 +1341,21 @@ fn check_source<A: ArchiveStore>(
     check_unpruned(bundle, archive)
 }
 
-/// The archive still has to start at the chain's first block, as the boundary
-/// check held it to when the bundle was captured. Finalization reads the
-/// closed windows its stele lists from the archive, and pruned, they and their
-/// logs read as empty rather than failing.
+/// The archive still has to start at the chain's first block. Finalization
+/// reads the closed windows its stele lists from the archive, and pruned, they
+/// and their logs read as empty rather than failing. Block #1 starts a chain
+/// only at slot 0, after a Byron genesis boundary block; anywhere else it
+/// means a prune has taken block #0 since capture.
 fn check_unpruned<A: ArchiveStore>(bundle: &Bundle, archive: &A) -> Result<(), Error> {
-    match crate::boundary::pruned_start(archive)? {
-        Some((first, number)) => Err(Refusal::PrunedArchive {
-            sequence: bundle.sequence(),
-            first: first.slot(),
-            number,
+    match crate::boundary::first_block(archive)? {
+        Some((first, number)) if number > 1 || (number == 1 && first.slot() != 0) => {
+            Err(Refusal::PrunedArchive {
+                sequence: bundle.sequence(),
+                first: first.slot(),
+                number,
+            }
+            .into())
         }
-        .into()),
-        None => Ok(()),
+        _ => Ok(()),
     }
 }

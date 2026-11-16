@@ -5862,6 +5862,160 @@ mod boundary_preparation {
         ));
     }
 
+    /// Block #1 past slot 0 is what a prune that takes only block #0 leaves,
+    /// and no chain starts there. Both staging and finalization refuse it, and
+    /// the refusal names the block the archive starts at.
+    #[test]
+    fn losing_only_the_chains_first_block_is_refused() {
+        let (root, stage_root, restage_root, finished_root) =
+            (tempdir(), tempdir(), tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let bundle = chain.prepare(&store).unwrap();
+        let origin = blocks_from(&chain, 0)[0].0.slot();
+
+        chain.advance_to(3);
+
+        let staged = chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &export::First,
+        );
+        let kept = blocks_from(&chain, origin + 1);
+        let second = kept[0].0.slot();
+
+        assert_ne!(second, 0);
+
+        let refusal = preparation_refusal(finalize_on(
+            finished_root.path(),
+            &store,
+            &bundle,
+            &staged,
+            &pruned_archive(kept.clone()),
+        ));
+        let message = refusal.to_string();
+
+        assert!(
+            matches!(
+                refusal,
+                Refusal::PrunedArchive { sequence: 2, first, number: 1 } if first == second
+            ),
+            "{refusal:?}"
+        );
+        assert!(
+            message.contains(&format!("block #1, slot {second}"))
+                && message.contains("full history"),
+            "{message}"
+        );
+
+        let restaged = prepare::stage_batch(
+            restage_root.path(),
+            &pruned_archive(kept),
+            &chain.state,
+            std::slice::from_ref(&bundle),
+            &export::First,
+            Budget::new(u64::MAX),
+            &Observer::silent(),
+        );
+
+        assert!(matches!(
+            preparation_refusal(restaged),
+            Refusal::PrunedArchive {
+                sequence: 2,
+                number: 1,
+                ..
+            }
+        ));
+    }
+
+    /// A copy of `chain`'s blocks and logs, in the store a publisher prunes.
+    fn fjall_copy(chain: &Chain) -> dolos_fjall::archive::ArchiveStore {
+        let schema = dolos_cardano::model::build_log_schema();
+        let archive = dolos_fjall::archive::ArchiveStore::for_tempdir(schema.clone()).unwrap();
+        let writer = archive.start_writer().unwrap();
+
+        for (point, body) in blocks_from(chain, 0) {
+            writer.apply(&point, &Arc::new(body)).unwrap();
+        }
+
+        for (&ns, _) in schema.iter() {
+            for entry in chain.archive.iter_logs(ns, KeyRange::all()).unwrap() {
+                let (key, value) = entry.unwrap();
+
+                writer.write_log(ns, &key, &value).unwrap();
+            }
+        }
+
+        writer.commit().unwrap();
+
+        archive
+    }
+
+    /// A real `prune_history` one slot past the chain's first block, on both
+    /// archives a publisher runs, takes exactly that block.
+    #[test]
+    fn a_whole_plan_pruned_one_slot_past_the_first_block_is_refused() {
+        for on_fjall in [false, true] {
+            let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
+            let store = store(root.path());
+            let mut chain = Chain::at(Shape::Shelley, 5);
+            let bundle = chain.prepare(&store).unwrap();
+            let origin = blocks_from(&chain, 0)[0].0.slot();
+
+            chain.advance_to(6);
+
+            let staged = chain.stage(
+                stage_root.path(),
+                std::slice::from_ref(&bundle),
+                &export::First,
+            );
+            let max_slots = chain.tip.as_ref().unwrap().slot() - (origin + 1);
+            let stele = SnapshotDir::create(finished_root.path()).unwrap();
+            let finalizing = Finalizing {
+                store: &store,
+                bundle: &bundle,
+                staged: &staged,
+                producers: export::Producers::DEFAULT,
+            };
+
+            let refused = if on_fjall {
+                let fjall = fjall_copy(&chain);
+
+                assert!(fjall.prune_history(max_slots, None, None).unwrap());
+
+                prepare::finalize(
+                    &stele,
+                    &finalizing,
+                    &fjall,
+                    &export::First,
+                    &Observer::silent(),
+                )
+            } else {
+                assert!(chain.archive.prune_history(max_slots, None, None).unwrap());
+
+                prepare::finalize(
+                    &stele,
+                    &finalizing,
+                    &chain.archive,
+                    &export::First,
+                    &Observer::silent(),
+                )
+            };
+
+            assert!(
+                matches!(
+                    preparation_refusal(refused),
+                    Refusal::PrunedArchive {
+                        sequence: 5,
+                        number: 1,
+                        ..
+                    }
+                ),
+                "on fjall: {on_fjall}"
+            );
+        }
+    }
+
     /// A delta for the main block sharing the boundary block's slot.
     #[test]
     fn a_delta_for_the_main_block_at_the_boundary_slot_is_refused() {

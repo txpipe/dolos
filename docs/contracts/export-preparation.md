@@ -136,9 +136,12 @@ The **manifest** (`BUNDLE_FORMAT`) holds:
 
 The manifest names no slot the archive has to keep. Staging and finalization read
 closed windows from the source archive, and `boundary::check` held it to the
-chain's first block when the boundary was captured, so both hold it there again
-(`PrunedArchive`): pruned, closed windows and their logs would read as empty
-rather than fail. A publisher keeps full history.
+chain's first block when the boundary was captured (block number at most 1, the
+test `data rebuild` applies), so both hold it there again (`PrunedArchive`):
+pruned, closed windows and their logs would read as empty rather than fail. They
+are stricter by one case: block #1 passes only at slot 0, where it follows a
+Byron genesis boundary block, because anywhere else it means block #0 was pruned
+since capture. A publisher keeps full history.
 
 **Lifecycle.** Payloads are fsynced, then their directory, then the manifest is
 written to `{sequence}.json.partial`, fsynced, renamed and the directory fsynced.

@@ -351,13 +351,23 @@ fn evidence<A: ArchiveStore>(
 pub(crate) fn pruned_start<A: ArchiveStore>(
     archive: &A,
 ) -> Result<Option<(ChainPoint, u64)>, Error> {
+    Ok(first_block(archive)?.filter(|(_, number)| *number > 1))
+}
+
+/// The archive's first block and its number. `None` for an empty archive.
+pub(crate) fn first_block<A: ArchiveStore>(
+    archive: &A,
+) -> Result<Option<(ChainPoint, u64)>, Error> {
     let Some((slot, body)) = archive.get_range(None, None)?.next() else {
         return Ok(None);
     };
 
     let first = decode(slot, &body)?;
 
-    Ok((first.number() > 1).then(|| (ChainPoint::Specific(slot, first.hash()), first.number())))
+    Ok(Some((
+        ChainPoint::Specific(slot, first.hash()),
+        first.number(),
+    )))
 }
 
 fn decode(slot: BlockSlot, body: &BlockBody) -> Result<MultiEraBlock<'_>, Error> {
