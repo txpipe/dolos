@@ -129,26 +129,37 @@ impl Stele {
         )
     }
 
-    /// The same, through stores that stop at the `call`-th commit or persist.
-    fn stopped_at(&self, storage: &Path, blank: &Blank<FjallStores>, call: usize) -> Error {
-        let journal = Journal::crashing_at(progress_path_in(storage), call);
-
+    /// The same, through stores that log to `journal`.
+    fn restore_recorded(
+        &self,
+        storage: &Path,
+        blank: &Blank<FjallStores>,
+        resume: bool,
+        journal: &Journal,
+    ) -> Result<restore::RestoreOutcome, Error> {
         let archive = RecordedArchive {
             inner: blank.archive.clone(),
             journal: journal.clone(),
         };
         let state = RecordedState {
             inner: blank.state().clone(),
-            journal,
+            journal: journal.clone(),
         };
 
         restore::execute(
             Input::Directory(self.path()),
-            restoring(storage, self.magic, false, Some(&self.source)),
+            restoring(storage, self.magic, resume, Some(&self.source)),
             Target::new(&archive, &state),
             None,
         )
-        .unwrap_err()
+    }
+
+    /// The same, through stores that stop at the `call`-th commit or persist.
+    fn stopped_at(&self, storage: &Path, blank: &Blank<FjallStores>, call: usize) -> Error {
+        let journal = Journal::crashing_at(progress_path_in(storage), call);
+
+        self.restore_recorded(storage, blank, false, &journal)
+            .unwrap_err()
     }
 
     /// The commits and persists of an uninterrupted recorded restore, in
@@ -163,22 +174,8 @@ impl Stele {
         let blank = Blank::<FjallStores>::open();
         let journal = adjust(Journal::new(progress_path_in(storage.path())));
 
-        let archive = RecordedArchive {
-            inner: blank.archive.clone(),
-            journal: journal.clone(),
-        };
-        let state = RecordedState {
-            inner: blank.state().clone(),
-            journal: journal.clone(),
-        };
-
-        restore::execute(
-            Input::Directory(self.path()),
-            restoring(storage.path(), self.magic, false, Some(&self.source)),
-            Target::new(&archive, &state),
-            None,
-        )
-        .unwrap();
+        self.restore_recorded(storage.path(), &blank, false, &journal)
+            .unwrap();
 
         let ops = journal.take().into_iter().map(|entry| entry.op).collect();
 
@@ -310,6 +307,93 @@ fn a_restore_stopped_around_an_ingest_resumes_into_the_same_node() {
                 "stopped at call {stop} of {ops:?}"
             );
         }
+    }
+}
+
+/// The archive settles once, after the last ingested layer and before the
+/// cursor commit.
+#[test]
+fn an_ingesting_restore_settles_before_the_cursor_commit() {
+    let stele = Stele::export();
+    let (ops, _) = stele.uninterrupted();
+
+    assert_settled_once(&ops);
+}
+
+/// Stopped at the settle, and at the cursor commit after it: the resume has
+/// no layer left to ingest, settles again, and builds the uninterrupted node.
+#[test]
+fn a_restore_stopped_at_or_after_the_settle_settles_again_on_resume() {
+    let stele = Stele::export();
+    let (ops, control) = stele.uninterrupted();
+
+    let settle = ops.iter().position(|op| *op == Op::ArchiveSettle).unwrap() + 1;
+    let cursor_commit = ops.iter().rposition(|op| *op == Op::StateCommit).unwrap() + 1;
+
+    for stop in [settle, cursor_commit] {
+        let storage = tempfile::tempdir().unwrap();
+        let blank = Blank::<FjallStores>::open();
+
+        let error = stele.stopped_at(storage.path(), &blank, stop);
+        assert!(error.to_string().contains("stopped at call"), "{error}");
+
+        let journal = Journal::new(progress_path_in(storage.path()));
+        stele
+            .restore_recorded(storage.path(), &blank, true, &journal)
+            .unwrap();
+
+        let resumed: Vec<Op> = journal.take().into_iter().map(|entry| entry.op).collect();
+
+        assert!(
+            !resumed.contains(&Op::ArchiveIngest),
+            "stopped at {stop}: {resumed:?}"
+        );
+        assert_settled_once(&resumed);
+        assert_eq!(
+            contents_digest(&blank.archive, blank.state()),
+            control,
+            "stopped at call {stop} of {ops:?}"
+        );
+    }
+}
+
+/// A settle that fails, as a rewrite that ran out of space, fails the restore
+/// before its cursor: the node stays unfinished and a resume completes it.
+#[test]
+fn a_settle_that_fails_fails_the_restore_before_the_cursor() {
+    let stele = Stele::export();
+    let (_, control) = stele.uninterrupted();
+
+    let storage = tempfile::tempdir().unwrap();
+    let blank = Blank::<FjallStores>::open();
+    let journal = Journal::failing_settle(progress_path_in(storage.path()));
+
+    let error = stele
+        .restore_recorded(storage.path(), &blank, false, &journal)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("the settle failed"), "{error}");
+    assert_eq!(blank.state().read_cursor().unwrap(), None);
+    assert!(progress(storage.path()).is_some());
+
+    stele.restore(storage.path(), &blank, true).unwrap();
+    assert_eq!(contents_digest(&blank.archive, blank.state()), control);
+}
+
+fn assert_settled_once(ops: &[Op]) {
+    let settles: Vec<usize> = ops
+        .iter()
+        .enumerate()
+        .filter(|(_, op)| **op == Op::ArchiveSettle)
+        .map(|(index, _)| index)
+        .collect();
+    let cursor_commit = ops.iter().rposition(|op| *op == Op::StateCommit).unwrap();
+
+    assert_eq!(settles.len(), 1, "{ops:?}");
+    assert!(settles[0] < cursor_commit, "{ops:?}");
+
+    if let Some(last_ingest) = ops.iter().rposition(|op| *op == Op::ArchiveIngest) {
+        assert!(last_ingest < settles[0], "{ops:?}");
     }
 }
 

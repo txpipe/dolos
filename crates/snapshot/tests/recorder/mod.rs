@@ -6,7 +6,8 @@
 //! call and every one after it without reaching the store, which is a
 //! process that died there: what committed before stays, and the batch in
 //! flight is dropped. One made with [`Journal::failing_persist`] fails a
-//! single persist and nothing else, as an fsync that returned an IO error.
+//! single persist and nothing else, as an fsync that returned an IO error,
+//! and one made with [`Journal::failing_settle`] fails the settle's join.
 
 // Each integration test binary compiles this module in full, so the parts one
 // binary does not reach look dead to it. They are not.
@@ -36,6 +37,9 @@ pub enum Op {
     /// runs unfinished.
     ArchiveIngest,
     ArchivePersist,
+    /// The archive's settle, run to its end inside the call so its entry
+    /// keeps its place among the others; refused, it never starts.
+    ArchiveSettle,
     StateCommit,
     StatePersist,
 }
@@ -63,6 +67,8 @@ pub struct Journal {
     /// Whether the archive writes ingested layers through its own writer,
     /// one commit per chunk, rather than the inner store's ingest.
     batched: bool,
+    /// Whether the settle's join reports an error after the settle ran.
+    fail_settle: bool,
 }
 
 impl Journal {
@@ -76,6 +82,7 @@ impl Journal {
             archive_persists: Arc::default(),
             state_persists: Arc::default(),
             batched: false,
+            fail_settle: false,
         }
     }
 
@@ -93,6 +100,15 @@ impl Journal {
     pub fn failing_persist(progress: PathBuf, op: Op, nth: usize) -> Self {
         Self {
             fail_persist: Some((op, nth)),
+            ..Self::new(progress)
+        }
+    }
+
+    /// A journal whose settle runs, then fails when the restore joins it, as
+    /// a major compaction that ran out of space.
+    pub fn failing_settle(progress: PathBuf) -> Self {
+        Self {
+            fail_settle: true,
             ..Self::new(progress)
         }
     }
@@ -123,7 +139,7 @@ impl Journal {
         let counter = match op {
             Op::ArchivePersist => &self.archive_persists,
             Op::StatePersist => &self.state_persists,
-            Op::ArchiveCommit | Op::ArchiveIngest | Op::StateCommit => {
+            Op::ArchiveCommit | Op::ArchiveIngest | Op::ArchiveSettle | Op::StateCommit => {
                 unreachable!("{op:?} is not a persist")
             }
         };
@@ -326,7 +342,18 @@ impl<A: ArchiveStore> ArchiveStore for RecordedArchive<A> {
     }
 
     fn settle_ingested(&self) -> Result<Settling, ArchiveError> {
-        self.inner.settle_ingested()
+        self.journal.gate().map_err(ArchiveError::InternalError)?;
+        self.inner.settle_ingested()?.join()?;
+        self.journal.log(Op::ArchiveSettle);
+
+        // What the restore joins carries only the outcome.
+        let fail = self.journal.fail_settle;
+        let outcome = std::thread::spawn(move || match fail {
+            true => Err(ArchiveError::InternalError("the settle failed".into())),
+            false => Ok(()),
+        });
+
+        Ok(Settling::of(vec![outcome]))
     }
 
     fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
