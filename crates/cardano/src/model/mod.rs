@@ -124,6 +124,8 @@ pub mod scripts;
 pub mod stats;
 
 #[cfg(test)]
+mod replay_tests;
+#[cfg(test)]
 pub(crate) mod testing;
 
 pub use account_addresses::*;

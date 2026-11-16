@@ -1149,11 +1149,49 @@ mod compat_tests {
 }
 
 #[cfg(test)]
-mod prop_tests {
+pub(super) mod prop_tests {
     use super::testing::{any_proposal_action, any_proposal_state};
     use super::*;
     use crate::model::testing::{self as root, assert_delta_roundtrip};
+    use crate::model::testing::{replay_case, ReplayCase};
     use proptest::prelude::*;
+
+    /// A resolution of the proposal the strategy pairs it with, or of none.
+    fn any_proposal_resolution() -> impl Strategy<Value = (Option<ProposalState>, ProposalResolved)>
+    {
+        (
+            prop::option::of(any_proposal_state()),
+            prop_oneof![
+                Just(ProposalOutcome::Enacted),
+                Just(ProposalOutcome::Expired),
+                Just(ProposalOutcome::PrunedSibling),
+            ],
+            root::any_epoch(),
+            root::any_hash_32(),
+        )
+            .prop_map(|(entity, outcome, closing_epoch, tx)| {
+                let (tx, idx) = entity
+                    .as_ref()
+                    .map_or((tx, 0), |state| (state.tx, state.idx));
+                (
+                    entity,
+                    ProposalResolved::new(tx, idx, outcome, closing_epoch),
+                )
+            })
+    }
+
+    /// One case per delta this module owns, for `model::replay_tests`.
+    pub(crate) fn replay_cases() -> Vec<ReplayCase> {
+        vec![
+            replay_case((prop::option::of(any_proposal_state()), any_new_proposal())),
+            replay_case((
+                prop::option::of(any_proposal_state()),
+                any_new_proposal_v2(),
+            )),
+            replay_case((prop::option::of(any_proposal_state()), any_vote_cast())),
+            replay_case(any_proposal_resolution()),
+        ]
+    }
 
     prop_compose! {
         fn any_new_proposal()(

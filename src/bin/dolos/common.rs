@@ -168,8 +168,13 @@ fn render_domain_build_error(error: DomainBuildError) -> miette::Report {
             ref state,
         }) => {
             let msg = match (wal, state) {
-                (Some(w), Some(s)) => format!(
+                (Some(w), Some(s)) if s.slot() > w.slot() => format!(
                     "state (slot {}) is ahead of WAL (slot {})",
+                    s.slot(),
+                    w.slot()
+                ),
+                (Some(w), Some(s)) => format!(
+                    "state (slot {}) is behind WAL (slot {}) after catch-up",
                     s.slot(),
                     w.slot()
                 ),
@@ -184,6 +189,12 @@ fn render_domain_build_error(error: DomainBuildError) -> miette::Report {
                 _ => "storage may be corrupted; consider re-bootstrapping with `dolos bootstrap`",
             };
             miette::miette!(help = help, "{msg}")
+        }
+        DomainBuildError::Bootstrap(error @ dolos_core::DomainError::WalGap { .. }) => {
+            miette::miette!(
+                help = "To see the missing blocks, run `dolos sync recover --dry-run`. To reset the WAL to the state cursor, run `dolos sync recover --discard-wal`. This command erases the rollback history of the WAL.",
+                "{error}, so Dolos does not replay it"
+            )
         }
         other => miette::miette!("{other}"),
     }
@@ -268,11 +279,18 @@ pub fn setup_tracing_warnings() -> miette::Result<()> {
     Ok(())
 }
 
-/// Dolos's own targets at `level`, then the `filter` directives over them.
+/// Dolos's own targets at `level`, every other target at `error`, then the
+/// `filter` directives over them.
+///
+/// The `error` floor keeps a library's own account of a failure, such as the
+/// storage engine naming the OS error behind a failed sync. `tower_http` is
+/// off: it reports every HTTP 5xx at `error`, including deliberate 503s.
 fn log_filter(config: &LoggingConfig) -> Result<Targets, ConfigError> {
     let mut filter = Targets::new()
+        .with_default(tracing::Level::ERROR)
         .with_target("dolos", config.level)
-        .with_target("gasket", config.level);
+        .with_target("gasket", config.level)
+        .with_target("tower_http", tracing_subscriber::filter::LevelFilter::OFF);
 
     if let Some(directives) = &config.filter {
         let extra: Targets = directives.parse().map_err(|error| {
@@ -524,7 +542,35 @@ mod tests {
         assert!(filter.would_enable("gasket", &tracing::Level::WARN));
         assert!(!filter.would_enable("gasket", &tracing::Level::INFO));
         assert!(filter.would_enable("fjall", &tracing::Level::INFO));
-        assert!(!filter.would_enable("tonic", &tracing::Level::ERROR));
+        assert!(filter.would_enable("fjall::db", &tracing::Level::ERROR));
+        assert!(filter.would_enable("tonic", &tracing::Level::ERROR));
+        assert!(!filter.would_enable("tonic", &tracing::Level::WARN));
+        assert!(!filter.would_enable("tower_http::trace::on_failure", &tracing::Level::ERROR));
+
+        let config = LoggingConfig {
+            filter: Some("tower_http=error".into()),
+            ..Default::default()
+        };
+        assert!(log_filter(&config)
+            .unwrap()
+            .would_enable("tower_http::trace::on_failure", &tracing::Level::ERROR));
+
+        let config = LoggingConfig {
+            filter: Some("warn".into()),
+            ..Default::default()
+        };
+        let filter = log_filter(&config).unwrap();
+        assert!(filter.would_enable("tonic", &tracing::Level::WARN));
+        assert!(filter.would_enable("dolos", &tracing::Level::INFO));
+        assert!(!filter.would_enable("tower_http::trace::on_failure", &tracing::Level::ERROR));
+
+        let config = LoggingConfig {
+            filter: Some("off".into()),
+            ..Default::default()
+        };
+        assert!(!log_filter(&config)
+            .unwrap()
+            .would_enable("tonic", &tracing::Level::ERROR));
 
         let config = LoggingConfig {
             filter: Some("dolos=loud".into()),

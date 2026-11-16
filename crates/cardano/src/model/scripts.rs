@@ -163,14 +163,23 @@ impl dolos_core::EntityDelta for StageFirstScript {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::testing::any_first_script_set;
     use super::*;
     use crate::model::testing::{
         self as root, assert_delta_roundtrip, assert_delta_serde_roundtrip,
     };
+    use crate::model::testing::{replay_case, ReplayCase};
     use dolos_core::KeyCodec as _;
     use proptest::prelude::*;
+
+    /// One case per delta this module owns, for `model::replay_tests`.
+    pub(crate) fn replay_cases() -> Vec<ReplayCase> {
+        vec![replay_case((
+            prop::option::of(any_first_script_set()),
+            any_stage_first_script(),
+        ))]
+    }
 
     #[test]
     fn positions_order_as_db_sync_lists() {
