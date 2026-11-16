@@ -369,8 +369,6 @@ impl Plan {
             .chain(self.tip_layers())
     }
 
-    /// Uncompressed bytes across the selected layers.
-    ///
     /// Whether the plan carries a `blocks` or a `log-*` layer, the layers
     /// a restore ingests and then settles.
     ///
@@ -382,6 +380,8 @@ impl Plan {
             .any(|epoch| epoch.blocks.is_some() || !epoch.logs.is_empty())
     }
 
+    /// Uncompressed bytes across the selected layers.
+    ///
     /// Not [`Inscription::uncompressed_size`], which sums the whole document:
     /// what a restore needs room for is what it is going to read, and an epoch
     /// dropped by the history window is never fetched.
