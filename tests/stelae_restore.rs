@@ -340,6 +340,30 @@ fn a_source_that_is_not_a_stele_is_refused() {
     assert_eq!(Contents::read(&node), before);
 }
 
+/// An image layout that holds no stele, as a refused publish leaves one, is
+/// refused the same way: before `--force` clears anything.
+#[test]
+fn a_layout_with_no_stele_is_refused() {
+    let node = Node::new();
+    node.sync();
+    let before = Contents::read(&node);
+    assert!(before.cursor.is_some());
+
+    let layout = node.root.path().join("no-stele");
+    dolos_snapshot::dir::SnapshotDir::create(&layout).unwrap();
+
+    let output = node.bootstrap_stelae(&format!("file://{}", layout.display()));
+    assert_eq!(output.status.code(), Some(1));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let said: Vec<_> = stderr
+        .split_whitespace()
+        .filter(|word| *word != "│")
+        .collect();
+    assert!(said.join(" ").contains("holds no stele"), "{stderr}");
+    assert_eq!(Contents::read(&node), before);
+}
+
 /// `--force` must not clear the node before the command it is going to run is
 /// fully resolved.
 ///

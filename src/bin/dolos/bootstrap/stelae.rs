@@ -423,16 +423,19 @@ fn refused(refusal: ResumeRefusal) -> miette::Report {
     miette::miette!("{refusal}. Use --force to start over")
 }
 
-/// The stele directory `dir`, once it is known to hold a stele and, when
-/// `clears`, to lie out of the reach of the clear with the stele's own
-/// files, the ones the restore reads. The restore reads it by the path
-/// checked, with any `..` in it resolved.
+/// The stele directory `dir`, once its latest stele resolves, chain and all,
+/// and, when `clears`, once it lies out of the reach of the clear with the
+/// stele's own files, the ones the restore reads. An image layout alone is
+/// not a stele: a refused publish leaves one with no tags. The restore reads
+/// it by the path checked, with any `..` in it resolved.
 fn check_dir(config: &RootConfig, dir: &Path, clears: bool) -> miette::Result<PathBuf> {
     let dir = dolos::storage::resolve_parent_dirs(dir)
         .into_diagnostic()
         .context("resolving --source")?;
 
     dolos_snapshot::dir::SnapshotDir::open(&dir)
+        .and_then(|layout| layout.resolve_latest(&dolos_snapshot::DolosProfile))
+        .map_err(dolos_snapshot::Error::from)
         .into_diagnostic()
         .with_context(|| format!("{} holds no stele", dir.display()))?;
 
