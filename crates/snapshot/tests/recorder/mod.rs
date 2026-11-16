@@ -5,7 +5,8 @@
 //! returned. A journal made with [`Journal::crashing_at`] refuses its chosen
 //! call and every one after it without reaching the store, which is a
 //! process that died there: what committed before stays, and the batch in
-//! flight is dropped.
+//! flight is dropped. One made with [`Journal::failing_persist`] fails a
+//! single persist and nothing else, as an fsync that returned an IO error.
 
 // Each integration test binary compiles this module in full, so the parts one
 // binary does not reach look dead to it. They are not.
@@ -52,6 +53,10 @@ pub struct Journal {
     /// fails, as every later one does: the process died there.
     crash_at: Option<usize>,
     calls: Arc<AtomicUsize>,
+    /// The persist of this op, counted from one, that fails alone.
+    fail_persist: Option<(Op, usize)>,
+    archive_persists: Arc<AtomicUsize>,
+    state_persists: Arc<AtomicUsize>,
 }
 
 impl Journal {
@@ -61,6 +66,19 @@ impl Journal {
             entries: Arc::default(),
             crash_at: None,
             calls: Arc::default(),
+            fail_persist: None,
+            archive_persists: Arc::default(),
+            state_persists: Arc::default(),
+        }
+    }
+
+    /// A journal whose `nth` persist of `op` (counted from one) fails without
+    /// reaching the store, while every commit and every other persist goes
+    /// through.
+    pub fn failing_persist(progress: PathBuf, op: Op, nth: usize) -> Self {
+        Self {
+            fail_persist: Some((op, nth)),
+            ..Self::new(progress)
         }
     }
 
@@ -79,6 +97,23 @@ impl Journal {
 
         match self.crash_at {
             Some(crash_at) if call >= crash_at => Err(format!("stopped at call {crash_at}")),
+            _ => Ok(()),
+        }
+    }
+
+    /// Count a persist of `op`, and refuse it if it is the one chosen to fail.
+    fn gate_persist(&self, op: Op) -> Result<(), String> {
+        self.gate()?;
+
+        let counter = match op {
+            Op::ArchivePersist => &self.archive_persists,
+            Op::StatePersist => &self.state_persists,
+            Op::ArchiveCommit | Op::StateCommit => unreachable!("{op:?} is not a persist"),
+        };
+        let nth = counter.fetch_add(1, Ordering::SeqCst) + 1;
+
+        match self.fail_persist {
+            Some(chosen) if chosen == (op, nth) => Err(format!("{op:?} {nth} failed")),
             _ => Ok(()),
         }
     }
@@ -226,7 +261,9 @@ impl<A: ArchiveStore> ArchiveStore for RecordedArchive<A> {
     }
 
     fn persist(&self) -> Result<(), ArchiveError> {
-        self.journal.gate().map_err(ArchiveError::InternalError)?;
+        self.journal
+            .gate_persist(Op::ArchivePersist)
+            .map_err(ArchiveError::InternalError)?;
         self.inner.persist()?;
         self.journal.log(Op::ArchivePersist);
 
@@ -412,7 +449,7 @@ impl<S: StateStore> StateStore for RecordedState<S> {
 
     fn persist(&self) -> Result<(), StateError> {
         self.journal
-            .gate()
+            .gate_persist(Op::StatePersist)
             .map_err(StateError::InternalStoreError)?;
         self.inner.persist()?;
         self.journal.log(Op::StatePersist);
