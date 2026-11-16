@@ -283,15 +283,8 @@ fn evidence<A: ArchiveStore>(
 
     // An empty archive holds no cursor block either, which is the refusal
     // that names it.
-    if let Some((first_slot, first_body)) = archive.get_range(None, None)?.next() {
-        let first = decode(first_slot, &first_body)?;
-
-        if first.number() > 1 {
-            return Err(refuse(Ineligible::PrunedArchive {
-                first: ChainPoint::Specific(first_slot, first.hash()),
-                number: first.number(),
-            }));
-        }
+    if let Some((first, number)) = pruned_start(archive)? {
+        return Err(refuse(Ineligible::PrunedArchive { first, number }));
     }
 
     let at_slot = archive.get_blocks_by_slot(&slot)?;
@@ -350,6 +343,41 @@ fn evidence<A: ArchiveStore>(
         first: plan.cursor.clone(),
         parent,
     })
+}
+
+/// The archive's first block and its number, when it is not the chain's
+/// first by the test `data rebuild` applies (block number at most 1). `None`
+/// for an archive that starts at origin, and for an empty one.
+pub(crate) fn pruned_start<A: ArchiveStore>(
+    archive: &A,
+) -> Result<Option<(ChainPoint, u64)>, Error> {
+    Ok(first_block(archive)?
+        .filter(|first| first.number > 1)
+        .map(|first| (first.point, first.number)))
+}
+
+/// What the archive's first block says about where the archive starts.
+pub(crate) struct FirstBlock {
+    pub point: ChainPoint,
+    pub number: u64,
+    /// Whether its header names a previous block. A chain's first block names
+    /// none, except a Byron genesis boundary block, which names the genesis.
+    pub names_predecessor: bool,
+}
+
+/// The archive's first block. `None` for an empty archive.
+pub(crate) fn first_block<A: ArchiveStore>(archive: &A) -> Result<Option<FirstBlock>, Error> {
+    let Some((slot, body)) = archive.get_range(None, None)?.next() else {
+        return Ok(None);
+    };
+
+    let first = decode(slot, &body)?;
+
+    Ok(Some(FirstBlock {
+        point: ChainPoint::Specific(slot, first.hash()),
+        number: first.number(),
+        names_predecessor: first.header().previous_hash().is_some(),
+    }))
 }
 
 fn decode(slot: BlockSlot, body: &BlockBody) -> Result<MultiEraBlock<'_>, Error> {

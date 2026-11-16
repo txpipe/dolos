@@ -13,7 +13,7 @@ use crate::{
     boundary::{self, Boundary},
     export::{self, Document, Plan, Predecessor},
     inscription::Inscription,
-    planning::{self, EpochRange},
+    planning,
     prepare::{self, Bundle, Finalizing},
     registry::{self, Preview, Published, Publishing},
     staging::{Budget, Staged},
@@ -23,18 +23,16 @@ use crate::{
 /// The selection shared by publication, digest and reproduction.
 ///
 /// All fields are optional so [`Selection::default`] preserves the profile's
-/// measured defaults and selects every epoch available at the current cursor.
+/// measured defaults.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Selection {
-    pub epochs: Option<EpochRange>,
     pub producers: Option<NonZeroUsize>,
 }
 
 impl Selection {
     /// Apply every selection knob through the profile's canonical planning
-    /// functions. The order is shared by all hosts and commands.
+    /// functions, the same for all hosts and commands.
     pub fn apply(self, plan: Plan) -> Plan {
-        let plan = planning::restrict(plan, self.epochs);
         planning::produced(plan, self.producers)
     }
 }
