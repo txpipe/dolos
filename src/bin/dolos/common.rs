@@ -272,12 +272,14 @@ pub fn setup_tracing_warnings() -> miette::Result<()> {
 /// `filter` directives over them.
 ///
 /// The `error` floor keeps a library's own account of a failure, such as the
-/// storage engine naming the OS error behind a failed sync.
+/// storage engine naming the OS error behind a failed sync. `tower_http` is
+/// off: it reports every HTTP 5xx at `error`, including deliberate 503s.
 fn log_filter(config: &LoggingConfig) -> Result<Targets, ConfigError> {
     let mut filter = Targets::new()
         .with_default(tracing::Level::ERROR)
         .with_target("dolos", config.level)
-        .with_target("gasket", config.level);
+        .with_target("gasket", config.level)
+        .with_target("tower_http", tracing_subscriber::filter::LevelFilter::OFF);
 
     if let Some(directives) = &config.filter {
         let extra: Targets = directives.parse().map_err(|error| {
@@ -532,6 +534,15 @@ mod tests {
         assert!(filter.would_enable("fjall::db", &tracing::Level::ERROR));
         assert!(filter.would_enable("tonic", &tracing::Level::ERROR));
         assert!(!filter.would_enable("tonic", &tracing::Level::WARN));
+        assert!(!filter.would_enable("tower_http::trace::on_failure", &tracing::Level::ERROR));
+
+        let config = LoggingConfig {
+            filter: Some("tower_http=error".into()),
+            ..Default::default()
+        };
+        assert!(log_filter(&config)
+            .unwrap()
+            .would_enable("tower_http::trace::on_failure", &tracing::Level::ERROR));
 
         let config = LoggingConfig {
             filter: Some("warn".into()),

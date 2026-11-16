@@ -22,7 +22,7 @@ Dolos follows a very common convention around log levels. These levels describe 
 
 ## Components
 
-Dolos's own events, under the `dolos` and `gasket` targets, follow `level`. Every other target logs only errors unless `filter` names it. That covers the libraries Dolos is built on, and the request logs of the HTTP APIs:
+Dolos's own events, under the `dolos` and `gasket` targets, follow `level`. Every other target, apart from `tower_http`, logs only errors unless `filter` names it. That covers the libraries Dolos is built on, and the request logs of the HTTP APIs:
 
 | target | component |
 | ------ | --------- |
@@ -34,6 +34,7 @@ Dolos's own events, under the `dolos` and `gasket` targets, follow `level`. Ever
 | `opentelemetry` | OpenTelemetry exporters |
 | `minibf` | MiniBF's request log, one event per HTTP request |
 | `minikupo` | MiniKupo's request log, one event per HTTP request |
+| `tower_http` | The HTTP APIs' failure events, one per 5xx response, including deliberate 503s and 504s under load. Off unless `filter` names it, e.g. `tower_http=error` |
 
 ## Configuration
 
@@ -45,7 +46,7 @@ The `[logging]` section within `dolos.toml` controls these options:
 | filter   | string | none     |
 
 - `level`: the most detailed level of Dolos's own events to include. Selecting a level includes it and every level of higher severity.
-- `filter`: further `target=level` directives, comma-separated, in the syntax of `RUST_LOG`. A directive names a target by its module path prefix; a bare level applies to every target no directive names, in place of `error`. A directive that does not parse is refused when the node starts.
+- `filter`: further `target=level` directives, comma-separated, in the syntax of `RUST_LOG`. A directive names a target by its module path prefix; a bare level applies to every target no directive names, in place of `error` (`tower_http` stays off unless named). A directive that does not parse is refused when the node starts.
 
 Both fields are optional.
 
