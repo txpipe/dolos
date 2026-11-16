@@ -134,11 +134,23 @@ pub(crate) mod testing {
 }
 
 #[cfg(test)]
-mod prop_tests {
+pub(super) mod prop_tests {
     use super::testing::any_account_address_set;
     use super::*;
     use crate::model::testing::{assert_delta_roundtrip, assert_delta_serde_roundtrip};
+    use crate::model::testing::{replay_case, ReplayCase};
     use proptest::prelude::*;
+
+    /// One case per delta this module owns, for `model::replay_tests`.
+    pub(crate) fn replay_cases() -> Vec<ReplayCase> {
+        vec![replay_case(
+            (
+                prop::option::of(any_account_address_set()),
+                any_account_address_set(),
+            )
+                .prop_map(|(entity, row)| (entity, StageAccountAddress::new(row))),
+        )]
+    }
 
     proptest! {
         #[test]

@@ -8,7 +8,9 @@
 //!
 //! The stores here are the real fjall pair, each wrapped by a recorder that
 //! logs every commit and persist in order, with the progress file as it stood
-//! when the call returned. The assertions read the order off that log.
+//! when the call returned. The assertions read the order off that log. A
+//! journal that fails one chosen persist checks the other half: a failed sync
+//! stops the restore and leaves the layer it covered unrecorded.
 
 mod node;
 mod recorder;
@@ -18,18 +20,32 @@ use std::path::Path;
 use dolos_core::{ArchiveStore as _, ArchiveWriter as _};
 use dolos_snapshot::{
     restore::{self, default_budget, progress_path_in, Checkpoint, Target},
-    ENTITY_KINDS,
+    Error, ENTITY_KINDS,
 };
 use dolos_testing::toy_domain::{FjallStores, ToyDomain};
-use node::{export_plan, harness, plan_for, Blank};
+use node::{export_plan, export_to, harness, plan_for, Blank};
 use recorder::{Entry, Journal, Op, RecordedArchive, RecordedState};
 use stelae::{plan::RestoreProgress, progress::Observer, Digest, SnapshotReader as _};
 
 /// Restore `root` into the recorded fjall pair, checkpointing into `storage`,
 /// and return the journal of the run with the epoch layers it checkpoints.
 fn recorded_restore(root: &Path, storage: &Path, magic: u64) -> (Vec<Entry>, Vec<Digest>) {
-    let blank = Blank::<FjallStores>::open();
     let journal = Journal::new(progress_path_in(storage));
+    let (result, epoch_layers) = journaled_restore(root, storage, magic, &journal);
+    result.unwrap();
+
+    (journal.take(), epoch_layers)
+}
+
+/// The same restore under `journal`, returning its result and the epoch layers
+/// it checkpoints, in the order it checkpoints them.
+fn journaled_restore(
+    root: &Path,
+    storage: &Path,
+    magic: u64,
+    journal: &Journal,
+) -> (Result<restore::Summary, Error>, Vec<Digest>) {
+    let blank = Blank::<FjallStores>::open();
 
     let archive = RecordedArchive {
         inner: blank.archive.clone(),
@@ -53,7 +69,7 @@ fn recorded_restore(root: &Path, storage: &Path, magic: u64) -> (Vec<Entry>, Vec
         .filter(|diff_id| !plan.tip_layers().any(|tip| tip.diff_id == *diff_id))
         .collect();
 
-    restore::restore(
+    let result = restore::restore(
         &stele,
         &index,
         &plan,
@@ -62,10 +78,9 @@ fn recorded_restore(root: &Path, storage: &Path, magic: u64) -> (Vec<Entry>, Vec
         restore::DEFAULT_READ_AHEAD,
         &mut checkpoint,
         &Observer::silent(),
-    )
-    .unwrap();
+    );
 
-    (journal.take(), epoch_layers)
+    (result, epoch_layers)
 }
 
 /// Entries as a seal writes them, straight into `domain`'s archive, so the
@@ -159,4 +174,88 @@ fn a_layer_is_recorded_only_after_its_writes_are_persisted() {
         None,
         "a finished restore left its progress file behind"
     );
+}
+
+/// Restore with the `nth` persist of `op` failing, and return the error, the
+/// layers the progress file was left recording (`None`: no file) and the epoch
+/// layers in checkpoint order.
+fn restore_failing_persist(op: Op, nth: usize) -> (Error, Option<Vec<Digest>>, Vec<Digest>) {
+    let domain: ToyDomain<FjallStores> = harness();
+    let magic = u64::from(dolos_core::Domain::genesis(&domain).network_magic());
+
+    let stele = tempfile::tempdir().unwrap();
+    export_to(stele.path(), &domain);
+    let storage = tempfile::tempdir().unwrap();
+
+    let journal = Journal::failing_persist(progress_path_in(storage.path()), op, nth);
+    let (result, epoch_layers) = journaled_restore(stele.path(), storage.path(), magic, &journal);
+    let err = result.expect_err("a restore whose persist failed reported success");
+
+    let recorded = RestoreProgress::load(&progress_path_in(storage.path()))
+        .unwrap()
+        .map(|progress| progress.completed.into_iter().collect());
+
+    (err, recorded, epoch_layers)
+}
+
+/// The persists a clean restore of the fixture makes, by op.
+fn persists_of_a_clean_restore(op: Op) -> usize {
+    let domain: ToyDomain<FjallStores> = harness();
+    let magic = u64::from(dolos_core::Domain::genesis(&domain).network_magic());
+
+    let stele = tempfile::tempdir().unwrap();
+    export_to(stele.path(), &domain);
+    let storage = tempfile::tempdir().unwrap();
+
+    let (entries, _) = recorded_restore(stele.path(), storage.path(), magic);
+    entries.iter().filter(|entry| entry.op == op).count()
+}
+
+/// A failed archive persist after an epoch layer's writes stops the restore
+/// with that error, and the progress file never names the layer.
+#[test]
+fn a_failed_layer_persist_fails_the_restore_and_leaves_the_layer_unrecorded() {
+    let (err, recorded, epoch_layers) = restore_failing_persist(Op::ArchivePersist, 1);
+
+    assert!(
+        matches!(&err, Error::Archive(dolos_core::ArchiveError::InternalError(reason)) if reason.contains("ArchivePersist 1 failed")),
+        "{err:?}"
+    );
+    assert!(
+        !recorded.unwrap_or_default().contains(&epoch_layers[0]),
+        "the layer whose persist failed was recorded anyway"
+    );
+}
+
+/// The final persists, after the cursor commit: if either fails, the restore
+/// returns its error and keeps the progress file, every epoch layer still on
+/// it.
+#[test]
+fn a_failed_final_persist_fails_the_restore_and_keeps_the_progress_file() {
+    let last_archive = persists_of_a_clean_restore(Op::ArchivePersist);
+    assert_eq!(
+        persists_of_a_clean_restore(Op::StatePersist),
+        1,
+        "the fixture's restore is expected to persist the state once, at the end"
+    );
+
+    for (op, nth) in [(Op::StatePersist, 1), (Op::ArchivePersist, last_archive)] {
+        let (err, recorded, epoch_layers) = restore_failing_persist(op, nth);
+
+        let reason = match &err {
+            Error::Archive(dolos_core::ArchiveError::InternalError(reason)) => reason,
+            Error::State(dolos_core::StateError::InternalStoreError(reason)) => reason,
+            other => panic!("{op:?} {nth}: unexpected error {other:?}"),
+        };
+        assert!(reason.contains(&format!("{op:?} {nth} failed")), "{err:?}");
+
+        let recorded = recorded
+            .unwrap_or_else(|| panic!("{op:?} {nth} failed, yet the progress file was removed"));
+        for layer in &epoch_layers {
+            assert!(
+                recorded.contains(layer),
+                "{op:?} {nth}: the kept progress file lost layer {layer:?}"
+            );
+        }
+    }
 }
