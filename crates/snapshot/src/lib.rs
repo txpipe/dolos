@@ -52,7 +52,7 @@
 //!   inspection, verification and directory/OCI restoration.
 //! - [`registry`] — publishing into an OCI repository: the link to the snapshot
 //!   before, and the layers an interrupted publish already uploaded.
-//! - [`planning`] — the epoch selection every command that walks these stores
+//! - [`planning`] — the producer pool every command that walks these stores
 //!   takes, and the arithmetic each of them reports.
 //! - [`staging`] — one tag and one exact traversal for `indexes` and one shared
 //!   entity traversal, partitioned into durable per-epoch runs that finish as
@@ -760,8 +760,8 @@ pub enum Error {
     ///
     /// A finding, not a routine failure: same stores, same epochs and the same
     /// link reproduce the same document, so a divergence means either the
-    /// inputs are not what the operator believes — a store at another epoch, a
-    /// different `--epochs` window than the publish used — or the format's
+    /// inputs are not what the operator believes — a store at another epoch or
+    /// another link than the publish used — or the format's
     /// determinism claim has a hole, which is ADR-004's residual risk with a
     /// name on it. `subject` names the layer (or the generic field) so the two
     /// can be told apart.

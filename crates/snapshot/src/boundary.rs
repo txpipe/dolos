@@ -283,15 +283,8 @@ fn evidence<A: ArchiveStore>(
 
     // An empty archive holds no cursor block either, which is the refusal
     // that names it.
-    if let Some((first_slot, first_body)) = archive.get_range(None, None)?.next() {
-        let first = decode(first_slot, &first_body)?;
-
-        if first.number() > 1 {
-            return Err(refuse(Ineligible::PrunedArchive {
-                first: ChainPoint::Specific(first_slot, first.hash()),
-                number: first.number(),
-            }));
-        }
+    if let Some((first, number)) = pruned_start(archive)? {
+        return Err(refuse(Ineligible::PrunedArchive { first, number }));
     }
 
     let at_slot = archive.get_blocks_by_slot(&slot)?;
@@ -350,6 +343,21 @@ fn evidence<A: ArchiveStore>(
         first: plan.cursor.clone(),
         parent,
     })
+}
+
+/// The archive's first block and its number, when it is not the chain's
+/// first by the test `data rebuild` applies (block number at most 1). `None`
+/// for an archive that starts at origin, and for an empty one.
+pub(crate) fn pruned_start<A: ArchiveStore>(
+    archive: &A,
+) -> Result<Option<(ChainPoint, u64)>, Error> {
+    let Some((slot, body)) = archive.get_range(None, None)?.next() else {
+        return Ok(None);
+    };
+
+    let first = decode(slot, &body)?;
+
+    Ok((first.number() > 1).then(|| (ChainPoint::Specific(slot, first.hash()), first.number())))
 }
 
 fn decode(slot: BlockSlot, body: &BlockBody) -> Result<MultiEraBlock<'_>, Error> {
