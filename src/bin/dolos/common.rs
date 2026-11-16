@@ -551,6 +551,7 @@ mod tests {
         let filter = log_filter(&config).unwrap();
         assert!(filter.would_enable("tonic", &tracing::Level::WARN));
         assert!(filter.would_enable("dolos", &tracing::Level::INFO));
+        assert!(!filter.would_enable("tower_http::trace::on_failure", &tracing::Level::ERROR));
 
         let config = LoggingConfig {
             filter: Some("off".into()),
