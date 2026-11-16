@@ -402,6 +402,10 @@ impl Plan {
     /// as dead space in its segment file. That is past spend: free space is
     /// read at check time, so those bytes are already out of it, and the layer
     /// is not recorded as done, so it is charged again in full.
+    ///
+    /// **One exception to "still writes": the settle.** It rewrites every
+    /// ingested log layer, recorded or not, so its copy is sized over the
+    /// whole plan.
     pub fn estimate<R: SnapshotReader>(
         &self,
         stele: &R,
@@ -427,11 +431,7 @@ impl Plan {
             ..Estimate::default()
         };
 
-        let mut on_disk = |kind: OnDisk, descriptor: &LayerDescriptor| -> Result<u64, Error> {
-            if resume.is_done(&descriptor.diff_id) {
-                return Ok(0);
-            }
-
+        let mut size = |kind: OnDisk, descriptor: &LayerDescriptor| -> Result<u64, Error> {
             // The compressed factors were fitted to this profile's own level;
             // a layer compressed otherwise is sized from what it declares.
             let sized = match self.foreign_compression.contains(&descriptor.diff_id) {
@@ -448,23 +448,32 @@ impl Plan {
             })
         };
 
+        let remaining = |descriptor: &&LayerDescriptor| !resume.is_done(&descriptor.diff_id);
+
         let (mut blocks, mut logs, mut entities, mut indexes) = (0u64, 0u64, 0u64, 0u64);
+        let mut settled = 0u64;
 
         for epoch in &self.epochs {
-            if let Some(descriptor) = &epoch.blocks {
-                blocks = blocks.saturating_add(on_disk(BLOCKS_ON_DISK, descriptor)?);
+            for descriptor in epoch.blocks.iter().filter(remaining) {
+                blocks = blocks.saturating_add(size(BLOCKS_ON_DISK, descriptor)?);
             }
 
             for descriptor in epoch.logs.values() {
-                logs = logs.saturating_add(on_disk(LOGS_ON_DISK, descriptor)?);
+                let bytes = size(LOGS_ON_DISK, descriptor)?;
+
+                settled = settled.saturating_add(bytes);
+
+                if remaining(&descriptor) {
+                    logs = logs.saturating_add(bytes);
+                }
             }
 
-            for descriptor in epoch.entities.values() {
-                entities = entities.saturating_add(on_disk(ENTITIES_ON_DISK, descriptor)?);
+            for descriptor in epoch.entities.values().filter(remaining) {
+                entities = entities.saturating_add(size(ENTITIES_ON_DISK, descriptor)?);
             }
 
-            if let Some(descriptor) = &epoch.indexes {
-                indexes = indexes.saturating_add(on_disk(INDEXES_ON_DISK, descriptor)?);
+            for descriptor in epoch.indexes.iter().filter(remaining) {
+                indexes = indexes.saturating_add(size(INDEXES_ON_DISK, descriptor)?);
             }
         }
 
@@ -486,10 +495,11 @@ impl Plan {
 
         estimate.derived_tags = utxo_records.saturating_mul(DERIVED_TAG_BYTES_PER_UTXO);
         // The settle holds the ingested logs, uncompressed, beside their
-        // rewrite until it ends: one copy of the logs term, which overstates
-        // the ingested copy (about 66 GB on mainnet's full history to 75).
+        // rewrite until it ends: one copy of the whole plan's logs, which
+        // overstates the ingested copy (about 66 GB on mainnet's full history
+        // to 75).
         estimate.headroom = scaled(estimate.before_headroom(), COMPACTION_HEADROOM_PER_MILLE)
-            .saturating_add(estimate.logs);
+            .saturating_add(settled);
 
         Ok(estimate)
     }
@@ -3328,6 +3338,26 @@ mod tests {
         );
         assert_eq!(at_level.total(), terms + headroom);
         assert_eq!(asked.get(), 5, "the recorded layer is never sized");
+
+        // A resume past the log layer writes no logs, but the settle still
+        // rewrites them: its copy stays in the headroom.
+        progress.record(Digest::from_bytes([0xa1; 32]));
+        let past_logs = Resume::from_progress(Some(&progress));
+        asked.set(0);
+
+        let resumed = plan.estimate_with(&past_logs, journals, lookup).unwrap();
+
+        let resumed_terms = terms - 2_100;
+        assert_eq!(resumed.logs, 0);
+        assert_eq!(
+            resumed.headroom,
+            (resumed_terms * 75).div_ceil(1_000) + 2_100
+        );
+        assert_eq!(
+            asked.get(),
+            5,
+            "the recorded log layer is sized for the settle"
+        );
 
         // Another level: every epoch layer falls back, and the transport is
         // never asked.
