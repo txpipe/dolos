@@ -991,7 +991,9 @@ mod tests {
         for name in [DOLOS_REPOSITORY, BLOCKS_REPOSITORY] {
             let (root, config) = root_without(Some(name));
 
-            let message = format!("{:?}", check_dir(&config, root.path(), false).unwrap_err());
+            let message = check_dir(&config, root.path(), false)
+                .unwrap_err()
+                .to_string();
 
             assert!(
                 message.contains(&format!("holds no `{name}` directory")),
