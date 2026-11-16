@@ -219,8 +219,8 @@ Restores a Stelae snapshot (a stele), then starts the WAL at the restored point.
 
 | flag | environment | meaning |
 | ---- | ----------- | ------- |
-| `--source URL` | | `file://DIR`, a stele directory, or `oci://HOST/PATH`, a registry repository; defaults to the network's official repository, required on a custom network |
-| `--point POINT` | | `latest` (default) or `epoch-N`; registry sources only |
+| `--source URL` | | a network root: `oci://HOST/PATH`, whose `PATH/dolos` and `PATH/blocks` repositories are read, or `file://DIR`, a directory holding `dolos/` and `blocks/`, each an OCI image layout; defaults to the network's official root, required on a custom network |
+| `--point POINT` | | `latest` (default) or `epoch-N`, the stele cut at the boundary that opens epoch `N`; registry sources only |
 | `--insecure` | | plaintext HTTP to the registry, for a loopback or in-cluster mirror only |
 | `--scratch-dir DIR` | | where pulled layers are staged, default `<storage.path>/scratch`; registry sources only |
 | `--skip-space-check` | | skip the disk-space preflight |
@@ -228,6 +228,8 @@ Restores a Stelae snapshot (a stele), then starts the WAL at the restored point.
 | `--continue` | | resume an interrupted restore from the layers it recorded, reading the stele it started from again; with nothing recorded, restore into storage that holds no data |
 | `--registry-user USER` | `DOLOS_STELAE_USER` | the registry user; defaults to the published read-only user on the official repository |
 | `--registry-credentials-file PATH` | | a TOML file naming `password` or `token`, instead of `DOLOS_STELAE_PASSWORD` / `DOLOS_STELAE_TOKEN` |
+
+The stele is read from the root's `dolos` repository and the blocks of its closed epochs from its `blocks` repository. A `file://` root missing either directory is refused, naming it, before `--force` clears anything, as is a `blocks` directory that does not hold the blocks snapshot the stele names.
 
 A registry read that drops partway, arrives short or fails its digest is made again: each read gets six attempts, waiting 2 s before the second and doubling each time. When the last one fails, the restore exits with an error naming the blob or manifest, the attempt count and the cause.
 

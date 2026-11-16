@@ -315,28 +315,75 @@ fn a_well_formed_repository_reaches_the_registry() {
     );
 }
 
-/// A directory that is not a stele is a clean refusal, not a half-restore:
-/// it is refused before `--force` clears anything, so the node it was to
-/// replace is left as it was.
+/// A directory that is not a network root is a clean refusal, not a
+/// half-restore: it is refused before `--force` clears anything, so the node
+/// it was to replace is left as it was.
 #[test]
-fn a_source_that_is_not_a_stele_is_refused() {
+fn a_source_that_is_not_a_network_root_is_refused() {
     let node = Node::new();
     node.sync();
     let before = Contents::read(&node);
     assert!(before.cursor.is_some());
 
-    let empty = node.root.path().join("not-a-stele");
+    let empty = node.root.path().join("not-a-root");
     std::fs::create_dir_all(&empty).unwrap();
 
     let output = node.bootstrap_stelae(&format!("file://{}", empty.display()));
     assert_eq!(output.status.code(), Some(1));
+    assert!(
+        reports(&output.stderr, "holds no `dolos` directory"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(Contents::read(&node), before);
+}
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let said: Vec<_> = stderr
-        .split_whitespace()
-        .filter(|word| *word != "│")
-        .collect();
-    assert!(said.join(" ").contains("holds no stele"), "{stderr}");
+/// A root whose `blocks` directory is missing is refused,
+/// naming it, before `--force` clears anything.
+#[test]
+fn a_root_without_its_blocks_directory_is_refused_naming_it() {
+    let node = Node::new();
+    node.sync();
+    node.stand_at_boundary();
+    let before = Contents::read(&node);
+
+    let root = node.root.path().join("root");
+    node.write_stele(&root);
+    std::fs::remove_dir_all(root.join("blocks")).unwrap();
+
+    let output = node.bootstrap_stelae(&format!("file://{}", root.display()));
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        reports(
+            &output.stderr,
+            &format!("{} holds no `blocks` directory", root.display())
+        ),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(Contents::read(&node), before);
+}
+
+/// A `blocks` directory that is not an image layout is refused too.
+#[test]
+fn a_root_whose_blocks_directory_is_no_layout_is_refused() {
+    let node = Node::new();
+    node.sync();
+    node.stand_at_boundary();
+    let before = Contents::read(&node);
+
+    let root = node.root.path().join("root");
+    node.write_stele(&root);
+    std::fs::remove_dir_all(root.join("blocks")).unwrap();
+    std::fs::create_dir_all(root.join("blocks")).unwrap();
+
+    let output = node.bootstrap_stelae(&format!("file://{}", root.display()));
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        reports(&output.stderr, "is not a blocks repository"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(Contents::read(&node), before);
 }
 
@@ -350,7 +397,9 @@ fn a_layout_with_no_stele_is_refused() {
     assert!(before.cursor.is_some());
 
     let layout = node.root.path().join("no-stele");
-    dolos_snapshot::dir::SnapshotDir::create(&layout).unwrap();
+    for name in ["dolos", "blocks"] {
+        dolos_snapshot::dir::SnapshotDir::create(layout.join(name)).unwrap();
+    }
 
     let output = node.bootstrap_stelae(&format!("file://{}", layout.display()));
     assert_eq!(output.status.code(), Some(1));
@@ -385,7 +434,7 @@ fn a_layout_whose_chain_is_broken_is_refused() {
     node.stand_at_boundary_of(2);
     node.write_stele(&stele);
 
-    let head = SnapshotDir::open(&stele)
+    let head = SnapshotDir::open(stele.join("dolos"))
         .unwrap()
         .resolve_latest(&DolosProfile)
         .unwrap()
@@ -395,7 +444,7 @@ fn a_layout_whose_chain_is_broken_is_refused() {
     assert_eq!(head.previous.map(|link| link.sequence), Some(1));
 
     // Sequence 1's tags leave the index, and the head keeps its own.
-    let index_path = stele.join(INDEX_FILE);
+    let index_path = stele.join("dolos").join(INDEX_FILE);
     let mut index: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&index_path).unwrap()).unwrap();
     let manifests = index["manifests"].as_array_mut().unwrap();
@@ -412,7 +461,7 @@ fn a_layout_whose_chain_is_broken_is_refused() {
     );
     std::fs::write(&index_path, serde_json::to_vec(&index).unwrap()).unwrap();
 
-    let layout = SnapshotDir::open(&stele).unwrap();
+    let layout = SnapshotDir::open(stele.join("dolos")).unwrap();
     assert!(layout.pull_latest(&DolosProfile).is_ok());
     let broken = layout
         .resolve_latest(&DolosProfile)
@@ -658,8 +707,8 @@ fn digest(node: &Node) -> String {
     pallas::crypto::hash::Hasher::<256>::hash(seen.join("\n").as_bytes()).to_string()
 }
 
-/// A stele directory cut from a synced node, and the node an uninterrupted
-/// restore of it builds.
+/// A network root holding a stele cut from a synced node, and the node an
+/// uninterrupted restore of it builds.
 struct Fixture {
     _origin: Node,
     stele: std::path::PathBuf,
@@ -693,7 +742,7 @@ impl Fixture {
     fn layers(&self) -> (String, u64, Vec<std::path::PathBuf>) {
         use dolos_snapshot::{dir::SnapshotDir, DolosProfile, SnapshotReader as _};
 
-        let layout = SnapshotDir::open(&self.stele).unwrap();
+        let layout = SnapshotDir::open(self.stele.join("dolos")).unwrap();
         let stele = layout.resolve_latest(&DolosProfile).unwrap();
         let inscription = stele.read_inscription().unwrap();
         let plan = dolos_snapshot::restore::plan(stele.chain().unwrap(), None, 2, None).unwrap();

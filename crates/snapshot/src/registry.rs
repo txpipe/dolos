@@ -337,7 +337,10 @@ fn resolve_blocks(
         Ok(snapshot) => Ok(snapshot),
         Err(error) if error.is_absent() => Err(Error::BlocksMissing {
             reference,
-            reason: format!("the blocks repository holds no snapshot at epoch-{sequence}"),
+            reason: format!(
+                "the blocks repository {} holds no snapshot at epoch-{sequence}",
+                registry.repository()
+            ),
         }),
         Err(error) => Err(error.into()),
     }

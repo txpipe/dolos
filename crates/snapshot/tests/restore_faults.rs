@@ -301,13 +301,10 @@ fn a_recorded_resume_is_gone_only_when_its_tag_is_absent() {
     let storage = tempfile::tempdir().unwrap();
     let source = restore::Source::Repo(registry.repository(REPOSITORY));
 
-    restore::SourceRecord {
-        source: source.to_string(),
-        sequence: 7,
-        inscription_digest: stelae::Digest::from_bytes([7; 32]),
-    }
-    .save(&restore::source_path_in(storage.path()))
-    .unwrap();
+    restore::SourceRecord::new(&source, 7, stelae::Digest::from_bytes([7; 32]))
+        .unwrap()
+        .save(&restore::source_path_in(storage.path()))
+        .unwrap();
 
     let resume = || {
         let blank = Blank::<MemoryStores>::open();

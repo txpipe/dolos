@@ -243,10 +243,21 @@ impl Node {
         last
     }
 
-    /// Write a directory stele as a restore fixture through the retained
-    /// headless profile encoder.
+    /// Write a network root as a restore fixture: a stele through the
+    /// retained headless profile encoder in its `dolos` directory, beside an
+    /// empty `blocks` layout.
     pub fn write_stele(&self, output: &std::path::Path) {
         use dolos_snapshot::facade::{Selection, SnapshotSource as _, StoreSnapshot};
+        use dolos_snapshot::restore::{BLOCKS_REPOSITORY, DOLOS_REPOSITORY};
+
+        // The stele lists its closed epochs' blocks itself, so the blocks
+        // layout only has to be there.
+        let blocks = output.join(BLOCKS_REPOSITORY);
+        if !blocks.exists() {
+            dolos_snapshot::dir::SnapshotDir::create(&blocks).unwrap();
+        }
+
+        let output = &output.join(DOLOS_REPOSITORY);
 
         let stores =
             dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&self.config).unwrap();

@@ -365,11 +365,12 @@ fn a_registry_resume_pulls_the_recorded_epoch_tag() {
     let node = Node::new();
     std::fs::create_dir_all(&node.config.storage.path).unwrap();
 
-    let record = dolos_snapshot::restore::SourceRecord {
-        source: networks::PREVIEW.stelae.registry.to_owned(),
-        sequence: 42,
-        inscription_digest: format!("sha256:{}", "ab".repeat(32)).parse().unwrap(),
-    };
+    let record = dolos_snapshot::restore::SourceRecord::new(
+        &networks::PREVIEW.stelae.registry.parse().unwrap(),
+        42,
+        format!("sha256:{}", "ab".repeat(32)).parse().unwrap(),
+    )
+    .unwrap();
     record
         .save(&dolos_snapshot::restore::source_path_in(
             &node.config.storage.path,
@@ -396,7 +397,7 @@ fn a_registry_resume_pulls_the_recorded_epoch_tag() {
     assert!(
         targets
             .iter()
-            .any(|target| target.ends_with("/cardano/preview/manifests/epoch-42")),
+            .any(|target| target.ends_with("/cardano/preview/dolos/manifests/epoch-42")),
         "the recorded epoch tag was not pulled: {targets:?}\n{}",
         stderr(&output)
     );
