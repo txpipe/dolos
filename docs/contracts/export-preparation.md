@@ -131,27 +131,18 @@ The **manifest** (`BUNDLE_FORMAT`) holds:
   finds held. Staged runs name the captures they were staged for (see
   [Restarting a batch](#on-disk-layout-and-lifecycle));
 - `capture_from` and `oldest_unsealed`;
-- its **horizon**: the slot of the last block at or before the first slot of the
-  plan's oldest closed window, or of the chain's first block when it has none that
-  early. Pruning must retain that block and everything after it until the bundle is
-  released, and an archive that starts exactly there is enough. Staging and
-  finalization both read closed windows from the source archive, and a captured log
-  window does not change that: its blocks and index rows still come from there, and
-  a window below `capture_from` reads its logs from there too. Those log rows key at
-  the epoch's first slot, which usually holds no block, and `prune_history` cuts them
-  by slot like the blocks. So the window's first block would not do: a cut right at
-  it keeps every block and loses the logs, and the layers would just be missing. A
-  block at or before the first slot shows the cut did not pass it. Where the horizon
-  is the chain's first block, `prune_history` takes it whenever it takes anything.
-  The price is that a cut after the horizon is refused even where it lost nothing,
-  because a block cannot show that; pruning to the recorded value never makes one.
-  `None` means the plan covers no closed window, and then only the boundary block
-  itself has to stay, so that finalization can check the chain.
-  This bounds what a batch reads, not what a later `prepare` needs: that one still
-  takes a whole archive (`boundary::check`), so a host prunes only after the batch's
-  last `prepare`;
 - every **layer**: descriptor, `diffId`, blob digest and both sizes;
 - an xxh3-64 **checksum** over all of the above.
+
+The manifest names no slot the archive has to keep. Staging and finalization read
+closed windows from the source archive, and `boundary::check` held it to the
+chain's first block when the boundary was captured (block number at most 1, the
+test `data rebuild` applies), so both hold it there again (`PrunedArchive`):
+pruned, closed windows and their logs would read as empty rather than fail. They
+are stricter by one case: block #1 passes at slot 0, where it follows a Byron
+genesis boundary block, or where its header names no previous block, as a
+chain's first block does. Block #1 past slot 0 that names a predecessor means
+block #0 was pruned. A publisher keeps full history.
 
 **Lifecycle.** Payloads are fsynced, then their directory, then the manifest is
 written to `{sequence}.json.partial`, fsynced, renamed and the directory fsynced.
@@ -199,12 +190,13 @@ before the sink finishes, so a damaged payload produces no layer and no stele.
 
 **Staging a batch** first holds each bundle to these stores: its store contract
 against this build's current one, its network and `mutable_slots` against the
-batch's, and its horizon against the archive. The traits expose no store's own
+batch's, and the archive against the chain's first block. The traits expose no store's own
 record, so a store still on an older contract this build reads is refused too,
 which is the safe direction.
 
 **Finalization** first holds the sources to the bundle: the staged runs' network,
-store contract and frontier, the boundary block in the archive and the horizon.
+store contract and frontier, the boundary block in the archive and the archive's
+first block.
 It reads nothing boundary-sensitive from the final store. A closed window neither
 staged nor forecast by the predecessor fails with `NotStaged` rather than dropping
 a layer.
@@ -234,7 +226,7 @@ releases a bundle only after the sequence is committed.
 | `MissingArtifact` | A payload is gone, at loading or when read, or not its recorded size at loading. One cut short after loading reads as `Corrupt`. |
 | `Corrupt` | A manifest or payload failed its checks. `Store::release` is the recovery, as it is for `MissingArtifact` and, at `prepare`, `SourceMismatch`. `Io` never calls for it. A bundle of another `BUNDLE_FORMAT` is `Corrupt` too; releasing it drops what the build that wrote it could read. |
 | `ForeignTail` | The delta is not the boundary block's. |
-| `HorizonLost` | The archive's first block is past the bundle's horizon. |
+| `PrunedArchive` | The archive does not start at the chain's first block. |
 | `EmptyBatch` | `stage_batch` had no bundles. |
 | `Io` | The machine failed, while reading a payload included. The bundle may be intact. |
 

@@ -147,14 +147,20 @@ impl Positions {
         self.archive_kept && self.archive_rolling && self.archive.is_none()
     }
 
-    /// The slot the WAL tip has applied the chain through.
-    fn wal(&self) -> Option<BlockSlot> {
+    /// How far the WAL tip has applied the chain.
+    fn wal(&self) -> Option<Applied> {
         applied(self.wal_tip.as_ref())
     }
 
-    /// The slot the state has applied the chain through.
-    fn state(&self) -> Option<BlockSlot> {
+    /// How far the state has applied the chain.
+    fn state(&self) -> Option<Applied> {
         applied(self.state.as_ref())
+    }
+
+    /// How far the archive has applied the chain: through the block at its
+    /// tip.
+    fn archive(&self) -> Option<Applied> {
+        self.archive.map(Applied::through)
     }
 
     /// What keeps the state, and the archive when it is kept, from standing at
@@ -167,8 +173,8 @@ impl Positions {
             found.push(relative_to_wal("state", self.state(), wal));
         }
 
-        if self.archive_kept && self.archive != wal {
-            found.push(relative_to_wal("archive", self.archive, wal));
+        if self.archive_kept && self.archive() != wal {
+            found.push(relative_to_wal("archive", self.archive(), wal));
         }
 
         found
@@ -177,8 +183,40 @@ impl Positions {
     /// Whether the archive is the one store away from the WAL tip, and ahead
     /// of it: only a sync past the archive tip brings the others to it.
     fn only_archive_ahead(&self) -> bool {
-        self.state() == self.wal() && self.archive_kept && self.archive > self.wal()
+        self.state() == self.wal() && self.archive_kept && self.archive() > self.wal()
     }
+}
+
+/// How far a store has applied the chain, ordered as the chain is: through
+/// the block at `slot`, or, for a cursor that holds only a slot (ESTART's,
+/// at an epoch's first block), up to that block and not through it. Two
+/// blocks at one slot, a Byron boundary block and the main block chained onto
+/// it, compare equal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Applied {
+    slot: BlockSlot,
+    /// Whether the block at `slot` is applied.
+    block: bool,
+}
+
+impl Applied {
+    fn through(slot: BlockSlot) -> Self {
+        Self { slot, block: true }
+    }
+}
+
+impl std::fmt::Display for Applied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.block {
+            true => write!(f, "slot {}", self.slot),
+            false => write!(f, "slot {} (its block not applied)", self.slot),
+        }
+    }
+}
+
+/// `at`, or `empty` for a store that has applied nothing.
+fn position(at: Option<Applied>) -> String {
+    at.map_or("empty".to_string(), |at| at.to_string())
 }
 
 /// Where the WAL's unbroken history starts (see [`Positions::wal_history`]),
@@ -210,26 +248,29 @@ fn history_start<W: WalStore>(
     Ok((history, floor))
 }
 
-/// The slot a store has applied the chain through: none for no position, or
+/// How far a store at `point` has applied the chain: none for no position, or
 /// for Origin, where nothing is applied yet.
-fn applied(point: Option<&ChainPoint>) -> Option<BlockSlot> {
+fn applied(point: Option<&ChainPoint>) -> Option<Applied> {
     match point {
         None | Some(ChainPoint::Origin) => None,
-        Some(point) => Some(point.slot()),
+        Some(point) => Some(Applied {
+            slot: point.slot(),
+            block: point.is_fully_defined(),
+        }),
     }
 }
 
 /// `store`, at `at`, said against the WAL tip at `wal`.
-fn relative_to_wal(store: &str, at: Option<BlockSlot>, wal: Option<BlockSlot>) -> String {
+fn relative_to_wal(store: &str, at: Option<Applied>, wal: Option<Applied>) -> String {
     let store = match at {
-        Some(slot) => format!("the {store}, at slot {slot},"),
+        Some(at) => format!("the {store}, at {at},"),
         None => format!("the {store}, empty,"),
     };
 
     let relation = if at < wal { "behind" } else { "ahead of" };
 
     match wal {
-        Some(slot) => format!("{store} is {relation} the WAL tip at slot {slot}"),
+        Some(wal) => format!("{store} is {relation} the WAL tip at {wal}"),
         None => format!("{store} is {relation} the WAL, which is empty"),
     }
 }
