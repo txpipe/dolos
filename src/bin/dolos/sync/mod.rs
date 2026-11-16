@@ -189,7 +189,9 @@ impl Positions {
 
 /// How far a store has applied the chain, ordered as the chain is: through
 /// the block at `slot`, or, for a cursor that holds only a slot (ESTART's,
-/// at an epoch's first block), up to that block and not through it.
+/// at an epoch's first block), up to that block and not through it. Two
+/// blocks at one slot, a Byron boundary block and the main block chained onto
+/// it, compare equal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Applied {
     slot: BlockSlot,

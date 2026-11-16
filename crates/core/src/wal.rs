@@ -792,4 +792,27 @@ mod chain_order_tests {
             vec![point, ChainPoint::Origin]
         );
     }
+
+    /// The Origin entry comes first beside a block at slot 0 that names a
+    /// parent the WAL doesn't hold, as a Byron chain's first boundary block
+    /// names the genesis hash.
+    #[test]
+    fn origin_comes_before_a_slot_zero_block_naming_a_parent() {
+        let (point, block) = make_byron_ebb(0, Hash::new([7u8; 32]));
+        let point = ChainPoint::Specific(byron_ebb_slot(0), point.hash().unwrap());
+
+        let entries = vec![
+            (ChainPoint::Origin, Arc::new(vec![])),
+            (point.clone(), block),
+        ];
+
+        assert_eq!(
+            points(ChainOrdered::forward(entries.clone().into_iter())),
+            vec![ChainPoint::Origin, point.clone()]
+        );
+        assert_eq!(
+            points(ChainOrdered::backward(entries.into_iter().rev())),
+            vec![point, ChainPoint::Origin]
+        );
+    }
 }

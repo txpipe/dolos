@@ -1,14 +1,16 @@
-//! A crash at any store commit while the block that opens an epoch rolls,
-//! then a restart, ends where a run without the crash does.
+//! A crash at any state or archive commit while the block that opens an
+//! epoch rolls, then a restart, ends where a run without the crash does. The
+//! harness lets every WAL commit land: a crash before the block's own leaves
+//! the state ahead of the WAL, which the open refuses, and is not covered.
 //!
 //! That block's roll runs the boundary first: EWRAP, then ESTART, whose
 //! finalize commits a state cursor holding only the block's slot. The block's
 //! WAL entry commits next and its state commit last, so a crash between those
 //! two leaves the block in the WAL and nowhere else, beside a cursor at its
 //! slot. The harness is `ToyDomain` on the devnet (500-slot epochs, k=5),
-//! wrapped in a `FaultyToyDomain` that dies after a set number of store
-//! commits; a restart rebuilds the chain logic from the state cursor and runs
-//! `bootstrap`, as the node's open does.
+//! wrapped in a `FaultyToyDomain` that dies after a set number of state and
+//! archive commits; a restart rebuilds the chain logic from the state cursor
+//! and runs `bootstrap`, as the node's open does.
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -180,7 +182,9 @@ fn a_crash_while_the_block_opening_an_epoch_rolls_loses_nothing() {
         let state = domain.state().read_cursor().unwrap();
 
         // ESTART's cursor holds only the slot of the block it opens on.
-        if state == Some(ChainPoint::Slot(opening))
+        // Matched, not compared: a block's point equals a bare cursor at its
+        // slot.
+        if matches!(state, Some(ChainPoint::Slot(slot)) if slot == opening)
             && wal.as_ref().map(|p| p.slot()) == Some(opening)
         {
             crashed_after_estart = true;
