@@ -716,14 +716,56 @@ impl dolos_core::EntityDelta for PoolCalidusUpdate {
 }
 
 #[cfg(test)]
-mod prop_tests {
+pub(super) mod prop_tests {
     use super::testing::any_pool_state;
     use super::*;
     use crate::model::testing::{
         self as root, assert_delta_roundtrip, assert_delta_serde_roundtrip,
     };
+    use crate::model::testing::{replay_case, ReplayCase};
     use crate::pallas_extras::testing::any_multi_era_pool_registration;
     use proptest::prelude::*;
+
+    /// One case per delta this module owns, with the fixups of the round
+    /// trips below, for `model::replay_tests`.
+    pub(crate) fn replay_cases() -> Vec<ReplayCase> {
+        vec![
+            replay_case(
+                (prop::option::of(any_pool_state()), any_pool_registration()).prop_map(
+                    |(entity, mut delta)| {
+                        if let Some(entity) = &entity {
+                            delta.epoch = entity.snapshot.epoch().expect("a concrete epoch");
+                        }
+                        (entity, delta)
+                    },
+                ),
+            ),
+            replay_case((any_pool_state(), 1u32..100u32).prop_map(|(pool, count)| {
+                let epoch = pool.snapshot.epoch().expect("a concrete epoch");
+                let delta = MintedBlocksInc {
+                    operator: pool.operator,
+                    count,
+                    epoch,
+                };
+                (Some(pool), delta)
+            })),
+            replay_case((
+                prop::option::of(any_pool_state()),
+                any_pool_deregistration(),
+            )),
+            replay_case((any_pool_state().prop_map(Some), any_pool_wrap_up())),
+            replay_case((any_pool_state(), any_pool_transition()).prop_map(
+                |(entity, mut delta)| {
+                    delta.next_epoch = entity.snapshot.epoch().expect("a concrete epoch") + 1;
+                    (Some(entity), delta)
+                },
+            )),
+            replay_case((
+                prop::option::of(any_pool_state()),
+                any_pool_calidus_update(),
+            )),
+        ]
+    }
 
     prop_compose! {
         fn any_pool_registration()(
