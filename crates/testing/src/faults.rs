@@ -776,6 +776,13 @@ impl WalStore for FaultyWalStore {
         self.inner.truncate_front(after)
     }
 
+    fn remove_points(&self, points: &[ChainPoint]) -> Result<(), WalError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        WalStore::remove_points(&self.inner, points)
+    }
+
     fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, WalError> {
         if self.should_fault() {
             return Err(self.fault_err());
