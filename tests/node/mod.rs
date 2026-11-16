@@ -205,6 +205,13 @@ impl Node {
     ///
     /// Returns the first block's parent, the evidence a plan reports.
     pub fn stand_at_boundary(&self) -> dolos_core::ChainPoint {
+        self.stand_at_boundary_of(1)
+    }
+
+    /// The same at the first block of `epoch`, chained onto the archive's tip:
+    /// after `stand_at_boundary`, `stand_at_boundary_of(2)` moves the stores
+    /// on to the next boundary, so a second stele can follow the first.
+    pub fn stand_at_boundary_of(&self, epoch: u64) -> dolos_core::ChainPoint {
         use dolos_cardano::pallas::ledger::traverse::MultiEraBlock;
         use dolos_core::{ArchiveStore as _, ArchiveWriter as _, StateWriter as _};
         use dolos_testing::blocks::make_conway_block_with_prev;
@@ -213,7 +220,7 @@ impl Node {
             dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&self.config).unwrap();
 
         let summary = dolos_cardano::eras::load_chain_summary_from_state(&stores.state).unwrap();
-        let start = summary.epoch_start(1);
+        let start = summary.epoch_start(epoch);
 
         let (_, tip) = stores.archive.get_tip().unwrap().unwrap();
         let tip = MultiEraBlock::decode(&tip).unwrap();

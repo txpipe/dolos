@@ -364,6 +364,69 @@ fn a_layout_with_no_stele_is_refused() {
     assert_eq!(Contents::read(&node), before);
 }
 
+/// A layout whose latest stele links to one it no longer holds, as a copy of a
+/// lineage cut short leaves one, is refused the same way. The head and its tip
+/// are whole, so only resolving the chain behind them refuses it before
+/// `--force` clears anything.
+#[test]
+fn a_layout_whose_chain_is_broken_is_refused() {
+    use dolos_snapshot::{
+        dir::{SnapshotDir, INDEX_FILE, REF_NAME_ANNOTATION},
+        DolosProfile, SnapshotReader as _,
+    };
+
+    let node = Node::new();
+    node.sync();
+
+    // Boundaries 1 and 2 into one layout, the second linked to the first.
+    let stele = node.root.path().join("stele");
+    node.stand_at_boundary();
+    node.write_stele(&stele);
+    node.stand_at_boundary_of(2);
+    node.write_stele(&stele);
+
+    let head = SnapshotDir::open(&stele)
+        .unwrap()
+        .resolve_latest(&DolosProfile)
+        .unwrap()
+        .read_inscription()
+        .unwrap();
+    assert_eq!(head.sequence, 2);
+    assert_eq!(head.previous.map(|link| link.sequence), Some(1));
+
+    // Sequence 1's tags leave the index, and the head keeps its own.
+    let index_path = stele.join(INDEX_FILE);
+    let mut index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&index_path).unwrap()).unwrap();
+    let manifests = index["manifests"].as_array_mut().unwrap();
+    let held = manifests.len();
+    manifests.retain(|entry| {
+        let tag = entry["annotations"][REF_NAME_ANNOTATION]
+            .as_str()
+            .unwrap_or_default();
+        tag != "epoch-1" && !tag.starts_with("epoch-1.")
+    });
+    assert!(manifests.len() < held, "the index held no tag for sequence 1");
+    std::fs::write(&index_path, serde_json::to_vec(&index).unwrap()).unwrap();
+
+    let layout = SnapshotDir::open(&stele).unwrap();
+    assert!(layout.pull_latest(&DolosProfile).is_ok());
+    let broken = layout.resolve_latest(&DolosProfile).unwrap_err().to_string();
+    assert!(broken.contains("chain is broken"), "{broken}");
+
+    let before = Contents::read(&node);
+    assert!(before.cursor.is_some());
+
+    let output = node.bootstrap_stelae(&format!("file://{}", stele.display()));
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        reports(&output.stderr, "its chain is broken"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(Contents::read(&node), before);
+}
+
 /// `--force` must not clear the node before the command it is going to run is
 /// fully resolved.
 ///
