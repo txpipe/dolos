@@ -4726,7 +4726,10 @@ mod boundary_preparation {
         store.load(2).unwrap();
         rewrite_manifest(&root.path().join("bundles/2.json"), |manifest| {
             manifest
-                .replace("\"format\":3", "\"format\":1")
+                .replace(
+                    &format!("\"format\":{}", prepare::BUNDLE_FORMAT),
+                    "\"format\":1",
+                )
                 .replace("\"windows\":", "\"retained\":[1],\"windows\":")
         });
 
@@ -5820,6 +5823,11 @@ mod boundary_preparation {
     #[test]
     fn a_shelley_boundary_is_refused_past_its_closed_window() {
         assert_a_prune_is_refused(Chain::at(Shape::Shelley, 4), 4);
+    }
+
+    #[test]
+    fn the_first_boundary_is_refused_past_its_closed_window() {
+        assert_a_prune_is_refused(Chain::at(Shape::Shelley, 1), 1);
     }
 
     #[test]
