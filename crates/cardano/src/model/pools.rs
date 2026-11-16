@@ -480,8 +480,9 @@ pub struct MintedBlocksInc {
     pub(crate) count: u32,
 
     /// Block epoch, used by `apply` to assert snapshot alignment. Transient
-    /// (`#[serde(skip)]`): WAL deltas are only ever undone, never re-applied,
-    /// so the `0` it decodes to off the WAL is never read.
+    /// (`#[serde(skip)]`): it decodes as `0` from the WAL. Before catch-up
+    /// applies a WAL delta again, `ChainLogic::prepare_replay` calculates it
+    /// from the slot of the block.
     #[serde(skip)]
     pub(crate) epoch: Epoch,
 }

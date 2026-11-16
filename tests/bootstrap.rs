@@ -4,7 +4,7 @@
 //! lifecycle with partial commits (WAL + state only), then verifies that
 //! `bootstrap()` recovers the archive store from WAL replay.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::str::FromStr as _;
 use std::sync::Arc;
 
@@ -544,6 +544,124 @@ fn snapshot_namespace(
         .collect()
 }
 
+fn snapshot_state(
+    domain: &ToyDomain,
+) -> BTreeMap<(dolos_core::Namespace, dolos_core::EntityKey), dolos_core::EntityValue> {
+    dolos_cardano::model::build_schema()
+        .keys()
+        .flat_map(|&ns| {
+            snapshot_namespace(domain, ns)
+                .into_iter()
+                .map(move |(key, value)| ((ns, key), value))
+        })
+        .collect()
+}
+
+#[test]
+fn test_catchup_restores_registered_pool_minting_context() {
+    use dolos_cardano::{CardanoDelta, PoolKey, PoolState};
+    use pallas::{crypto::hash::Hasher, ledger::traverse::MultiEraBlock};
+
+    let genesis = Arc::new(dolos_cardano::include::devnet::load());
+    let epoch_length = genesis.shelley.epoch_length.unwrap() as u64;
+    let (probe, _, _) = build_synthetic_blocks(SyntheticBlockConfig::default());
+    let block = MultiEraBlock::decode(&probe[0]).unwrap();
+    let operator = Hasher::<224>::hash(block.header().issuer_vkey().unwrap());
+    let pool_id =
+        bech32::encode::<bech32::Bech32>(bech32::Hrp::parse("pool").unwrap(), operator.as_ref())
+            .unwrap();
+    let registration = pallas::ledger::primitives::conway::Certificate::PoolRegistration {
+        operator,
+        vrf_keyhash: [1; 32].into(),
+        pledge: 0,
+        cost: 0,
+        margin: pallas::ledger::primitives::RationalNumber {
+            numerator: 0,
+            denominator: 1,
+        },
+        reward_account: [&[0xe0][..], operator.as_ref()].concat().into(),
+        pool_owners: vec![].into(),
+        relays: vec![],
+        pool_metadata: None,
+    };
+    let cfg = SyntheticBlockConfig {
+        pool_id,
+        slot: epoch_length - 1,
+        txs_per_block: 1,
+        seed_amount: dolos_testing::MIN_UTXO_AMOUNT + 500_000_007,
+        plain_txs: true,
+        extra_certs_by_block: vec![vec![vec![registration]], vec![], vec![]],
+        ..Default::default()
+    };
+    let (blocks, _, config) = build_synthetic_blocks(cfg);
+    let clean = ToyDomain::new_with_genesis_and_config(genesis.clone(), config.clone(), None, None);
+    let recovered = ToyDomain::new_with_genesis_and_config(genesis, config, None, None);
+
+    for domain in [&clean, &recovered] {
+        for block in &blocks[..2] {
+            domain.roll_forward(block.clone()).unwrap();
+        }
+    }
+
+    let target = recovered.state().read_cursor().unwrap().unwrap();
+    let before = snapshot_state(&recovered);
+    let pool = recovered
+        .state()
+        .read_entity_typed::<PoolState>(&PoolKey(operator))
+        .unwrap()
+        .unwrap();
+    assert_eq!(pool.snapshot.epoch(), Some(1));
+    assert_eq!(pool.snapshot.unwrap_live().blocks_minted, 1);
+
+    clean.roll_forward(blocks[2].clone()).unwrap();
+    feed_blocks_partial(&recovered, &blocks[2..], CrashAfter::Wal);
+    assert_eq!(snapshot_state(&recovered), before);
+
+    let (point, mut log) = recovered.wal().find_tip().unwrap().unwrap();
+    assert!(log
+        .delta
+        .iter()
+        .any(|delta| matches!(delta, CardanoDelta::MintedBlocksInc(_))));
+    let encoded_deltas = bincode::serialize(&log.delta).unwrap();
+    dolos_cardano::CardanoLogic::prepare_replay(
+        recovered.state(),
+        recovered.genesis(),
+        &log.block,
+        &mut log.delta,
+    )
+    .unwrap();
+    assert_eq!(bincode::serialize(&log.delta).unwrap(), encoded_deltas);
+
+    let encoded_wal_delta = |domain: &ToyDomain| {
+        bincode::serialize(&domain.wal().read_entry(&point).unwrap().unwrap().delta).unwrap()
+    };
+    let wal_delta = encoded_wal_delta(&recovered);
+    recovered.bootstrap().unwrap();
+    assert_eq!(
+        recovered.state().read_cursor().unwrap(),
+        Some(point.clone())
+    );
+    let expected = snapshot_state(&clean);
+    assert_eq!(snapshot_state(&recovered), expected);
+    let pool = recovered
+        .state()
+        .read_entity_typed::<PoolState>(&PoolKey(operator))
+        .unwrap()
+        .unwrap();
+    assert_eq!(pool.snapshot.epoch(), Some(1));
+    assert_eq!(pool.snapshot.unwrap_live().blocks_minted, 2);
+    assert_eq!(encoded_wal_delta(&recovered), wal_delta);
+
+    recovered.bootstrap().unwrap();
+    assert_eq!(snapshot_state(&recovered), expected);
+    assert_eq!(encoded_wal_delta(&recovered), wal_delta);
+
+    clean.rollback(&target).unwrap();
+    recovered.rollback(&target).unwrap();
+    assert_eq!(snapshot_state(&recovered), before);
+    assert_eq!(snapshot_state(&recovered), snapshot_state(&clean));
+}
+
 #[test]
 fn test_bootstrap_origin_cursor_is_noop() {
     let genesis = Arc::new(dolos_cardano::include::devnet::load());
@@ -608,8 +726,7 @@ fn test_recovery_plan_when_the_wal_covers_the_lag() {
 }
 
 /// A WAL reset to its tip, past the state, holds only the synthetic entry
-/// there: the plan says the lag is not covered, and catch-up, unable to reach
-/// the tip, fails.
+/// there: the plan says the lag is not covered, and catch-up refuses it.
 #[test]
 fn test_recovery_plan_when_the_wal_is_short() {
     let (blocks, _, cardano_config) = build_synthetic_blocks(SyntheticBlockConfig::default());
@@ -631,13 +748,13 @@ fn test_recovery_plan_when_the_wal_is_short() {
 
     assert!(matches!(
         catch_up_stores(&domain),
-        Err(dolos_core::DomainError::InconsistentState { .. })
+        Err(dolos_core::DomainError::WalGap { .. })
     ));
 }
 
 /// A WAL pruned past the state, with no synthetic entry left: it no longer
-/// reaches back to the state, so the lag is not covered. Catch-up still
-/// replays what remains and reaches the tip, the pruned blocks never applied.
+/// reaches back to the state, so the lag is not covered. Catch-up refuses it,
+/// and the state does not change.
 #[test]
 fn test_recovery_plan_when_the_wal_is_pruned_past_the_state() {
     let (blocks, _, cardano_config) = build_synthetic_blocks(SyntheticBlockConfig::default());
@@ -669,13 +786,21 @@ fn test_recovery_plan_when_the_wal_is_pruned_past_the_state() {
         assert!(!step(&plan, store).unwrap().covered, "{store:?}");
     }
 
-    catch_up_stores(&domain).unwrap();
-    assert_eq!(domain.state().read_cursor().unwrap(), Some(wal_tip));
+    let cursor = domain.state().read_cursor().unwrap();
+    let entities = snapshot_state(&domain);
+    let error = catch_up_stores(&domain).unwrap_err();
+    assert!(matches!(
+        error,
+        dolos_core::DomainError::WalGap { wal, state }
+            if wal == wal_tip && state == cursor
+    ));
+    assert_eq!(domain.state().read_cursor().unwrap(), cursor);
+    assert_eq!(snapshot_state(&domain), entities);
 }
 
 /// A WAL that still reaches back to the state, but holds a synthetic entry
 /// past it where a block was: the blocks before that entry were discarded, so
-/// the lag is not covered, though catch-up replays the rest to the tip.
+/// the lag is not covered. Catch-up refuses it, and the state does not change.
 #[test]
 fn test_recovery_plan_when_a_synthetic_entry_is_past_the_state() {
     let (blocks, _, cardano_config) = build_synthetic_blocks(SyntheticBlockConfig::default());
@@ -711,8 +836,16 @@ fn test_recovery_plan_when_a_synthetic_entry_is_past_the_state() {
         assert_eq!(step.entries, blocks.len() as u64 - 1);
     }
 
-    catch_up_stores(&domain).unwrap();
-    assert_eq!(domain.state().read_cursor().unwrap(), Some(wal_tip));
+    let cursor = domain.state().read_cursor().unwrap();
+    let entities = snapshot_state(&domain);
+    let error = catch_up_stores(&domain).unwrap_err();
+    assert!(matches!(
+        error,
+        dolos_core::DomainError::WalGap { wal, state }
+            if wal == wal_tip && state == cursor
+    ));
+    assert_eq!(domain.state().read_cursor().unwrap(), cursor);
+    assert_eq!(snapshot_state(&domain), entities);
 }
 
 /// State at the WAL tip with the archive behind it: only the archive replays.
