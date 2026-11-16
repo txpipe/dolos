@@ -13,8 +13,9 @@ use std::sync::Arc;
 use tracing::{debug, info, instrument, warn};
 
 use crate::{
-    ArchiveStore as _, ArchiveWriter as _, BlockSlot, ChainLogic, ChainPoint, Domain, DomainError,
-    EntityMap, MempoolStore, RawBlock, StateStore, StateWriter as _, TipEvent, WalStore, WorkUnit,
+    wal::ChainOrdered, ArchiveStore as _, ArchiveWriter as _, BlockSlot, ChainLogic, ChainPoint,
+    Domain, DomainError, EntityMap, MempoolStore, RawBlock, StateStore, StateWriter as _, TipEvent,
+    WalStore, WorkUnit,
 };
 
 const MEMPOOL_DROP_THRESHOLD: u32 = 2;
@@ -50,10 +51,10 @@ pub trait SyncExt: Domain {
 
     /// Roll back the chain to a previous point.
     ///
-    /// Iterates WAL entries after the target point in reverse order,
+    /// Iterates WAL entries after the target point in reverse chain order,
     /// undoing each block's effects on state, UTxOs (tags included), and the
     /// archive's index entries; the archive's blocks and logs are then cut
-    /// with `truncate_front`.
+    /// with `truncate_front`, and the WAL drops the entries undone.
     fn rollback(&self, to: &ChainPoint) -> Result<(), DomainError>;
 }
 
@@ -104,7 +105,12 @@ impl<D: Domain> SyncExt for D {
 
     #[instrument(skip_all, fields(rollback_to = %to))]
     fn rollback(&self, to: &ChainPoint) -> Result<(), DomainError> {
-        let undo_blocks = self.wal().iter_logs(Some(to.clone()), None)?;
+        // Keys sort the entries of one slot by hash, so a block the chain
+        // puts after `to` at its slot can sort below it: read from the slot's
+        // first key.
+        let logs = self
+            .wal()
+            .iter_logs(Some(ChainPoint::Slot(to.slot())), None)?;
 
         let writer = self.state().start_writer()?;
         let archive_writer = self.archive().start_writer()?;
@@ -114,12 +120,16 @@ impl<D: Domain> SyncExt for D {
         // re-reading the not-yet-committed store.
         let mut entities: EntityMap<Self::Entity> = EntityMap::default();
 
-        for (point, log) in undo_blocks.rev() {
+        let mut undone = Vec::new();
+
+        for (point, log) in ChainOrdered::backward(logs.rev()) {
             if point == *to {
                 // Final cursor update
                 writer.set_cursor(point.clone())?;
                 break;
             }
+
+            undone.push(point.clone());
 
             crate::state::undo_delta_chunk::<Self>(&mut entities, self.state(), &log.delta)?;
 
@@ -164,7 +174,9 @@ impl<D: Domain> SyncExt for D {
 
         self.archive().truncate_front(to)?;
 
-        self.wal().truncate_front(to)?;
+        // Exactly what was undone: a cut after `to`'s key could keep a block
+        // undone at its slot, or drop one the chain puts before it.
+        self.wal().remove_points(&undone)?;
 
         Ok(())
     }

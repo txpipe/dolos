@@ -87,6 +87,37 @@ fn empty_wal(node: &Node) {
     wal.shutdown().unwrap();
 }
 
+/// Move the state cursor to `to` and nothing else.
+fn set_state_cursor(node: &Node, to: ChainPoint) {
+    use dolos_core::{StateStore as _, StateWriter as _};
+
+    let state = dolos::storage::open_state_store(&node.config).unwrap();
+
+    let writer = state.start_writer().unwrap();
+    writer.set_cursor(to).unwrap();
+    writer.commit().unwrap();
+
+    state.shutdown().unwrap();
+}
+
+/// Every UTxO in the state, as text.
+fn utxo_set(node: &Node) -> Vec<String> {
+    use dolos_core::StateStore as _;
+
+    let state = dolos::storage::open_state_store(&node.config).unwrap();
+
+    let mut utxos: Vec<_> = state
+        .iter_utxos()
+        .unwrap()
+        .map(|utxo| format!("{:?}", utxo.unwrap()))
+        .collect();
+    utxos.sort();
+
+    state.shutdown().unwrap();
+
+    utxos
+}
+
 /// Empty the state store, as deleting a corrupt one leaves it once a node
 /// recreates it.
 fn empty_state(node: &Node) {
@@ -341,6 +372,52 @@ fn a_lag_the_wal_covers_is_replayed() {
         let status = node.run(&["sync", "status"]);
         assert_eq!(code(&status), Some(0), "{crash:?}: {}", stdout(&status));
     }
+}
+
+/// ESTART leaves the state cursor holding only the slot of the epoch's first
+/// block, which a crash after that block's WAL commit keeps it at: the state
+/// has every block before the slot and not the one at it. `sync status` says
+/// so, and `sync recover` replays the block.
+#[test]
+fn a_state_at_a_slot_without_its_block_replays_it() {
+    let (node, genesis, blocks) = fixture("");
+    let tip = point(&blocks[3]);
+
+    let domain = start(&node, &genesis);
+    domain.roll_forward_batch(blocks[..3].to_vec()).unwrap();
+    feed_until_crash(&domain, &blocks[3..], CrashAfter::Wal);
+    domain.shutdown().unwrap();
+    drop(domain);
+
+    set_state_cursor(&node, ChainPoint::Slot(tip.slot()));
+
+    let status = node.run(&["sync", "status", "--format", "json"]);
+    assert_eq!(code(&status), Some(3), "{}", stdout(&status));
+    let disagreements = json(&status)["disagreements"].to_string();
+    assert!(
+        disagreements.contains("the state, at slot")
+            && disagreements.contains("its block not applied"),
+        "{disagreements}"
+    );
+
+    let dry_run = node.run(&["sync", "recover", "--dry-run", "--format", "json"]);
+    assert_eq!(code(&dry_run), Some(0), "{}", stderr_words(&dry_run));
+    let planned = json(&dry_run);
+    assert_eq!(planned["action"], "replay");
+    assert_eq!(planned["steps"][0]["store"], "state", "{planned}");
+    assert_eq!(planned["steps"][0]["entries"], 1, "{planned}");
+
+    let output = node.run(&["sync", "recover"]);
+    assert_eq!(code(&output), Some(0), "{}", stderr_words(&output));
+
+    assert_eq!(
+        store_positions(&node),
+        (Some(tip.clone()), Some(tip.clone()), Some(tip.slot()))
+    );
+    assert_eq!(utxo_set(&node), utxo_set(&synced().0));
+
+    let status = node.run(&["sync", "status"]);
+    assert_eq!(code(&status), Some(0), "{}", stdout(&status));
 }
 
 /// The state and the archive two blocks back, and a WAL reset to the tip, so

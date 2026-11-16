@@ -9,8 +9,9 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 
 use crate::{
-    sync::drain_pending_work, ArchiveStore, ArchiveWriter as _, BlockSlot, ChainLogic, ChainPoint,
-    Domain, DomainError, EntityMap, StateStore, StateWriter as _, WalStore,
+    sync::drain_pending_work, wal::ChainOrdered, ArchiveStore, ArchiveWriter as _, BlockSlot,
+    ChainLogic, ChainPoint, Domain, DomainError, EntityMap, RawBlock, StateStore, StateWriter as _,
+    WalError, WalStore,
 };
 
 /// Extension trait for domain bootstrapping operations.
@@ -158,11 +159,12 @@ enum CatchUpSeverity {
 
 /// Verify a store reached the catch-up `target` after replay.
 ///
-/// `reached` is the store's position after catch-up. Comparison is by slot: a
-/// `Slot`-only cursor at the target's slot (e.g. post-ESTART) counts as
-/// reached even though the points differ. A store can fall short when the WAL
-/// no longer holds the entries needed to replay (e.g. after `reset_to`);
-/// `severity` decides whether that aborts the boot or is only flagged.
+/// `reached` is the store's position after catch-up. Comparison is by slot,
+/// since the archive's tip is only a slot; the state's replay has already
+/// applied every entry its cursor had not (see [`unapplied`]). A store can
+/// fall short when the WAL no longer holds the entries needed to replay (e.g.
+/// after `reset_to`); `severity` decides whether that aborts the boot or is
+/// only flagged.
 fn verify_caught_up(
     store: &str,
     reached: Option<ChainPoint>,
@@ -319,14 +321,45 @@ where
         Some(point) => Some(point.slot()),
     };
 
-    let stores = [
-        (RecoveredStore::State, state_slot),
-        (RecoveredStore::Archive, archive_tip),
-    ];
+    let blocks = wal.iter_blocks(replay_start(wal, state_slot)?, Some(target.clone()))?;
+    let pending = unapplied(ChainOrdered::forward(blocks), state_cursor);
+    plan.add_step(
+        RecoveredStore::State,
+        state_slot,
+        wal_start,
+        &target,
+        pending,
+    );
 
-    for (store, from) in stores {
-        if from.is_some_and(|slot| slot >= target.slot()) {
-            continue;
+    // The archive's tip is a slot, so it lacks what the WAL holds past it.
+    let blocks = wal.iter_blocks(replay_start(wal, archive_tip)?, Some(target.clone()))?;
+    let pending = blocks.filter(|(point, _)| Some(point.slot()) > archive_tip);
+    plan.add_step(
+        RecoveredStore::Archive,
+        archive_tip,
+        wal_start,
+        &target,
+        pending,
+    );
+
+    Ok(plan)
+}
+
+impl RecoveryPlan {
+    /// Add `store`'s replay of `pending`, the WAL entries it lacks, unless it
+    /// lacks none.
+    fn add_step(
+        &mut self,
+        store: RecoveredStore,
+        from: Option<BlockSlot>,
+        wal_start: Option<BlockSlot>,
+        target: &ChainPoint,
+        pending: impl Iterator<Item = (ChainPoint, RawBlock)>,
+    ) {
+        let mut pending = pending.peekable();
+
+        if pending.peek().is_none() {
+            return;
         }
 
         // The WAL has to reach back to the store, and hold real blocks all
@@ -335,16 +368,7 @@ where
         let mut covered = wal_start.is_some_and(|start| start <= from.unwrap_or(0));
         let mut entries = 0;
 
-        let start = match from {
-            Some(slot) => wal.locate_point(slot)?,
-            None => None,
-        };
-
-        for (point, block) in wal.iter_blocks(start, Some(target.clone()))? {
-            if Some(point.slot()) <= from {
-                continue;
-            }
-
+        for (point, block) in pending {
             if block.is_empty() {
                 covered &= point == ChainPoint::Origin;
             } else {
@@ -352,9 +376,9 @@ where
             }
         }
 
-        plan.covers_lag &= covered;
+        self.covers_lag &= covered;
 
-        plan.steps.push(RecoveryStep {
+        self.steps.push(RecoveryStep {
             store,
             from,
             to: target.clone(),
@@ -362,8 +386,46 @@ where
             covered,
         });
     }
+}
 
-    Ok(plan)
+/// Where a store at `slot` starts reading the WAL: the first key of the
+/// nearest slot the WAL holds, so the read meets every entry at that slot.
+fn replay_start<W: WalStore>(
+    wal: &W,
+    slot: Option<BlockSlot>,
+) -> Result<Option<ChainPoint>, WalError> {
+    let Some(slot) = slot else {
+        return Ok(None);
+    };
+
+    Ok(wal
+        .locate_point(slot)?
+        .map(|point| ChainPoint::Slot(point.slot())))
+}
+
+/// The entries, met in chain order, that a state at `cursor` has not applied.
+///
+/// A cursor naming a block has applied it and everything before it. One that
+/// holds only a slot, as ESTART leaves at an epoch's first block before that
+/// block rolls, has applied every block before its slot and none at it.
+fn unapplied<T>(
+    entries: impl Iterator<Item = (ChainPoint, T)>,
+    cursor: Option<ChainPoint>,
+) -> impl Iterator<Item = (ChainPoint, T)> {
+    let mut reached = false;
+
+    entries.skip_while(move |(point, _)| match &cursor {
+        None | Some(ChainPoint::Origin) => false,
+        Some(at) if !at.is_fully_defined() => point.slot() < at.slot(),
+        Some(at) => {
+            if reached || point.slot() > at.slot() {
+                return false;
+            }
+
+            reached = point == at;
+            true
+        }
+    })
 }
 
 /// Catch up the state store by replaying WAL entries.
@@ -379,10 +441,6 @@ where
 fn catch_up_state<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), DomainError> {
     let state_cursor = domain.state().read_cursor()?;
 
-    if state_cursor.as_ref() == Some(target) {
-        return Ok(());
-    }
-
     // Origin (or no cursor) means nothing has been applied yet — replay the
     // whole WAL.
     let state_slot = match &state_cursor {
@@ -390,22 +448,12 @@ fn catch_up_state<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), Doma
         Some(point) => Some(point.slot()),
     };
 
-    // Find the WAL start point from the state cursor
-    let start = match state_slot {
-        Some(slot) => domain.wal().locate_point(slot)?,
-        None => None,
-    };
-
+    let start = replay_start(domain.wal(), state_slot)?;
     let logs = domain.wal().iter_logs(start, Some(target.clone()))?;
 
     let mut count = 0u64;
 
-    for (point, mut log) in logs {
-        // Skip entries at or before the current state cursor
-        if Some(point.slot()) <= state_slot {
-            continue;
-        }
-
+    for (point, mut log) in unapplied(ChainOrdered::forward(logs), state_cursor) {
         // Skip synthetic entries (from reset_to) — they carry no effects
         if log.block.is_empty() {
             continue;
