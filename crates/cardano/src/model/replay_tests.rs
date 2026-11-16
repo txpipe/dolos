@@ -129,6 +129,7 @@ fn replay_matches_first_apply(
     let mut first = entity.clone();
     let mut applied = delta;
     applied.apply(&mut first);
+    let key = applied.key();
 
     // the WAL row holds the deltas as their first apply left them
     let row = bincode::serialize(&LogValue {
@@ -141,6 +142,9 @@ fn replay_matches_first_apply(
 
     CardanoLogic::prepare_replay(&state, genesis.clone(), &block, &mut row.delta)
         .map_err(|error| TestCaseError::fail(format!("prepare_replay failed: {error}")))?;
+
+    // catch-up loads and saves the entity the decoded delta names
+    proptest::prop_assert_eq!(row.delta[0].key(), key);
 
     let mut replayed = entity;
     row.delta[0].apply(&mut replayed);
