@@ -1343,16 +1343,19 @@ fn check_source<A: ArchiveStore>(
 
 /// The archive still has to start at the chain's first block. Finalization
 /// reads the closed windows its stele lists from the archive, and pruned, they
-/// and their logs read as empty rather than failing. Block #1 starts a chain
-/// only at slot 0, after a Byron genesis boundary block; anywhere else it
-/// means a prune has taken block #0 since capture.
+/// and their logs read as empty rather than failing. Block #1 can start a chain
+/// at slot 0, after a Byron genesis boundary block, and anywhere when its
+/// header names no previous block. Otherwise it means block #0 has been pruned.
 fn check_unpruned<A: ArchiveStore>(bundle: &Bundle, archive: &A) -> Result<(), Error> {
     match crate::boundary::first_block(archive)? {
-        Some((first, number)) if number > 1 || (number == 1 && first.slot() != 0) => {
+        Some(first)
+            if first.number > 1
+                || (first.number == 1 && first.point.slot() != 0 && first.names_predecessor) =>
+        {
             Err(Refusal::PrunedArchive {
                 sequence: bundle.sequence(),
-                first: first.slot(),
-                number,
+                first: first.point.slot(),
+                number: first.number,
             }
             .into())
         }

@@ -3784,6 +3784,12 @@ mod boundary_preparation {
 
     impl Chain {
         fn new(shape: Shape) -> Self {
+            Self::numbered_from(shape, 0)
+        }
+
+        /// A chain whose first block is numbered `number` and names no previous
+        /// block, as the synthetic chains start at #1.
+        fn numbered_from(shape: Shape, number: u64) -> Self {
             let epoch_length = match shape {
                 Shape::Shelley => 100,
                 Shape::Byron => dolos_testing::blocks::BYRON_EPOCH_LENGTH,
@@ -3812,7 +3818,7 @@ mod boundary_preparation {
                 )),
                 state: MemoryStateStore::new(),
                 tip: None,
-                number: 0,
+                number,
                 epoch: 0,
                 boundary_delta: None,
             };
@@ -5926,6 +5932,78 @@ mod boundary_preparation {
                 ..
             }
         ));
+    }
+
+    /// An archive whose first block is #1 past slot 0 and names no previous
+    /// block has lost nothing: it is where the chain starts, as capture holds
+    /// and the synthetic chains start. Staging and finalization take it on
+    /// both archives a publisher runs.
+    #[test]
+    fn an_archive_starting_at_block_one_with_no_predecessor_is_finished() {
+        for on_fjall in [false, true] {
+            let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
+            let store = store(root.path());
+            let mut chain = Chain::numbered_from(Shape::Shelley, 1);
+
+            chain.advance_to(2);
+
+            let (first, body) = blocks_from(&chain, 0).remove(0);
+            let block = MultiEraBlock::decode(&body).unwrap();
+
+            assert_eq!(block.number(), 1);
+            assert_ne!(first.slot(), 0);
+            assert_eq!(block.header().previous_hash(), None);
+
+            let bundle = chain.prepare(&store).unwrap();
+
+            chain.advance_to(3);
+
+            let bundles = std::slice::from_ref(&bundle);
+            let stele = SnapshotDir::create(finished_root.path()).unwrap();
+            let finished = if on_fjall {
+                let fjall = fjall_copy(&chain);
+                let staged = prepare::stage_batch(
+                    stage_root.path(),
+                    &fjall,
+                    &chain.state,
+                    bundles,
+                    &export::First,
+                    Budget::new(u64::MAX),
+                    &Observer::silent(),
+                )
+                .unwrap();
+
+                prepare::finalize(
+                    &stele,
+                    &Finalizing {
+                        store: &store,
+                        bundle: &bundle,
+                        staged: &staged,
+                        producers: export::Producers::DEFAULT,
+                    },
+                    &fjall,
+                    &export::First,
+                    &Observer::silent(),
+                )
+            } else {
+                let staged = chain.stage(stage_root.path(), bundles, &export::First);
+
+                prepare::finalize(
+                    &stele,
+                    &Finalizing {
+                        store: &store,
+                        bundle: &bundle,
+                        staged: &staged,
+                        producers: export::Producers::DEFAULT,
+                    },
+                    &chain.archive,
+                    &export::First,
+                    &Observer::silent(),
+                )
+            };
+
+            assert!(finished.is_ok(), "on fjall: {on_fjall}: {finished:?}");
+        }
     }
 
     /// A copy of `chain`'s blocks and logs, in the store a publisher prunes.

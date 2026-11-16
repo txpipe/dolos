@@ -139,9 +139,10 @@ closed windows from the source archive, and `boundary::check` held it to the
 chain's first block when the boundary was captured (block number at most 1, the
 test `data rebuild` applies), so both hold it there again (`PrunedArchive`):
 pruned, closed windows and their logs would read as empty rather than fail. They
-are stricter by one case: block #1 passes only at slot 0, where it follows a
-Byron genesis boundary block, because anywhere else it means block #0 was pruned
-since capture. A publisher keeps full history.
+are stricter by one case: block #1 passes at slot 0, where it follows a Byron
+genesis boundary block, or where its header names no previous block, as a
+chain's first block does. Block #1 past slot 0 that names a predecessor means
+block #0 was pruned. A publisher keeps full history.
 
 **Lifecycle.** Payloads are fsynced, then their directory, then the manifest is
 written to `{sequence}.json.partial`, fsynced, renamed and the directory fsynced.
@@ -225,7 +226,7 @@ releases a bundle only after the sequence is committed.
 | `MissingArtifact` | A payload is gone, at loading or when read, or not its recorded size at loading. One cut short after loading reads as `Corrupt`. |
 | `Corrupt` | A manifest or payload failed its checks. `Store::release` is the recovery, as it is for `MissingArtifact` and, at `prepare`, `SourceMismatch`. `Io` never calls for it. A bundle of another `BUNDLE_FORMAT` is `Corrupt` too; releasing it drops what the build that wrote it could read. |
 | `ForeignTail` | The delta is not the boundary block's. |
-| `PrunedArchive` | The archive no longer starts at the chain's first block. |
+| `PrunedArchive` | The archive does not start at the chain's first block. |
 | `EmptyBatch` | `stage_batch` had no bundles. |
 | `Io` | The machine failed, while reading a payload included. The bundle may be intact. |
 

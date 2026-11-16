@@ -351,23 +351,33 @@ fn evidence<A: ArchiveStore>(
 pub(crate) fn pruned_start<A: ArchiveStore>(
     archive: &A,
 ) -> Result<Option<(ChainPoint, u64)>, Error> {
-    Ok(first_block(archive)?.filter(|(_, number)| *number > 1))
+    Ok(first_block(archive)?
+        .filter(|first| first.number > 1)
+        .map(|first| (first.point, first.number)))
 }
 
-/// The archive's first block and its number. `None` for an empty archive.
-pub(crate) fn first_block<A: ArchiveStore>(
-    archive: &A,
-) -> Result<Option<(ChainPoint, u64)>, Error> {
+/// What the archive's first block says about where the archive starts.
+pub(crate) struct FirstBlock {
+    pub point: ChainPoint,
+    pub number: u64,
+    /// Whether its header names a previous block. A chain's first block names
+    /// none, except a Byron genesis boundary block, which names the genesis.
+    pub names_predecessor: bool,
+}
+
+/// The archive's first block. `None` for an empty archive.
+pub(crate) fn first_block<A: ArchiveStore>(archive: &A) -> Result<Option<FirstBlock>, Error> {
     let Some((slot, body)) = archive.get_range(None, None)?.next() else {
         return Ok(None);
     };
 
     let first = decode(slot, &body)?;
 
-    Ok(Some((
-        ChainPoint::Specific(slot, first.hash()),
-        first.number(),
-    )))
+    Ok(Some(FirstBlock {
+        point: ChainPoint::Specific(slot, first.hash()),
+        number: first.number(),
+        names_predecessor: first.header().previous_hash().is_some(),
+    }))
 }
 
 fn decode(slot: BlockSlot, body: &BlockBody) -> Result<MultiEraBlock<'_>, Error> {
