@@ -1158,9 +1158,9 @@ fn staged_windows(bundle: &Bundle, family: Family) -> impl Iterator<Item = &Epoc
 /// before it.
 ///
 /// A batch restarted on the same `root` reuses its runs while they cover what
-/// it wants, which shrinks as layers are recorded and steles commit. Wanting
-/// more than they hold is [`staging::Refusal::Uncovered`], and a bundle they
-/// were not staged for, such as a boundary captured again after a rebuild, is
+/// it wants, which shrinks as steles commit. Wanting more than they hold is
+/// [`staging::Refusal::Uncovered`], and a bundle they were not staged for,
+/// such as a boundary captured again after a rebuild, is
 /// [`staging::Refusal::SourceMismatch`].
 pub fn stage_batch<A: ArchiveStore, S: StateStore>(
     root: &Path,

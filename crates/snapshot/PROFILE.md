@@ -368,9 +368,10 @@ one boundary adds, never on the length of the chain:
   `indexes` and log layers, the `log-account-epochs` and `log-pool-epochs`
   layers that settled at the boundary, and the period logs and
   `entity-{kind}` layers of every window its seal sealed. A boundary seals
-  one window, two where the epoch length grows, as at mainnet's
-  Byron-to-Shelley change, and on mainnet's short Byron epochs none for the
-  first boundaries; `EPOCH_KINDS` bounds the layers per window.
+  one window, and several where the epoch length grows: mainnet's boundary
+  209, the first after the Byron-to-Shelley change, seals the six Byron
+  windows 202 to 207. On mainnet's short Byron epochs the first boundaries
+  seal none. `EPOCH_KINDS` bounds the layers per window.
 - **The tip** holds one state tip's worth of layers (16 per sixteen-way
   namespace, 1 per single-blob namespace; `STATE_KINDS`), the boundary
   sliver's `blocks` and `indexes`, and two `log-account-epochs` layers.
