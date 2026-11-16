@@ -25,31 +25,31 @@ use dolos_core::{
 };
 use serde::{Deserialize, Serialize};
 use stelae::{
-    dir::{SnapshotDir, BLOBS_DIR},
+    dir::{BlobStore, BLOBS_DIR, STAGING_PREFIX},
     frame::{CanonicalCbor, Limits},
     inscription::{Inscription, LayerDescriptor},
     profile::Profile,
     progress::{Observer, Outcome},
-    transport::{
-        BlobIndex, LayerSpec, RecordSink, SnapshotReader as _, SnapshotWriter, WrittenLayer,
-    },
-    Digest,
+    transport::{LayerSpec, RecordSink, SnapshotWriter, WrittenLayer},
+    Digest, LayerReader,
 };
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::{
-    export::{self, Adopted, EpochWindow, First, Job, Plan, Predecessor, Producers, Source},
+    export::{self, EpochWindow, First, Job, Plan, Predecessor, Producers, Resumed, Source},
     layers::indexes,
     reporting::Cursor,
+    roles::{Listing, Rule},
     scope_key,
     staging::{self, sync_dir, Budget, Capture, Family, Runs, Staged},
     state_layer_count, DolosProfile, Error, Network, Scope as _, COMPRESSION_LEVEL, ENTITY_KINDS,
     INDEXES, LOG_KINDS, MAX_RECORD, MEDIA_TYPE_VERSION, PROFILE_NAME, PROFILE_VERSION, STATE_KINDS,
 };
 
-/// Version of the bundle manifest and its layout. Format 2 drops the retained
-/// list from the identity; a format-1 bundle is refused rather than read.
-pub const BUNDLE_FORMAT: u32 = 2;
+/// Version of the bundle manifest and its layout. Format 3 captures only the
+/// layers the boundary's snapshot holds, into a plain blob store; a bundle of
+/// an earlier format is refused rather than read.
+pub const BUNDLE_FORMAT: u32 = 3;
 
 /// The level payloads are compressed at on their way to the store. Identity is
 /// the uncompressed digest, so this trades scratch for preparation time and
@@ -219,7 +219,6 @@ fn checksum(manifest: &Manifest) -> Result<u64, serde_json::Error> {
 pub struct Bundle {
     manifest: Manifest,
     cursor: ChainPoint,
-    index: BlobIndex,
     layers: BTreeMap<(String, String), usize>,
 }
 
@@ -244,15 +243,8 @@ impl Bundle {
             })
             .collect::<Result<_, Error>>()?;
 
-        let index = manifest
-            .layers
-            .iter()
-            .map(|layer| (layer.digests.diff_id, layer.digests.blob_digest))
-            .collect();
-
         Ok(Self {
             cursor: ChainPoint::Specific(*slot, hash.into()),
-            index,
             layers,
             manifest,
         })
@@ -340,13 +332,12 @@ impl Bundle {
 
 /// A root holding bundles and the content-addressed payloads they share.
 ///
-/// One writer at a time. Payloads are named by the digest of their bytes, in
-/// the layout of a stele directory, so two boundaries that captured the same
-/// layer hold one file.
+/// One writer at a time. Payloads are named by the digest of their bytes, in a
+/// [`BlobStore`], so two boundaries that captured the same layer hold one file.
 pub struct Store {
     root: PathBuf,
     owner: String,
-    blobs: SnapshotDir,
+    blobs: BlobStore,
 }
 
 impl Store {
@@ -354,14 +345,18 @@ impl Store {
     /// dropping any payload a crash left half-written.
     pub fn open(root: impl Into<PathBuf>, owner: impl Into<String>) -> Result<Self, Error> {
         let root = root.into();
-        let blobs = SnapshotDir::create(&root)?;
+        let blobs = BlobStore::create(&root)?;
 
         fs::create_dir_all(root.join(BUNDLES_DIR)).map_err(io)?;
 
         for entry in fs::read_dir(root.join(BLOBS_DIR)).map_err(io)? {
             let entry = entry.map_err(io)?;
 
-            if entry.file_name().to_string_lossy().starts_with(".staging-") {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(STAGING_PREFIX)
+            {
                 fs::remove_file(entry.path()).map_err(io)?;
             }
         }
@@ -673,6 +668,14 @@ pub fn prepare<A: ArchiveStore, S: StateStore>(
     let summary = dolos_cardano::eras::load_chain_summary_from_state(state)?;
     let oldest_unsealed = *unsealed_epochs(&summary, request.mutable_slots, plan.sequence).start();
 
+    // Every layer the snapshot at this boundary holds, in either array, so the
+    // bundle serves the boundary whether its lineage starts here or not.
+    let holds = Listing::new(
+        Rule::new(&summary, request.mutable_slots),
+        plan.sequence,
+        true,
+    );
+
     // The window before the boundary still takes the reward update's pool rows
     // and its settled account rows, whatever the seal says.
     let capture_from = oldest_unsealed.min(plan.sequence.saturating_sub(1));
@@ -700,15 +703,16 @@ pub fn prepare<A: ArchiveStore, S: StateStore>(
         let layers = capture_layers(
             &store.blobs,
             &capture,
+            &holds,
             archive,
             state,
             request.tail,
             observer,
         )?;
 
-        // Finalization reads every closed window it does not inherit, whatever
-        // was captured of it: closed blocks come from the archive and closed
-        // indexes from its runs.
+        // Finalization reads the closed windows its stele lists from the
+        // archive, whatever was captured of them: closed blocks come from the
+        // archive and closed indexes from its runs.
         let horizon = match plan.epochs.iter().find(|w| w.epoch < plan.sequence) {
             Some(window) => block_to_keep(archive, window.start_slot)?,
             None => None,
@@ -733,6 +737,7 @@ pub fn prepare<A: ArchiveStore, S: StateStore>(
     let walked = capture_layers(
         &stelae::Discarding,
         &capture,
+        &holds,
         archive,
         state,
         request.tail,
@@ -744,11 +749,13 @@ pub fn prepare<A: ArchiveStore, S: StateStore>(
     Ok(bundle)
 }
 
-/// Run a capture of `capture`'s layers through `inner`, sorted the way a
-/// manifest lists them.
+/// Run a capture of `capture`'s layers that `holds` names through `inner`,
+/// sorted the way a manifest lists them.
+#[allow(clippy::too_many_arguments)]
 fn capture_layers<W, A, S>(
     inner: &W,
     capture: &Plan,
+    holds: &Listing<'_>,
     archive: &A,
     state: &S,
     tail: IndexTail<'_>,
@@ -769,7 +776,7 @@ where
         written: Arc::default(),
     };
 
-    let total = export::log_layers(capture, archive, None, &First)?
+    let total = export::log_layers(capture, holds, archive, None)?
         + state_layer_count()
         + 2 * usize::from(tail_window.is_some());
     let cursor = Cursor::new(observer, total);
@@ -793,6 +800,10 @@ where
 
     for (kind, ns) in LOG_KINDS {
         for window in &capture.epochs {
+            if !holds.lists(kind, window.epoch)? {
+                continue;
+            }
+
             jobs.push(Box::new(move || {
                 Ok(export::write_logs(
                     writer_ref, capture, archive, None, window, kind, ns, &First, cursor_ref,
@@ -991,7 +1002,8 @@ pub(crate) enum Captured<'a> {
     /// It holds the layer's payload.
     Layer(&'a WrittenLayer),
     /// It covers the window and holds no such layer: none existed at the
-    /// boundary, whatever a later view shows.
+    /// boundary, whatever a later view shows. Asked only of a layer the
+    /// boundary's snapshot holds, which is all a bundle captures.
     Absent,
     /// The window can no longer change, so the source reads the same.
     Source,
@@ -1078,15 +1090,23 @@ impl Prepared<'_> {
             ..Limits::default()
         };
 
-        let mut reader = self
-            .store
-            .blobs
-            .stream_layer(
-                &self.bundle.index,
-                &DolosProfile,
-                &written.descriptor,
-                limits,
-            )
+        let blob = self.store.blobs.blob_path(&written.digests.blob_digest);
+
+        let file = match File::open(&blob) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(self.read_failure(
+                    written,
+                    stelae::Error::LayerNotFound {
+                        kind: written.descriptor.kind.clone(),
+                        diff_id: written.descriptor.diff_id.to_string(),
+                    },
+                ))
+            }
+            Err(e) => return Err(io(e)),
+        };
+
+        let mut reader = LayerReader::new(file, &DolosProfile, &written.descriptor, limits)
             .map_err(|e| self.read_failure(written, e))?;
 
         let mut sink = stele.layer_sink(&DolosProfile, spec, COMPRESSION_LEVEL)?;
@@ -1131,8 +1151,11 @@ fn staged_windows(bundle: &Bundle, family: Family) -> impl Iterator<Item = &Epoc
 
 /// Stage the closed windows `bundles` need from the frozen stores, once.
 ///
-/// Inherited windows are left out, and so is every window a boundary could not
-/// seal for the entity kinds. `previous` is what the first bundle follows.
+/// Only the windows each bundle's stele lists in its `diff` are staged: the
+/// one each boundary closes, and for the entity kinds the ones it seals.
+/// `previous` is what the first bundle follows; with none, its stele starts a
+/// lineage and lists every closed window. Each later bundle follows the one
+/// before it.
 ///
 /// A batch restarted on the same `root` reuses its runs while they cover what
 /// it wants, which shrinks as layers are recorded and steles commit. Wanting
@@ -1186,16 +1209,20 @@ pub fn stage_batch<A: ArchiveStore, S: StateStore>(
         .read_cursor()?
         .ok_or_else(|| Error::UnanchoredPoint("the state store has no cursor".to_owned()))?;
 
+    let summary = dolos_cardano::eras::load_chain_summary_from_state(state)?;
+    let rule = Rule::new(&summary, first.mutable_slots());
+
     let mut epochs: BTreeMap<Family, BTreeSet<u64>> = BTreeMap::new();
 
     for (family, kind) in staged_families() {
         let mut wanted = BTreeSet::new();
 
-        for bundle in bundles {
-            for window in staged_windows(bundle, family) {
-                let spec = window.scope(bundle.network_magic()).layer_spec(kind)?;
+        for (at, bundle) in bundles.iter().enumerate() {
+            let starts = at == 0 && previous.previous().is_none();
+            let listing = Listing::new(rule, bundle.sequence(), starts);
 
-                if !previous.carried_forward(kind, &spec.scope)? {
+            for window in staged_windows(bundle, family) {
+                if listing.lists(kind, window.epoch)? {
                     wanted.insert(window.epoch);
                 }
             }
@@ -1203,8 +1230,6 @@ pub fn stage_batch<A: ArchiveStore, S: StateStore>(
 
         epochs.insert(family, wanted);
     }
-
-    let summary = dolos_cardano::eras::load_chain_summary_from_state(state)?;
 
     let captures = bundles
         .iter()
@@ -1242,12 +1267,11 @@ pub struct Finalizing<'a> {
 }
 
 /// Assemble a prepared boundary's publication into `stele`, once `previous`,
-/// the stele it really follows, is committed.
+/// the stele it really follows, is committed, and seal its diff and its tip.
 ///
-/// Only here does the inscription take a history. Nothing the boundary captured
-/// is read from `archive`, and a window it could still have changed never is.
-/// A window `previous` forecast when the batch was staged and declines now is
-/// staged here, from the same view.
+/// Only here does the inscription take its link, and with it the layers its
+/// `diff` lists. Nothing the boundary captured is read from `archive`, and a
+/// window it could still have changed never is.
 pub fn finalize<W, A>(
     stele: &W,
     finalizing: &Finalizing<'_>,
@@ -1271,52 +1295,21 @@ where
     stele.observe(observer.clone());
 
     let plan = bundle.plan().with_producers(producers);
-    let adopted = Adopted::ask(&plan, previous)?;
+    let listing = plan.listing(staged.summary(), previous);
+    let resumed = Resumed::ask(&plan, &listing, previous)?;
     let prepared = Prepared { store, bundle };
-
-    let declined = declined_windows(bundle, &adopted, staged, previous)?;
-    let declined = match declined.is_empty() {
-        true => None,
-        false => Some(staged.stage_declined(archive, declined, observer)?),
-    };
 
     export::assemble(
         stele,
         &plan,
+        &listing,
         archive,
         &Source::<MemoryStateStore>::Prepared(&prepared),
-        Runs::new(staged, declined.as_ref().map(|declined| declined.staged())),
-        &adopted,
+        Runs::new(staged),
+        &resumed,
         previous,
         observer,
     )
-}
-
-/// The windows a batch left out on `previous`'s forecast and `previous` then
-/// declined. Only those: a window nothing forecast and nothing staged is the
-/// `NotStaged` a wrong batch has to hear about.
-fn declined_windows(
-    bundle: &Bundle,
-    adopted: &Adopted,
-    staged: &Staged,
-    previous: &dyn Predecessor,
-) -> Result<BTreeMap<Family, BTreeSet<u64>>, Error> {
-    let mut declined: BTreeMap<Family, BTreeSet<u64>> = BTreeMap::new();
-
-    for (family, kind) in staged_families() {
-        for window in staged_windows(bundle, family) {
-            let spec = window.scope(bundle.network_magic()).layer_spec(kind)?;
-
-            if adopted.get(kind, window.epoch).is_none()
-                && staged.records(family, window.epoch).is_none()
-                && previous.carried_forward(kind, &spec.scope)?
-            {
-                declined.entry(family).or_default().insert(window.epoch);
-            }
-        }
-    }
-
-    Ok(declined)
 }
 
 /// The staged runs and the archive have to stand on the chain the bundle was

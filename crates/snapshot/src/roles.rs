@@ -4,8 +4,8 @@
 //! snapshot inherits, and `tip`, which belongs to its own sequence alone. A
 //! layer goes to `diff` once its content is final; until then each snapshot
 //! carries its current form in its tip. This module is that rule for this
-//! profile, and the one table it reads, [`ANCHORS`]. Export does not use it
-//! yet.
+//! profile, and the one table it reads, [`ANCHORS`]. [`Listing`] is what one
+//! snapshot lists under it, which is what export builds.
 
 use dolos_cardano::{
     eras::ChainSummary,
@@ -101,6 +101,96 @@ pub fn anchor_for(kind: &str) -> Option<Anchor> {
         .into_iter()
         .find(|(known, _)| *known == kind)
         .map(|(_, anchor)| anchor)
+}
+
+/// The array of a layer the snapshot at `sequence` writes, without the chain's
+/// epoch geometry.
+///
+/// [`Rule::role`] for a layer known to exist: a seal-anchored layer is written
+/// only by the seal that makes it final, so a written one is in the diff.
+/// What the driver asks of the layers it records and resumes.
+pub fn written_role(kind: &str, window: Option<u64>, sequence: u64) -> Result<Role, Error> {
+    let mismatch = |scope| Error::ScopeMismatch {
+        kind: kind.to_owned(),
+        scope,
+    };
+
+    if is_state_kind(kind) {
+        return match window {
+            None => Ok(Role::Tip),
+            Some(_) => Err(mismatch("an epoch in a state scope")),
+        };
+    }
+
+    let anchor = anchor_for(kind).ok_or_else(|| Error::Unassigned(kind.to_owned()))?;
+    let epoch = window.ok_or_else(|| mismatch("a scope without an epoch"))?;
+
+    match anchor {
+        Anchor::Seal => Ok(Role::Diff),
+        Anchor::After { first, settled } => match sequence {
+            sequence if sequence < epoch + first => Err(Error::Unlisted {
+                kind: kind.to_owned(),
+                window: epoch,
+                sequence,
+            }),
+            sequence if sequence < epoch + settled => Ok(Role::Tip),
+            _ => Ok(Role::Diff),
+        },
+    }
+}
+
+/// What the snapshot at one sequence lists: its tip, and in its diff only the
+/// layers that become final there.
+///
+/// A snapshot that starts its lineage lists in its diff every layer final by
+/// its cut instead (decision 0080, point 3).
+#[derive(Debug, Clone, Copy)]
+pub struct Listing<'a> {
+    rule: Rule<'a>,
+    sequence: u64,
+    starts: bool,
+}
+
+impl<'a> Listing<'a> {
+    /// The listing of the snapshot at `sequence`; `starts` when it has no
+    /// predecessor.
+    pub fn new(rule: Rule<'a>, sequence: u64, starts: bool) -> Self {
+        Self {
+            rule,
+            sequence,
+            starts,
+        }
+    }
+
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// Whether this snapshot starts its lineage.
+    pub fn starts(&self) -> bool {
+        self.starts
+    }
+
+    /// The array this snapshot lists a layer of `kind` for `window` in, or
+    /// `None` where it lists none: the rule holds no such layer yet, or an
+    /// earlier diff of the lineage already listed it.
+    pub fn role(&self, kind: &str, window: Option<u64>) -> Result<Option<Role>, Error> {
+        let role = self.rule.role(kind, window, self.sequence)?;
+
+        Ok(match role {
+            Some(Role::Diff)
+                if !self.starts && self.rule.first_listed(kind, window)? != Some(self.sequence) =>
+            {
+                None
+            }
+            role => role,
+        })
+    }
+
+    /// Whether this snapshot lists a layer of `kind` for `window`.
+    pub fn lists(&self, kind: &str, window: u64) -> Result<bool, Error> {
+        Ok(self.role(kind, Some(window))?.is_some())
+    }
 }
 
 /// The rule over one chain: its epoch bounds and its genesis stability window,
@@ -505,5 +595,87 @@ mod tests {
             rule.role("state-utxos", Some(2), 3),
             Err(Error::ScopeMismatch { .. })
         ));
+    }
+
+    /// The geometry-free answer agrees with the rule for every layer the rule
+    /// places in a snapshot.
+    #[test]
+    fn the_written_role_is_the_rules_for_every_layer_a_snapshot_holds() {
+        for (network, summary, window) in networks() {
+            let rule = Rule::new(&summary, window);
+
+            for sequence in [1, 2, 207, 208, 209, 212, 500] {
+                for (kind, _) in ANCHORS {
+                    for epoch in 0..=sequence {
+                        let Some(role) = rule.role(kind, Some(epoch), sequence).unwrap() else {
+                            continue;
+                        };
+
+                        assert_eq!(
+                            written_role(kind, Some(epoch), sequence).unwrap(),
+                            role,
+                            "{network} {kind} {epoch} at {sequence}"
+                        );
+                    }
+                }
+
+                for kind in STATE_KIND_NAMES {
+                    assert_eq!(written_role(kind, None, sequence).unwrap(), Role::Tip);
+                }
+            }
+        }
+
+        assert!(matches!(
+            written_role("log-pool-epochs", Some(7), 8),
+            Err(Error::Unlisted { .. })
+        ));
+        assert!(matches!(
+            written_role(STATE_KIND_NAMES[0], Some(7), 8),
+            Err(Error::ScopeMismatch { .. })
+        ));
+    }
+
+    /// A chained snapshot lists in its diff what becomes final at its own
+    /// sequence; a lineage's first lists everything final by its cut. Both
+    /// list the whole tip.
+    #[test]
+    fn a_listing_holds_the_diff_of_its_own_sequence_or_all_of_it_at_a_start() {
+        let (summary, window) = preview();
+        let rule = Rule::new(&summary, window);
+
+        let chained = Listing::new(rule, 10, false);
+        let first = Listing::new(rule, 10, true);
+
+        assert_eq!(chained.role(BLOCKS, Some(9)).unwrap(), Some(Role::Diff));
+        assert_eq!(chained.role(BLOCKS, Some(8)).unwrap(), None);
+        assert_eq!(first.role(BLOCKS, Some(0)).unwrap(), Some(Role::Diff));
+
+        for listing in [chained, first] {
+            assert_eq!(listing.role(BLOCKS, Some(10)).unwrap(), Some(Role::Tip));
+            assert_eq!(
+                listing.role("log-account-epochs", Some(9)).unwrap(),
+                Some(Role::Tip)
+            );
+            assert_eq!(listing.role("log-pool-epochs", Some(9)).unwrap(), None);
+            assert_eq!(
+                listing.role(STATE_KIND_NAMES[0], None).unwrap(),
+                Some(Role::Tip)
+            );
+        }
+
+        assert_eq!(
+            chained.role("log-account-epochs", Some(8)).unwrap(),
+            Some(Role::Diff)
+        );
+        assert_eq!(chained.role("log-account-epochs", Some(7)).unwrap(), None);
+        assert!(first.lists("log-account-epochs", 7).unwrap());
+
+        // preview seals two boundaries after: 8's period logs at 10
+        assert_eq!(rule.seal(8), 10);
+        assert!(chained.lists("log-address-stats", 8).unwrap());
+        assert!(!chained.lists("log-address-stats", 7).unwrap());
+        assert!(!chained.lists("log-address-stats", 9).unwrap());
+        assert!(first.lists("log-address-stats", 7).unwrap());
+        assert!(!first.lists("log-address-stats", 9).unwrap());
     }
 }

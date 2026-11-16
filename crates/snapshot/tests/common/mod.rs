@@ -49,9 +49,9 @@ use dolos_snapshot::{
     LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
 };
 use stelae::{
-    dir::{BlobIndex, SnapshotDir, WrittenLayer},
+    dir::{BlobIndex, Snapshot, SnapshotDir, WrittenLayer},
     frame::{CanonicalCbor, LayerHeader, Limits},
-    inscription::LayerDescriptor,
+    inscription::{Inscription, LayerDescriptor},
     Profile, SnapshotReader, SnapshotWriter,
 };
 
@@ -411,6 +411,40 @@ pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
     layers
 }
 
+/// Seal the layers `stele` has written since its last seal as the tip of a
+/// stele at [`EPOCH`] that starts its lineage, and read that sequence back.
+pub fn seal_alone(stele: &SnapshotDir, tip: Vec<LayerDescriptor>) -> Snapshot {
+    let mut inscription = Inscription::new(
+        &DolosProfile,
+        EPOCH,
+        serde_json::json!({}),
+        dolos_snapshot::parameters(),
+        dolos_snapshot::compression(),
+    );
+    inscription.tip = tip;
+
+    stele.seal(&DolosProfile, &inscription).unwrap();
+    stele.pull_sequence(&DolosProfile, EPOCH).unwrap()
+}
+
+/// The latest stele of the image layout at `root`, resolved through its chain.
+pub fn resolve(root: &std::path::Path) -> Snapshot {
+    SnapshotDir::open(root)
+        .unwrap()
+        .resolve_latest(&DolosProfile)
+        .unwrap()
+}
+
+/// The layer set of a resolved stele: every `diff` of its chain, then its tip.
+pub fn layer_set(stele: &Snapshot) -> Vec<LayerDescriptor> {
+    stele
+        .chain()
+        .expect("a resolved stele")
+        .descriptors()
+        .cloned()
+        .collect()
+}
+
 /// Read a layer both ways and insist the two paths agree.
 ///
 /// The same discipline the stelae repo's `tests/toy_profile.rs` applies to the
@@ -418,7 +452,7 @@ pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
 /// determinism bug in the format, and this profile is the first real one to put
 /// that to the test.
 pub fn read_both_ways(
-    stele: &SnapshotDir,
+    stele: &Snapshot,
     index: &BlobIndex,
     descriptor: &LayerDescriptor,
 ) -> Vec<Vec<u8>> {

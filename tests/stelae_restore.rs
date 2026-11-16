@@ -598,16 +598,17 @@ impl Fixture {
     /// The stele's digest and sequence, and the epoch layers in the order the
     /// restore reads them.
     fn layers(&self) -> (String, u64, Vec<std::path::PathBuf>) {
-        use dolos_snapshot::{dir::SnapshotDir, SnapshotReader as _};
+        use dolos_snapshot::{dir::SnapshotDir, DolosProfile, SnapshotReader as _};
 
-        let stele = SnapshotDir::open(&self.stele).unwrap();
+        let layout = SnapshotDir::open(&self.stele).unwrap();
+        let stele = layout.resolve_latest(&DolosProfile).unwrap();
         let inscription = stele.read_inscription().unwrap();
-        let plan = dolos_snapshot::restore::plan(&stele, 2, None).unwrap();
+        let plan = dolos_snapshot::restore::plan(stele.chain().unwrap(), 2, None).unwrap();
         let index = stele.blob_index().unwrap();
 
         let blobs = plan
             .immutable_layers()
-            .map(|layer| stele.blob_path(&index.blob_for(&layer.diff_id).unwrap()))
+            .map(|layer| layout.blob_path(&index.blob_for(&layer.diff_id).unwrap()))
             .collect();
 
         (

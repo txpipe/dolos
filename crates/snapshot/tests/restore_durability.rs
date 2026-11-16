@@ -21,11 +21,9 @@ use dolos_snapshot::{
     ENTITY_KINDS,
 };
 use dolos_testing::toy_domain::{FjallStores, ToyDomain};
-use node::{export_to, harness, Blank};
+use node::{export_plan, harness, plan_for, Blank};
 use recorder::{Entry, Journal, Op, RecordedArchive, RecordedState};
-use stelae::{
-    dir::SnapshotDir, plan::RestoreProgress, progress::Observer, Digest, SnapshotReader as _,
-};
+use stelae::{plan::RestoreProgress, progress::Observer, Digest, SnapshotReader as _};
 
 /// Restore `root` into the recorded fjall pair, checkpointing into `storage`,
 /// and return the journal of the run with the epoch layers it checkpoints.
@@ -42,9 +40,10 @@ fn recorded_restore(root: &Path, storage: &Path, magic: u64) -> (Vec<Entry>, Vec
         journal: journal.clone(),
     };
 
-    let stele = SnapshotDir::open(root).unwrap();
-    let identity = stele.read_inscription().unwrap().digest().unwrap();
-    let plan = restore::plan(&stele, magic, None).unwrap();
+    let stele = node::resolved(root);
+    let chain = stele.chain().unwrap();
+    let identity = chain.identity();
+    let plan = restore::plan(chain, magic, None).unwrap();
     let index = stele.blob_index().unwrap();
     let mut checkpoint = Checkpoint::open(progress_path_in(storage), identity, false).unwrap();
 
@@ -92,14 +91,18 @@ fn a_layer_is_recorded_only_after_its_writes_are_persisted() {
     let magic = u64::from(dolos_core::Domain::genesis(&domain).network_magic());
     seed_entities(&domain);
 
+    // With no stability window the boundary seals the window before it, so
+    // its entity layers are listed.
+    let mut plan = plan_for(&domain);
+    plan.mutable_slots = 0;
+
     let stele = tempfile::tempdir().unwrap();
-    let inscription = export_to(stele.path(), &domain);
+    let inscription = export_plan(stele.path(), &domain, &plan);
     let storage = tempfile::tempdir().unwrap();
 
     assert!(
         inscription
-            .layers
-            .iter()
+            .layers()
             .any(|layer| layer.kind.starts_with("entity-")),
         "the fixture needs an entity layer, or one layer family goes unchecked"
     );

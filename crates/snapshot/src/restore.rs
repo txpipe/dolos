@@ -10,13 +10,15 @@
 //! implementation preference — each step exists because of what the one before
 //! it established:
 //!
-//! 1. Read the inscription, check the profile, and refuse a stele whose
-//!    `position.network.magic` is not this node's — **before anything is
-//!    written**, because half a mainnet ledger under a preprod configuration is
-//!    not a state a node recovers from.
-//! 2. Select layers ([`plan`]) and preflight free space ([`Plan::preflight`]).
-//!    Selection is profile-side by necessity: a layer's `scope` is opaque to
-//!    the protocol, so nothing but this crate can read an epoch out of one.
+//! 1. Resolve the stele's chain — every inscription from the head back to the
+//!    first of its lineage, each linked by digest — check the profile, and
+//!    refuse a stele whose `position.network.magic` is not this node's —
+//!    **before anything is written**, because half a mainnet ledger under a
+//!    preprod configuration is not a state a node recovers from.
+//! 2. Select layers over the chain's layer set ([`plan`]) and preflight free
+//!    space ([`Plan::preflight`]). Selection is profile-side by necessity: a
+//!    layer's `scope` is opaque to the protocol, so nothing but this crate can
+//!    read an epoch out of one.
 //! 3. Per epoch: `blocks`, then the `log-{ns}` layers the epoch carries, then
 //!    its `entity-{kind}` layers, then `indexes` — all into the archive store.
 //! 4. The state tip — every shard of every `state-{ns}` kind. Derive the
@@ -73,11 +75,11 @@
 //! and this module supplies the half the protocol cannot: **which layers may be
 //! skipped at all.**
 //!
-//! Epoch layers may. They describe a closed window, so the same `diffId` in a
-//! newer inscription is the same layer. A `log-account-epochs` window settles
-//! one stele after it closes ([`crate::is_settled`]); its settled layer is
-//! new bytes under a new `diffId`, which the checkpoint has not recorded and so
-//! restores.
+//! Epoch layers may. A `diffId` names bytes, so the same `diffId` under a
+//! newer inscription is the same layer. A `log-account-epochs` window is in the
+//! tip until it settles two steles after it opens ([`crate::roles`]); its
+//! settled layer is new bytes under a new `diffId`, which the checkpoint has
+//! not recorded and so restores.
 //!
 //! **The state tip never may.** It is the tip: it is rewritten by every
 //! publish, and — independently of that — a tip layer's descriptor scope is
@@ -155,7 +157,7 @@
 
 use std::{
     cell::RefCell,
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -167,11 +169,11 @@ use dolos_core::{
 };
 use stelae::{
     frame::Limits,
-    inscription::{Compression, Inscription, LayerDescriptor},
+    inscription::{Inscription, LayerDescriptor},
     plan::{Remaining, Resume},
     progress::{Event, Observer, Outcome},
     transport::{BlobIndex, LayerStream, SnapshotReader},
-    Digest, LayerHeader, LayerReader,
+    Chain, Digest, LayerHeader, LayerReader,
 };
 use tracing::info;
 
@@ -249,7 +251,9 @@ impl EpochLayers {
 /// What a restore will consume, decided before a single byte is written.
 ///
 /// The mirror of [`crate::export::Plan`]: built up front so a report of what
-/// *would* happen and the restore itself agree by construction.
+/// *would* happen and the restore itself agree by construction. It is drawn
+/// from the stele's whole layer set, every inscription's `diff` up to the head
+/// and the head's `tip`.
 #[derive(Debug, Clone)]
 pub struct Plan {
     /// Where the stele stands. Its magic has already been checked against the
@@ -273,9 +277,11 @@ pub struct Plan {
     /// than silent whenever it is not: a restore that quietly dropped a layer
     /// is a node missing data nothing downstream would notice.
     pub skipped_unknown: Vec<LayerDescriptor>,
-    /// The compression the stele's layers were published under, which decides
-    /// which factors [`Plan::estimate`] sizes them with.
-    pub compression: Compression,
+    /// The `diffId`s of the selected layers whose inscription published them
+    /// under another compression than this profile's, which [`Plan::estimate`]
+    /// sizes from their declared size rather than their compressed one. Each
+    /// inscription's compression describes its own layers.
+    pub foreign_compression: BTreeSet<Digest>,
 }
 
 impl Plan {
@@ -400,10 +406,6 @@ impl Plan {
         journals: u64,
         mut compressed: impl FnMut(&LayerDescriptor) -> Result<Option<u64>, Error>,
     ) -> Result<Estimate, Error> {
-        // The compressed factors were fitted to this profile's own level; a
-        // stele compressed otherwise is sized from what it declares instead.
-        let at_profile_level = self.compression == crate::compression();
-
         let mut estimate = Estimate {
             journals,
             ..Estimate::default()
@@ -414,9 +416,11 @@ impl Plan {
                 return Ok(0);
             }
 
-            let sized = match at_profile_level {
-                true => compressed(descriptor)?,
-                false => None,
+            // The compressed factors were fitted to this profile's own level;
+            // a layer compressed otherwise is sized from what it declares.
+            let sized = match self.foreign_compression.contains(&descriptor.diff_id) {
+                false => compressed(descriptor)?,
+                true => None,
             };
 
             Ok(match sized {
@@ -731,34 +735,36 @@ impl Staging<'_> {
     }
 }
 
-/// Read a stele's inscription and decide what restoring it into this node
-/// means.
+/// Read a stele's chain and decide what restoring it into this node means.
 ///
-/// `network_magic` is the node's own, from its genesis; a stele that disagrees
-/// is refused here, which is the whole reason this function exists separately
-/// from [`restore`]. `max_history` is the rolling `history.window` in slots:
-/// epochs whose layers fall entirely below `cursor - max_history` are dropped,
-/// which is what ADR-004 replaced the old `full`/`ledger` snapshot variants
-/// with.
-pub fn plan<R: SnapshotReader>(
-    stele: &R,
-    network_magic: u64,
-    max_history: Option<u64>,
-) -> Result<Plan, Error> {
-    let inscription = stele.read_inscription()?;
+/// `chain` is the stele resolved back to the first of its lineage; its head
+/// is the inscription the operator named. `network_magic` is the node's own,
+/// from its genesis; a stele that disagrees is refused here, which is the
+/// whole reason this function exists separately from [`restore`].
+/// `max_history` is the rolling `history.window` in slots: epochs whose layers
+/// fall entirely below `cursor - max_history` are dropped, which is what
+/// ADR-004 replaced the old `full`/`ledger` snapshot variants with.
+///
+/// The head's `parameters` speak for the whole layer set: they gate which
+/// namespaces and entity kinds must be present, while each inscription's own
+/// map describes only the layers it lists, so a lineage continues across a
+/// namespace added along the way (`SPEC.md`, "Restore planning").
+pub fn plan(chain: &Chain, network_magic: u64, max_history: Option<u64>) -> Result<Plan, Error> {
+    let head = chain.head();
 
     // Refuses a foreign profile and a profile major above this one — both
-    // before a store is opened. A kind this build does not define is decided a
-    // few lines down instead, where the profile can read its scope.
-    inscription.check_profile(&DolosProfile)?;
+    // before a store is opened. The walk asked the same of every inscription
+    // of the chain. A kind this build does not define is decided a few lines
+    // down instead, where the profile can read its scope.
+    head.check_profile(&DolosProfile)?;
 
     // The other half of the compatibility rule: `check_profile` decides about
     // kinds the stele *carries*, and this decides about the ones it does not.
-    check_namespaces(&inscription)?;
-    check_entities(&inscription)?;
+    check_namespaces(head)?;
+    check_entities(head)?;
 
-    let skipped_unknown = unknown_layers(&inscription)?;
-    let position = read_position(&inscription.position)?;
+    let skipped_unknown = unknown_layers(chain)?;
+    let position = read_position(&head.position)?;
 
     if position.network.magic() != network_magic {
         return Err(Error::NetworkMismatch {
@@ -767,18 +773,37 @@ pub fn plan<R: SnapshotReader>(
         });
     }
 
-    let epochs = select_epochs(&inscription)?;
+    let epochs = select_epochs(chain.descriptors())?;
     let selected = retain_history(epochs, position.point.slot(), max_history);
-    let state = select_state(&inscription)?;
+    let state = select_state(chain.descriptors())?;
+
+    let foreign_compression = chain
+        .layers()
+        .iter()
+        .filter(|layer| {
+            chain
+                .origin(layer)
+                .is_some_and(|origin| origin.compression != crate::compression())
+        })
+        .map(|layer| layer.descriptor.diff_id)
+        .collect();
 
     Ok(Plan {
-        sequence: inscription.sequence,
+        sequence: head.sequence,
         state,
         epochs: selected.0,
         skipped_epochs: selected.1,
         skipped_unknown,
         position,
-        compression: inscription.compression,
+        foreign_compression,
+    })
+}
+
+/// The chain of a stele read through [`stelae::dir::SnapshotDir::resolve`] or
+/// [`stelae::oci::Registry::resolve`], which always hold one.
+pub(crate) fn chain_of(chain: Option<&Chain>) -> Result<&Chain, Error> {
+    chain.ok_or_else(|| {
+        Error::malformed_inscription("the stele", "it was read without resolving its chain")
     })
 }
 
@@ -794,7 +819,9 @@ pub fn plan<R: SnapshotReader>(
 ///
 /// Only presence is judged, never the revision's *value*: a revision the reader
 /// has not seen describes bytes it can still parse and is deliberately not a
-/// gate (ADR-004). What is a gate is a namespace that is gone.
+/// gate (ADR-004). What is a gate is a namespace that is gone. The map judged
+/// is the head's, which states what the whole stele defines; an earlier
+/// inscription's lists only its own layers.
 ///
 /// A map that is absent or holds a value of the wrong type is a different
 /// failure and reports as one. This is the first check `plan` runs over
@@ -875,7 +902,8 @@ fn check_entities(inscription: &Inscription) -> Result<(), Error> {
     Ok(())
 }
 
-/// The layers this build has no kind for, once any required one has refused.
+/// The layers of the chain's layer set this build has no kind for, once any
+/// required one has refused.
 ///
 /// The profile's half of the rule decision 0026 sets. The protocol reports
 /// which layers are unknown ([`Inscription::unknown_layers`]) and interprets
@@ -887,8 +915,11 @@ fn check_entities(inscription: &Inscription) -> Result<(), Error> {
 /// layer is still a layer of the stele: its `diffId` is still cross-checked
 /// against the manifest and still covered by the inscription digest a publisher
 /// signs. What this decides is only whether its records are read into a store.
-fn unknown_layers(inscription: &Inscription) -> Result<Vec<LayerDescriptor>, Error> {
-    let unknown = inscription.unknown_layers(&DolosProfile);
+fn unknown_layers(chain: &Chain) -> Result<Vec<LayerDescriptor>, Error> {
+    let unknown: Vec<&LayerDescriptor> = chain
+        .descriptors()
+        .filter(|layer| !stelae::Profile::kinds(&DolosProfile).contains(&layer.kind.as_str()))
+        .collect();
 
     if let Some(required) = unknown
         .iter()
@@ -904,10 +935,12 @@ fn unknown_layers(inscription: &Inscription) -> Result<Vec<LayerDescriptor>, Err
 }
 
 /// Group the epoch-scoped layers by the epoch their scope names.
-fn select_epochs(inscription: &Inscription) -> Result<Vec<EpochLayers>, Error> {
+fn select_epochs<'a>(
+    layers: impl IntoIterator<Item = &'a LayerDescriptor>,
+) -> Result<Vec<EpochLayers>, Error> {
     let mut by_epoch: BTreeMap<u64, EpochLayers> = BTreeMap::new();
 
-    for descriptor in &inscription.layers {
+    for descriptor in layers {
         let kind = descriptor.kind.as_str();
         let log_ns = log_ns_for(kind);
         let entity = entity_kind_for(kind);
@@ -999,12 +1032,12 @@ fn select_epochs(inscription: &Inscription) -> Result<Vec<EpochLayers>, Error> {
 /// later step would notice — the write path dispatches on the kind, not the
 /// shard — so it is refused rather than restored into a node whose queries
 /// quietly miss part of the state.
-fn select_state(
-    inscription: &Inscription,
+fn select_state<'a>(
+    layers: impl IntoIterator<Item = &'a LayerDescriptor>,
 ) -> Result<BTreeMap<Namespace, Vec<LayerDescriptor>>, Error> {
     let mut tip: BTreeMap<Namespace, BTreeMap<u64, LayerDescriptor>> = BTreeMap::new();
 
-    for descriptor in &inscription.layers {
+    for descriptor in layers {
         let Some(ns) = state_ns_for(&descriptor.kind) else {
             continue;
         };
@@ -1627,6 +1660,7 @@ fn fetch_durable<A: ArchiveStore>(
 /// transport writes to the same volume.
 pub(crate) fn restore_stele<R, A, S>(
     stele: &R,
+    chain: &Chain,
     node: Restoring<'_>,
     scratch_dir: Option<&Path>,
     target: Target<'_, A, S>,
@@ -1637,9 +1671,9 @@ where
     A: ArchiveStore,
     S: StateStore,
 {
-    let plan = plan(stele, node.network_magic, node.max_history)?;
+    let plan = plan(chain, node.network_magic, node.max_history)?;
 
-    let identity = stele.read_inscription()?.digest()?;
+    let identity = chain.identity();
 
     let record = node.source.map(|source| SourceRecord {
         source: source.to_string(),
@@ -1738,14 +1772,12 @@ fn check_restore_space(
     }
 }
 
-/// Restore from a stele directory.
+/// Restore from a directory holding an OCI image layout.
 ///
-/// An inscription names layers by identity, so a reader needs a map from a
-/// descriptor to the file holding it. A stele sealed by this implementation
-/// carries one — `stelae::dir::BLOB_INDEX_FILE`, the sidecar that makes a
-/// directory a degenerate registry — and `blob_index` reads it. One published
-/// before that file existed has none, and the map is rebuilt by decompressing
-/// every blob once *before* the restore decompresses the ones it wants.
+/// The stele read is the layout's `latest`, resolved through its chain, or the
+/// sequence a resume's source record names, refused as gone when that
+/// sequence is absent or holds another stele. The layout's manifests map each
+/// layer's identity to the blob holding it, as a registry's do.
 pub fn restore_dir<A, S>(
     root: impl Into<std::path::PathBuf>,
     node: Restoring<'_>,
@@ -1756,12 +1788,50 @@ where
     A: ArchiveStore,
     S: StateStore,
 {
-    let stele = match stelae::dir::SnapshotDir::open(root) {
-        Ok(stele) => stele,
-        Err(error) => return Err(pinned(&node)?.map_or(error.into(), gone)),
+    let record = pinned(&node)?;
+
+    let layout = match stelae::dir::SnapshotDir::open(root) {
+        Ok(layout) => layout,
+        Err(error) => return Err(record.map_or(error.into(), gone)),
     };
 
-    restore_stele(&stele, node, None, target, observer)
+    // A resume reads its recorded sequence, and refuses another stele under
+    // its tag before walking that stele's chain.
+    if let Some(record) = &record {
+        let head = match layout.pull_sequence(&DolosProfile, record.sequence) {
+            Ok(head) => head.read_inscription()?.digest()?,
+            Err(error) if error.is_absent() => return Err(gone(record.clone())),
+            Err(error) => return Err(error.into()),
+        };
+
+        if head != record.inscription_digest {
+            return Err(gone(record.clone()));
+        }
+    }
+
+    let resolved = match &record {
+        Some(record) => layout.resolve_sequence(&DolosProfile, record.sequence),
+        None => layout.resolve_latest(&DolosProfile),
+    };
+
+    let stele = match resolved {
+        Ok(stele) => stele,
+        Err(error) => {
+            return Err(match record {
+                Some(record) if error.is_absent() => gone(record),
+                _ => error.into(),
+            })
+        }
+    };
+
+    restore_stele(
+        &stele,
+        chain_of(stele.chain())?,
+        node,
+        None,
+        target,
+        observer,
+    )
 }
 
 /// The refusal for a resume whose recorded stele its source no longer has.
@@ -2341,8 +2411,25 @@ mod tests {
             crate::compression(),
         );
 
-        inscription.layers = layers;
+        inscription.tip = layers;
         inscription
+    }
+
+    /// `stele` as the whole of its lineage.
+    fn alone(stele: Inscription) -> Chain {
+        Chain::walk(&DolosProfile, stele, |_| Ok(None)).unwrap()
+    }
+
+    fn state_of(stele: &Inscription) -> Result<BTreeMap<Namespace, Vec<LayerDescriptor>>, Error> {
+        select_state(stele.layers())
+    }
+
+    fn epochs_of(stele: &Inscription) -> Result<Vec<EpochLayers>, Error> {
+        select_epochs(stele.layers())
+    }
+
+    fn unknown_of(stele: &Inscription) -> Result<Vec<LayerDescriptor>, Error> {
+        unknown_layers(&alone(stele.clone()))
     }
 
     /// Every state layer a complete tip carries: each kind, shards ascending.
@@ -2378,7 +2465,7 @@ mod tests {
     /// a complete tip selects into.
     #[test]
     fn the_state_tip_requires_every_kind_and_every_shard() {
-        let selected = select_state(&inscription(state_layers())).unwrap();
+        let selected = state_of(&inscription(state_layers())).unwrap();
 
         assert_eq!(selected.len(), STATE_KINDS.len(), "one entry per kind");
 
@@ -2401,7 +2488,7 @@ mod tests {
             .unwrap();
         short.remove(dropped);
 
-        let err = select_state(&inscription(short)).unwrap_err();
+        let err = state_of(&inscription(short)).unwrap_err();
         assert!(matches!(err, Error::IncompleteStele(_)), "{err:?}");
 
         // An absent kind: tip completeness is every kind, not "what's there".
@@ -2410,7 +2497,7 @@ mod tests {
             .filter(|layer| layer.kind != "state-epochs")
             .collect();
 
-        let err = select_state(&inscription(absent)).unwrap_err();
+        let err = state_of(&inscription(absent)).unwrap_err();
         assert!(matches!(err, Error::IncompleteStele(_)), "{err:?}");
         assert!(err.to_string().contains("state-epochs"), "{err}");
 
@@ -2418,14 +2505,14 @@ mod tests {
         let mut oversharded = state_layers();
         oversharded.push(descriptor("state-pools", json!({"shard": 1}), 0xfe));
 
-        let err = select_state(&inscription(oversharded)).unwrap_err();
+        let err = state_of(&inscription(oversharded)).unwrap_err();
         assert!(matches!(err, Error::IncompleteStele(_)), "{err:?}");
 
         // One shard described twice.
         let mut doubled = state_layers();
         doubled.push(descriptor("state-utxos", json!({"shard": 0}), 0xff));
 
-        let err = select_state(&inscription(doubled)).unwrap_err();
+        let err = state_of(&inscription(doubled)).unwrap_err();
         assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
     }
 
@@ -2440,8 +2527,8 @@ mod tests {
         layers.extend(dump_layers(3, 0x80));
         layers.extend(short);
 
-        let tip = select_state(&inscription(layers)).unwrap();
-        let plain = select_state(&inscription(state_layers())).unwrap();
+        let tip = state_of(&inscription(layers)).unwrap();
+        let plain = state_of(&inscription(state_layers())).unwrap();
 
         assert_eq!(tip, plain);
 
@@ -2455,7 +2542,7 @@ mod tests {
             }
         }
 
-        assert_eq!(select_state(&inscription(published)).unwrap(), plain);
+        assert_eq!(state_of(&inscription(published)).unwrap(), plain);
     }
 
     #[test]
@@ -2468,7 +2555,7 @@ mod tests {
             epoch_descriptor(INDEXES, 1, 4),
         ];
 
-        let epochs = select_epochs(&inscription(layers)).unwrap();
+        let epochs = epochs_of(&inscription(layers)).unwrap();
 
         assert_eq!(epochs.len(), 2);
 
@@ -2495,7 +2582,7 @@ mod tests {
             epoch_descriptor(BLOCKS, 0, 2),
         ];
 
-        let err = select_epochs(&inscription(doubled)).unwrap_err();
+        let err = epochs_of(&inscription(doubled)).unwrap_err();
         assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
 
         // And so is one epoch carrying two different slot windows.
@@ -2506,7 +2593,7 @@ mod tests {
             2,
         ));
 
-        let err = select_epochs(&inscription(disagreeing)).unwrap_err();
+        let err = epochs_of(&inscription(disagreeing)).unwrap_err();
         assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
     }
 
@@ -2514,7 +2601,7 @@ mod tests {
     fn a_scope_without_an_epoch_is_refused() {
         let nonsense = vec![descriptor(BLOCKS, json!({"shard": 0}), 1)];
 
-        let err = select_epochs(&inscription(nonsense)).unwrap_err();
+        let err = epochs_of(&inscription(nonsense)).unwrap_err();
         assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
     }
 
@@ -2567,17 +2654,17 @@ mod tests {
         layers.push(epoch_descriptor(BLOCKS, 2, 0xa2));
 
         let stele = inscription(layers);
-        let epochs = select_epochs(&stele).unwrap();
+        let epochs = epochs_of(&stele).unwrap();
         let (epochs, skipped) = retain_history(epochs, 250, Some(100));
 
         let plan = Plan {
             position: read_position(&stele.position).unwrap(),
             sequence: stele.sequence,
             epochs,
-            state: select_state(&stele).unwrap(),
+            state: state_of(&stele).unwrap(),
             skipped_epochs: skipped,
             skipped_unknown: Vec::new(),
-            compression: crate::compression(),
+            foreign_compression: BTreeSet::new(),
         };
 
         let tip = crate::state_layer_count() as u64;
@@ -2676,7 +2763,7 @@ mod tests {
         layers.push(descriptor("state-treasury", json!({"epoch": 0}), 0xb1));
 
         let stele = inscription(layers);
-        let skipped = unknown_layers(&stele).unwrap();
+        let skipped = unknown_of(&stele).unwrap();
 
         assert_eq!(
             skipped
@@ -2690,14 +2777,14 @@ mod tests {
         // namespace for is skipped like any other unknown kind, and the tip is
         // still complete, because completeness is counted over the kinds this
         // profile defines rather than over the state layers present.
-        assert_eq!(select_state(&stele).unwrap().len(), STATE_KINDS.len());
+        assert_eq!(state_of(&stele).unwrap().len(), STATE_KINDS.len());
 
         // And a stele written by a publisher this build keeps up with skips
         // nothing at all.
         let mut known = state_layers();
         known.push(epoch_descriptor(BLOCKS, 0, 0xa0));
 
-        assert!(unknown_layers(&inscription(known)).unwrap().is_empty());
+        assert!(unknown_of(&inscription(known)).unwrap().is_empty());
     }
 
     /// The one unknown kind a restore refuses.
@@ -2710,7 +2797,7 @@ mod tests {
             0xb0,
         ));
 
-        let err = unknown_layers(&inscription(layers)).unwrap_err();
+        let err = unknown_of(&inscription(layers)).unwrap_err();
 
         let Error::RequiredUnknownLayer { kind, scope } = &err else {
             panic!("{err:?}");
@@ -2725,7 +2812,7 @@ mod tests {
             let mut layers = state_layers();
             layers.push(descriptor("log-votes", json!({"required": benign}), 0xb0));
 
-            assert_eq!(unknown_layers(&inscription(layers)).unwrap().len(), 1);
+            assert_eq!(unknown_of(&inscription(layers)).unwrap().len(), 1);
         }
     }
 
@@ -2760,12 +2847,8 @@ mod tests {
         let mut bare = inscription(vec![]);
         bare.parameters["schemas"][retired] = json!(RETIRED_SCHEMA_REV);
 
-        let temp = tempfile::tempdir().unwrap();
-        let stele = stelae::dir::SnapshotDir::create(temp.path()).unwrap();
-        stelae::SnapshotWriter::seal(&stele, &DolosProfile, &bare).unwrap();
-
         assert!(matches!(
-            plan(&stele, MAINNET_MAGIC, None),
+            plan(&alone(bare), MAINNET_MAGIC, None),
             Err(Error::RetiredNamespace { namespace }) if namespace == retired
         ));
     }
@@ -2891,12 +2974,8 @@ mod tests {
         let mut bare = inscription(vec![]);
         bare.parameters.as_object_mut().unwrap().remove("entities");
 
-        let temp = tempfile::tempdir().unwrap();
-        let stele = stelae::dir::SnapshotDir::create(temp.path()).unwrap();
-        stelae::SnapshotWriter::seal(&stele, &DolosProfile, &bare).unwrap();
-
         assert!(matches!(
-            plan(&stele, MAINNET_MAGIC, None),
+            plan(&alone(bare), MAINNET_MAGIC, None),
             Err(Error::UndeclaredEntityKind { .. })
         ));
     }
@@ -2960,7 +3039,7 @@ mod tests {
             epoch_descriptor(script_layer, 5, 3),
         ];
 
-        let epochs = select_epochs(&inscription(layers)).unwrap();
+        let epochs = epochs_of(&inscription(layers)).unwrap();
 
         assert_eq!(epochs.len(), 2);
         assert_eq!(
@@ -2978,7 +3057,7 @@ mod tests {
             epoch_descriptor(asset_layer, 4, 2),
         ];
 
-        let err = select_epochs(&inscription(twice)).unwrap_err();
+        let err = epochs_of(&inscription(twice)).unwrap_err();
         assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
     }
 
@@ -2987,11 +3066,11 @@ mod tests {
         Plan {
             position: read_position(&stele.position).unwrap(),
             sequence: stele.sequence,
-            epochs: select_epochs(stele).unwrap(),
-            state: select_state(stele).unwrap(),
+            epochs: epochs_of(stele).unwrap(),
+            state: state_of(stele).unwrap(),
             skipped_epochs: 0,
             skipped_unknown: Vec::new(),
-            compression: stele.compression.clone(),
+            foreign_compression: BTreeSet::new(),
         }
     }
 
@@ -3209,10 +3288,7 @@ mod tests {
 
         // Another level: every epoch layer falls back, and the transport is
         // never asked.
-        plan.compression = Compression {
-            algo: "zstd".to_owned(),
-            level: 3,
-        };
+        plan.foreign_compression = plan.layers().map(|layer| layer.diff_id).collect();
         asked.set(0);
 
         let elsewhere = plan.estimate_with(&resume, journals, lookup).unwrap();

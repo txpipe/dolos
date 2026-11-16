@@ -20,7 +20,8 @@
 //! `entity-{kind}` and `state-{ns}` kind string — which is where the namespace
 //! and kind strings live now that no record names one — the layer header and
 //! scope shapes, and the `position`/`parameters` key spellings, the shard,
-//! schema and entity maps included.
+//! schema and entity maps included, and the inscription's `diff`, `tip` and
+//! `previous`.
 
 mod common;
 
@@ -34,7 +35,7 @@ use dolos_snapshot::{
 use stelae::{
     dir::SnapshotDir,
     frame::Limits,
-    inscription::{canonical_json, HistoryEntry, Inscription},
+    inscription::{canonical_json, Inscription, Link},
     Digest, SnapshotReader, SnapshotWriter,
 };
 
@@ -316,19 +317,14 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 45] = [
 
 /// The stele's identity: sha256 of the canonical inscription.
 const GOLDEN_INSCRIPTION: &str =
-    "sha256:d1f31cce5cef5d28659630d9359daadf7aa5b529ad69ebbd91e1592f96273b23";
+    "sha256:aa516d6e2e165af5add28943c687249e0f267a6348a7a8a6917a7a121c0dc73e";
 
-fn history() -> Vec<HistoryEntry> {
-    vec![
-        HistoryEntry {
-            sequence: EPOCH - 2,
-            inscription_digest: Digest::from_bytes([0x55; 32]),
-        },
-        HistoryEntry {
-            sequence: EPOCH - 1,
-            inscription_digest: Digest::from_bytes([0x66; 32]),
-        },
-    ]
+/// The stele the fixture follows.
+fn previous() -> Link {
+    Link {
+        sequence: EPOCH - 1,
+        inscription_digest: Digest::from_bytes([0x66; 32]),
+    }
 }
 
 /// The blocks snapshot a fixture stele names in `position.blocks`.
@@ -337,9 +333,12 @@ const BLOCKS_INSCRIPTION: [u8; 32] = [0x77; 32];
 /// The identity of the same stele when its `position` names
 /// [`BLOCKS_INSCRIPTION`].
 const GOLDEN_INSCRIPTION_WITH_BLOCKS: &str =
-    "sha256:81eb9054f4ce01feab57dc2b30e9993d7a260edeea73ca88f23729d686a8f8bf";
+    "sha256:36ed809939600d529888ea2955d8ad72b10b2cbc1add0db3e7d7fd5b37906439";
 
 /// Write the whole fixture stele into `root`: its layers and an inscription.
+///
+/// A shape golden, not an export: every epoch layer is in `diff` and the state
+/// is the `tip`, so both arrays and the link are frozen.
 fn write_stele(root: &std::path::Path) -> (Inscription, Digest) {
     write_stele_naming(root, None)
 }
@@ -358,14 +357,16 @@ fn write_stele_naming(root: &std::path::Path, blocks: Option<&Digest>) -> (Inscr
         dolos_snapshot::compression(),
     );
 
-    inscription.history = history();
+    inscription.previous = Some(previous());
 
-    inscription.layers = all_layers()
-        .into_iter()
-        .map(|(kind, scope, records)| {
-            write_layer(&stele, kind, scope.as_ref(), &records).descriptor
-        })
-        .collect();
+    for (kind, scope, records) in all_layers() {
+        let descriptor = write_layer(&stele, kind, scope.as_ref(), &records).descriptor;
+
+        match dolos_snapshot::is_state_kind(kind) {
+            true => inscription.tip.push(descriptor),
+            false => inscription.diff.push(descriptor),
+        }
+    }
 
     let digest = stele.seal(&DolosProfile, &inscription).unwrap();
 
@@ -418,8 +419,9 @@ fn a_complete_stele_reads_back_and_reproduces_its_digest() {
     );
 
     // The document survives the trip to disk in canonical form, and belongs to
-    // this profile.
-    let stele = SnapshotDir::open(first.path()).unwrap();
+    // this profile. Its own sequence alone: the stele it links to is not here.
+    let layout = SnapshotDir::open(first.path()).unwrap();
+    let stele = layout.pull_sequence(&DolosProfile, EPOCH).unwrap();
     let read = stele.read_inscription().unwrap();
 
     assert_eq!(read, inscription);
@@ -432,7 +434,7 @@ fn a_complete_stele_reads_back_and_reproduces_its_digest() {
     let index = stele.blob_index().unwrap();
     assert_eq!(index.len(), GOLDEN_LAYERS.len());
 
-    for descriptor in &read.layers {
+    for descriptor in read.layers() {
         let mut reader = stele
             .stream_layer(&index, &DolosProfile, descriptor, Limits::default())
             .unwrap();
@@ -465,16 +467,25 @@ fn a_complete_stele_reads_back_and_reproduces_its_digest() {
 
     assert_eq!(again, inscription);
     assert_eq!(again_digest, digest);
+
+    let second_layout = SnapshotDir::open(second.path()).unwrap();
+
+    // The inscription blob, the manifests and the tags, byte for byte.
     assert_eq!(
-        std::fs::read(first.path().join("inscription.json")).unwrap(),
-        std::fs::read(second.path().join("inscription.json")).unwrap(),
+        std::fs::read(layout.blob_path(&digest)).unwrap(),
+        std::fs::read(second_layout.blob_path(&digest)).unwrap(),
+    );
+    assert_eq!(
+        std::fs::read(first.path().join(stelae::dir::INDEX_FILE)).unwrap(),
+        std::fs::read(second.path().join(stelae::dir::INDEX_FILE)).unwrap(),
     );
 
-    let second_index = SnapshotDir::open(second.path())
+    let second_index = second_layout
+        .pull_sequence(&DolosProfile, EPOCH)
         .unwrap()
         .blob_index()
         .unwrap();
-    for descriptor in &inscription.layers {
+    for descriptor in inscription.layers() {
         assert_eq!(
             index.blob_for(&descriptor.diff_id),
             second_index.blob_for(&descriptor.diff_id),
@@ -492,13 +503,12 @@ fn descriptors_match_the_per_kind_goldens() {
     let (inscription, _) = write_stele(temp.path());
 
     assert_eq!(
-        inscription.layers.len(),
+        inscription.layers().count(),
         GOLDEN_LAYERS.len(),
         "the stele no longer has the layers the goldens pin"
     );
 
-    for (descriptor, (kind, diff_id, records, size)) in inscription.layers.iter().zip(GOLDEN_LAYERS)
-    {
+    for (descriptor, (kind, diff_id, records, size)) in inscription.layers().zip(GOLDEN_LAYERS) {
         assert_eq!(descriptor.kind, kind);
         assert_eq!(descriptor.diff_id.to_string(), diff_id);
         assert_eq!(descriptor.records, records);
@@ -553,6 +563,8 @@ fn a_stele_naming_its_blocks_is_pinned() {
 
     let read = SnapshotDir::open(temp.path())
         .unwrap()
+        .pull_sequence(&DolosProfile, EPOCH)
+        .unwrap()
         .read_inscription()
         .unwrap();
     assert_eq!(read, inscription);
@@ -578,7 +590,7 @@ const CANONICAL_POSITION_WITH_BLOCKS: &str = concat!(
 /// crate's — but every *string* in it is this profile's, and that is what the
 /// literal is for.
 const CANONICAL_INSCRIPTION: &str = concat!(
-    r#"{"compression":{"algo":"zstd","level":9},"history":[{"inscriptionDigest":"sha256:5555555555555555555555555555555555555555555555555555555555555555","sequence":5},{"inscriptionDigest":"sha256:6666666666666666666666666666666666666666666666666666666666666666","sequence":6}],"layers":["#,
+    r#"{"compression":{"algo":"zstd","level":9},"diff":["#,
     r#"{"diffId":"sha256:14a05418723da3c0b4117b5f30ef07d96887b3e12eae114988ff299a654ff106","kind":"blocks","#,
     r#""mediaType":"application/vnd.dolos.stelae.blocks.v1+zstd","records":4,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":167},"#,
@@ -638,7 +650,16 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":117},"#,
     r#"{"diffId":"sha256:26e58433f499d63f4d1cc0a6d007a3a3e699a8d4adc5009f9a8d419752f9a6e3","kind":"entity-stake","#,
     r#""mediaType":"application/vnd.dolos.stelae.entity-stake.v1+zstd","records":3,"#,
-    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":118},"#,
+    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":118}"#,
+    r#"],"parameters":{"#,
+    r#""entities":{"asset":32,"script":28,"stake":29},"#,
+    r#""indexKeyHash":"xxh3-64","#,
+    r#""schemas":{"account-address-epochs":1,"account-addresses":1,"account-epochs":1,"account-history":1,"account-stats":1,"accounts":1,"address-stats":1,"asset-mint-chunks":1,"asset-mints":1,"datums":1,"drep-epochs":1,"drep-observations":1,"dreps":1,"epochs":1,"eras":1,"first-mint-chunks":1,"first-mints":1,"first-script-chunks":1,"first-scripts":1,"gov":1,"metadata-labels":1,"payment-address-epochs":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"policy-first-mint-chunks":1,"pool-epochs":1,"pools":1,"proposals":1,"utxos":1},"#,
+    r#""shards":{"account-addresses":1,"account-history":1,"account-stats":1,"accounts":16,"address-stats":1,"asset-mints":1,"datums":16,"drep-observations":1,"dreps":1,"epochs":1,"eras":1,"first-mints":1,"first-scripts":1,"gov":1,"metadata-labels":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"pools":1,"proposals":1,"utxos":16}"#,
+    r#"},"position":{"#,
+    r#""epoch":7,"network":{"magic":764824073,"name":"mainnet"},"#,
+    r#""point":{"hash":"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b","slot":101}},"previous":{"inscriptionDigest":"sha256:6666666666666666666666666666666666666666666666666666666666666666","sequence":6},"#,
+    r#""profile":{"name":"io.txpipe.dolos.cardano","version":1},"schema":1,"sequence":7,"tip":["#,
     r#"{"diffId":"sha256:5296f2db380326b740501e5706a980bf5dc8f96d8fc6b5c3e37f825ebc43b204","kind":"state-account-addresses","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-account-addresses.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":165},"#,
@@ -714,14 +735,7 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#"{"diffId":"sha256:f193e457cf6094ca38250b65ce07d37be4e056b816106a56545d751d30bd8673","kind":"state-utxos","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-utxos.v1+zstd","records":2,"#,
     r#""scope":{"shard":1},"uncompressedSize":91}"#,
-    r#"],"parameters":{"#,
-    r#""entities":{"asset":32,"script":28,"stake":29},"#,
-    r#""indexKeyHash":"xxh3-64","#,
-    r#""schemas":{"account-address-epochs":1,"account-addresses":1,"account-epochs":1,"account-history":1,"account-stats":1,"accounts":1,"address-stats":1,"asset-mint-chunks":1,"asset-mints":1,"datums":1,"drep-epochs":1,"drep-observations":1,"dreps":1,"epochs":1,"eras":1,"first-mint-chunks":1,"first-mints":1,"first-script-chunks":1,"first-scripts":1,"gov":1,"metadata-labels":1,"payment-address-epochs":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"policy-first-mint-chunks":1,"pool-epochs":1,"pools":1,"proposals":1,"utxos":1},"#,
-    r#""shards":{"account-addresses":1,"account-history":1,"account-stats":1,"accounts":16,"address-stats":1,"asset-mints":1,"datums":16,"drep-observations":1,"dreps":1,"epochs":1,"eras":1,"first-mints":1,"first-scripts":1,"gov":1,"metadata-labels":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"pools":1,"proposals":1,"utxos":16}"#,
-    r#"},"position":{"#,
-    r#""epoch":7,"network":{"magic":764824073,"name":"mainnet"},"#,
-    r#""point":{"hash":"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b","slot":101}},"profile":{"name":"io.txpipe.dolos.cardano","version":1},"schema":1,"sequence":7}"#,
+    r#"]}"#,
 );
 /// Decode one record with the codec its layer kind names, so the streaming pass
 /// exercises every codec rather than only the framing underneath them.

@@ -58,8 +58,9 @@ pub trait SnapshotSource {
     /// the boundary and do not.
     fn boundary(&self, plan: &Plan) -> Result<Boundary, Error>;
 
-    /// Write a directory stele through the same profile encoder publication
-    /// and registry publication use.
+    /// Write a stele into a directory's image layout, chained onto the latest
+    /// one it holds, through the same profile encoder registry publication
+    /// uses.
     fn publish_directory(
         &self,
         destination: &Path,
@@ -98,7 +99,7 @@ pub trait SnapshotSource {
         observer: &Observer,
     ) -> Result<Bundle, Error>;
 
-    /// Stage the closed windows `bundles` need from this frozen view, once.
+    /// Stage the closed windows `bundles` list from this frozen view, once.
     /// `previous` is what the first of them follows.
     fn stage_batch(
         &self,

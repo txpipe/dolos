@@ -50,7 +50,7 @@ impl Script {
 struct State {
     blobs: HashMap<String, Vec<u8>>,
     manifests: HashMap<String, (String, Vec<u8>)>,
-    /// Layer digests of the last manifest stored, in manifest order.
+    /// Layer digests of every manifest stored, in the order they were put.
     layers: Vec<String>,
     /// Config blob digest of the last manifest stored.
     config: Option<String>,
@@ -114,7 +114,7 @@ impl FaultRegistry {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// The layer blob digests of the manifest last pushed.
+    /// The layer blob digests of every manifest pushed.
     pub fn layers(&self) -> Vec<String> {
         self.state().layers.clone()
     }
@@ -429,12 +429,17 @@ fn handle(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
             let parsed: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
 
             let mut state = lock();
-            state.layers = parsed["layers"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|layer| layer["digest"].as_str().unwrap().to_owned())
-                .collect();
+
+            // A publish puts a tip manifest and then a diff manifest, so the
+            // layers of every manifest put are the layers.
+            for layer in parsed["layers"].as_array().into_iter().flatten() {
+                let digest = layer["digest"].as_str().unwrap().to_owned();
+
+                if !state.layers.contains(&digest) {
+                    state.layers.push(digest);
+                }
+            }
+
             state.config = parsed["config"]["digest"].as_str().map(str::to_owned);
             let entry = (media_type, request.body);
             state.manifests.insert(digest.clone(), entry.clone());

@@ -50,8 +50,8 @@
 //!   empty store set, in the order ADR-004 specifies.
 //! - [`facade`] — supported headless assembly for planning, encoding,
 //!   inspection, verification and directory/OCI restoration.
-//! - [`registry`] — publishing into an OCI repository: the history chain, and
-//!   the layers a publish inherits instead of rebuilding.
+//! - [`registry`] — publishing into an OCI repository: the link to the snapshot
+//!   before, and the layers an interrupted publish already uploaded.
 //! - [`planning`] — the epoch selection every command that walks these stores
 //!   takes, and the arithmetic each of them reports.
 //! - [`staging`] — one tag and one exact traversal for `indexes` and one shared
@@ -124,7 +124,6 @@ use serde_json::json;
 use stelae::{
     dir::LayerSpec,
     frame::{self, CanonicalCbor},
-    inscription::HistoryEntry,
     profile::MediaType,
     Compression, Digest, Profile,
 };
@@ -374,59 +373,6 @@ pub const fn state_layer_count() -> usize {
     total
 }
 
-/// Whether a layer of `kind` at `scope` may be carried forward from an earlier
-/// publish rather than built again.
-///
-/// One rule in one place, asked by everything that decides it: the
-/// predecessor's manifest, an interrupted publish's record, and the note a
-/// landed layer leaves. It is a question about the **scope** and not only the
-/// kind, which is what decision 0026 changed — a state layer whose descriptor
-/// scope names its epoch is a retained dump of a closed epoch, as immutable as
-/// a `blocks` layer and told apart from every other publish's by the same
-/// scope equality; a state layer whose scope names only a shard is the moving
-/// tip, and every publish's shard `n` compares equal to every other's.
-pub fn is_inheritable(kind: &str, scope: &serde_json::Value) -> bool {
-    if EPOCH_KINDS.contains(&kind) {
-        return true;
-    }
-
-    state_ns_for(kind).is_some()
-        && scope
-            .get("epoch")
-            .and_then(serde_json::Value::as_u64)
-            .is_some()
-}
-
-/// Whether a publish chained onto `history` may carry forward a layer of `kind`
-/// for the window of `epoch`, where [`is_inheritable`] admits the kind.
-///
-/// Every closed window's layer is final when it is first published, except
-/// `log-account-epochs`. ESTART opening an epoch writes its rows with the stake
-/// leg alone, and the EWRAP closing the epoch after it rewrites them in full
-/// under the same keys, at the boundary into `epoch + 2`. The predecessor, the
-/// last entry of `history`, therefore published that window's final rows only
-/// if `epoch + 2` is at or below its sequence; a younger window is built again
-/// from the stores, which hold the full rows by now.
-///
-/// With no predecessor no window of this kind is settled. Nor does a
-/// resumption record ever supply one, since it does not say which sequence
-/// built a layer: [`export::Settling`] holds a publish to the predecessor's
-/// manifest for this kind.
-pub fn is_settled(kind: &str, epoch: u64, history: &[HistoryEntry]) -> bool {
-    !settles_late(kind)
-        || history
-            .last()
-            .is_some_and(|built| epoch + 2 <= built.sequence)
-}
-
-/// Whether a closed window's layer of `kind` can still change: only
-/// `log-account-epochs`, see [`is_settled`].
-pub(crate) fn settles_late(kind: &str) -> bool {
-    LOG_KINDS
-        .iter()
-        .any(|(log, ns)| *log == kind && *ns == AccountEpochLog::NS)
-}
-
 /// The epoch kinds a window always produces a layer for.
 ///
 /// The log and entity kinds are the exception, and the only ones: a log layer
@@ -451,9 +397,9 @@ pub const KINDS: [&str; EPOCH_KINDS.len() + STATE_KIND_NAMES.len()] = {
 /// scope shape.
 ///
 /// The namespace lives in the kind rather than in the scope, so a log layer
-/// wears the same [`EpochScope`] as `blocks` and `indexes` do — which is what
-/// keeps per-(kind, scope) inheritance working across the split. The entity
-/// layers wear it too, after the logs.
+/// wears the same [`EpochScope`] as `blocks` and `indexes` do, and is placed in
+/// `diff` or `tip` by its kind and window alone. The entity layers wear it
+/// too, after the logs.
 pub const EPOCH_KINDS: [&str; DENSE_EPOCH_KINDS.len() + LOG_KINDS.len() + ENTITY_KINDS.len()] = {
     let mut kinds = [""; DENSE_EPOCH_KINDS.len() + LOG_KINDS.len() + ENTITY_KINDS.len()];
     let mut at = fill(&mut kinds, 0, &DENSE_EPOCH_KINDS);
@@ -687,6 +633,14 @@ pub enum Error {
     #[error("layer kind {0:?} has no array in the diff chain")]
     Unassigned(String),
 
+    /// A layer for a window the snapshot at `sequence` cannot hold yet.
+    #[error("no snapshot at sequence {sequence} lists a {kind} layer for epoch {window}")]
+    Unlisted {
+        kind: String,
+        window: u64,
+        sequence: u64,
+    },
+
     /// A stele stands at a specific block, so its `position` needs that block's
     /// hash. A cursor that has only a slot cannot anchor one.
     #[error("a stele's position needs a block hash, but the chain point is {0}")]
@@ -766,12 +720,13 @@ pub enum Error {
     #[error(transparent)]
     Resume(#[from] restore::ResumeRefusal),
 
-    /// A publish that would not extend the repository's chain.
+    /// A publish that would not extend the repository's chain, so no link can
+    /// be made to its latest snapshot.
     ///
     /// Both sequences are in the message because the fix depends on which of
     /// them is wrong: a gap means a publisher skipped epochs, an equal or lower
     /// sequence means it is republishing one. There is deliberately no flag
-    /// that overrides this — see [`stelae::inscription::history_for`], where it
+    /// that overrides this — see [`stelae::inscription::link_for`], where it
     /// is raised.
     ///
     /// `reason` is owned rather than static so a gap can state its *distance*.
@@ -782,17 +737,29 @@ pub enum Error {
         "this repository's latest stele is sequence {latest} and this publish is sequence \
          {publishing}: {reason}"
     )]
-    HistoryBreak {
+    LinkBreak {
         latest: u64,
         publishing: u64,
         reason: String,
     },
 
+    /// A snapshot whose diff is published and whose tip is not.
+    ///
+    /// Not absence: every later snapshot is built on its diff, so the
+    /// repository still holds it. What is gone is the state only this
+    /// sequence carried, so it cannot be restored as a node.
+    #[error(
+        "the tip of the stele at epoch-{sequence} is gone ({tag:?} is not in the repository), so \
+         that epoch cannot be restored as a node; restore a later epoch, or one whose tip the \
+         repository keeps"
+    )]
+    TipGone { sequence: u64, tag: String },
+
     /// A reproduction that arrived at a different answer than the published
     /// stele it recomputed.
     ///
     /// A finding, not a routine failure: same stores, same epochs and the same
-    /// history reproduce the same document, so a divergence means either the
+    /// link reproduce the same document, so a divergence means either the
     /// inputs are not what the operator believes — a store at another epoch, a
     /// different `--epochs` window than the publish used — or the format's
     /// determinism claim has a hole, which is ADR-004's residual risk with a
@@ -881,8 +848,8 @@ impl Error {
 /// `?` still converts, so no caller changed; what does not change either is
 /// what a caller *matches* or an operator *reads*. The record-shape checks
 /// ([`stelae::codec`]), the free-space policy ([`stelae_driver::preflight`]),
-/// the ordering contracts and the history rule
-/// ([`stelae::inscription::history_for`]) were all this crate's errors before
+/// the ordering contracts and the link rule
+/// ([`stelae::inscription::link_for`]) were all this crate's errors before
 /// they moved, and each is matched on somewhere — a test, or the CLI's
 /// exit-code mapping. Wrapping them would have renamed every one of those
 /// refusals and prefixed every message; a `match` arm apiece is what a move
@@ -893,15 +860,16 @@ impl From<stelae::Error> for Error {
             stelae::Error::MalformedRecord { kind, reason } => {
                 Self::MalformedRecord { kind, reason }
             }
-            stelae::Error::HistoryBreak {
+            stelae::Error::LinkBreak {
                 latest,
                 publishing,
                 reason,
-            } => Self::HistoryBreak {
+            } => Self::LinkBreak {
                 latest,
                 publishing,
                 reason,
             },
+            stelae::Error::TipGone { sequence, tag } => Self::TipGone { sequence, tag },
             other => Self::Stelae(other),
         }
     }
@@ -919,11 +887,11 @@ impl From<stelae_driver::Error> for Error {
             stelae_driver::Error::MalformedInscription { field, reason } => {
                 Self::MalformedInscription { field, reason }
             }
-            stelae_driver::Error::HistoryBreak {
+            stelae_driver::Error::LinkBreak {
                 latest,
                 publishing,
                 reason,
-            } => Self::HistoryBreak {
+            } => Self::LinkBreak {
                 latest,
                 publishing,
                 reason,
@@ -931,6 +899,10 @@ impl From<stelae_driver::Error> for Error {
             stelae_driver::Error::DatasetMismatch { expected, found } => {
                 Self::NetworkMismatch { expected, found }
             }
+            stelae_driver::Error::Unplaced { kind, reason } => Self::MalformedInscription {
+                field: format!("layers[{kind}]"),
+                reason,
+            },
         }
     }
 }
@@ -984,11 +956,10 @@ impl Profile for DolosProfile {
 ///
 /// Five questions [`Profile`] deliberately does not ask, because none of them
 /// is about naming: which kinds a closed window produces, which of them carry
-/// the tip, which layers may be carried forward, and whether two documents
+/// the state, which array a layer is listed in, and whether two documents
 /// stand on one chain. Every one of them is already decided somewhere in this
-/// crate — the constants, the state split, the inheritance rule and the
-/// position check — so this is delegation and not a second statement of any of
-/// it.
+/// crate — the constants, the state split, [`roles`] and the position check —
+/// so this is delegation and not a second statement of any of it.
 impl stelae_driver::DriverProfile for DolosProfile {
     fn epoch_kinds(&self) -> &[&str] {
         &EPOCH_KINDS
@@ -1002,8 +973,25 @@ impl stelae_driver::DriverProfile for DolosProfile {
         is_state_kind(kind)
     }
 
-    fn is_inheritable(&self, kind: &str, scope: &serde_json::Value) -> bool {
-        is_inheritable(kind, scope)
+    /// [`roles::written_role`]: asked of a layer being written, so it needs
+    /// no chain geometry. The window is the scope's `epoch`, which a state
+    /// shard's descriptor does not carry.
+    fn role(
+        &self,
+        kind: &str,
+        scope: &serde_json::Value,
+        sequence: u64,
+    ) -> Result<stelae_driver::Role, stelae_driver::Error> {
+        let window = scope.get("epoch").and_then(serde_json::Value::as_u64);
+
+        match roles::written_role(kind, window, sequence) {
+            Ok(roles::Role::Diff) => Ok(stelae_driver::Role::Diff),
+            Ok(roles::Role::Tip) => Ok(stelae_driver::Role::Tip),
+            Err(error) => Err(stelae_driver::Error::Unplaced {
+                kind: kind.to_owned(),
+                reason: error.to_string(),
+            }),
+        }
     }
 
     /// Two steles stand on the same dataset when their `position` names the
@@ -1728,60 +1716,44 @@ mod tests {
         assert_eq!(state.descriptor(), json!({"shard": 15}));
     }
 
-    /// The rule the predecessor, the resumption record and the landing note
-    /// all decide by — and the one line decision 0026 moved.
+    /// The driver asks the role of a layer being written, from its scope: the
+    /// state is the tip, a boundary window is the tip, and a closed window is
+    /// in the diff once [`roles`] says it is final.
     #[test]
-    fn a_dumps_scope_is_inheritable_and_a_tips_is_not() {
+    fn the_driver_reads_a_layers_role_off_its_scope() {
+        use stelae_driver::{DriverProfile as _, Role};
+
+        let role = |kind, scope: serde_json::Value, sequence| {
+            DolosProfile.role(kind, &scope, sequence).unwrap()
+        };
+
         let tip = StateScope::tip(2, 7, 3);
+        assert_eq!(role(STATE_KIND_NAMES[0], tip.descriptor(), 7), Role::Tip);
 
-        assert!(is_inheritable(
-            STATE_KIND_NAMES[0],
-            &json!({"epoch": 4, "shard": 3})
-        ));
-        assert!(!is_inheritable(STATE_KIND_NAMES[0], &tip.descriptor()));
+        assert_eq!(role(BLOCKS, json!({"epoch": 7}), 7), Role::Tip);
+        assert_eq!(role(BLOCKS, json!({"epoch": 6}), 7), Role::Diff);
+        assert_eq!(
+            role("log-account-epochs", json!({"epoch": 6}), 7),
+            Role::Tip
+        );
+        assert_eq!(
+            role("log-account-epochs", json!({"epoch": 5}), 7),
+            Role::Diff
+        );
+        assert_eq!(role("log-pool-epochs", json!({"epoch": 5}), 7), Role::Diff);
+        assert_eq!(role("entity-asset", json!({"epoch": 3}), 7), Role::Diff);
 
-        for kind in EPOCH_KINDS {
-            assert!(is_inheritable(kind, &json!({"epoch": 7})), "{kind}");
-        }
-
-        // A kind this profile does not define never inherits, whatever its
-        // scope claims.
-        assert!(!is_inheritable("state", &json!({"epoch": 4, "shard": 0})));
-    }
-
-    /// The predecessor at 9 published window 8's account rows as ESTART wrote
-    /// them, and the EWRAP closing 9 rewrote them before 10 was cut; window
-    /// 7's were already EWRAP's. The predecessor is the history's last entry,
-    /// never an earlier one. Without a predecessor nothing says when a window's
-    /// rows were built. Every other kind is final once its window closes.
-    #[test]
-    fn only_a_settled_windows_account_rows_are_carried_forward() {
-        let after_9 = [HistoryEntry {
-            sequence: 9,
-            inscription_digest: stelae::digest::Digest::from_bytes([9; 32]),
-        }];
-
-        assert!(is_settled("log-account-epochs", 7, &after_9));
-        assert!(!is_settled("log-account-epochs", 8, &after_9));
-        assert!(!is_settled("log-account-epochs", 9, &after_9));
-        assert!(!is_settled("log-account-epochs", 0, &[]));
-
-        let up_to_9: Vec<_> = (1..=9)
-            .map(|sequence| HistoryEntry {
-                sequence,
-                inscription_digest: stelae::digest::Digest::from_bytes([sequence as u8; 32]),
-            })
-            .collect();
-
-        assert!(is_settled("log-account-epochs", 7, &up_to_9));
-        assert!(!is_settled("log-account-epochs", 8, &up_to_9));
-
-        for kind in EPOCH_KINDS
-            .into_iter()
-            .filter(|kind| *kind != "log-account-epochs")
-        {
-            assert!(is_settled(kind, 9, &after_9), "{kind}");
-            assert!(is_settled(kind, 9, &[]), "{kind}");
+        // a window the snapshot cannot hold yet, a dump's scope and a kind
+        // this profile does not define are refused
+        for (kind, scope) in [
+            ("log-pool-epochs", json!({"epoch": 6})),
+            (STATE_KIND_NAMES[0], json!({"epoch": 4, "shard": 3})),
+            ("state", json!({"shard": 0})),
+        ] {
+            assert!(matches!(
+                DolosProfile.role(kind, &scope, 7),
+                Err(stelae_driver::Error::Unplaced { .. })
+            ));
         }
     }
 }

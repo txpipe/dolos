@@ -28,7 +28,6 @@ use fault_registry::FaultRegistry;
 use node::{export_to, harness, plan_at_boundary, Blank};
 use recorder::{contents_digest, Journal, Op, RecordedArchive, RecordedState};
 use stelae::{
-    dir::SnapshotDir,
     inscription::LayerDescriptor,
     oci::{Options, Registry, Snapshot, DEFAULT_READ_ATTEMPTS},
     plan::{RestoreProgress, Resume},
@@ -99,11 +98,11 @@ impl Published {
 
         let scratch = tempfile::tempdir().unwrap();
         let stele = Point::Latest
-            .pull(&opened(&registry, scratch.path()))
+            .resolve(&opened(&registry, scratch.path()))
             .unwrap();
         let index = stele.blob_index().unwrap();
-        let plan = restore::plan(&stele, magic, None).unwrap();
-        let identity = stele.read_inscription().unwrap().digest().unwrap();
+        let plan = restore::plan(stele.chain().unwrap(), magic, None).unwrap();
+        let identity = stele.chain().unwrap().identity();
 
         Self {
             registry,
@@ -496,8 +495,8 @@ fn exported() -> (tempfile::TempDir, u64) {
 #[test]
 fn the_staging_preflight_charges_the_largest_layers_a_read_ahead_holds() {
     let (root, magic) = exported();
-    let dir = SnapshotDir::open(root.path()).unwrap();
-    let plan = restore::plan(&dir, magic, None).unwrap();
+    let dir = node::resolved(root.path());
+    let plan = restore::plan(dir.chain().unwrap(), magic, None).unwrap();
     let index = dir.blob_index().unwrap();
 
     let largest = |layers: &mut dyn Iterator<Item = &LayerDescriptor>, count: usize| {

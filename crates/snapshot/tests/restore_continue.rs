@@ -81,8 +81,7 @@ impl Stele {
     fn digest(&self) -> Digest {
         use stelae::SnapshotReader as _;
 
-        stelae::dir::SnapshotDir::open(self.path())
-            .unwrap()
+        node::resolved(self.path())
             .read_inscription()
             .unwrap()
             .digest()
@@ -245,10 +244,7 @@ fn the_source_record_names_the_source_the_sequence_and_the_digest() {
 
     let inscription = {
         use stelae::SnapshotReader as _;
-        stelae::dir::SnapshotDir::open(stele.path())
-            .unwrap()
-            .read_inscription()
-            .unwrap()
+        node::resolved(stele.path()).read_inscription().unwrap()
     };
 
     assert_eq!(

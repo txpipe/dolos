@@ -437,12 +437,12 @@ fn check_dir(config: &RootConfig, dir: &Path, clears: bool) -> miette::Result<Pa
         .with_context(|| format!("{} holds no stele", dir.display()))?;
 
     if clears {
-        use dolos_snapshot::dir::{BLOBS_DIR, BLOB_INDEX_FILE, INSCRIPTION_FILE};
+        use dolos_snapshot::dir::{BLOBS_DIR, INDEX_FILE, LAYOUT_FILE};
 
         super::refuse_what_the_clear_takes(
             config,
             &dir,
-            &[INSCRIPTION_FILE, BLOB_INDEX_FILE, BLOBS_DIR].map(|name| dir.join(name)),
+            &[LAYOUT_FILE, INDEX_FILE, BLOBS_DIR].map(|name| dir.join(name)),
             "the stele",
             "the restore",
             "move the stele out of the storage root",
