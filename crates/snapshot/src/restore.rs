@@ -2940,6 +2940,114 @@ mod tests {
         unknown_layers(&alone(stele.clone()), &DolosProfile)
     }
 
+    /// A blocks snapshot at `sequence` on `magic`, as the whole of its lineage,
+    /// with a `blocks` layer for each `(epoch, start_slot, end_slot)`.
+    fn blocks_chain(magic: u64, sequence: u64, epochs: &[(u64, u64, u64)]) -> Chain {
+        let mut head = Inscription::new(
+            &BlocksProfile,
+            sequence,
+            stelae_blocks::position(&stelae_blocks::Position {
+                network_magic: magic,
+                epoch: sequence,
+            }),
+            stelae_blocks::parameters(),
+            stelae_blocks::compression(),
+        );
+
+        head.diff = epochs
+            .iter()
+            .zip(0xb0u8..)
+            .map(|((epoch, start, end), byte)| LayerDescriptor {
+                kind: stelae_blocks::BLOCKS.to_owned(),
+                media_type: stelae_blocks::BLOCKS_MEDIA_TYPE.to_owned(),
+                diff_id: Digest::from_bytes([byte; 32]),
+                records: 1,
+                uncompressed_size: 100,
+                scope: json!({"epoch": epoch, "startSlot": start, "endSlot": end}),
+            })
+            .collect();
+
+        Chain::walk(&BlocksProfile, head, |_| Ok(None)).unwrap()
+    }
+
+    /// A stele's kept epochs at sequence 2: 0 and 1 closed, 100 slots each,
+    /// and the cut's, none of them with a `blocks` layer yet.
+    fn kept_epochs() -> Vec<EpochLayers> {
+        (0..3)
+            .map(|epoch| EpochLayers {
+                epoch,
+                start_slot: epoch * 100,
+                end_slot: epoch * 100 + 99,
+                blocks: None,
+                logs: BTreeMap::new(),
+                entities: BTreeMap::new(),
+                indexes: Some(epoch_descriptor(INDEXES, epoch, epoch as u8)),
+            })
+            .collect()
+    }
+
+    /// Each closed epoch takes its layer from the blocks snapshot, and the
+    /// cut's epoch none. A blocks snapshot that does not fit the stele is
+    /// refused: another one, another network or sequence, a kept epoch it
+    /// lacks or holds over other slots, and an epoch it lists twice.
+    #[test]
+    fn a_blocks_snapshot_that_does_not_fit_the_stele_is_refused() {
+        let closed = [(0, 0, 99), (1, 100, 199)];
+
+        let pair = |blocks: &Chain| {
+            let mut epochs = kept_epochs();
+            pair_blocks(&mut epochs, blocks, blocks.identity(), 2, MAINNET_MAGIC).map(|()| epochs)
+        };
+
+        let fits = blocks_chain(MAINNET_MAGIC, 2, &closed);
+        let taken: Vec<Option<Digest>> = pair(&fits)
+            .unwrap()
+            .iter()
+            .map(|epoch| epoch.blocks.as_ref().map(|layer| layer.diff_id))
+            .collect();
+        let listed: Vec<Option<Digest>> = fits.descriptors().map(|l| Some(l.diff_id)).collect();
+        assert_eq!(taken, [listed, vec![None]].concat());
+
+        let mut epochs = kept_epochs();
+        let other = Digest::from_bytes([0xee; 32]);
+        let err = pair_blocks(&mut epochs, &fits, other, 2, MAINNET_MAGIC).unwrap_err();
+        assert!(
+            matches!(err, Error::BlocksMismatch { expected, .. } if expected == other),
+            "{err:?}"
+        );
+
+        let refused = |blocks: Chain| pair(&blocks).unwrap_err();
+
+        let err = refused(blocks_chain(1, 2, &closed));
+        assert!(
+            matches!(err, Error::NetworkMismatch { found: 1, .. }),
+            "{err:?}"
+        );
+
+        let err = refused(blocks_chain(
+            MAINNET_MAGIC,
+            3,
+            &[(0, 0, 99), (1, 100, 199), (2, 200, 299)],
+        ));
+        assert!(
+            matches!(&err, Error::MalformedInscription { field, .. } if field == "position.blocks"),
+            "{err:?}"
+        );
+
+        let err = refused(blocks_chain(MAINNET_MAGIC, 2, &[(0, 0, 99)]));
+        assert!(matches!(err, Error::IncompleteStele(_)), "{err:?}");
+
+        let err = refused(blocks_chain(MAINNET_MAGIC, 2, &[(0, 0, 99), (1, 100, 198)]));
+        assert!(err.to_string().contains("100..=199 in this stele"), "{err}");
+
+        let err = refused(blocks_chain(
+            MAINNET_MAGIC,
+            2,
+            &[(0, 0, 99), (1, 100, 199), (1, 100, 198)],
+        ));
+        assert!(err.to_string().contains("described twice"), "{err}");
+    }
+
     /// Every state layer a complete tip carries: each kind, shards ascending.
     fn state_layers() -> Vec<LayerDescriptor> {
         let mut byte = 0u8;
