@@ -406,12 +406,18 @@ fn a_layout_whose_chain_is_broken_is_refused() {
             .unwrap_or_default();
         tag != "epoch-1" && !tag.starts_with("epoch-1.")
     });
-    assert!(manifests.len() < held, "the index held no tag for sequence 1");
+    assert!(
+        manifests.len() < held,
+        "the index held no tag for sequence 1"
+    );
     std::fs::write(&index_path, serde_json::to_vec(&index).unwrap()).unwrap();
 
     let layout = SnapshotDir::open(&stele).unwrap();
     assert!(layout.pull_latest(&DolosProfile).is_ok());
-    let broken = layout.resolve_latest(&DolosProfile).unwrap_err().to_string();
+    let broken = layout
+        .resolve_latest(&DolosProfile)
+        .unwrap_err()
+        .to_string();
     assert!(broken.contains("chain is broken"), "{broken}");
 
     let before = Contents::read(&node);
