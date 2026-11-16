@@ -283,9 +283,8 @@ impl Plan {
 
     /// Take a producer pool other than [`Producers::DEFAULT`].
     ///
-    /// The same builder shape as [`restrict_epochs`](Plan::restrict_epochs),
-    /// and for the same reason: the CLI is where an operator's choice is
-    /// spelled, and it applies it to a plan the rules already built.
+    /// A builder, because the CLI is where an operator's choice is spelled,
+    /// and it applies it to a plan the rules already built.
     pub fn with_producers(mut self, producers: Producers) -> Self {
         self.producers = producers;
 
@@ -295,20 +294,6 @@ impl Plan {
     /// Name the blocks snapshot at this sequence in `position.blocks`.
     pub fn with_blocks(mut self, blocks: Digest) -> Self {
         self.blocks = Some(blocks);
-
-        self
-    }
-
-    /// Keep only the epoch layers within `first..=last`.
-    ///
-    /// A partial publish: the state tip is unaffected, since it is the tip
-    /// whatever epoch layers travel with it. Bounds outside the covered range
-    /// simply select nothing there.
-    pub fn restrict_epochs(mut self, first: Option<u64>, last: Option<u64>) -> Self {
-        self.epochs.retain(|window| {
-            first.is_none_or(|first| window.epoch >= first)
-                && last.is_none_or(|last| window.epoch <= last)
-        });
 
         self
     }
@@ -1074,8 +1059,7 @@ fn compare(published: &Inscription, reproduced: &Inscription) -> Result<(), Erro
                 subject,
                 reason: match ours.len() {
                     0 => "the published stele describes it and the reproduction built no such \
-                          layer; the stores may cover different epochs than the stele, or \
-                          `--epochs` may select a different window than the publish did"
+                          layer; the stores may cover different epochs than the stele"
                         .to_owned(),
                     built => format!(
                         "the published stele describes it {} time(s) and the reproduction built \
@@ -1579,7 +1563,7 @@ fn entity_presence<A: ArchiveStore>(plan: &Plan, archive: &A) -> Result<EntityPr
 }
 
 /// The window among `windows` (ascending and disjoint) whose slots hold
-/// `slot`, if any: a restricted plan can leave gaps.
+/// `slot`, if any.
 fn window_of(windows: &[EpochWindow], slot: BlockSlot) -> Option<&EpochWindow> {
     let above = windows.partition_point(|window| window.start_slot <= slot);
 
@@ -2118,20 +2102,6 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(err, Error::UnanchoredPoint(_)), "{err:?}");
         }
-    }
-
-    #[test]
-    fn restricting_epochs_keeps_the_window_bounds() {
-        let plan = Plan::new(&summary(), Network::for_magic(2), point(250), MUTABLE_SLOTS)
-            .unwrap()
-            .restrict_epochs(Some(1), Some(1));
-
-        assert_eq!(
-            plan.sequence, 2,
-            "the sequence is the cursor's, not the cut"
-        );
-        assert_eq!(plan.epochs.len(), 1);
-        assert_eq!(plan.epochs[0].epoch, 1);
     }
 }
 

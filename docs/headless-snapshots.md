@@ -19,8 +19,8 @@ revision `703cc34b`.
 
 `ReplayWorkspace::snapshot()` returns a read-only `SnapshotSource`. The host
 supplies the network magic and `facade::Selection`; the
-library applies epoch restriction and producer sizing in the same order for
-publication, digest and verification. The resulting plan can
+library applies its producer sizing the same way for publication, digest and
+verification. The resulting plan can
 be passed to:
 
 - `publish_directory` with an explicit destination and progress observer;

@@ -1410,6 +1410,12 @@ where
         }
     }
 
+    fn remove_points(&self, points: &[ChainPoint]) -> Result<(), WalError> {
+        match self {
+            Self::Redb(s) => WalStore::remove_points(s, points),
+        }
+    }
+
     fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, WalError> {
         match self {
             Self::Redb(s) => WalStore::prune_history(s, max_slots, max_prune),

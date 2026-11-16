@@ -46,10 +46,11 @@ use crate::{
     INDEXES, LOG_KINDS, MAX_RECORD, MEDIA_TYPE_VERSION, PROFILE_NAME, PROFILE_VERSION, STATE_KINDS,
 };
 
-/// Version of the bundle manifest and its layout. Format 3 captures only the
-/// layers the boundary's snapshot holds, into a plain blob store; a bundle of
-/// an earlier format is refused rather than read.
-pub const BUNDLE_FORMAT: u32 = 3;
+/// Version of the bundle manifest and its layout. Format 4 captures only the
+/// layers the boundary's snapshot holds, into a plain blob store, and its
+/// manifest names no slot the archive has to keep; a bundle of another format
+/// is refused rather than read.
+pub const BUNDLE_FORMAT: u32 = 4;
 
 /// The level payloads are compressed at on their way to the store. Identity is
 /// the uncompressed digest, so this trades scratch for preparation time and
@@ -88,12 +89,14 @@ pub enum Refusal {
     #[error("the index delta is not the boundary block's: {reason}")]
     ForeignTail { reason: String },
     #[error(
-        "bundle {sequence} needs the archive's block at slot {horizon}, and it starts at {first}"
+        "bundle {sequence} reads closed windows from the archive, but the archive starts at \
+         block #{number}, slot {first}, not at the chain's first block; finish the batch on an \
+         archive that keeps full history"
     )]
-    HorizonLost {
+    PrunedArchive {
         sequence: u64,
-        horizon: BlockSlot,
         first: BlockSlot,
+        number: u64,
     },
     #[error("a batch has at least one prepared boundary")]
     EmptyBatch,
@@ -197,9 +200,6 @@ struct Manifest {
     capture_from: u64,
     /// The first window the boundary could not seal.
     oldest_unsealed: u64,
-    /// The block a prune must leave, see [`Bundle::horizon`]. `None` when the
-    /// plan covers no closed window.
-    horizon: Option<BlockSlot>,
     layers: Vec<WrittenLayer>,
 }
 
@@ -269,17 +269,6 @@ impl Bundle {
     /// The genesis's `3k/f` the boundary was prepared under.
     pub fn mutable_slots(&self) -> u64 {
         self.manifest.identity.mutable_slots
-    }
-
-    /// The slot of the block the source archive must keep for this bundle's
-    /// batch, for staging and finalization both: the last block at or before
-    /// the oldest closed window's first slot, or the chain's first block
-    /// when it has none that early. An archive starting there is enough,
-    /// and one starting later is refused. `None` when the plan covers no
-    /// closed window, though finalization still looks up the boundary block
-    /// itself.
-    pub fn horizon(&self) -> Option<BlockSlot> {
-        self.manifest.horizon
     }
 
     /// The payloads this bundle holds, by kind and scope.
@@ -710,21 +699,12 @@ pub fn prepare<A: ArchiveStore, S: StateStore>(
             observer,
         )?;
 
-        // Finalization reads the closed windows its stele lists from the
-        // archive, whatever was captured of them: closed blocks come from the
-        // archive and closed indexes from its runs.
-        let horizon = match plan.epochs.iter().find(|w| w.epoch < plan.sequence) {
-            Some(window) => block_to_keep(archive, window.start_slot)?,
-            None => None,
-        };
-
         return store.commit(Manifest {
             identity,
             owner: store.owner.clone(),
             capture_id: fresh_capture_id(),
             capture_from,
             oldest_unsealed,
-            horizon,
             layers,
         });
     };
@@ -1202,7 +1182,7 @@ pub fn stage_batch<A: ArchiveStore, S: StateStore>(
             .into());
         }
 
-        check_horizon(bundle, archive)?;
+        check_unpruned(bundle, archive)?;
     }
 
     let frontier = state
@@ -1313,7 +1293,7 @@ where
 }
 
 /// The staged runs and the archive have to stand on the chain the bundle was
-/// captured from, and the archive still has to reach back to the horizon.
+/// captured from, and the archive still has to start at the chain's origin.
 fn check_source<A: ArchiveStore>(
     bundle: &Bundle,
     staged: &Staged,
@@ -1358,44 +1338,27 @@ fn check_source<A: ArchiveStore>(
         )));
     }
 
-    check_horizon(bundle, archive)
+    check_unpruned(bundle, archive)
 }
 
-/// The block whose presence shows a prune left every slot from `start` on.
-///
-/// A prune cuts blocks and log rows by slot, and log rows key at an epoch's
-/// first slot, which usually holds no block. So a window's first block says
-/// nothing of its logs: a cut right at it keeps every block and drops them. A
-/// block at or before `start` means the cut did not pass `start`. With none
-/// that early it is the chain's first block, which a prune takes whenever it
-/// takes anything.
-fn block_to_keep<A: ArchiveStore>(
-    archive: &A,
-    start: BlockSlot,
-) -> Result<Option<BlockSlot>, Error> {
-    let block = match archive.get_range(None, Some(start + 1))?.next_back() {
-        Some(block) => Some(block),
-        None => archive.get_range(None, None)?.next(),
-    };
-
-    Ok(block.map(|(slot, _)| slot))
-}
-
-/// The archive still has to hold the horizon's block. Pruned shorter, closed
-/// windows and their logs read as empty rather than failing.
-fn check_horizon<A: ArchiveStore>(bundle: &Bundle, archive: &A) -> Result<(), Error> {
-    let first = archive.get_range(None, None)?.next();
-
-    if let (Some(horizon), Some((slot, _))) = (bundle.horizon(), first) {
-        if slot > horizon {
-            return Err(Refusal::HorizonLost {
+/// The archive still has to start at the chain's first block. Finalization
+/// reads the closed windows its stele lists from the archive, and pruned, they
+/// and their logs read as empty rather than failing. Block #1 can start a chain
+/// at slot 0, after a Byron genesis boundary block, and anywhere when its
+/// header names no previous block. Otherwise it means block #0 has been pruned.
+fn check_unpruned<A: ArchiveStore>(bundle: &Bundle, archive: &A) -> Result<(), Error> {
+    match crate::boundary::first_block(archive)? {
+        Some(first)
+            if first.number > 1
+                || (first.number == 1 && first.point.slot() != 0 && first.names_predecessor) =>
+        {
+            Err(Refusal::PrunedArchive {
                 sequence: bundle.sequence(),
-                horizon,
-                first: slot,
+                first: first.point.slot(),
+                number: first.number,
             }
-            .into());
+            .into())
         }
+        _ => Ok(()),
     }
-
-    Ok(())
 }
