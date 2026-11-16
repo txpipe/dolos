@@ -412,7 +412,7 @@ fn agrees(args: &Args, record: &SourceRecord) -> miette::Result<()> {
 
 /// The recorded stele directory, refused as gone when it holds no stele.
 fn reopen_dir(dir: &Path, record: &SourceRecord) -> miette::Result<PathBuf> {
-    match dolos_snapshot::dir::SteleDir::open(dir) {
+    match dolos_snapshot::dir::SnapshotDir::open(dir) {
         Ok(_) => Ok(dir.to_path_buf()),
         Err(_) => Err(refused(ResumeRefusal::Gone(record.clone()))),
     }
@@ -432,7 +432,7 @@ fn check_dir(config: &RootConfig, dir: &Path, clears: bool) -> miette::Result<Pa
         .into_diagnostic()
         .context("resolving --source")?;
 
-    dolos_snapshot::dir::SteleDir::open(&dir)
+    dolos_snapshot::dir::SnapshotDir::open(&dir)
         .into_diagnostic()
         .with_context(|| format!("{} holds no stele", dir.display()))?;
 
@@ -641,41 +641,6 @@ fn report(
             "skipped:  {} layer(s) this build has no kind for ({}); upgrade to restore them",
             plan.skipped_unknown.len(),
             plan.skipped_kinds().join(", "),
-        );
-    }
-
-    // The one line about layers this restore deliberately did not read. A
-    // dump is a past epoch's state, and this run is building a node that
-    // stands at the stele's sequence — so what an operator learns here is what
-    // the stele *carries*, which is the difference between a repository they
-    // can restore an old epoch out of later and one they cannot.
-    //
-    // With the layer count when it is short of a whole one, because a dump may
-    // be. Only the tip is checked for completeness — a publisher whose
-    // predecessor did not carry every shard of an epoch warns and publishes the
-    // short dump anyway — so an epoch listed bare here and an epoch missing
-    // nine of its shards would otherwise read identically, and the second is
-    // not a repository that restores that epoch.
-    let dumps = plan.carried_dumps();
-
-    if !dumps.is_empty() {
-        let epochs: Vec<String> = dumps
-            .iter()
-            .map(|dump| match dump.is_whole() {
-                true => dump.epoch.to_string(),
-                false => format!(
-                    "{} (partial: {} of {} layers)",
-                    dump.epoch,
-                    dump.carried,
-                    dolos_snapshot::restore::CarriedDump::expected(),
-                ),
-            })
-            .collect();
-
-        println!(
-            "dumps:    {} retained state dump(s) carried and not restored (epochs {})",
-            dumps.len(),
-            epochs.join(", "),
         );
     }
 

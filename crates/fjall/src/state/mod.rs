@@ -45,6 +45,7 @@ pub mod entity_keys;
 pub mod tags;
 pub mod utxos;
 
+use crate::metrics::L0Runs;
 use crate::preset::{Preset, Tuning};
 use crate::view::{View, Viewed};
 use crate::Error;
@@ -86,6 +87,8 @@ pub struct StateStore {
     /// Live-UTxO tags keyspace
     tags: Keyspace,
     preset: Preset,
+    /// The L0 gauge of a writable store.
+    l0_runs: Option<Arc<L0Runs>>,
     /// The mirror a read-only store opened over, dropped after the database
     /// and every iterator over it.
     view: Option<Arc<View>>,
@@ -112,20 +115,29 @@ impl StateStore {
 
     fn open_at(path: &Path, preset: Preset, view: Option<Arc<View>>) -> Result<Self, Error> {
         let tuning = preset.state();
-        let db = crate::open_database(tuning.database.builder(path), path, || {
+        let builder = match view {
+            Some(_) => tuning.database.view_builder(path),
+            None => tuning.database.builder(path),
+        };
+        let db = crate::open_database(builder, path, || {
             view.as_ref()
                 .map_or(path.to_path_buf(), |view| view.source_of(path))
         })?;
 
-        let store = Self {
+        let mut store = Self {
             cursor: db.keyspace(keyspace_names::CURSOR, || tuning.cursor.options())?,
             utxos: db.keyspace(keyspace_names::UTXOS, || tuning.utxos.options())?,
             entities: db.keyspace(keyspace_names::ENTITIES, || tuning.entities.options())?,
             tags: db.keyspace(keyspace_names::TAGS, || tuning.tags.options())?,
             db,
             preset,
+            l0_runs: None,
             view,
         };
+
+        if store.view.is_none() {
+            store.l0_runs = Some(Arc::new(L0Runs::report("state", store.keyspaces())));
+        }
 
         tracing::info!(tuning = %store.tuning(), "state store opened");
 
@@ -197,17 +209,23 @@ impl StateStore {
         Ok(false)
     }
 
+    /// Every keyspace, with its name.
+    fn keyspaces(&self) -> Vec<(&'static str, Keyspace)> {
+        vec![
+            (keyspace_names::CURSOR, self.cursor.clone()),
+            (keyspace_names::UTXOS, self.utxos.clone()),
+            (keyspace_names::ENTITIES, self.entities.clone()),
+            (keyspace_names::TAGS, self.tags.clone()),
+        ]
+    }
+
     /// Per-keyspace disk footprint: `(name, bytes, path)`, the path in the
     /// store's own folder.
     pub fn disk_usage(&self) -> Vec<(&'static str, u64, std::path::PathBuf)> {
-        [
-            (keyspace_names::CURSOR, &self.cursor),
-            (keyspace_names::UTXOS, &self.utxos),
-            (keyspace_names::ENTITIES, &self.entities),
-            (keyspace_names::TAGS, &self.tags),
-        ]
-        .map(|(name, ks)| (name, ks.disk_space(), self.source_of(ks.path())))
-        .to_vec()
+        self.keyspaces()
+            .into_iter()
+            .map(|(name, ks)| (name, ks.disk_space(), self.source_of(ks.path())))
+            .collect()
     }
 
     /// Where `path` is in the store itself, when it is in a view's mirror.
@@ -667,6 +685,40 @@ mod tests {
 
         let _store = StateStore::open(&path, Preset::Standard).unwrap();
         assert_eq!(left(dir.path()), ["state"]);
+    }
+
+    /// A view over a keyspace past its L0 threshold leaves its runs as they
+    /// are: fjall queues a compaction for it on open, and a view has no
+    /// workers to run one in its mirror.
+    #[test]
+    fn a_view_leaves_a_compaction_backlog_alone() {
+        use fjall::AbstractTree;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state");
+        let runs = usize::from(Preset::Standard.state().tags.l0_threshold) + 2;
+
+        {
+            let store = StateStore::open(&path, Preset::Standard).unwrap();
+
+            // Keys at both ends make every table overlap, so each flush is its
+            // own L0 run; a manual flush queues no compaction.
+            for run in 0..runs as u32 {
+                store.tags.insert("a", run.to_be_bytes()).unwrap();
+                store.tags.insert("z", run.to_be_bytes()).unwrap();
+                store.tags.tree.flush_active_memtable(0).unwrap();
+            }
+            assert_eq!(store.tags.tree.l0_run_count(), runs);
+            store.shutdown().unwrap();
+        }
+
+        let view = StateStore::open_view(&path, Preset::Standard).unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        assert_eq!(
+            view.tags.tree.l0_run_count(),
+            runs,
+            "the view compacted its mirror"
+        );
     }
 
     /// A view reports its footprint under the store's own folder, not the

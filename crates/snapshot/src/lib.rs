@@ -61,6 +61,8 @@
 //!   into its publication once the sequence is committed.
 //! - [`node`] — what a node's own configuration says about reaching a registry:
 //!   which identity, and where it stages.
+//! - [`roles`] — which array of the diff chain, `diff` or `tip`, holds each
+//!   layer at a sequence (decision 0080).
 //!
 //! Publisher application policy and replay/acquisition orchestration live in
 //! the Stelae repository. This crate retains the profile-specific encoding,
@@ -76,6 +78,7 @@ pub mod planning;
 pub mod prepare;
 pub mod registry;
 pub mod restore;
+pub mod roles;
 pub mod source;
 pub mod staging;
 
@@ -105,7 +108,7 @@ pub use stelae::progress;
 /// there is one pin point and one place to absorb upstream churn. These cover
 /// what a test or a binary opens a stele with; anything else a consumer needs
 /// joins the list rather than justifying a second dependency edge.
-pub use stelae::{dir, inscription, transport, SteleReader};
+pub use stelae::{dir, inscription, transport, SnapshotReader};
 
 use dolos_cardano::indexes::entities;
 use dolos_cardano::model::{
@@ -123,7 +126,7 @@ use stelae::{
     frame::{self, CanonicalCbor},
     inscription::HistoryEntry,
     profile::MediaType,
-    Compression, Profile,
+    Compression, Digest, Profile,
 };
 
 pub use layers::state::shard_of;
@@ -138,10 +141,6 @@ pub const PROFILE_VERSION: u64 = 1;
 
 pub const BLOCKS: &str = "blocks";
 pub const INDEXES: &str = "indexes";
-
-/// Spelled by the codec that reads and writes the kind, so the vocabulary has
-/// one definition on both sides of the crate boundary.
-pub use stelae_driver::digests::DIGESTS;
 
 /// The namespaces the ledger writes epoch-boundary logs under: the namespace
 /// column of [`LOG_KINDS`], byte-sorted.
@@ -375,93 +374,6 @@ pub const fn state_layer_count() -> usize {
     total
 }
 
-/// The epochs whose state dumps a publisher retains, validated.
-///
-/// A newtype rather than a `Vec<u64>` passed around, because the list is
-/// **signed input**: it is echoed into `parameters`, so the moment it is
-/// readable it is also attestable, and the only place to refuse a bad one is
-/// before it becomes either. A value of this type is a list two publishers of
-/// the same network can be compared on.
-///
-/// The rules, and each one's reason:
-///
-/// - **Strictly ascending.** Order is visible — the list renders into the
-///   canonical document as it is held — so two publishers naming the same
-///   epochs in different orders would publish different documents and stop
-///   co-signing over a difference that means nothing. Ascending is the one
-///   order that needs no convention, and it makes a duplicate a refusal rather
-///   than something to silently drop.
-/// - **Never epoch 0.** Epoch 0's state is the state after Byron's first epoch,
-///   and a stele at `sequence` 0 has no history to inherit a dump from; more to
-///   the point, "retain epoch 0" is the shape a default-constructed or
-///   mis-parsed list takes, and refusing it costs a publisher nothing it
-///   wanted.
-///
-/// Empty is valid and is the default: a publisher that retains nothing
-/// publishes the tip alone.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RetainedEpochs(Vec<u64>);
-
-impl RetainedEpochs {
-    /// Validate a configured list.
-    pub fn new(epochs: Vec<u64>) -> Result<Self, Error> {
-        if let Some(index) = epochs.iter().position(|epoch| *epoch == 0) {
-            return Err(Error::RetainedEpochs(format!(
-                "entry {index} is epoch 0, which no stele retains a dump of"
-            )));
-        }
-
-        for pair in epochs.windows(2) {
-            let (previous, next) = (pair[0], pair[1]);
-
-            if previous == next {
-                return Err(Error::RetainedEpochs(format!(
-                    "epoch {next} is listed twice"
-                )));
-            }
-
-            if previous > next {
-                return Err(Error::RetainedEpochs(format!(
-                    "epoch {next} follows epoch {previous}; the list has to ascend"
-                )));
-            }
-        }
-
-        Ok(Self(epochs))
-    }
-
-    /// The validated list, as `parameters` renders it.
-    pub fn as_slice(&self) -> &[u64] {
-        &self.0
-    }
-
-    /// The retained epochs a stele at `sequence` is due to carry a dump of:
-    /// those at or below it.
-    ///
-    /// A configured epoch above the sequence is not a miss and not a warning —
-    /// it has not happened yet, and the publish that reaches it will cut it.
-    pub fn due(&self, sequence: u64) -> impl Iterator<Item = u64> + '_ {
-        self.0
-            .iter()
-            .copied()
-            .take_while(move |epoch| *epoch <= sequence)
-    }
-
-    /// Whether `sequence` is itself retained — the publish that cuts a dump
-    /// out of its own tip.
-    pub fn cuts(&self, sequence: u64) -> bool {
-        self.0.binary_search(&sequence).is_ok()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-}
-
 /// Whether a layer of `kind` at `scope` may be carried forward from an earlier
 /// publish rather than built again.
 ///
@@ -473,8 +385,6 @@ impl RetainedEpochs {
 /// a `blocks` layer and told apart from every other publish's by the same
 /// scope equality; a state layer whose scope names only a shard is the moving
 /// tip, and every publish's shard `n` compares equal to every other's.
-///
-/// `digests` is in neither set: it has no source in this slice.
 pub fn is_inheritable(kind: &str, scope: &serde_json::Value) -> bool {
     if EPOCH_KINDS.contains(&kind) {
         return true;
@@ -529,17 +439,16 @@ pub(crate) fn settles_late(kind: &str) -> bool {
 pub const DENSE_EPOCH_KINDS: [&str; 2] = [BLOCKS, INDEXES];
 
 /// Every layer kind, in the order the inscription lists them.
-pub const KINDS: [&str; EPOCH_KINDS.len() + STATE_KIND_NAMES.len() + 1] = {
-    let mut kinds = [""; EPOCH_KINDS.len() + STATE_KIND_NAMES.len() + 1];
+pub const KINDS: [&str; EPOCH_KINDS.len() + STATE_KIND_NAMES.len()] = {
+    let mut kinds = [""; EPOCH_KINDS.len() + STATE_KIND_NAMES.len()];
     let at = fill(&mut kinds, 0, &EPOCH_KINDS);
-    let at = fill(&mut kinds, at, &STATE_KIND_NAMES);
-    kinds[at] = DIGESTS;
+    fill(&mut kinds, at, &STATE_KIND_NAMES);
 
     kinds
 };
 
-/// The kinds whose scope is an epoch range. The state kinds and `digests` carry
-/// their own scope shapes.
+/// The kinds whose scope is an epoch range. The state kinds carry their own
+/// scope shape.
 ///
 /// The namespace lives in the kind rather than in the scope, so a log layer
 /// wears the same [`EpochScope`] as `blocks` and `indexes` do — which is what
@@ -773,6 +682,11 @@ pub enum Error {
     #[error("layer kind {kind:?} does not take {scope}")]
     ScopeMismatch { kind: String, scope: &'static str },
 
+    /// A kind [`roles`] assigns to neither array: one this profile does not
+    /// define, or `digests`, which decision 0080 removes.
+    #[error("layer kind {0:?} has no array in the diff chain")]
+    Unassigned(String),
+
     /// A stele stands at a specific block, so its `position` needs that block's
     /// hash. A cursor that has only a slot cannot anchor one.
     #[error("a stele's position needs a block hash, but the chain point is {0}")]
@@ -912,15 +826,6 @@ pub enum Error {
         scope: String,
         source: Box<Error>,
     },
-
-    /// A `--state-epochs` list this profile will not publish under.
-    ///
-    /// Refused where the list is read rather than where a dump is cut, because
-    /// the list is signed input: it reaches `parameters` before any layer is
-    /// written, and a publisher that discovered the problem at the sixteenth
-    /// shard would already have attested it.
-    #[error("the state epochs are not a list of retained epochs: {0}")]
-    RetainedEpochs(String),
 
     /// Registry credentials naming two identities at once.
     ///
@@ -1197,20 +1102,31 @@ impl Network {
 /// `point` is the boundary the stele was cut at — in practice the state store's
 /// cursor after a `stop_epoch` sync. It must carry a hash: a stele that names
 /// only a slot cannot be verified against a chain.
+///
+/// `blocks` is the inscription digest of the blocks snapshot at the same
+/// sequence. Without it the field is left out, so the position's bytes are the
+/// same as before the field existed.
 pub fn position(
     network: &Network,
     point: &ChainPoint,
     epoch: u64,
+    blocks: Option<&Digest>,
 ) -> Result<serde_json::Value, Error> {
     let hash = point
         .hash()
         .ok_or_else(|| Error::UnanchoredPoint(point.to_string()))?;
 
-    Ok(json!({
+    let mut position = json!({
         "network": {"magic": network.magic(), "name": network.name()},
         "point": {"slot": point.slot(), "hash": hex::encode(hash)},
         "epoch": epoch,
-    }))
+    });
+
+    if let Some(blocks) = blocks {
+        position["blocks"] = json!(blocks.to_string());
+    }
+
+    Ok(position)
 }
 
 /// Where a stele stands, as [`position`] records it.
@@ -1225,6 +1141,9 @@ pub struct Position {
     pub point: ChainPoint,
     /// The epoch the point stands in, which is the last one the layers cover.
     pub epoch: u64,
+    /// The inscription digest of the blocks snapshot at the same sequence,
+    /// when the stele names one.
+    pub blocks: Option<Digest>,
 }
 
 /// Read a `position` back.
@@ -1280,10 +1199,22 @@ pub fn read_position(value: &serde_json::Value) -> Result<Position, Error> {
             Error::malformed_inscription("position.point.hash", "not 32 hex-encoded bytes")
         })?;
 
+    let blocks = value
+        .get("blocks")
+        .map(|blocks| {
+            blocks
+                .as_str()
+                .ok_or_else(|| Error::malformed_inscription("position.blocks", "not a string"))?
+                .parse::<Digest>()
+                .map_err(|err| Error::malformed_inscription("position.blocks", err.to_string()))
+        })
+        .transpose()?;
+
     Ok(Position {
         network,
         point: ChainPoint::Specific(slot, hash.into()),
         epoch: uint("epoch", value)?,
+        blocks,
     })
 }
 
@@ -1307,15 +1238,7 @@ pub fn read_position(value: &serde_json::Value) -> Result<Position, Error> {
 /// record, so its absence cannot tell a reader that the publisher does not
 /// carry the kind; the declaration does, and a restore refuses a stele that
 /// does not declare a kind the reader registers.
-///
-/// `stateEpochs` is the one value here that is not a consequence of code:
-/// which epochs a publisher retains a dump of is an operational choice, so it
-/// is configuration ([`RetainedEpochs`]) rather than a table. Echoing it here
-/// is what makes it *signed* input — two publishers of one network with
-/// different lists produce different parameters, and therefore different
-/// inscription digests, which is a divergence an operator can read out of a
-/// parameters diff instead of hunting through layers for it.
-pub fn parameters(retained: &RetainedEpochs) -> serde_json::Value {
+pub fn parameters() -> serde_json::Value {
     let shards: serde_json::Map<String, serde_json::Value> = STATE_KINDS
         .into_iter()
         .map(|(_, ns, shards, _)| (ns.to_owned(), json!(shards)))
@@ -1333,7 +1256,6 @@ pub fn parameters(retained: &RetainedEpochs) -> serde_json::Value {
         "indexKeyHash": INDEX_KEY_HASH,
         "shards": shards,
         "schemas": schemas,
-        "stateEpochs": retained.as_slice(),
     })
 }
 
@@ -1368,75 +1290,30 @@ pub struct EpochScope {
     pub end_slot: u64,
 }
 
-/// Which of the two things a state layer is.
-///
-/// The state kinds carry two roles over one record format, and the roles are
-/// told apart by the descriptor scope alone (decision 0026). The header is
-/// deliberately blind to this: at the publish where `sequence` equals a
-/// retained epoch, the tip layer and that epoch's dump are the same header
-/// over the same records, so they are one blob under two descriptors and the
-/// bytes move once. Putting the distinction anywhere inside the layer would
-/// break that by construction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StateRole {
-    /// The moving tip: the state as of this stele's `sequence`, republished
-    /// whole by every publish. Descriptor scope `{"shard": n}`, which names no
-    /// epoch — so nothing distinguishes one publish's tip from another's, and
-    /// nothing may inherit or checkpoint one.
-    Tip,
-
-    /// A retained dump: the state as of a configured epoch, cut once and then
-    /// carried forward unchanged. Descriptor scope `{"epoch": E, "shard": n}`,
-    /// which is what makes it inheritable by the scope-equality rule every
-    /// other immutable layer already uses.
-    Dump,
-}
-
-/// Scope of one shard of one state kind, in one of its two roles.
+/// Scope of one shard of one state kind.
 ///
 /// Uniform across every state kind, single-blob namespaces included — their
 /// one layer is shard 0 — so the header and descriptor shapes stay one shape
-/// and a reader never dispatches on the kind to parse a scope.
+/// and a reader never dispatches on the kind to parse a scope. The state is
+/// always the tip: the ledger as of the stele's `sequence`, republished whole
+/// by every publish.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StateScope {
     pub network_magic: u64,
-    /// The epoch the records are the state as of: the stele's `sequence` for a
-    /// [tip](StateRole::Tip), the dump's own epoch for a
-    /// [dump](StateRole::Dump). It is the same number at the publish that cuts
-    /// one, which is what makes the two blobs one blob.
+    /// The epoch the records are the state as of: the stele's `sequence`.
     pub epoch: u64,
     pub shard: u8,
-    pub role: StateRole,
 }
 
 impl StateScope {
-    /// One shard of the moving tip of a stele at `epoch`.
+    /// One shard of the tip of a stele at `epoch`.
     pub fn tip(network_magic: u64, epoch: u64, shard: u8) -> Self {
         Self {
             network_magic,
             epoch,
             shard,
-            role: StateRole::Tip,
         }
     }
-
-    /// One shard of the retained dump at `epoch`.
-    pub fn dump(network_magic: u64, epoch: u64, shard: u8) -> Self {
-        Self {
-            network_magic,
-            epoch,
-            shard,
-            role: StateRole::Dump,
-        }
-    }
-}
-
-/// Scope of the optional `digests` layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DigestsScope {
-    pub network_magic: u64,
-    pub epoch: u64,
-    pub last_immutable: u64,
 }
 
 /// A layer's scope, in the two encodings the protocol carries.
@@ -1459,7 +1336,7 @@ pub trait Scope {
     fn shape(&self) -> &'static str;
 
     /// Both encodings plus the kind, ready for
-    /// [`stelae::transport::SteleWriter::layer_sink`].
+    /// [`stelae::transport::SnapshotWriter::layer_sink`].
     ///
     /// Refuses a kind that does not take this scope shape: a state layer
     /// carrying an epoch scope would be structurally valid CBOR and permanently
@@ -1513,15 +1390,10 @@ impl Scope for StateScope {
         })?)
     }
 
-    /// The one place the two roles differ.
-    ///
-    /// [`Scope::header`] above is role-blind on purpose, so the dump a publish
-    /// cuts out of its own tip is the tip's bytes rather than a copy of them.
+    /// The shard alone: the epoch rides in the header, so no two publishes'
+    /// tips are told apart by their descriptors.
     fn descriptor(&self) -> serde_json::Value {
-        match self.role {
-            StateRole::Tip => json!({"shard": self.shard}),
-            StateRole::Dump => json!({"epoch": self.epoch, "shard": self.shard}),
-        }
+        json!({"shard": self.shard})
     }
 
     fn kinds(&self) -> &'static [&'static str] {
@@ -1530,30 +1402,6 @@ impl Scope for StateScope {
 
     fn shape(&self) -> &'static str {
         "a state scope"
-    }
-}
-
-impl Scope for DigestsScope {
-    fn header(&self) -> Result<CanonicalCbor, Error> {
-        Ok(frame::encode(|e| {
-            e.array(3)?
-                .u64(self.network_magic)?
-                .u64(self.epoch)?
-                .u64(self.last_immutable)?;
-            Ok(())
-        })?)
-    }
-
-    fn descriptor(&self) -> serde_json::Value {
-        json!({"lastImmutable": self.last_immutable})
-    }
-
-    fn kinds(&self) -> &'static [&'static str] {
-        &[DIGESTS]
-    }
-
-    fn shape(&self) -> &'static str {
-        "a digests scope"
     }
 }
 
@@ -1593,7 +1441,10 @@ mod tests {
 
     #[test]
     fn an_undefined_kind_is_refused() {
-        for kind in ["utxos", "state", "logs", "receipts", "", "Blocks"] {
+        // `digests` moved to the blocks profile by decision 0080.
+        for kind in [
+            "utxos", "state", "logs", "receipts", "", "Blocks", "digests",
+        ] {
             assert!(DolosProfile.layer_media_type(kind).is_err(), "{kind:?}");
             assert!(
                 checked_layer_media_type(&DolosProfile, kind).is_err(),
@@ -1631,15 +1482,16 @@ mod tests {
         let network = Network::for_magic(MAINNET_MAGIC);
         let point = ChainPoint::Specific(133660800, BlockHash::from([0xab; 32]));
 
-        let built = position(&network, &point, 550).unwrap();
+        let built = position(&network, &point, 550, None).unwrap();
         assert_eq!(built["network"]["magic"], 764824073u64);
         assert_eq!(built["network"]["name"], "mainnet");
         assert_eq!(built["point"]["slot"], 133660800u64);
         assert_eq!(built["point"]["hash"], "ab".repeat(32));
         assert_eq!(built["epoch"], 550u64);
+        assert!(built.get("blocks").is_none());
 
         for unanchored in [ChainPoint::Origin, ChainPoint::Slot(133660800)] {
-            let err = position(&network, &unanchored, 550).unwrap_err();
+            let err = position(&network, &unanchored, 550, None).unwrap_err();
             assert!(matches!(err, Error::UnanchoredPoint(_)), "{err:?}");
         }
     }
@@ -1648,20 +1500,26 @@ mod tests {
     /// are held against each other rather than each against a literal.
     #[test]
     fn position_round_trips() {
+        let blocks = Digest::from_bytes([0xcd; 32]);
+
         for magic in [MAINNET_MAGIC, PREPROD_MAGIC, PREVIEW_MAGIC, 42] {
-            let network = Network::for_magic(magic);
-            let point = ChainPoint::Specific(133660800, BlockHash::from([0xab; 32]));
+            for blocks in [None, Some(blocks)] {
+                let network = Network::for_magic(magic);
+                let point = ChainPoint::Specific(133660800, BlockHash::from([0xab; 32]));
 
-            let read = read_position(&position(&network, &point, 550).unwrap()).unwrap();
+                let written = position(&network, &point, 550, blocks.as_ref()).unwrap();
+                let read = read_position(&written).unwrap();
 
-            assert_eq!(
-                read,
-                Position {
-                    network,
-                    point,
-                    epoch: 550
-                }
-            );
+                assert_eq!(
+                    read,
+                    Position {
+                        network,
+                        point,
+                        epoch: 550,
+                        blocks,
+                    }
+                );
+            }
         }
     }
 
@@ -1674,6 +1532,7 @@ mod tests {
             &Network::for_magic(MAINNET_MAGIC),
             &ChainPoint::Specific(1, BlockHash::from([0xab; 32])),
             0,
+            None,
         )
         .unwrap();
 
@@ -1689,6 +1548,7 @@ mod tests {
             &Network::for_magic(PREVIEW_MAGIC),
             &ChainPoint::Specific(7, BlockHash::from([0xab; 32])),
             0,
+            None,
         )
         .unwrap();
 
@@ -1721,22 +1581,48 @@ mod tests {
         // A hash of the wrong width would otherwise become a plausible,
         // unreachable chain point: `BlockHash` converts from a slice by
         // padding.
-        let mut short = good;
+        let mut short = good.clone();
         short["point"]["hash"] = json!("ab".repeat(31));
 
         let err = read_position(&short).unwrap_err();
         assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
+
+        // `blocks` is optional, but present it must be a digest string. A
+        // string is refused for its digest, anything else for not being one.
+        for (blocks, a_string) in [
+            (json!(null), false),
+            (json!(7), false),
+            (json!("cd".repeat(32)), true),
+            (json!(format!("sha256:{}", "CD".repeat(32))), true),
+            (json!(format!("sha256:{}", "cd".repeat(31))), true),
+        ] {
+            let mut broken = good.clone();
+            broken["blocks"] = blocks.clone();
+
+            let err = read_position(&broken).unwrap_err();
+            let Error::MalformedInscription { field, reason } = &err else {
+                panic!("{blocks}: {err:?}");
+            };
+
+            assert_eq!(field, "position.blocks", "{blocks}");
+            assert_eq!(reason == "not a string", !a_string, "{blocks}: {reason}");
+        }
     }
 
     /// The parameters are claims about code elsewhere in this workspace, so
     /// they are compared against that code rather than against themselves.
     #[test]
     fn parameters_report_what_the_code_does() {
-        let retained = RetainedEpochs::new(vec![4, 100]).unwrap();
-        let parameters = parameters(&retained);
+        let parameters = parameters();
 
         assert_eq!(parameters["indexKeyHash"], INDEX_KEY_HASH);
-        assert_eq!(parameters["stateEpochs"], json!([4, 100]));
+        let keys: Vec<&str> = parameters
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, ["entities", "indexKeyHash", "schemas", "shards"]);
 
         // The two maps are the two tables, entry for entry — and nothing more:
         // a namespace in the JSON that no table has would be a claim about code
@@ -1796,11 +1682,6 @@ mod tests {
             end_slot: 199,
         };
         let state = StateScope::tip(2, 7, 3);
-        let digests = DigestsScope {
-            network_magic: 2,
-            epoch: 7,
-            last_immutable: 42,
-        };
 
         for kind in EPOCH_KINDS {
             epoch.layer_spec(kind).unwrap();
@@ -1808,14 +1689,11 @@ mod tests {
         for kind in STATE_KIND_NAMES {
             state.layer_spec(kind).unwrap();
         }
-        digests.layer_spec(DIGESTS).unwrap();
 
         for (spec, kind) in [
             (epoch.layer_spec(STATE_KIND_NAMES[0]), STATE_KIND_NAMES[0]),
-            (epoch.layer_spec(DIGESTS), DIGESTS),
             (state.layer_spec(BLOCKS), BLOCKS),
             (state.layer_spec("state"), "state"),
-            (digests.layer_spec(LOG_KINDS[0].0), LOG_KINDS[0].0),
         ] {
             let err = spec.unwrap_err();
             assert!(
@@ -1848,57 +1726,6 @@ mod tests {
             &[0x83, 0x01, 0x02, 0x0f]
         );
         assert_eq!(state.descriptor(), json!({"shard": 15}));
-
-        // The dump's header is the tip's, byte for byte, and only the
-        // descriptor says which role the layer plays — which is the whole of
-        // why one blob can wear both.
-        let dump = StateScope::dump(1, 2, 15);
-        assert_eq!(dump.header().unwrap(), state.header().unwrap());
-        assert_eq!(dump.descriptor(), json!({"epoch": 2, "shard": 15}));
-
-        let digests = DigestsScope {
-            network_magic: 1,
-            epoch: 2,
-            last_immutable: 6187,
-        };
-        assert_eq!(
-            digests.header().unwrap().as_bytes(),
-            &[0x83, 0x01, 0x02, 0x19, 0x18, 0x2b]
-        );
-        assert_eq!(digests.descriptor(), json!({"lastImmutable": 6187}));
-    }
-
-    /// Done criterion 4: the list is refused where it is read, not where a
-    /// dump is cut — it reaches `parameters` before any layer is written.
-    #[test]
-    fn a_retained_epoch_list_has_to_ascend_and_start_above_zero() {
-        RetainedEpochs::new(vec![]).unwrap();
-        RetainedEpochs::new(vec![1]).unwrap();
-        assert_eq!(
-            RetainedEpochs::new(vec![4, 208, 250]).unwrap().as_slice(),
-            &[4, 208, 250]
-        );
-
-        for bad in [vec![0], vec![0, 4], vec![4, 4], vec![250, 4], vec![4, 9, 9]] {
-            let err = RetainedEpochs::new(bad.clone()).unwrap_err();
-            assert!(matches!(err, Error::RetainedEpochs(_)), "{bad:?}: {err:?}");
-        }
-    }
-
-    /// What a publish at `sequence` owes: every retained epoch at or below it,
-    /// and nothing above — a configured epoch the chain has not reached is not
-    /// a missing dump.
-    #[test]
-    fn only_the_retained_epochs_at_or_below_the_sequence_are_due() {
-        let retained = RetainedEpochs::new(vec![4, 208, 250]).unwrap();
-
-        assert_eq!(retained.due(3).collect::<Vec<_>>(), Vec::<u64>::new());
-        assert_eq!(retained.due(4).collect::<Vec<_>>(), vec![4]);
-        assert_eq!(retained.due(249).collect::<Vec<_>>(), vec![4, 208]);
-        assert_eq!(retained.due(9_999).collect::<Vec<_>>(), vec![4, 208, 250]);
-
-        assert!(retained.cuts(208));
-        assert!(!retained.cuts(209));
     }
 
     /// The rule the predecessor, the resumption record and the landing note
@@ -1906,18 +1733,16 @@ mod tests {
     #[test]
     fn a_dumps_scope_is_inheritable_and_a_tips_is_not() {
         let tip = StateScope::tip(2, 7, 3);
-        let dump = StateScope::dump(2, 4, 3);
 
-        assert!(is_inheritable(STATE_KIND_NAMES[0], &dump.descriptor()));
+        assert!(is_inheritable(
+            STATE_KIND_NAMES[0],
+            &json!({"epoch": 4, "shard": 3})
+        ));
         assert!(!is_inheritable(STATE_KIND_NAMES[0], &tip.descriptor()));
 
         for kind in EPOCH_KINDS {
             assert!(is_inheritable(kind, &json!({"epoch": 7})), "{kind}");
         }
-
-        // `digests` names an epoch nowhere in its descriptor and has no source
-        // in this slice either way.
-        assert!(!is_inheritable(DIGESTS, &json!({"lastImmutable": 3})));
 
         // A kind this profile does not define never inherits, whatever its
         // scope claims.

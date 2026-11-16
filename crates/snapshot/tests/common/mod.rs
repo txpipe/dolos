@@ -45,16 +45,15 @@ use dolos_snapshot::{
         logs::LogRecord,
         state::{self, StateRecord},
     },
-    DigestsScope, DolosProfile, EpochScope, Error, Network, Scope, StateScope, BLOCKS, DIGESTS,
-    ENTITY_KINDS, INDEXES, LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
+    DolosProfile, EpochScope, Error, Network, Scope, StateScope, BLOCKS, ENTITY_KINDS, INDEXES,
+    LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
 };
 use stelae::{
-    dir::{BlobIndex, SteleDir, WrittenLayer},
+    dir::{BlobIndex, SnapshotDir, WrittenLayer},
     frame::{CanonicalCbor, LayerHeader, Limits},
     inscription::LayerDescriptor,
-    Digest, Profile, SteleReader, SteleWriter,
+    Profile, SnapshotReader, SnapshotWriter,
 };
-use stelae_driver::digests::ImmutableDigests;
 
 pub const NETWORK_MAGIC: u64 = dolos_snapshot::MAINNET_MAGIC;
 
@@ -62,7 +61,6 @@ pub const NETWORK_MAGIC: u64 = dolos_snapshot::MAINNET_MAGIC;
 pub const EPOCH: u64 = 7;
 pub const START_SLOT: u64 = 100;
 pub const END_SLOT: u64 = 101;
-pub const LAST_IMMUTABLE: u64 = 3;
 
 /// The boundary block this stele stands at.
 pub const POINT_HASH: [u8; 32] = [0x0b; 32];
@@ -163,28 +161,6 @@ pub fn epoch_scope() -> EpochScope {
 
 pub fn state_scope(shard: u8) -> StateScope {
     StateScope::tip(NETWORK_MAGIC, EPOCH, shard)
-}
-
-/// The one retained epoch the fixture carries a dump of.
-///
-/// Below [`EPOCH`] rather than equal to it, and that is the interesting
-/// choice: a dump cut at the sequence *is* the tip, byte for byte, so a
-/// fixture that used one would write every state kind's layers again, whose
-/// digests are already pinned and freeze nothing new. A past epoch's dump has
-/// its own header, its own `diffId`, and the descriptor shape decision 0026
-/// added — which is what a golden is for.
-pub const DUMP_EPOCH: u64 = 4;
-
-pub fn dump_scope(shard: u8) -> StateScope {
-    StateScope::dump(NETWORK_MAGIC, DUMP_EPOCH, shard)
-}
-
-pub fn digests_scope() -> DigestsScope {
-    DigestsScope {
-        network_magic: NETWORK_MAGIC,
-        epoch: EPOCH,
-        last_immutable: LAST_IMMUTABLE,
-    }
 }
 
 /// Three blocks, two of which share a slot — the Byron end-of-epoch boundary
@@ -323,17 +299,6 @@ pub fn state(ns: Namespace, shard: u8) -> Vec<StateRecord> {
     }]
 }
 
-pub fn digests() -> Vec<ImmutableDigests> {
-    (0..2u64)
-        .map(|n| ImmutableDigests {
-            immutable_number: n,
-            chunk: Digest::from_bytes([0x50 | n as u8; 32]),
-            primary: Digest::from_bytes([0x60 | n as u8; 32]),
-            secondary: Digest::from_bytes([0x70 | n as u8; 32]),
-        })
-        .collect()
-}
-
 /// A key of `ns`'s log at `slot`, made from `byte`.
 pub fn log_key(ns: Namespace, slot: u64, byte: u8) -> LogKey {
     let key = state_key(ns, byte);
@@ -358,7 +323,7 @@ pub fn encode_all<T>(
 /// content.
 ///
 /// This is exactly what a `diffId` covers, so a golden computed from it is the
-/// same number `SteleDir::write_layer` puts in a descriptor —
+/// same number `SnapshotDir::write_layer` puts in a descriptor —
 /// `descriptors_match_the_per_kind_goldens` holds the two against each other.
 pub fn sequence(kind: &str, scope: &dyn Scope, records: &[CanonicalCbor]) -> Vec<u8> {
     let header = LayerHeader::new(DolosProfile.name(), kind, scope.header().unwrap())
@@ -375,7 +340,7 @@ pub fn sequence(kind: &str, scope: &dyn Scope, records: &[CanonicalCbor]) -> Vec
 }
 
 pub fn write_layer(
-    stele: &SteleDir,
+    stele: &SnapshotDir,
     kind: &str,
     scope: &dyn Scope,
     records: &[CanonicalCbor],
@@ -396,12 +361,11 @@ pub fn write_layer(
 /// what makes the goldens freeze every namespace- and kind-bearing kind
 /// string: the namespace or kind lives in the layer header, and nowhere else
 /// on the wire. A state kind appears once
-/// per populated shard in each role, dump and tip.
+/// per populated shard of the tip.
 pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
     use dolos_snapshot::layers::{
         blocks, entities as entities_layer, indexes as indexes_layer, logs,
     };
-    use stelae_driver::digests as digests_layer;
 
     let mut layers: Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> = vec![
         (
@@ -432,32 +396,17 @@ pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
         ));
     }
 
-    // Per kind, every shard of the retained dump and then every shard of the
-    // tip — the order an export writes them in, so the golden freezes the
-    // ordering rule as well as the two scope shapes. The records are the same
-    // in both; what tells the layers apart is the epoch in the header and the
-    // epoch in the descriptor scope.
+    // Per kind, every shard of the tip — the order an export writes them in,
+    // so the golden freezes the ordering rule as well as the scope shape.
     for (kind, ns, shards, _) in STATE_KINDS {
-        let populated = populated_shards(shards);
-
-        for scope in [dump_scope as fn(u8) -> StateScope, state_scope] {
-            for shard in populated.iter().copied() {
-                layers.push((
-                    kind,
-                    Box::new(scope(shard)),
-                    encode_all(&state(ns, shard), |record| state::encode(ns, record)),
-                ));
-            }
+        for shard in populated_shards(shards) {
+            layers.push((
+                kind,
+                Box::new(state_scope(shard)),
+                encode_all(&state(ns, shard), |record| state::encode(ns, record)),
+            ));
         }
     }
-
-    layers.push((
-        DIGESTS,
-        Box::new(digests_scope()),
-        encode_all(&self::digests(), |record| {
-            Ok(digests_layer::encode(record)?)
-        }),
-    ));
 
     layers
 }
@@ -469,7 +418,7 @@ pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
 /// determinism bug in the format, and this profile is the first real one to put
 /// that to the test.
 pub fn read_both_ways(
-    stele: &SteleDir,
+    stele: &SnapshotDir,
     index: &BlobIndex,
     descriptor: &LayerDescriptor,
 ) -> Vec<Vec<u8>> {

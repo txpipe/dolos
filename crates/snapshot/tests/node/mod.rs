@@ -19,16 +19,13 @@ use dolos_core::{
     import::ImportExt as _, ArchiveStore as _, ArchiveWriter as _, Domain as _, StateStore as _,
     StateWriter as _,
 };
-use dolos_snapshot::{
-    export::{self, First, Plan},
-    RetainedEpochs,
-};
+use dolos_snapshot::export::{self, First, Plan};
 use dolos_testing::{
     blocks::make_conway_block_with_prev,
     synthetic::{build_synthetic_blocks, seed_epoch_logs, seed_reward_logs, SyntheticBlockConfig},
     toy_domain::{MemoryStores, ToyDomain, ToyStores},
 };
-use stelae::{dir::SteleDir, inscription::Inscription, progress::Observer};
+use stelae::{dir::SnapshotDir, inscription::Inscription, progress::Observer};
 
 /// Preview genesis, synthetic blocks and seeded logs, all inside epoch zero.
 ///
@@ -158,7 +155,7 @@ mod registry_node {
     use dolos_snapshot::{
         export::Plan,
         registry::{self, Published, Publishing, Registry},
-        Error, RetainedEpochs,
+        Error,
     };
     use dolos_testing::toy_domain::{MemoryStores, ToyDomain};
     use stelae::progress::Observer;
@@ -186,10 +183,8 @@ mod registry_node {
             let earlier = harness::<MemoryStores>();
             let domain = harness::<MemoryStores>();
 
-            let retained = RetainedEpochs::default();
-
-            let first = plan_at_boundary(&earlier, 1, retained.clone());
-            let second = plan_at_boundary(&domain, 2, retained);
+            let first = plan_at_boundary(&earlier, 1);
+            let second = plan_at_boundary(&domain, 2);
 
             assert_eq!(
                 first.epochs[..1],
@@ -243,19 +238,12 @@ mod registry_node {
         ) -> Result<Published, Error> {
             let stores = self.stores(plan);
 
-            registry::publish(
-                publishing,
-                plan,
-                stores.archive(),
-                stores.state(),
-                None,
-                observer,
-            )
+            registry::publish(publishing, plan, stores.archive(), stores.state(), observer)
         }
 
         /// The same publish, through a writer of the caller's — the interrupted
         /// transport the resume suite kills at a layer it chose.
-        pub fn publish_through<W: stelae::SteleWriter + Sync>(
+        pub fn publish_through<W: stelae::SnapshotWriter + Sync>(
             &self,
             stele: &W,
             publishing: Publishing<'_>,
@@ -269,7 +257,6 @@ mod registry_node {
                 plan,
                 stores.archive(),
                 stores.state(),
-                None,
                 &Observer::silent(),
             )
         }
@@ -317,18 +304,13 @@ pub fn extend_archive_past_cursor<B: ToyStores>(domain: &ToyDomain<B>) -> dolos_
     next
 }
 
-/// A plan for `domain` standing on the **first block of `epoch`**, retaining
-/// the state dumps `retained` names.
+/// A plan for `domain` standing on the **first block of `epoch`**.
 ///
 /// Stores standing in an earlier epoch are moved onto that boundary first —
 /// see [`stand_at_boundary`] — so the plan is the one a publish from them would
-/// make. The harness ledger lives inside epoch zero, so this is how the dump
-/// paths, which need a sequence a retained list can name, are reached at all.
-pub fn plan_at_boundary<B: ToyStores>(
-    domain: &ToyDomain<B>,
-    epoch: u64,
-    retained: RetainedEpochs,
-) -> Plan {
+/// make. The harness ledger lives inside epoch zero, so this is how a later
+/// sequence is reached at all.
+pub fn plan_at_boundary<B: ToyStores>(domain: &ToyDomain<B>, epoch: u64) -> Plan {
     let summary = dolos_cardano::eras::load_chain_summary_from_state(domain.state()).unwrap();
     let cursor = domain.state().read_cursor().unwrap().unwrap();
 
@@ -336,7 +318,7 @@ pub fn plan_at_boundary<B: ToyStores>(
         stand_at_boundary(domain, epoch);
     }
 
-    let plan = plan_retaining(domain, retained);
+    let plan = plan_for(domain);
     assert_eq!(plan.sequence, epoch);
 
     plan
@@ -348,32 +330,27 @@ pub fn export_plan<B: ToyStores>(
     domain: &ToyDomain<B>,
     plan: &Plan,
 ) -> Inscription {
-    let stele = SteleDir::create(root).unwrap();
+    let stele = SnapshotDir::create(root).unwrap();
 
     export::export(
         &stele,
         plan,
         domain.archive(),
         domain.state(),
-        None,
         &First,
         &Observer::silent(),
     )
     .unwrap()
 }
 
-/// The publish plan for `domain`, retaining the state dumps `retained` names.
-pub fn plan_retaining<B: ToyStores>(domain: &ToyDomain<B>, retained: RetainedEpochs) -> Plan {
+/// The publish plan for `domain`, standing where its stores stand.
+pub fn plan_for<B: ToyStores>(domain: &ToyDomain<B>) -> Plan {
     export::plan(
         domain.state(),
         domain.genesis().network_magic() as u64,
-        retained,
+        dolos_cardano::mutable_slots(&domain.genesis()),
     )
     .unwrap()
-}
-
-pub fn plan_for<B: ToyStores>(domain: &ToyDomain<B>) -> Plan {
-    plan_retaining(domain, RetainedEpochs::default())
 }
 
 pub fn export_to<B: ToyStores>(root: &std::path::Path, domain: &ToyDomain<B>) -> Inscription {

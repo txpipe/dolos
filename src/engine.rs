@@ -144,7 +144,7 @@ impl<'a> DomainBuilder<'a> {
         .map_err(DomainBuildError::Chain)?;
 
         let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
-        let query_limiter = QueryLimiter::new(self.config.serve.max_concurrent_queries);
+        let query_limiter = self.config.serve.query_limiter();
         let cache = cache(query_limiter.clone())?;
 
         Ok(DomainAdapter {
@@ -256,7 +256,11 @@ impl<'a> ReplayWorkspace<'a> {
 
     /// Borrow read-only Dolos profile operations, not storage handles.
     pub fn snapshot(&self) -> impl SnapshotSource + '_ {
-        StoreSnapshot::new(&self.stores.archive, &self.stores.state)
+        StoreSnapshot::new(
+            &self.stores.archive,
+            &self.stores.state,
+            dolos_cardano::mutable_slots(&self.genesis),
+        )
     }
 
     /// Begin processing, including any pending ledger initialization.
@@ -361,7 +365,11 @@ impl BulkReplaySession {
 
     /// Borrow profile operations over the currently committed dataset.
     pub fn snapshot(&self) -> impl SnapshotSource + '_ {
-        StoreSnapshot::new(self.domain.archive(), self.domain.state())
+        StoreSnapshot::new(
+            self.domain.archive(),
+            self.domain.state(),
+            dolos_cardano::mutable_slots(&self.domain.genesis()),
+        )
     }
 
     /// Process a nonempty batch and report its committed position or boundary.

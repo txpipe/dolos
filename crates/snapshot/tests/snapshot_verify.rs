@@ -42,11 +42,11 @@ use dolos_snapshot::{
     boundary::Ineligible,
     export::{self, Following, Predecessor as _},
     registry::{self, Point, PublishRecord, Publishing},
-    DolosProfile, Error, RetainedEpochs,
+    DolosProfile, Error,
 };
 use dolos_testing::toy_domain::{MemoryStores, ToyDomain};
 use serde_json::json;
-use stelae::{Digest, SteleReader as _};
+use stelae::{Digest, SnapshotReader as _};
 
 use node::{account_layer, plan_at_boundary, settled, stake_only, write_account_row, Node};
 use registry_fixture::{Distribution, Fixture, Unanswered};
@@ -269,7 +269,6 @@ fn a_reproduction_passes_at_the_published_epoch_and_fails_at_another() {
         &node.second,
         node.domain.archive(),
         node.domain.state(),
-        None,
     )
     .unwrap();
 
@@ -280,7 +279,6 @@ fn a_reproduction_passes_at_the_published_epoch_and_fails_at_another() {
         &node.first,
         node.earlier.archive(),
         node.earlier.state(),
-        None,
     )
     .unwrap_err();
 
@@ -326,7 +324,6 @@ fn a_registry_publish_and_its_dry_run_refuse_a_cursor_past_the_boundary() {
         &plan,
         past.archive(),
         past.state(),
-        None,
     );
     assert_eq!(refused(preview.unwrap_err()), expected);
 
@@ -335,7 +332,6 @@ fn a_registry_publish_and_its_dry_run_refuse_a_cursor_past_the_boundary() {
         &plan,
         past.archive(),
         past.state(),
-        None,
         &stelae::progress::Observer::silent(),
     );
     assert_eq!(refused(publish.unwrap_err()), expected);
@@ -376,7 +372,6 @@ fn a_registry_refusal_comes_before_any_request() {
         &plan,
         past.archive(),
         past.state(),
-        None,
     );
     assert_eq!(refused(preview.unwrap_err()), expected);
 
@@ -385,7 +380,6 @@ fn a_registry_refusal_comes_before_any_request() {
         &plan,
         past.archive(),
         past.state(),
-        None,
         &stelae::progress::Observer::silent(),
     );
     assert_eq!(refused(publish.unwrap_err()), expected);
@@ -424,7 +418,7 @@ fn a_resumed_registry_publish_rebuilds_an_account_window_the_manifest_lacks() {
     let host_a: ToyDomain<MemoryStores> = node::harness();
     write_account_row(&host_a, 1, stake_only());
 
-    let cut_at_2 = plan_at_boundary(&host_a, 2, RetainedEpochs::default());
+    let cut_at_2 = plan_at_boundary(&host_a, 2);
     let dying = process();
     let interrupted = registry::publish_into(
         &SealFails(&dying),
@@ -432,19 +426,12 @@ fn a_resumed_registry_publish_rebuilds_an_account_window_the_manifest_lacks() {
         &cut_at_2,
         host_a.archive(),
         host_a.state(),
-        None,
         &stelae::progress::Observer::silent(),
     );
     assert!(interrupted.is_err(), "the seal was meant to fail");
 
-    let stale = export::reproduce(
-        &cut_at_2,
-        host_a.archive(),
-        host_a.state(),
-        None,
-        &export::First,
-    )
-    .unwrap();
+    let stale =
+        export::reproduce(&cut_at_2, host_a.archive(), host_a.state(), &export::First).unwrap();
     let stale = account_layer(&stale, 1);
 
     // The record was written through the wrapper the registry publishes with.
@@ -476,13 +463,12 @@ fn a_resumed_registry_publish_rebuilds_an_account_window_the_manifest_lacks() {
 
     let host_b: ToyDomain<MemoryStores> = node::harness();
     for sequence in [2, 3] {
-        let plan = plan_at_boundary(&host_b, sequence, RetainedEpochs::default());
+        let plan = plan_at_boundary(&host_b, sequence);
         registry::publish(
             Publishing::new(&process()),
             &plan,
             host_b.archive(),
             host_b.state(),
-            None,
             &stelae::progress::Observer::silent(),
         )
         .unwrap();
@@ -505,24 +491,17 @@ fn a_resumed_registry_publish_rebuilds_an_account_window_the_manifest_lacks() {
     // Through 3 as B went, so the two hosts hold the same chain.
     node::stand_at_boundary(&host_a, 3);
     write_account_row(&host_a, 1, settled());
-    let cut_at_4 = plan_at_boundary(&host_a, 4, RetainedEpochs::default());
+    let cut_at_4 = plan_at_boundary(&host_a, 4);
 
     let resumed = process();
     let resuming = || Publishing::new(&resumed).recording_in(&record_path);
-    let preview = registry::preview(
-        resuming(),
-        &cut_at_4,
-        host_a.archive(),
-        host_a.state(),
-        None,
-    )
-    .unwrap();
+    let preview =
+        registry::preview(resuming(), &cut_at_4, host_a.archive(), host_a.state()).unwrap();
     let published = registry::publish(
         resuming(),
         &cut_at_4,
         host_a.archive(),
         host_a.state(),
-        None,
         &stelae::progress::Observer::silent(),
     )
     .unwrap();
@@ -539,7 +518,6 @@ fn a_resumed_registry_publish_rebuilds_an_account_window_the_manifest_lacks() {
         &cut_at_4,
         host_a.archive(),
         host_a.state(),
-        None,
     )
     .unwrap();
     assert_eq!(reproduced.digest().unwrap(), published.identity);
@@ -609,7 +587,6 @@ fn a_prepared_batch_publishes_what_direct_publishes_do() {
                 producers: export::Producers::DEFAULT,
             },
             node.domain.archive(),
-            None,
             &silent,
         )
         .unwrap();
@@ -634,8 +611,8 @@ fn a_prepared_batch_publishes_what_direct_publishes_do() {
 /// and the stele never becomes readable.
 struct SealFails<'a>(&'a stelae::oci::Registry);
 
-impl stelae::SteleWriter for SealFails<'_> {
-    type Sink = <stelae::oci::Registry as stelae::SteleWriter>::Sink;
+impl stelae::SnapshotWriter for SealFails<'_> {
+    type Sink = <stelae::oci::Registry as stelae::SnapshotWriter>::Sink;
 
     fn layer_sink(
         &self,
@@ -723,7 +700,6 @@ fn an_inspection_reports_the_manifest_and_its_json_chains_a_digest() {
         &node.second,
         node.domain.archive(),
         node.domain.state(),
-        None,
         &following,
     )
     .unwrap();

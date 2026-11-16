@@ -25,15 +25,16 @@ use dolos_core::{
 };
 use serde::{Deserialize, Serialize};
 use stelae::{
-    dir::{SteleDir, BLOBS_DIR},
+    dir::{SnapshotDir, BLOBS_DIR},
     frame::{CanonicalCbor, Limits},
     inscription::{Inscription, LayerDescriptor},
     profile::Profile,
     progress::{Observer, Outcome},
-    transport::{BlobIndex, LayerSpec, RecordSink, SteleReader as _, SteleWriter, WrittenLayer},
+    transport::{
+        BlobIndex, LayerSpec, RecordSink, SnapshotReader as _, SnapshotWriter, WrittenLayer,
+    },
     Digest,
 };
-use stelae_driver::digests;
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::{
@@ -42,13 +43,13 @@ use crate::{
     reporting::Cursor,
     scope_key,
     staging::{self, sync_dir, Budget, Capture, Family, Runs, Staged},
-    state_layer_count, DolosProfile, Error, Network, RetainedEpochs, Scope as _, COMPRESSION_LEVEL,
-    ENTITY_KINDS, INDEXES, LOG_KINDS, MAX_RECORD, MEDIA_TYPE_VERSION, PROFILE_NAME,
-    PROFILE_VERSION, STATE_KINDS,
+    state_layer_count, DolosProfile, Error, Network, Scope as _, COMPRESSION_LEVEL, ENTITY_KINDS,
+    INDEXES, LOG_KINDS, MAX_RECORD, MEDIA_TYPE_VERSION, PROFILE_NAME, PROFILE_VERSION, STATE_KINDS,
 };
 
-/// Version of the bundle manifest and its layout.
-pub const BUNDLE_FORMAT: u32 = 1;
+/// Version of the bundle manifest and its layout. Format 2 drops the retained
+/// list from the identity; a format-1 bundle is refused rather than read.
+pub const BUNDLE_FORMAT: u32 = 2;
 
 /// The level payloads are compressed at on their way to the store. Identity is
 /// the uncompressed digest, so this trades scratch for preparation time and
@@ -143,9 +144,11 @@ struct Identity {
     sequence: u64,
     cursor: (BlockSlot, String),
     store_contract: String,
-    retained: Vec<u64>,
     windows: Vec<EpochWindow>,
     mutable_slots: u64,
+    /// The plan's `position.blocks`. Left out when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    blocks: Option<Digest>,
 }
 
 impl Identity {
@@ -158,12 +161,12 @@ impl Identity {
                 "store contract",
                 self.store_contract != other.store_contract,
             ),
-            ("retained list", self.retained != other.retained),
             ("set of windows", self.windows != other.windows),
             (
                 "mutable slot count",
                 self.mutable_slots != other.mutable_slots,
             ),
+            ("blocks reference", self.blocks != other.blocks),
         ]
         .into_iter()
         .find_map(|(what, differs)| differs.then_some(what))
@@ -216,7 +219,6 @@ fn checksum(manifest: &Manifest) -> Result<u64, serde_json::Error> {
 pub struct Bundle {
     manifest: Manifest,
     cursor: ChainPoint,
-    retained: RetainedEpochs,
     index: BlobIndex,
     layers: BTreeMap<(String, String), usize>,
 }
@@ -230,9 +232,6 @@ impl Bundle {
             .ok()
             .and_then(|raw| raw.try_into().ok())
             .ok_or_else(|| corrupt(sequence, "the cursor hash is not 32 hex-encoded bytes"))?;
-
-        let retained = RetainedEpochs::new(manifest.identity.retained.clone())
-            .map_err(|e| corrupt(sequence, e))?;
 
         let layers = manifest
             .layers
@@ -253,7 +252,6 @@ impl Bundle {
 
         Ok(Self {
             cursor: ChainPoint::Specific(*slot, hash.into()),
-            retained,
             index,
             layers,
             manifest,
@@ -318,16 +316,18 @@ impl Bundle {
         by_blob.values().sum()
     }
 
-    /// The plan this boundary was prepared for, without its execution knobs.
+    /// The plan this boundary was prepared for, with the blocks reference it
+    /// was prepared with and without its execution knobs.
     pub fn plan(&self) -> Plan {
         Plan {
             network: Network::for_magic(self.network_magic()),
             cursor: self.cursor.clone(),
             sequence: self.sequence(),
             epochs: self.manifest.identity.windows.clone(),
-            retained: self.retained.clone(),
+            mutable_slots: self.mutable_slots(),
             scratch: None,
             producers: Producers::DEFAULT,
+            blocks: self.manifest.identity.blocks,
         }
     }
 
@@ -346,7 +346,7 @@ impl Bundle {
 pub struct Store {
     root: PathBuf,
     owner: String,
-    blobs: SteleDir,
+    blobs: SnapshotDir,
 }
 
 impl Store {
@@ -354,7 +354,7 @@ impl Store {
     /// dropping any payload a crash left half-written.
     pub fn open(root: impl Into<PathBuf>, owner: impl Into<String>) -> Result<Self, Error> {
         let root = root.into();
-        let blobs = SteleDir::create(&root)?;
+        let blobs = SnapshotDir::create(&root)?;
 
         fs::create_dir_all(root.join(BUNDLES_DIR)).map_err(io)?;
 
@@ -603,7 +603,7 @@ impl<S: RecordSink> RecordSink for CapturingSink<S> {
     }
 }
 
-impl<W: SteleWriter> SteleWriter for Capturing<'_, W> {
+impl<W: SnapshotWriter> SnapshotWriter for Capturing<'_, W> {
     type Sink = CapturingSink<W::Sink>;
 
     fn layer_sink(
@@ -677,8 +677,6 @@ pub fn prepare<A: ArchiveStore, S: StateStore>(
     // and its settled account rows, whatever the seal says.
     let capture_from = oldest_unsealed.min(plan.sequence.saturating_sub(1));
 
-    // The tip is the retained dump a publication cuts at this boundary: one
-    // payload, described twice when the publication is assembled.
     let capture = Plan {
         epochs: plan
             .epochs
@@ -686,7 +684,6 @@ pub fn prepare<A: ArchiveStore, S: StateStore>(
             .filter(|window| window.epoch >= capture_from)
             .copied()
             .collect(),
-        retained: RetainedEpochs::default(),
         ..plan.clone()
     };
 
@@ -758,7 +755,7 @@ fn capture_layers<W, A, S>(
     observer: &Observer,
 ) -> Result<Vec<WrittenLayer>, Error>
 where
-    W: SteleWriter + Sync,
+    W: SnapshotWriter + Sync,
     A: ArchiveStore,
     S: StateStore,
 {
@@ -816,7 +813,6 @@ where
                 ns,
                 shards,
                 shard_byte,
-                &First,
                 cursor_ref,
             )
         }));
@@ -908,9 +904,9 @@ fn identity_of(plan: &Plan, request: &Request<'_>) -> Result<Identity, Error> {
         sequence: plan.sequence,
         cursor: (plan.cursor.slot(), hex::encode(hash)),
         store_contract: request.store_contract.clone(),
-        retained: plan.retained.as_slice().to_vec(),
         windows: plan.epochs.clone(),
         mutable_slots: request.mutable_slots,
+        blocks: plan.blocks,
     })
 }
 
@@ -936,7 +932,7 @@ fn check_delta(delta: &ArchiveIndexDelta, plan: &Plan) -> Result<(), Error> {
 
 /// The boundary's own `indexes` layer: the one block the boundary check proved
 /// is all its window holds.
-fn write_tail<W: SteleWriter, A: ArchiveStore>(
+fn write_tail<W: SnapshotWriter, A: ArchiveStore>(
     stele: &W,
     plan: &Plan,
     archive: &A,
@@ -1069,7 +1065,7 @@ impl Prepared<'_> {
     /// Stream a payload into `spec`'s layer of `stele`. The payload is held to
     /// its descriptor before the sink is finished, so a damaged one produces no
     /// layer.
-    pub(crate) fn replay<W: SteleWriter>(
+    pub(crate) fn replay<W: SnapshotWriter>(
         &self,
         stele: &W,
         spec: &LayerSpec,
@@ -1256,12 +1252,11 @@ pub fn finalize<W, A>(
     stele: &W,
     finalizing: &Finalizing<'_>,
     archive: &A,
-    digest_records: Option<&[digests::ImmutableDigests]>,
     previous: &dyn Predecessor,
     observer: &Observer,
 ) -> Result<Inscription, Error>
 where
-    W: SteleWriter + Sync,
+    W: SnapshotWriter + Sync,
     A: ArchiveStore,
 {
     let Finalizing {
@@ -1292,7 +1287,6 @@ where
         &Source::<MemoryStateStore>::Prepared(&prepared),
         Runs::new(staged, declined.as_ref().map(|declined| declined.staged())),
         &adopted,
-        digest_records,
         previous,
         observer,
     )

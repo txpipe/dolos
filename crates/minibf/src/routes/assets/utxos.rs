@@ -12,7 +12,7 @@ use crate::{
     error::Error,
     mapping::assets::resolve_asset,
     pagination::{Pagination, PaginationError, PaginationNumberAndIndex, PaginationParameters},
-    routes::utxos::load_tag_page_in_slots,
+    utxos::load_tag_page_in_slots,
     Facade,
 };
 

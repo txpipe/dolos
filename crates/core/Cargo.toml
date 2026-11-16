@@ -17,7 +17,7 @@ futures-util.workspace = true
 rayon.workspace = true
 
 # TODO: we shouldn't need Tokio in core
-tokio.workspace = true
+tokio = { workspace = true, features = ["time"] }
 tokio-stream.workspace = true
 
 # TODO: we shouldn't need Pallas in core

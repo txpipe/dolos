@@ -79,9 +79,9 @@ impl Stele {
     }
 
     fn digest(&self) -> Digest {
-        use stelae::SteleReader as _;
+        use stelae::SnapshotReader as _;
 
-        stelae::dir::SteleDir::open(self.path())
+        stelae::dir::SnapshotDir::open(self.path())
             .unwrap()
             .read_inscription()
             .unwrap()
@@ -244,8 +244,8 @@ fn the_source_record_names_the_source_the_sequence_and_the_digest() {
         serde_json::from_slice(&std::fs::read(source_path_in(storage.path())).unwrap()).unwrap();
 
     let inscription = {
-        use stelae::SteleReader as _;
-        stelae::dir::SteleDir::open(stele.path())
+        use stelae::SnapshotReader as _;
+        stelae::dir::SnapshotDir::open(stele.path())
             .unwrap()
             .read_inscription()
             .unwrap()

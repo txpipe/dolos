@@ -17,7 +17,7 @@ use crate::{
     prepare::{self, Bundle, Finalizing},
     registry::{self, Preview, Published, Publishing},
     staging::{Budget, Staged},
-    Error, RetainedEpochs,
+    Error,
 };
 
 /// The selection shared by publication, digest and reproduction.
@@ -43,16 +43,11 @@ impl Selection {
 pub trait SnapshotSource {
     fn committed_position(&self) -> Result<Option<ChainPoint>, Error>;
     fn epoch(&self) -> Result<Option<u64>, Error>;
-    fn plan(&self, network_magic: u64, retained: RetainedEpochs) -> Result<Plan, Error>;
+    fn plan(&self, network_magic: u64) -> Result<Plan, Error>;
 
     /// Build and select a plan in the same way for every snapshot operation.
-    fn selected_plan(
-        &self,
-        network_magic: u64,
-        retained: RetainedEpochs,
-        selection: Selection,
-    ) -> Result<Plan, Error> {
-        Ok(selection.apply(self.plan(network_magic, retained)?))
+    fn selected_plan(&self, network_magic: u64, selection: Selection) -> Result<Plan, Error> {
+        Ok(selection.apply(self.plan(network_magic)?))
     }
 
     /// Establish that `plan` stands on the first block of its sequence epoch.
@@ -135,11 +130,18 @@ pub trait SnapshotSource {
 pub struct StoreSnapshot<'a, A, S> {
     archive: &'a A,
     state: &'a S,
+    mutable_slots: u64,
 }
 
 impl<'a, A: ArchiveStore, S: StateStore> StoreSnapshot<'a, A, S> {
-    pub fn new(archive: &'a A, state: &'a S) -> Self {
-        Self { archive, state }
+    /// A view of `archive` and `state`, on a chain whose genesis has
+    /// `mutable_slots` as its `3k/f` (`dolos_cardano::mutable_slots`).
+    pub fn new(archive: &'a A, state: &'a S, mutable_slots: u64) -> Self {
+        Self {
+            archive,
+            state,
+            mutable_slots,
+        }
     }
 }
 
@@ -162,8 +164,8 @@ impl<A: ArchiveStore, S: StateStore> SnapshotSource for StoreSnapshot<'_, A, S> 
         Ok(Some(summary.slot_epoch(position.slot()).0))
     }
 
-    fn plan(&self, network_magic: u64, retained: RetainedEpochs) -> Result<Plan, Error> {
-        export::plan(self.state, network_magic, retained)
+    fn plan(&self, network_magic: u64) -> Result<Plan, Error> {
+        export::plan(self.state, network_magic, self.mutable_slots)
     }
 
     fn boundary(&self, plan: &Plan) -> Result<Boundary, Error> {
@@ -176,7 +178,7 @@ impl<A: ArchiveStore, S: StateStore> SnapshotSource for StoreSnapshot<'_, A, S> 
         plan: &Plan,
         observer: &Observer,
     ) -> Result<Inscription, Error> {
-        export::publish(destination, plan, self.archive, self.state, None, observer)
+        export::publish(destination, plan, self.archive, self.state, observer)
     }
 
     fn digest_document(&self, plan: &Plan, previous: &dyn Predecessor) -> Result<Document, Error> {
@@ -188,7 +190,7 @@ impl<A: ArchiveStore, S: StateStore> SnapshotSource for StoreSnapshot<'_, A, S> 
         published: &Inscription,
         plan: &Plan,
     ) -> Result<Inscription, Error> {
-        export::verify_reproduction(published, plan, self.archive, self.state, None)
+        export::verify_reproduction(published, plan, self.archive, self.state)
     }
 
     fn preview_repository(
@@ -196,7 +198,7 @@ impl<A: ArchiveStore, S: StateStore> SnapshotSource for StoreSnapshot<'_, A, S> 
         publishing: Publishing<'_>,
         plan: &Plan,
     ) -> Result<Preview, Error> {
-        registry::preview(publishing, plan, self.archive, self.state, None)
+        registry::preview(publishing, plan, self.archive, self.state)
     }
 
     fn publish_repository(
@@ -205,7 +207,7 @@ impl<A: ArchiveStore, S: StateStore> SnapshotSource for StoreSnapshot<'_, A, S> 
         plan: &Plan,
         observer: &Observer,
     ) -> Result<Published, Error> {
-        registry::publish(publishing, plan, self.archive, self.state, None, observer)
+        registry::publish(publishing, plan, self.archive, self.state, observer)
     }
 
     fn prepare_boundary(
@@ -246,7 +248,6 @@ impl<A: ArchiveStore, S: StateStore> SnapshotSource for StoreSnapshot<'_, A, S> 
             &stelae::Discarding,
             finalizing,
             self.archive,
-            None,
             previous,
             &Observer::silent(),
         )?;
@@ -260,6 +261,6 @@ impl<A: ArchiveStore, S: StateStore> SnapshotSource for StoreSnapshot<'_, A, S> 
         finalizing: &Finalizing<'_>,
         observer: &Observer,
     ) -> Result<Published, Error> {
-        registry::publish_prepared(publishing, finalizing, self.archive, None, observer)
+        registry::publish_prepared(publishing, finalizing, self.archive, observer)
     }
 }

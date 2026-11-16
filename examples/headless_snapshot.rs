@@ -5,13 +5,11 @@
 //!
 //! ```text
 //! cargo run --no-default-features --example headless_snapshot -- \
-//!   ./dolos.toml ./stele [208,236,290]
+//!   ./dolos.toml ./stele
 //! ```
 //!
-//! The optional third argument is the publisher's retained state-dump epochs;
-//! omitted, the stele retains the tip alone. The destination must not already
-//! contain a stele. Progress rendering and destination cleanup remain host
-//! responsibilities.
+//! The destination must not already contain a stele. Progress rendering and
+//! destination cleanup remain host responsibilities.
 //!
 //! The stores must stand on the first block of an epoch, with the archive
 //! ending there, as a sync stopped at that epoch leaves them; any other cut is
@@ -34,16 +32,6 @@ fn main() -> Result<(), AnyError> {
     let mut args = std::env::args_os().skip(1);
     let config_path = args.next().ok_or("missing path to dolos.toml")?;
     let destination = args.next().ok_or("missing output directory")?;
-    let state_epochs: Vec<u64> = match args.next() {
-        Some(list) => list
-            .to_str()
-            .ok_or("state epochs are not valid UTF-8")?
-            .split(',')
-            .map(str::parse)
-            .collect::<Result<_, _>>()?,
-        None => Vec::new(),
-    };
-
     let config = dolos::core::config::load(Some(Path::new(&config_path)))?;
     let genesis = Arc::new(ResolvedNetwork::resolve(&config.chain)?.genesis()?);
 
@@ -53,12 +41,8 @@ fn main() -> Result<(), AnyError> {
 
     let snapshot_result = (|| -> Result<(), AnyError> {
         let snapshot = workspace.snapshot();
-        let retained = dolos_snapshot::planning::retained_epochs(&state_epochs)?;
-        let plan = snapshot.selected_plan(
-            u64::from(genesis.network_magic()),
-            retained,
-            Selection::default(),
-        )?;
+        let plan =
+            snapshot.selected_plan(u64::from(genesis.network_magic()), Selection::default())?;
 
         let inscription =
             snapshot.publish_directory(Path::new(&destination), &plan, &Observer::silent())?;

@@ -5,7 +5,7 @@ use axum::{
     http::{header, HeaderMap, Method, Request, StatusCode},
     Router,
 };
-use dolos_core::{config::MinikupoConfig, import::ImportExt as _, Domain};
+use dolos_core::{config::MinikupoConfig, import::ImportExt as _, Domain, QueryLimiter};
 use dolos_testing::{
     synthetic::{build_synthetic_blocks, SyntheticBlockConfig, SyntheticVectors},
     toy_domain::ToyDomain,
@@ -146,6 +146,36 @@ impl TestApp {
         }
     }
 
+    /// App on a query limiter of `limiter` whose requests time out after
+    /// `request_timeout_seconds`.
+    pub fn new_admitting(
+        fault: Option<TestFault>,
+        limiter: QueryLimiter,
+        request_timeout_seconds: u64,
+    ) -> Self {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+        let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
+        let domain = dolos_testing::faults::FaultyToyDomain::new(
+            domain.with_query_limiter(limiter),
+            fault.unwrap_or_default(),
+        );
+
+        let router = build_router_with_facade(Facade {
+            inner: domain.clone(),
+            config: test_config().with_request_timeout_seconds(request_timeout_seconds),
+        });
+
+        Self {
+            router,
+            domain,
+            vectors,
+        }
+    }
+
     pub async fn get_response(&self, path: &str) -> (StatusCode, HeaderMap, Vec<u8>) {
         self.get_response_with_accept(path, None).await
     }
@@ -196,8 +226,5 @@ impl TestApp {
 }
 
 fn test_config() -> MinikupoConfig {
-    MinikupoConfig {
-        listen_address: "[::]:0".parse().expect("invalid listen address"),
-        permissive_cors: None,
-    }
+    MinikupoConfig::new("[::]:0".parse().expect("invalid listen address"))
 }

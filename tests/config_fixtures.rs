@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use dolos_cardano::networks::{KnownNetwork, ResolvedNetwork};
 use dolos_core::config::{
@@ -145,6 +146,8 @@ fn the_full_reference_parses() {
 
     let serve = &config.serve;
     assert_eq!(serve.max_concurrent_queries, 32);
+    assert_eq!(serve.max_concurrent_heavy_scans, 32);
+    assert_eq!(serve.heavy_scan_queue_seconds, 5);
 
     let grpc = serve.grpc.as_ref().unwrap();
     assert_eq!(grpc.listen_address, "[::]:50051");
@@ -175,10 +178,12 @@ fn the_full_reference_parses() {
         minibf.ipfs_gateways(),
         ["https://ipfs.io", "https://gateway.pinata.cloud"]
     );
+    assert_eq!(minibf.request_timeout(), Duration::from_secs(120));
 
     let minikupo = serve.minikupo.as_ref().unwrap();
     assert_eq!(minikupo.listen_address, "[::]:1442".parse().unwrap());
     assert!(minikupo.permissive_cors());
+    assert_eq!(minikupo.request_timeout(), Duration::from_secs(120));
 
     let ouroboros = serve.ouroboros.as_ref().unwrap();
     assert_eq!(ouroboros.listen_path, PathBuf::from("./dolos.socket"));
@@ -288,6 +293,8 @@ fn omitted_sections_take_their_defaults() {
     assert!(!config.mempool.persistent);
     assert_eq!(config.mempool.retain_confirmed_blocks, 6);
     assert_eq!(config.serve.max_concurrent_queries, 32);
+    assert_eq!(config.serve.max_concurrent_heavy_scans, 32);
+    assert_eq!(config.serve.heavy_scan_queue_seconds, 5);
     assert!(config.serve.grpc.is_none() && config.serve.minibf.is_none());
     assert!(config.relay.is_none());
     assert_eq!(config.logging.level, tracing::Level::INFO);
@@ -347,6 +354,18 @@ fn each_rule_refuses_its_fixture() {
             "fractional-concurrent-queries",
             "floating point `64.4`, expected a non-negative whole number for key \
              `serve.max_concurrent_queries`",
+        ),
+        (
+            "no-heavy-scans",
+            "`serve.max_concurrent_heavy_scans` must be between 1 and 64, found 0",
+        ),
+        (
+            "long-heavy-scan-queue",
+            "`serve.heavy_scan_queue_seconds` must be between 0 and 60, found 61",
+        ),
+        (
+            "zero-request-timeout",
+            "`serve.minikupo.request_timeout_seconds` must be between 1 and 3600, found 0",
         ),
         (
             "ephemeral-store-with-a-path",
@@ -1395,6 +1414,9 @@ fn nested_environment_variables_override_the_file() {
         ("DOLOS_UPSTREAM__PEER_ADDRESS", "relay.example:3001"),
         ("DOLOS_SERVE__MINIBF__LISTEN_ADDRESS", "127.0.0.1:4000"),
         ("DOLOS_SERVE__MAX_CONCURRENT_QUERIES", "8"),
+        ("DOLOS_SERVE__MAX_CONCURRENT_HEAVY_SCANS", "2"),
+        ("DOLOS_SERVE__HEAVY_SCAN_QUEUE_SECONDS", "0"),
+        ("DOLOS_SERVE__MINIBF__REQUEST_TIMEOUT_SECONDS", "30"),
         ("DOLOS_MITHRIL_AGGREGATOR", "https://aggregator.example"),
         ("DOLOS_COMPATIBILITY", "v2-alpha.0"),
     ]
@@ -1411,6 +1433,17 @@ fn nested_environment_variables_override_the_file() {
         "127.0.0.1:4000".parse().unwrap()
     );
     assert_eq!(config.serve.max_concurrent_queries, 8);
+    assert_eq!(config.serve.max_concurrent_heavy_scans, 2);
+    assert_eq!(config.serve.heavy_scan_queue_seconds, 0);
+    assert_eq!(
+        config.serve.minibf.as_ref().unwrap().request_timeout(),
+        Duration::from_secs(30)
+    );
+
+    let limiter = config.serve.query_limiter();
+    assert_eq!(limiter.cap(), 8);
+    assert_eq!(limiter.heavy_limit(), 2);
+    assert_eq!(limiter.heavy_queue(), Duration::ZERO);
     assert_eq!(config.compatibility().as_str(), "v2-alpha.2");
 }
 

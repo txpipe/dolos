@@ -15,7 +15,7 @@ before the replay advances. This contract separates the work:
 `export::export`, and every path through it (directory and registry publication,
 digest, reproduction), is the batch of one: see
 [Batch of one](#batch-of-one). A publication has exactly the canonical content
-the old exporter gave it at the same point, predecessor and retained list. No
+the old exporter gave it at the same point and predecessor. No
 stored schema, layer format, published byte or protocol rule changes.
 
 The sections below cover the facade, then boundary preparation, then index
@@ -77,8 +77,6 @@ when the boundary is prepared:
 | Layer | Window | Source |
 |---|---|---|
 | `state-*` tip shards | | The bundle. |
-| retained dump at `P` | | The tip's payload, described a second time (`carry_again`). |
-| retained dump below `P` | | The predecessor, or left out with a warning, as before. |
 | `blocks` | `P` | The bundle. |
 | `blocks` | closed | The final archive: closed blocks do not change. |
 | `indexes` | `P`, the live-boundary tail | The bundle. |
@@ -126,8 +124,8 @@ writer at a time:
 The **manifest** (`BUNDLE_FORMAT`) holds:
 
 - its **identity**: format, profile and version, media type version, network
-  magic, sequence, cursor slot and hash, store contract, retained list, the plan's
-  windows and `mutable_slots`;
+  magic, sequence, cursor slot and hash, store contract, the plan's windows and
+  `mutable_slots`;
 - its **owner**, the journal the host names when it opens the store;
 - its **capture id**: random, new on every capture, and kept by a bundle `prepare`
   finds held. Staged runs name the captures they were staged for (see

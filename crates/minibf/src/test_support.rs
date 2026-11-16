@@ -505,6 +505,11 @@ impl<B: ToyStores> TestDomainBuilder<B> {
     }
 }
 
+/// Taken by tests whose submit timing matters. Submission holds a
+/// process-wide lock (`dolos_core::submit`), so a submit held in one test
+/// would otherwise delay or cut a submit in another.
+pub static SUBMIT_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub struct TestApp {
     router: Router,
     facade: Facade<dolos_testing::faults::FaultyToyDomain>,
@@ -620,6 +625,24 @@ impl TestApp {
         let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"))
             .with_max_scan_items(max_scan_items);
         Self::from_domain(domain, vectors, None, minibf)
+    }
+
+    /// App on a query limiter of `limiter` whose requests time out after
+    /// `request_timeout_seconds`.
+    pub fn new_admitting(
+        fault: Option<TestFault>,
+        limiter: QueryLimiter,
+        request_timeout_seconds: u64,
+    ) -> Self {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+        let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
+        let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"))
+            .with_request_timeout_seconds(request_timeout_seconds);
+        Self::from_domain(domain.with_query_limiter(limiter), vectors, fault, minibf)
     }
 
     /// App over `domain`, its chain described by `vectors`.

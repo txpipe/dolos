@@ -46,6 +46,12 @@ $ curl "http://localhost:1442/matches/addr1vyc29pvl2uyzqt8nwxrcxnf558ffm27u3d9ca
 - When using `asset_name`, you must also provide `policy_id`.
 - When using `output_index`, you must also provide `transaction_id`.
 
+### Heavy matches
+
+Every pattern but an output reference (`{index}@{tx}`, `*@{tx}`) scans an index: matches by address, payment or delegation credential, stake address, policy or asset. These share one limit with MiniBF's [heavy scans](./minibf#heavy-scans), `serve.max_concurrent_heavy_scans` requests at once (32 by default). A heavy match that finds every slot taken waits up to `serve.heavy_scan_queue_seconds` (5 by default) and is then answered `503 Service Unavailable`, with `Retry-After: 1` and a `hint`. Output-reference matches and the other routes are never refused by this limit.
+
+Every request answers `504 Gateway Timeout`, with a `hint`, once it runs past `request_timeout_seconds` (120 by default).
+
 ### Health and Prometheus output
 
 The `/health` endpoint returns JSON by default. If you send `Accept: text/plain`, it returns Prometheus-formatted output instead:
@@ -62,9 +68,11 @@ The `serve.minikupo` section controls the options for the MiniKupo endpoint that
 |-----------------|---------|----------------|
 | listen_address  | string  | "[::]:1442"   |
 | permissive_cors | boolean | true           |
+| request_timeout_seconds | integer | 120     |
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming connections (`[::]` represents any IP address).
 - `permissive_cors`: allow cross-origin requests from any origin.
+- `request_timeout_seconds`: the deadline of every request, the wait for a heavy-match slot included; past it the request is answered `504 Gateway Timeout`.
 
 This is an example of the `serve.minikupo` fragment with a `dolos.toml` configuration file.
 

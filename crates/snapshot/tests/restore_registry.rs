@@ -70,11 +70,11 @@ use registry_fixture::{Distribution, Fixture};
 use stelae::{
     frame::Limits,
     inscription::LayerDescriptor,
-    oci::{Auth, Registry, Stele},
+    oci::{Auth, Registry, Snapshot},
     plan::RestoreProgress,
     progress::{Observer, Outcome},
     transport::BlobIndex,
-    Digest, LayerReader, Profile, SteleReader,
+    Digest, LayerReader, Profile, SnapshotReader,
 };
 
 use watcher::Watcher;
@@ -117,8 +117,8 @@ impl Node {
 
         let magic = u64::from(domain.genesis().network_magic());
 
-        let first = plan_at_boundary(&earlier, 1, Default::default());
-        let second = plan_at_boundary(&domain, 2, Default::default());
+        let first = plan_at_boundary(&earlier, 1);
+        let second = plan_at_boundary(&domain, 2);
 
         Self {
             earlier,
@@ -146,7 +146,6 @@ impl Node {
             plan,
             stores.archive(),
             stores.state(),
-            None,
             &Observer::silent(),
         )
         .unwrap();
@@ -244,14 +243,13 @@ fn a_registry_restore_is_a_directory_restore() {
     let from_dir = Blank::<MemoryStores>::open();
 
     {
-        let stele = stelae::dir::SteleDir::create(dir.path()).unwrap();
+        let stele = stelae::dir::SnapshotDir::create(dir.path()).unwrap();
 
         dolos_snapshot::export::export(
             &stele,
             &node.first,
             node.earlier.archive(),
             node.earlier.state(),
-            None,
             &dolos_snapshot::export::First,
             &Observer::silent(),
         )
@@ -805,11 +803,11 @@ fn a_node_authenticates_with_the_credentials_it_was_given() {
 /// so the interrupted run committed exactly the layers ahead of that one and
 /// nothing of it.
 struct Interrupted<'a> {
-    inner: &'a Stele,
+    inner: &'a Snapshot,
     stop_at: Digest,
 }
 
-impl SteleReader for Interrupted<'_> {
+impl SnapshotReader for Interrupted<'_> {
     type Blob = std::fs::File;
 
     fn read_inscription(&self) -> Result<stelae::inscription::Inscription, stelae::Error> {
