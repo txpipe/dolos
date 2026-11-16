@@ -10,7 +10,7 @@ use dolos_core::{
 use miette::{Context, IntoDiagnostic};
 use serde::Serialize;
 
-use super::Positions;
+use super::{position, Applied, Positions};
 use crate::feedback::Feedback;
 use crate::output::{emit, FormatArgs, Unhealthy};
 
@@ -38,9 +38,9 @@ struct Status {
     /// prints: a WAL holding only Origin is empty there, not at slot 0.
     #[serde(skip)]
     wal_applied: Option<BlockSlot>,
-    /// The slot the state has applied the chain through, as for the WAL.
+    /// How far the state has applied the chain, as for the WAL.
     #[serde(skip)]
-    state_applied: Option<BlockSlot>,
+    state_applied: Option<Applied>,
 }
 
 #[derive(Debug, Serialize)]
@@ -91,7 +91,7 @@ impl fmt::Display for Status {
             _ => writeln!(f, "wal        empty")?,
         }
 
-        writeln!(f, "state      {}", slot(self.state_applied))?;
+        writeln!(f, "state      {}", position(self.state_applied))?;
 
         if self.archive_kept {
             writeln!(f, "archive    {}", slot(self.cursors.archive.tip_slot))?;
@@ -199,7 +199,7 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         rollback_window,
         integrity,
         healthy,
-        wal_applied: positions.wal(),
+        wal_applied: positions.wal().map(|at| at.slot),
         state_applied: positions.state(),
     };
 
