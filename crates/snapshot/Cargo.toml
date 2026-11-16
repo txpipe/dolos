@@ -22,7 +22,7 @@ edition.workspace = true
 # directory as an OCI image layout (txpipe/stelae#36), over the diff chain:
 # inscriptions listing their own layers in `diff` and `tip`, linked by
 # `previous`. It also holds the blocks profile and its plain writer
-# (txpipe/stelae#34).
+# (txpipe/stelae#29).
 stelae = { git = "https://github.com/txpipe/stelae", rev = "b2735ed829cbafdc57273a42871510aa564b00b3", features = ["oci"] }
 stelae-driver = { git = "https://github.com/txpipe/stelae", rev = "b2735ed829cbafdc57273a42871510aa564b00b3", features = ["oci"] }
 # The `io.txpipe.cardano.blocks` profile, which a restore reads the closed
