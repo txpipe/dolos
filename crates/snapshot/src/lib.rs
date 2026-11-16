@@ -755,6 +755,23 @@ pub enum Error {
     )]
     TipGone { sequence: u64, tag: String },
 
+    /// A stele whose closed epochs' blocks are in a blocks snapshot this
+    /// restore has no repository for, or whose repository does not hold it.
+    #[error("this stele's blocks are in blocks snapshot {reference}, and {reason}")]
+    BlocksMissing { reference: Digest, reason: String },
+
+    /// A blocks repository whose snapshot at the stele's sequence is not the
+    /// one the stele's `position.blocks` names.
+    #[error(
+        "this stele names blocks snapshot {expected}, and the blocks repository holds {found} at \
+         its sequence"
+    )]
+    BlocksMismatch { expected: Digest, found: Digest },
+
+    /// A refusal of the blocks profile this enum does not name itself.
+    #[error("blocks profile: {0}")]
+    Blocks(stelae_blocks::Error),
+
     /// A reproduction that arrived at a different answer than the published
     /// stele it recomputed.
     ///
@@ -903,6 +920,21 @@ impl From<stelae_driver::Error> for Error {
                 field: format!("layers[{kind}]"),
                 reason,
             },
+        }
+    }
+}
+
+/// The blocks profile's refusals, with the protocol's, the driver's and a
+/// malformed document kept as this crate already names them.
+impl From<stelae_blocks::Error> for Error {
+    fn from(error: stelae_blocks::Error) -> Self {
+        match error {
+            stelae_blocks::Error::Stelae(error) => error.into(),
+            stelae_blocks::Error::Driver(error) => error.into(),
+            stelae_blocks::Error::MalformedInscription { field, reason } => {
+                Self::MalformedInscription { field, reason }
+            }
+            other => Self::Blocks(other),
         }
     }
 }

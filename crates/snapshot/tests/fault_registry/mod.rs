@@ -417,7 +417,12 @@ fn handle(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
     }
 
     if let Some(index) = rest.find("/manifests/") {
-        let reference = rest[index + "/manifests/".len()..].to_owned();
+        // Keyed by repository: two repositories each hold their own `epoch-N`.
+        let reference = format!(
+            "{}/{}",
+            &rest[..index],
+            &rest[index + "/manifests/".len()..]
+        );
 
         if request.method == "PUT" {
             let media_type = request
@@ -442,7 +447,9 @@ fn handle(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
 
             state.config = parsed["config"]["digest"].as_str().map(str::to_owned);
             let entry = (media_type, request.body);
-            state.manifests.insert(digest.clone(), entry.clone());
+            state
+                .manifests
+                .insert(format!("{}/{digest}", &rest[..index]), entry.clone());
             state.manifests.insert(reference, entry);
             drop(state);
 

@@ -9,6 +9,7 @@
 
 mod fault_registry;
 mod node;
+mod paired;
 mod recorder;
 mod watcher;
 
@@ -18,7 +19,7 @@ use dolos_core::Domain as _;
 use dolos_snapshot::{
     registry::{self, Point},
     restore::{
-        self, default_budget, progress_path_in, Checkpoint, Plan, Summary, Target,
+        self, default_budget, progress_path_in, Checkpoint, Plan, ReadAhead, Repo, Summary, Target,
         DEFAULT_READ_AHEAD,
     },
     Error,
@@ -39,6 +40,9 @@ use watcher::Watcher;
 
 const REPOSITORY: &str = "dolos/read-ahead";
 
+/// Where a paired stele's blocks are, beside [`REPOSITORY`].
+const BLOCKS_REPOSITORY: &str = "dolos/read-ahead/blocks";
+
 /// Install `ring` as the process-default crypto provider, which `stelae::oci`
 /// asks of whatever process opens a `Registry`.
 fn install_crypto_provider() {
@@ -54,10 +58,15 @@ fn install_crypto_provider() {
 /// The repository, staging into `scratch`, its reads retried after a
 /// millisecond rather than the node's seconds so an exhausted layer fails fast.
 fn opened(registry: &FaultRegistry, scratch: &Path) -> Registry {
+    opened_at(registry, scratch, REPOSITORY)
+}
+
+/// [`opened`], for the repository `name`.
+fn opened_at(registry: &FaultRegistry, scratch: &Path, name: &str) -> Registry {
     install_crypto_provider();
 
     Registry::open(
-        &registry.repository(REPOSITORY),
+        &registry.repository(name),
         Options {
             insecure: true,
             scratch_dir: Some(scratch.to_path_buf()),
@@ -76,11 +85,64 @@ struct Published {
     scratch: tempfile::TempDir,
     stele: Snapshot,
     index: BlobIndex,
+    /// The blocks snapshot a paired stele names, and its blob index.
+    blocks: Option<(Snapshot, BlobIndex)>,
     plan: Plan,
     identity: Digest,
 }
 
 impl Published {
+    /// The harness published on boundaries 1 and 2, paired ([`paired`]) into
+    /// [`REPOSITORY`] and [`BLOCKS_REPOSITORY`] of a fresh registry.
+    fn paired() -> Self {
+        let registry = FaultRegistry::spawn();
+        let domain = harness::<MemoryStores>();
+        let magic = u64::from(domain.genesis().network_magic());
+
+        let source = tempfile::tempdir().unwrap();
+
+        for epoch in [1, 2] {
+            dolos_snapshot::export::publish(
+                source.path(),
+                &plan_at_boundary(&domain, epoch),
+                domain.archive(),
+                domain.state(),
+                &Observer::silent(),
+            )
+            .unwrap();
+        }
+
+        let publishing = tempfile::tempdir().unwrap();
+        let pair = paired::pair(
+            source.path(),
+            &opened_at(&registry, publishing.path(), REPOSITORY),
+            &opened_at(&registry, publishing.path(), BLOCKS_REPOSITORY),
+        );
+
+        let scratch = tempfile::tempdir().unwrap();
+        let stele = Point::Latest
+            .resolve(&opened(&registry, scratch.path()))
+            .unwrap();
+        let blocks = opened_at(&registry, scratch.path(), BLOCKS_REPOSITORY)
+            .resolve_sequence(&stelae_blocks::BlocksProfile, pair.head().0)
+            .unwrap();
+
+        let plan = restore::plan(stele.chain().unwrap(), blocks.chain(), magic, None).unwrap();
+        assert_eq!(plan.blocks, Some(pair.blocks[&pair.head().0]));
+
+        let blocks_index = blocks.blob_index().unwrap();
+
+        Self {
+            identity: stele.chain().unwrap().identity(),
+            index: stele.blob_index().unwrap(),
+            blocks: Some((blocks, blocks_index)),
+            registry,
+            scratch,
+            stele,
+            plan,
+        }
+    }
+
     fn new() -> Self {
         let registry = FaultRegistry::spawn();
         let domain = harness::<MemoryStores>();
@@ -101,7 +163,7 @@ impl Published {
             .resolve(&opened(&registry, scratch.path()))
             .unwrap();
         let index = stele.blob_index().unwrap();
-        let plan = restore::plan(stele.chain().unwrap(), magic, None).unwrap();
+        let plan = restore::plan(stele.chain().unwrap(), None, magic, None).unwrap();
         let identity = stele.chain().unwrap().identity();
 
         Self {
@@ -109,15 +171,23 @@ impl Published {
             scratch,
             stele,
             index,
+            blocks: None,
             plan,
             identity,
         }
     }
 
-    /// The blob of each layer in `layers`, as the registry names it.
+    /// The blob of each layer in `layers`, as the registry names it, in
+    /// whichever repository holds it.
     fn blobs<'a>(&self, layers: impl Iterator<Item = &'a LayerDescriptor>) -> Vec<String> {
         layers
-            .map(|layer| self.index.blob_for(&layer.diff_id).unwrap().to_string())
+            .map(|layer| {
+                self.index
+                    .blob_for(&layer.diff_id)
+                    .or_else(|| self.blocks.as_ref()?.1.blob_for(&layer.diff_id))
+                    .unwrap()
+                    .to_string()
+            })
             .collect()
     }
 
@@ -135,6 +205,9 @@ impl Published {
         restore::restore(
             &self.stele,
             &self.index,
+            self.blocks
+                .as_ref()
+                .map(|(snapshot, index)| restore::Blocks { snapshot, index }),
             &self.plan,
             target,
             default_budget(),
@@ -496,7 +569,7 @@ fn exported() -> (tempfile::TempDir, u64) {
 fn the_staging_preflight_charges_the_largest_layers_a_read_ahead_holds() {
     let (root, magic) = exported();
     let dir = node::resolved(root.path());
-    let plan = restore::plan(dir.chain().unwrap(), magic, None).unwrap();
+    let plan = restore::plan(dir.chain().unwrap(), None, magic, None).unwrap();
     let index = dir.blob_index().unwrap();
 
     let largest = |layers: &mut dyn Iterator<Item = &LayerDescriptor>, count: usize| {
@@ -514,7 +587,10 @@ fn the_staging_preflight_charges_the_largest_layers_a_read_ahead_holds() {
         sizes[..count].iter().sum::<u64>()
     };
 
-    let peak = |resume: &Resume, depth| plan.staging_peak(&dir, &index, resume, depth).unwrap();
+    let peak = |resume: &Resume, depth| {
+        plan.staging_peak(&dir, &index, None, resume, depth)
+            .unwrap()
+    };
 
     assert_eq!(
         peak(&Resume::none(), DEFAULT_READ_AHEAD),
@@ -537,4 +613,176 @@ fn the_staging_preflight_charges_the_largest_layers_a_read_ahead_holds() {
         peak(&resume, DEFAULT_READ_AHEAD),
         Some(largest(&mut plan.tip_layers(), 9))
     );
+}
+
+/// A paired stele reads both repositories ahead, its blocks stream as well as
+/// its own, never more layers at once than the depth, and writes and records
+/// them as a restore reading one layer at a time does, into the same node.
+#[test]
+fn both_repositories_are_read_ahead_under_one_depth() {
+    let published = Published::paired();
+    let registry = &published.registry;
+    let plan = &published.plan;
+
+    let blocks = published.blobs(plan.remaining_in(Repo::Blocks, &Resume::none()));
+    let others = published.blobs(plan.remaining_in(Repo::Dolos, &Resume::none()));
+    assert_eq!(blocks.len(), 2, "the fixture has two closed epochs");
+
+    let (serial, serial_node) = journaled(&published, 1);
+
+    // Epoch 0's blocks arrive only once epoch 1's have been asked for. A
+    // blocks stream that reads ahead asks for both at its first take; one that
+    // does not asks for epoch 1's after the rest of epoch 0 is written.
+    registry.hold(&blocks[0], &blocks[1]);
+    registry.forget();
+
+    let (ahead, ahead_node) = journaled(&published, DEFAULT_READ_AHEAD);
+
+    let arrived = registry.arrived();
+    let at = |blob: &String| arrived.iter().position(|b| b == blob).unwrap();
+
+    assert!(
+        others.iter().all(|blob| at(&blocks[1]) < at(blob)),
+        "the blocks stream did not read ahead: {arrived:?}"
+    );
+    assert!(registry.peak() > 1, "nothing was read ahead");
+    assert!(
+        registry.peak() <= DEFAULT_READ_AHEAD,
+        "{} layers were fetched at once",
+        registry.peak()
+    );
+
+    assert_eq!(ahead, serial, "the writes and records left plan order");
+    assert_eq!(ahead_node, serial_node);
+}
+
+/// At a depth of 0 or 1 a paired restore asks for one layer at a time, from
+/// either repository, in plan order.
+#[test]
+fn a_paired_restore_at_a_depth_of_zero_or_one_fetches_one_layer_at_a_time() {
+    let published = Published::paired();
+    let registry = &published.registry;
+    let order = published.blobs(published.plan.layers());
+
+    for depth in [0, 1] {
+        registry.forget();
+
+        let blank = Blank::<MemoryStores>::open();
+        published
+            .restore(
+                Target::new(&blank.archive, blank.state()),
+                depth,
+                &mut Checkpoint::none(),
+                &Observer::silent(),
+            )
+            .unwrap();
+
+        assert_eq!(registry.arrived(), order, "depth {depth}");
+        assert_eq!(registry.peak(), 1, "depth {depth}");
+    }
+}
+
+/// The depth is split between the two streams, and the staging need is each
+/// stream's largest layers at its share: a blocks stream reading one layer at
+/// a time beside another that does too holds one layer in all.
+#[test]
+fn the_staging_preflight_charges_each_stream_its_share() {
+    assert_eq!(
+        ReadAhead::split(DEFAULT_READ_AHEAD, true),
+        ReadAhead {
+            dolos: DEFAULT_READ_AHEAD - 2,
+            blocks: 2
+        }
+    );
+    assert_eq!(
+        ReadAhead::split(3, true),
+        ReadAhead {
+            dolos: 2,
+            blocks: 1
+        }
+    );
+    assert_eq!(ReadAhead::split(1, true).at_once(), 1);
+    assert_eq!(
+        ReadAhead::split(DEFAULT_READ_AHEAD, false),
+        ReadAhead {
+            dolos: DEFAULT_READ_AHEAD,
+            blocks: 0
+        }
+    );
+
+    let domain: ToyDomain<MemoryStores> = harness();
+    let magic = u64::from(domain.genesis().network_magic());
+
+    let source = tempfile::tempdir().unwrap();
+    for epoch in [1, 2] {
+        dolos_snapshot::export::publish(
+            source.path(),
+            &plan_at_boundary(&domain, epoch),
+            domain.archive(),
+            domain.state(),
+            &Observer::silent(),
+        )
+        .unwrap();
+    }
+
+    let (stele_root, blocks_root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let pair = paired::pair(
+        source.path(),
+        &stelae::dir::SnapshotDir::create(stele_root.path()).unwrap(),
+        &stelae::dir::SnapshotDir::create(blocks_root.path()).unwrap(),
+    );
+
+    let stele = node::resolved(stele_root.path());
+    let blocks = stelae::dir::SnapshotDir::open(blocks_root.path())
+        .unwrap()
+        .resolve_sequence(&stelae_blocks::BlocksProfile, pair.head().0)
+        .unwrap();
+    let (index, blocks_index) = (stele.blob_index().unwrap(), blocks.blob_index().unwrap());
+    let plan = restore::plan(stele.chain().unwrap(), blocks.chain(), magic, None).unwrap();
+
+    let pair = restore::Blocks {
+        snapshot: &blocks,
+        index: &blocks_index,
+    };
+
+    let sizes = |repo| -> Vec<u64> {
+        let (snapshot, index) = match repo {
+            Repo::Dolos => (&stele, &index),
+            Repo::Blocks => (&blocks, &blocks_index),
+        };
+
+        let mut sizes: Vec<u64> = plan
+            .remaining_in(repo, &Resume::none())
+            .map(|layer| snapshot.compressed_size(index, layer).unwrap().unwrap())
+            .collect();
+
+        sizes.sort_unstable_by(|a, b| b.cmp(a));
+        sizes
+    };
+
+    let largest = |sizes: &[u64], count: usize| sizes.iter().take(count).sum::<u64>();
+    let (own, theirs) = (sizes(Repo::Dolos), sizes(Repo::Blocks));
+    assert!(own.len() > DEFAULT_READ_AHEAD && theirs.len() == 2);
+
+    let peak = |depth| {
+        plan.staging_peak(&stele, &index, Some(pair), &Resume::none(), depth)
+            .unwrap()
+    };
+
+    // Seven of the stele's own at depth 6 and both blocks layers at depth 2.
+    assert_eq!(
+        peak(DEFAULT_READ_AHEAD),
+        Some(largest(&own, DEFAULT_READ_AHEAD - 1) + largest(&theirs, 3))
+    );
+
+    let mut both = [own.clone(), theirs.clone()].concat();
+    both.sort_unstable_by(|a, b| b.cmp(a));
+    assert_eq!(peak(1), Some(both[0]));
+    assert_eq!(peak(0), peak(1));
+
+    // Without the blocks snapshot, the layers it serves have no transport.
+    assert!(matches!(
+        plan.staging_peak(&stele, &index, None, &Resume::none(), 1),
+        Err(Error::BlocksMissing { .. })
+    ));
 }

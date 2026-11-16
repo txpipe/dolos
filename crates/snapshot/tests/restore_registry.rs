@@ -191,6 +191,7 @@ fn restore_watched(
     registry::restore_registry(
         repository,
         point,
+        None,
         restoring(storage, magic, resume),
         target(blank),
         observer,
@@ -334,6 +335,7 @@ fn a_registry_restore_is_a_directory_restore() {
 
     let (_, _, by_dir) = restore::restore_dir(
         dir.path(),
+        None,
         restoring(dir_storage.path(), node.magic, false),
         target(&from_dir),
         &Observer::silent(),
@@ -349,6 +351,7 @@ fn a_registry_restore_is_a_directory_restore() {
         RestoreInput::Repository {
             repository: &source,
             point: Point::Latest,
+            blocks: None,
         },
         restoring(registry_storage.path(), node.magic, false),
         target(&from_registry),
@@ -426,7 +429,7 @@ fn a_killed_registry_restore_resumes_where_it_stopped() {
 
     let stele = Point::Latest.resolve(&repository).unwrap();
     let identity = stele.chain().unwrap().identity();
-    let plan = restore::plan(stele.chain().unwrap(), node.magic, None).unwrap();
+    let plan = restore::plan(stele.chain().unwrap(), None, node.magic, None).unwrap();
     let index = stele.blob_index().unwrap();
 
     let epoch_layers: Vec<Digest> = plan.immutable_layers().map(|l| l.diff_id).collect();
@@ -442,6 +445,7 @@ fn a_killed_registry_restore_resumes_where_it_stopped() {
             stop_at: epoch_layers[1],
         },
         &index,
+        None,
         &plan,
         target(&blank),
         default_budget(),
@@ -540,7 +544,7 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
     // carries commits, the tip does not.
     let first = Point::Epoch(1).resolve(&repository).unwrap();
     let identity = first.chain().unwrap().identity();
-    let plan = restore::plan(first.chain().unwrap(), node.magic, None).unwrap();
+    let plan = restore::plan(first.chain().unwrap(), None, node.magic, None).unwrap();
     let index = first.blob_index().unwrap();
 
     let shards: Vec<Digest> = plan.tip_layers().map(|l| l.diff_id).collect();
@@ -555,6 +559,7 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
             stop_at: shards[0],
         },
         &index,
+        None,
         &plan,
         target(&blank),
         default_budget(),
@@ -702,6 +707,7 @@ fn a_publish_writes_the_snapshot_envelope_and_restores() {
         RestoreInput::Repository {
             repository: &source,
             point: Point::Latest,
+            blocks: None,
         },
         restoring(storage.path(), node.magic, false),
         target(&blank),
@@ -755,6 +761,7 @@ fn a_retired_envelope_is_refused_before_the_stores_are_touched() {
             RestoreInput::Repository {
                 repository: &source,
                 point,
+                blocks: None,
             },
             restoring(storage, node.magic, false),
             target(blank),
@@ -1197,7 +1204,7 @@ fn a_resumed_registry_restore_reports_what_it_skipped() {
     {
         let stele = Point::Latest.resolve(&repository).unwrap();
         let identity = stele.chain().unwrap().identity();
-        let plan = restore::plan(stele.chain().unwrap(), node.magic, None).unwrap();
+        let plan = restore::plan(stele.chain().unwrap(), None, node.magic, None).unwrap();
         let index = stele.blob_index().unwrap();
 
         let epoch_layers: Vec<Digest> = plan.immutable_layers().map(|l| l.diff_id).collect();
@@ -1212,6 +1219,7 @@ fn a_resumed_registry_restore_reports_what_it_skipped() {
                 stop_at: epoch_layers[1],
             },
             &index,
+            None,
             &plan,
             target(&blank),
             default_budget(),
@@ -1303,6 +1311,7 @@ impl Recorded {
             RestoreInput::Repository {
                 repository: &self.repository,
                 point,
+                blocks: None,
             },
             self.restoring(storage, resume),
             target(blank),
@@ -1338,6 +1347,7 @@ impl Recorded {
             RestoreInput::Repository {
                 repository: &self.repository,
                 point,
+                blocks: None,
             },
             self.restoring(storage, false),
             restore::Target::new(&archive, &state),

@@ -99,6 +99,7 @@ fn restore_into(
     registry::restore_registry(
         source,
         Point::Latest,
+        None,
         restoring(storage, magic),
         restore::Target::new(&blank.archive, blank.state()),
         observer,
@@ -314,6 +315,7 @@ fn a_recorded_resume_is_gone_only_when_its_tag_is_absent() {
         registry::restore_registry(
             &opened(&registry, scratch.path()),
             Point::Epoch(7),
+            None,
             restore::Restoring {
                 resume: true,
                 source: Some(&source),
