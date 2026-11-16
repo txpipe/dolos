@@ -86,8 +86,9 @@
 //! - **a recorded digest equals a rebuilt one**, because a `diff` layer is
 //!   final, and so deterministic — the property the export golden and the
 //!   two-backend determinism test already pin — and the record refuses itself
-//!   if anything the bytes depend on has moved ([`Origin`]). A record offers a
-//!   layer only where the sequence being published places it in `diff`;
+//!   if anything the bytes depend on has moved ([`Origin`]), or if a build that
+//!   recorded other layers wrote it. A record offers a layer only where the
+//!   sequence being published places it in `diff`;
 //! - **`--rebuild` ignores it wholesale**, and overwrites it rather than
 //!   reading it;
 //! - **the manifests remain the only statement of what the repository holds.**
@@ -825,13 +826,9 @@ fn chained<'a>(
     latest: Option<&Snapshot>,
     plan: &Plan,
 ) -> Result<Chained<'a>, Error> {
-    // This profile identifies a dataset by its network magic; the driver holds
-    // the number and never reads it.
-    let origin = Origin::of(
-        publishing.registry,
+    let origin = record_origin(
+        publishing.registry.repository().to_string(),
         plan.network.magic(),
-        crate::parameters(),
-        crate::compression(),
     );
 
     Ok(Chained::new(
@@ -842,6 +839,29 @@ fn chained<'a>(
         &plan.position()?,
         origin,
     )?)
+}
+
+/// The revision of what a resumption record may hold.
+///
+/// Filed in the record's [`Origin`] parameters, which no inscription carries.
+/// Records from before the diff chain have none, and they held tip layers too,
+/// such as window N-1's account rows at N, which are stake-only there and
+/// final in the diff at N+1. A record without this revision offers nothing.
+const RECORD_REVISION: u64 = 2;
+
+/// The [`Origin`] a publish of the dataset `magic` into `repository` files its
+/// record under. This profile identifies a dataset by its network magic; the
+/// driver holds the number and never reads it.
+fn record_origin(repository: String, magic: u64) -> Origin {
+    let mut parameters = crate::parameters();
+    parameters["recordRevision"] = serde_json::json!(RECORD_REVISION);
+
+    Origin {
+        repository,
+        dataset_id: magic,
+        parameters,
+        compression: crate::compression(),
+    }
 }
 
 #[cfg(test)]
@@ -897,12 +917,7 @@ mod tests {
     // in `tests/publish.rs`, with the interruption that raises it.
 
     fn origin(repository: &str) -> Origin {
-        Origin {
-            repository: repository.to_owned(),
-            dataset_id: 2,
-            parameters: crate::parameters(),
-            compression: crate::compression(),
-        }
+        record_origin(repository.to_owned(), 2)
     }
 
     fn written(kind: &str, scope: serde_json::Value, identity: u8) -> WrittenLayer {
@@ -1093,6 +1108,31 @@ mod tests {
                 ..mine.clone()
             }),
             vec!["repository", "dataset id", "parameters", "compression"]
+        );
+    }
+
+    /// A record written before the diff chain was filed under the inscription
+    /// parameters alone, and offers nothing, though the account rows it holds
+    /// for window 2 are a diff layer at 4.
+    #[test]
+    fn a_record_from_before_the_diff_chain_offers_nothing() {
+        let mine = origin("oci://example.test/dolos");
+        let before = Origin {
+            parameters: crate::parameters(),
+            ..mine.clone()
+        };
+
+        assert_eq!(before.differences_from(&mine), vec!["parameters"]);
+        assert!(record(before)
+            .table(&mine, &DolosProfile, 4)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            record(mine.clone())
+                .table(&mine, &DolosProfile, 4)
+                .unwrap()
+                .len(),
+            2
         );
     }
 
