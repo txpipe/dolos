@@ -666,8 +666,8 @@ fn both_repositories_are_read_ahead_under_one_depth() {
 
 /// Each stream keeps to its share of the depth, whatever it has left to read:
 /// at the default, the blocks stream fetches two layers at once and the
-/// stele's own six. The staging preflight charges each stream one layer more
-/// than its share, the one it drains.
+/// stele's own six, and the staging preflight charges each of them one layer
+/// more, the one it drains.
 #[test]
 fn each_stream_reads_ahead_at_its_share_of_the_depth() {
     let published = Published::paired_to(3);
