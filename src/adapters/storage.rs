@@ -16,7 +16,10 @@ use std::{
 
 use bytes::Bytes;
 use dolos_core::{
-    archive::{ArchiveError, ArchiveStore as CoreArchiveStore, ArchiveWriter as CoreArchiveWriter},
+    archive::{
+        ArchiveError, ArchiveIngest, ArchiveStore as CoreArchiveStore,
+        ArchiveWriter as CoreArchiveWriter, BatchIngest, Settling,
+    },
     builtin::{
         EmptyBlockIter, EmptyLogIter, EmptySlotIter, MemoryArchiveStore, MemoryStateStore,
         MemoryStateWriter, NoDiskTier, NoOpArchiveStore, NoOpArchiveWriter,
@@ -2433,6 +2436,20 @@ impl CoreArchiveStore for ArchiveStoreBackend {
             Self::Fjall(s) => CoreArchiveStore::persist(s),
             Self::EntityReads(_) => CoreArchiveStore::persist(&NoOpArchiveStore),
             Self::NoOp(s) => CoreArchiveStore::persist(s),
+        }
+    }
+
+    fn start_ingest(&self) -> Result<Box<dyn ArchiveIngest + '_>, ArchiveError> {
+        match self {
+            Self::Fjall(s) => CoreArchiveStore::start_ingest(s),
+            _ => Ok(Box::new(BatchIngest::new(self))),
+        }
+    }
+
+    fn settle_ingested(&self) -> Result<Settling, ArchiveError> {
+        match self {
+            Self::Fjall(s) => CoreArchiveStore::settle_ingested(s),
+            _ => Ok(Settling::none()),
         }
     }
 

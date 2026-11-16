@@ -67,9 +67,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use dolos_core::{
-    key_hash, ArchiveError, ArchiveIndexDelta, ArchiveStore as CoreArchiveStore,
+    key_hash, ArchiveError, ArchiveIndexDelta, ArchiveIngest, ArchiveStore as CoreArchiveStore,
     ArchiveWriter as CoreArchiveWriter, BlockBody, BlockSlot, ChainPoint, EntityValue, ExactKind,
-    IndexRecord, KeyRange, LogKey, Namespace, RawBlock, StateSchema, TagDimension,
+    IndexRecord, KeyRange, LogKey, Namespace, RawBlock, Settling, StateSchema, TagDimension,
 };
 use fjall::{Database, Keyspace, OwnedWriteBatch, PersistMode, Readable, Snapshot};
 use pallas::ledger::traverse::MultiEraBlock;
@@ -84,6 +84,7 @@ use crate::Error;
 
 pub mod entity;
 pub mod exact;
+pub mod ingest;
 pub mod log_keys;
 pub mod scan;
 pub mod tags;
@@ -1374,6 +1375,20 @@ impl CoreArchiveStore for ArchiveStore {
         self.db.persist(PersistMode::SyncAll).map_err(fjall_err)?;
 
         Ok(())
+    }
+
+    /// Ingested runs for `archive-blocks` and `archive-logs` ([`ingest`]);
+    /// a finished run's tables and version are synced by `finish`.
+    fn start_ingest(&self) -> Result<Box<dyn ArchiveIngest + '_>, ArchiveError> {
+        self.writable()?;
+
+        Ok(Box::new(ingest::Ingest::new(self, ingest::L0_GUARD)))
+    }
+
+    fn settle_ingested(&self) -> Result<Settling, ArchiveError> {
+        self.writable()?;
+
+        Ok(Settling::of(ingest::settle(self)?))
     }
 
     /// Drop everything the archive holds after `after`.
