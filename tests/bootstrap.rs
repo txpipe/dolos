@@ -997,6 +997,87 @@ fn test_catchup_replays_the_block_sharing_the_cursor_slot() {
     }
 }
 
+/// The same crash after the WAL was reseeded at the boundary block, as a
+/// restore or a discarded WAL leaves it: the WAL holds that block only as a
+/// seed entry naming its hash, while the archive holds its body. Catch-up
+/// still replays the main block, whichever of the two sorts first.
+#[test]
+fn test_catchup_replays_the_block_sharing_a_seeded_cursor_slot() {
+    for number in both_key_orders() {
+        let domain = ToyDomain::new(None, None);
+        let [ebb, main] = same_slot_pair(number);
+        let (ebb_point, main_point) = (ebb.0.clone(), main.0.clone());
+
+        WalStore::append_entries(domain.wal(), vec![ebb]).unwrap();
+        catch_up_stores(&domain).unwrap();
+
+        dolos_core::seed_wal_from_state(domain.state(), domain.wal()).unwrap();
+        let seed = domain.wal().read_entry(&ebb_point).unwrap().unwrap();
+        assert!(seed.block.is_empty(), "main block numbered {number}");
+        let archived = domain
+            .archive()
+            .get_blocks_by_slot(&ebb_point.slot())
+            .unwrap();
+        assert_eq!(archived.len(), 1, "main block numbered {number}");
+
+        WalStore::append_entries(domain.wal(), vec![main]).unwrap();
+
+        let plan = plan_for(&domain);
+        let state = step(&plan, RecoveredStore::State).unwrap();
+        assert_eq!(state.entries, 1, "main block numbered {number}: {plan:?}");
+        assert!(state.covered, "main block numbered {number}: {plan:?}");
+
+        catch_up_stores(&domain).unwrap();
+
+        assert_eq!(
+            datum_refs(&domain, MAIN_DATUM),
+            Some(1),
+            "main block numbered {number}"
+        );
+        assert_eq!(datum_refs(&domain, EBB_DATUM), Some(1));
+        assert_eq!(domain.state().read_cursor().unwrap(), Some(main_point));
+    }
+}
+
+/// A seed entry vouches only for the block whose hash it names: with another
+/// body archived at the boundary block's slot, catch-up refuses before it
+/// replays anything.
+#[test]
+fn test_catchup_refuses_an_archived_block_a_seed_entry_does_not_name() {
+    use dolos_core::ArchiveWriter as _;
+
+    for number in both_key_orders() {
+        let domain = ToyDomain::new(None, None);
+        let [ebb, main] = same_slot_pair(number);
+        let ebb_point = ebb.0.clone();
+
+        WalStore::append_entries(domain.wal(), vec![ebb]).unwrap();
+        catch_up_stores(&domain).unwrap();
+        dolos_core::seed_wal_from_state(domain.state(), domain.wal()).unwrap();
+
+        let (foreign, body) = dolos_testing::blocks::make_conway_block(ebb_point.slot());
+        let writer = domain.archive().start_writer().unwrap();
+        writer.undo(&ebb_point).unwrap();
+        writer.apply(&foreign, &body).unwrap();
+        writer.commit().unwrap();
+
+        WalStore::append_entries(domain.wal(), vec![main]).unwrap();
+
+        let case = format!("main block numbered {number}");
+        let error = catch_up_stores(&domain).unwrap_err();
+        assert!(
+            format!("{error:?}").contains("is not the same as the WAL block"),
+            "{case}: {error:?}"
+        );
+        assert_eq!(datum_refs(&domain, MAIN_DATUM), None, "{case}");
+        assert_eq!(
+            domain.state().read_cursor().unwrap(),
+            Some(ebb_point),
+            "{case}"
+        );
+    }
+}
+
 /// A cursor holding only a slot, as ESTART leaves it at the epoch's first
 /// block: catch-up replays every block at that slot, in chain order.
 #[test]

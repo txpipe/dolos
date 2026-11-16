@@ -239,6 +239,13 @@ fn parent_hash(block: &[u8]) -> Option<BlockHash> {
         .and_then(|block| block.header().previous_hash())
 }
 
+/// The hash of a block's header; none for bytes that don't decode.
+pub(crate) fn block_hash(block: &[u8]) -> Option<BlockHash> {
+    pallas::ledger::traverse::MultiEraBlock::decode(block)
+        .ok()
+        .map(|block| block.hash())
+}
+
 /// What [`verify_integrity`] found walking a WAL's prev-hash chain.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct IntegrityReport {

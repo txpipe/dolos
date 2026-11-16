@@ -9,9 +9,10 @@ use std::{collections::HashSet, sync::Arc};
 use tracing::{error, info, warn};
 
 use crate::{
-    sync::drain_pending_work, wal::ChainOrdered, ArchiveStore, ArchiveWriter as _, BlockBody,
-    BlockSlot, ChainLogic, ChainPoint, Domain, DomainError, EntityMap, RawBlock, StateStore,
-    StateWriter as _, WalError, WalStore,
+    sync::drain_pending_work,
+    wal::{block_hash, ChainOrdered},
+    ArchiveStore, ArchiveWriter as _, BlockBody, BlockSlot, ChainLogic, ChainPoint, Domain,
+    DomainError, EntityMap, RawBlock, StateStore, StateWriter as _, WalError, WalStore,
 };
 
 /// Extension trait for domain bootstrapping operations.
@@ -424,8 +425,9 @@ fn unapplied<T>(
 }
 
 /// Whether each of `bodies`, the blocks an archive holds at `slot`, is a block
-/// the WAL holds there too. A block of a same-slot pair is then not a conflict
-/// with the other one.
+/// the WAL holds there too: the same bytes, or a synthetic entry (a seed or
+/// `reset_to`) naming the block's hash. A block of a same-slot pair is then
+/// not a conflict with the other one.
 fn wal_holds_each<W: WalStore>(
     wal: &W,
     slot: BlockSlot,
@@ -435,15 +437,17 @@ fn wal_holds_each<W: WalStore>(
         return Ok(true);
     }
 
-    let held: Vec<RawBlock> = wal
+    let held: Vec<(ChainPoint, RawBlock)> = wal
         .iter_blocks(Some(ChainPoint::Slot(slot)), None)?
         .take_while(|(point, _)| point.slot() == slot)
-        .map(|(_, block)| block)
         .collect();
 
-    Ok(bodies
-        .iter()
-        .all(|body| held.iter().any(|block| body == block.as_ref())))
+    Ok(bodies.iter().all(|body| {
+        held.iter().any(|(point, block)| match point.hash() {
+            Some(hash) if block.is_empty() => block_hash(body) == Some(hash),
+            _ => body == block.as_ref(),
+        })
+    }))
 }
 
 /// Catch up the state store by replaying WAL entries.
