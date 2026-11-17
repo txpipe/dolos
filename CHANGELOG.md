@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 
 - *(minibf)* Add `/governance/dreps` endpoint
 - *(telemetry)* A configuration with `[telemetry]` now exports metrics over OTLP as well as traces, unless `metrics = false`
+- *(grpc)* Export metrics for every gRPC and gRPC-web call (duration, active and dropped calls by service, method and status) and for server streams (open streams and how they end)
 - *(minibf)* [**breaking**] Remove the `/metrics` route: the chain tip is exported as the `dolos.sync.tip.slot` and `dolos.sync.tip.block_number` metrics
 - *(mempool)* Export the mempool's size, each transaction's lifecycle, its confirmation time, submission time by outcome and stale upstream offers as metrics
 
