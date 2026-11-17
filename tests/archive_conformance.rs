@@ -870,6 +870,26 @@ fn truncate_front_to_the_block_sharing_an_ebbs_slot_keeps_both<B: Backend>() {
     );
 }
 
+fn truncate_front_to_a_hash_its_slot_does_not_hold_keeps_the_slot<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let (ebb, main) = write_boundary(&store, 1);
+    let later = make_conway_block_with_prev(byron_ebb_slot(1) + 20, main.0.hash(), 2);
+
+    let writer = store.start_writer().unwrap();
+    writer.apply(&later.0, &later.1).unwrap();
+    writer.commit().unwrap();
+
+    // A point at the pair's slot naming neither block keeps both of them.
+    let foreign = ChainPoint::Specific(ebb.0.slot(), pallas::crypto::hash::Hash::new([9u8; 32]));
+    store.truncate_front(&foreign).unwrap();
+
+    assert_eq!(
+        bodies(store.get_range(None, None).unwrap().collect()),
+        vec![ebb.1.as_ref().clone(), main.1.as_ref().clone()]
+    );
+}
+
 fn remove_before_prunes_every_block_at_a_slot<B: Backend>() {
     let (store, _guard) = B::open();
 
@@ -1932,6 +1952,7 @@ macro_rules! full_suite {
                 truncate_front_drops_an_ebb_past_the_cut,
                 truncate_front_to_an_ebb_drops_the_block_sharing_its_slot,
                 truncate_front_to_the_block_sharing_an_ebbs_slot_keeps_both,
+                truncate_front_to_a_hash_its_slot_does_not_hold_keeps_the_slot,
                 remove_before_prunes_every_block_at_a_slot,
                 find_intersect_resolves_an_ebb_by_its_own_hash,
                 log_roundtrip,
