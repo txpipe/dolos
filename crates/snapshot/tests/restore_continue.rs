@@ -341,8 +341,9 @@ fn a_stopped_restore_of_a_chained_head_resumes_from_its_records() {
     assert_eq!(contents_digest(&blank.archive, blank.state()), control);
 }
 
-/// The record's fields are the published contract: the source URL, the
-/// stele's sequence and its inscription digest, and nothing else.
+/// The record's fields are the published contract: the network root's URL,
+/// the two repositories under it, the stele's sequence and its inscription
+/// digest, and nothing else.
 #[test]
 fn the_source_record_names_the_source_the_sequence_and_the_digest() {
     let stele = Stele::export();
@@ -365,6 +366,8 @@ fn the_source_record_names_the_source_the_sequence_and_the_digest() {
         raw,
         serde_json::json!({
             "source": format!("file://{}", stele.path().display()),
+            "dolos": format!("file://{}", stele.path().join("dolos").display()),
+            "blocks": format!("file://{}", stele.path().join("blocks").display()),
             "sequence": inscription.sequence,
             "inscriptionDigest": stele.digest().to_string(),
         })

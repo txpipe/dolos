@@ -1187,12 +1187,12 @@ fn continue_past_the_source_tip_keeps_the_wal_window() {
     assert!(!fixture.db().exists(), "the snapshot outlived the resume");
 }
 
-/// A stele directory is resolved before `--force` clears anything: one
-/// holding no stele, one inside the storage root or a relative link to it,
-/// one whose blobs link there, and one whose inscription or blob index links
-/// there, are refused with the node, and the stele, as they were. One beside
-/// the root, named through it, is restored, and what it holds beside the
-/// stele's own files, as a volume's `.Trashes`, is never read.
+/// A network root is resolved before `--force` clears anything: one holding
+/// no stele, one inside the storage root or a relative link to it, one whose
+/// stele's blobs link there, and one whose stele's inscription or blob index
+/// links there, are refused with the node, and the stele, as they were. One
+/// beside the storage root, named through it, is restored, and what it holds
+/// beside the layouts' own files, as a volume's `.Trashes`, is never read.
 #[test]
 fn force_refuses_a_stele_it_would_lose_the_node_over() {
     let synced = Node::new();
@@ -1207,13 +1207,17 @@ fn force_refuses_a_stele_it_would_lose_the_node_over() {
     let stele = node.config.storage.path.join("stele");
     synced.write_stele(&stele);
     let stele_before = files(&stele);
+    let dolos = stele.join("dolos");
 
     #[allow(unused_mut)]
     let mut sources = vec![
-        (node.root.path().join("no-such-stele"), "holds no stele"),
+        (
+            node.root.path().join("no-such-stele"),
+            "holds no `dolos` directory",
+        ),
         (
             stele.clone(),
-            "which `--force` clears before the restore: move the stele out of the storage root",
+            "which `--force` clears before the restore: move the source out of the storage root",
         ),
     ];
 
@@ -1229,37 +1233,40 @@ fn force_refuses_a_stele_it_would_lose_the_node_over() {
         symlink(relative, srv.join("stele")).unwrap();
         sources.push((srv.join("stele"), "which `--force` clears"));
 
-        // A stele of its own whose blob directories are the root's stele's,
-        // linked from its `blobs` directory, and from a directory elsewhere
-        // that its `blobs` links to.
+        // A root of its own whose stele's blob directories are the storage
+        // root's stele's, linked from its `blobs` directory, and from a
+        // directory elsewhere that its `blobs` links to.
         let viewing = |view: &Path, blobs: &Path| {
-            std::fs::create_dir_all(view).unwrap();
-            for entry in std::fs::read_dir(&stele).unwrap() {
+            let layout = view.join("dolos");
+            std::fs::create_dir_all(&layout).unwrap();
+            for entry in std::fs::read_dir(&dolos).unwrap() {
                 let path = entry.unwrap().path();
                 if path.is_file() {
-                    std::fs::copy(&path, view.join(path.file_name().unwrap())).unwrap();
+                    std::fs::copy(&path, layout.join(path.file_name().unwrap())).unwrap();
                 }
             }
 
             std::fs::create_dir_all(blobs).unwrap();
-            for entry in std::fs::read_dir(stele.join("blobs")).unwrap() {
+            for entry in std::fs::read_dir(dolos.join("blobs")).unwrap() {
                 let path = entry.unwrap().path();
                 symlink(&path, blobs.join(path.file_name().unwrap())).unwrap();
             }
+
+            dolos_snapshot::dir::SnapshotDir::create(view.join("blocks")).unwrap();
         };
 
         let view = node.root.path().join("stele-view");
-        viewing(&view, &view.join("blobs"));
+        viewing(&view, &view.join("dolos").join("blobs"));
         sources.push((view, "leads into the storage root"));
 
         let nested = node.root.path().join("stele-nested");
         let elsewhere = node.root.path().join("elsewhere").join("blobs");
         viewing(&nested, &elsewhere);
-        symlink(&elsewhere, nested.join("blobs")).unwrap();
+        symlink(&elsewhere, nested.join("dolos").join("blobs")).unwrap();
         sources.push((nested, "leads into the storage root"));
 
-        // A stele of its own, blobs and all, but for one file of the root's
-        // stele, linked in its place.
+        // A root of its own, blobs and all, but for one file of the storage
+        // root's stele, linked in its place.
         fn copy_tree(from: &Path, to: &Path) {
             std::fs::create_dir_all(to).unwrap();
             for entry in std::fs::read_dir(from).unwrap() {
@@ -1279,8 +1286,9 @@ fn force_refuses_a_stele_it_would_lose_the_node_over() {
         ] {
             let view = node.root.path().join(view);
             copy_tree(&stele, &view);
-            std::fs::remove_file(view.join(linked)).unwrap();
-            symlink(stele.join(linked), view.join(linked)).unwrap();
+            let copied = view.join("dolos").join(linked);
+            std::fs::remove_file(&copied).unwrap();
+            symlink(dolos.join(linked), &copied).unwrap();
             sources.push((view, "leads into the storage root"));
         }
     }
@@ -1368,7 +1376,7 @@ fn a_stele_beside_the_stores_restores_without_a_clear() {
             "{flags:?}"
         );
         assert!(
-            stele.join("blobs").is_dir(),
+            stele.join("dolos").join("blobs").is_dir(),
             "{flags:?}: the stele was taken"
         );
     }

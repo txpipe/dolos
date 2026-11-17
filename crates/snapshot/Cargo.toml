@@ -6,11 +6,12 @@ edition.workspace = true
 
 # This crate is the *profile* half of the Stelae boundary: it depends on the
 # stelae crates and on `dolos-*`, never the other way around — structural now
-# that the protocol lives in its own repository. This is the workspace's one
+# that the protocol lives in its own repository. This is the workspace's
 # pin point: the CLI and root lib reach protocol and driver types through
 # this crate's re-exports, and both crates move here together to one
 # immutable stelae reference: a release tag or, between releases, a commit
-# `rev` (they version in lockstep; never pin a branch). See
+# `rev` (they version in lockstep; never pin a branch). The root crate's
+# dev-dependencies repeat the reference for its tests and move with it. See
 # adrs/004_stelae_snapshots.md, "Code layout".
 [dependencies]
 # The protocol crates keep their own default-off `oci` feature for third

@@ -67,6 +67,22 @@ single restore entry point for both `RestoreInput::Directory` and
 resume/space policy, and an optional observer. `None`
 selects a silent observer.
 
+A source names a network root, and each profile's repository is under it:
+`restore::Source::profile` with `DOLOS_REPOSITORY` or `BLOCKS_REPOSITORY`
+gives `oci://HOST/PATH/dolos` and `oci://HOST/PATH/blocks` in a registry, and
+`DIR/dolos` and `DIR/blocks` on disk, each an OCI image layout:
+
+```text
+DIR/
+├── dolos/    the stele: oci-layout, index.json, blobs/
+└── blocks/   the blocks profile's snapshots, the same layout
+```
+
+Pass the `dolos` repository as the input's stele and the `blocks` one as its
+`blocks`; a stele whose closed epochs' blocks are in the blocks repository is
+refused without it. `Restoring::source` takes the root, and the restore's
+`SourceRecord` names the root and both repositories.
+
 The library deliberately does not infer credentials, a scratch directory,
 publication journal, or rebuild policy. An application may use Dolos's `node`
 helpers to resolve its existing config, or provide its own policy. Publisher

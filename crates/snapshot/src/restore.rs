@@ -1589,15 +1589,31 @@ pub fn source_path_in(storage_path: &Path) -> PathBuf {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceRecord {
-    /// The source as a URL: `oci://HOST/PATH`, or `file://DIR` with `DIR`
-    /// absolute.
+    /// The network root as a URL: `oci://HOST/PATH`, or `file://DIR` with
+    /// `DIR` absolute.
     pub source: String,
+    /// The repository under the root the stele is read from.
+    pub dolos: String,
+    /// The repository under the root closed epochs' blocks are read from.
+    pub blocks: String,
     /// The stele's sequence, which names its immutable tag in a registry.
     pub sequence: u64,
     pub inscription_digest: Digest,
 }
 
 impl SourceRecord {
+    /// The record of reading the stele at `sequence` from the network root
+    /// `source`, naming both of its repositories.
+    pub fn new(source: &Source, sequence: u64, inscription_digest: Digest) -> Result<Self, Error> {
+        Ok(Self {
+            source: source.to_string(),
+            dolos: source.profile(DOLOS_REPOSITORY)?.to_string(),
+            blocks: source.profile(BLOCKS_REPOSITORY)?.to_string(),
+            sequence,
+            inscription_digest,
+        })
+    }
+
     /// The record at `path`, or `None` if there is none. A file that does not
     /// parse is an error, as a progress file that does not parse is.
     pub fn load(path: &Path) -> Result<Option<Self>, Error> {
@@ -1769,7 +1785,11 @@ fn check_resume<S: StateStore>(
         };
     };
 
-    if record.source != reading.source {
+    fn read_from(record: &SourceRecord) -> (&str, &str, &str) {
+        (&record.source, &record.dolos, &record.blocks)
+    }
+
+    if read_from(&record) != read_from(reading) {
         return Err(ResumeRefusal::OtherSource {
             recorded: record.source,
             given: reading.source.clone(),
@@ -1849,10 +1869,10 @@ pub struct Restoring<'a> {
     /// one layer at a time. [`DEFAULT_READ_AHEAD`] unless the operator says.
     /// A transport whose blobs are local reads one at a time whatever it says.
     pub read_ahead: usize,
-    /// Where the stele is read from, for the [`SourceRecord`]: recorded
-    /// before the first layer and, on a resume, the record the stele has to
-    /// match. `None` records and checks nothing, so a resume honours any
-    /// progress file whatever stele it was written for.
+    /// The network root the stele is read from, for the [`SourceRecord`]:
+    /// recorded before the first layer and, on a resume, the record the
+    /// stele has to match. `None` records and checks nothing, so a resume
+    /// honours any progress file whatever stele it was written for.
     pub source: Option<&'a Source>,
 }
 
@@ -2105,11 +2125,10 @@ where
 
     let identity = chain.identity();
 
-    let record = node.source.map(|source| SourceRecord {
-        source: source.to_string(),
-        sequence: plan.sequence,
-        inscription_digest: identity,
-    });
+    let record = node
+        .source
+        .map(|source| SourceRecord::new(source, plan.sequence, identity))
+        .transpose()?;
 
     if let (true, Some(record)) = (node.resume, &record) {
         check_resume(
@@ -2288,8 +2307,8 @@ where
 }
 
 /// The blocks snapshot at `sequence` in the layout at `root`, resolved through
-/// its chain, or [`Error::BlocksMissing`] when there is none.
-fn blocks_dir(
+/// its chain, or [`Error::BlocksMissing`] naming `root` when there is none.
+pub fn blocks_dir(
     root: &Path,
     reference: Digest,
     sequence: u64,
@@ -2820,12 +2839,44 @@ fn restore_state<R: SnapshotReader, S: StateStore>(
 /// that decide what to do with existing data are handled a layer above, and a
 /// source rejected any later would have cost the operator the node they still
 /// had.
+///
+/// A source names a network root, and each profile's repository is under it
+/// ([`Source::profile`]): `oci://HOST/PATH` holds `PATH/dolos` and
+/// `PATH/blocks`, and `file://DIR` holds `DIR/dolos` and `DIR/blocks`, each an
+/// OCI image layout.
 #[derive(Debug, Clone)]
 pub enum Source {
-    /// A stele directory on this filesystem.
+    /// A network root directory on this filesystem.
     Dir(std::path::PathBuf),
-    /// A stele repository in an OCI registry.
+    /// A network root in an OCI registry.
     Repo(crate::registry::Repository),
+}
+
+/// The repository under a network root that holds this profile's steles.
+pub const DOLOS_REPOSITORY: &str = "dolos";
+
+/// The repository under a network root that holds the blocks profile's
+/// snapshots.
+pub const BLOCKS_REPOSITORY: &str = "blocks";
+
+impl Source {
+    /// The repository `name` under this network root: `PATH/name` in a
+    /// registry ([`profile_repository`]), the subdirectory `name` on disk.
+    pub fn profile(&self, name: &str) -> Result<Self, Error> {
+        match self {
+            Self::Dir(dir) => Ok(Self::Dir(dir.join(name))),
+            Self::Repo(root) => Ok(Self::Repo(profile_repository(root, name)?)),
+        }
+    }
+}
+
+/// The repository `name` under the registry path `root`, refused when the
+/// path it makes is not a valid repository name.
+pub fn profile_repository(
+    root: &crate::registry::Repository,
+    name: &str,
+) -> Result<crate::registry::Repository, Error> {
+    Ok(format!("{root}/{name}").parse()?)
 }
 
 /// The URL [`FromStr`](std::str::FromStr) reads back.
@@ -2901,6 +2952,44 @@ mod source_tests {
 
         assert_eq!(repo.registry(), "ghcr.io");
         assert_eq!(repo.repository(), "txpipe/dolos-snapshots/mainnet");
+    }
+
+    /// A network root names each profile's repository under it, in a
+    /// registry and on disk alike.
+    #[test]
+    fn a_source_names_the_repositories_under_its_root() {
+        use super::{BLOCKS_REPOSITORY, DOLOS_REPOSITORY};
+
+        let root: Source = "oci://oci.stelae.store/cardano/mainnet".parse().unwrap();
+
+        assert_eq!(
+            root.profile(DOLOS_REPOSITORY).unwrap().to_string(),
+            "oci://oci.stelae.store/cardano/mainnet/dolos"
+        );
+        assert_eq!(
+            root.profile(BLOCKS_REPOSITORY).unwrap().to_string(),
+            "oci://oci.stelae.store/cardano/mainnet/blocks"
+        );
+
+        let root: Source = "file:///srv/preview".parse().unwrap();
+
+        let Source::Dir(blocks) = root.profile(BLOCKS_REPOSITORY).unwrap() else {
+            panic!("a directory root named a repository");
+        };
+        assert_eq!(blocks, PathBuf::from("/srv/preview/blocks"));
+    }
+
+    /// The record names the root and both repositories under it.
+    #[test]
+    fn a_source_record_names_both_repositories() {
+        let root: Source = "oci://127.0.0.1:5000/cardano/preview".parse().unwrap();
+
+        let record =
+            super::SourceRecord::new(&root, 7, stelae::Digest::from_bytes([7; 32])).unwrap();
+
+        assert_eq!(record.source, "oci://127.0.0.1:5000/cardano/preview");
+        assert_eq!(record.dolos, "oci://127.0.0.1:5000/cardano/preview/dolos");
+        assert_eq!(record.blocks, "oci://127.0.0.1:5000/cardano/preview/blocks");
     }
 
     /// A source a restore cannot use is refused by the parse, not carried to
