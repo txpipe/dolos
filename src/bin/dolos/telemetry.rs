@@ -356,6 +356,8 @@ mod tests {
         let exporter = InMemoryMetricExporter::default();
         let (guard, _tracer) = {
             let _env = env_lock();
+            // The resource asserts below expect the configured defaults.
+            std::env::remove_var("OTEL_RESOURCE_ATTRIBUTES");
             crate::common::telemetry_providers_over(
                 &config,
                 &telemetry,
@@ -394,7 +396,8 @@ mod tests {
             })
             .await
             .unwrap();
-        // The same key again is a hit, so every cache counter is exported.
+        // The same key again is a hit, so the hit, miss and fill counters are
+        // exported.
         domain
             .cache()
             .get_or_fill("telemetry-test", b"key", || {
