@@ -437,12 +437,14 @@ async fn assert_a_lagged_subscriber_keeps_inflight_txs<S: MempoolStore>(store: S
         ]
     );
 
-    let before = samples(&meters);
     let items = backlog(&mut subscriber);
     subscriber.lifecycle.follow(&store, items).await;
 
     assert_eq!(subscriber.lifecycle.remembered(), inflight.len());
 
+    // Counted from after the lag, so that the samples below come from the
+    // later confirm and not from reconciliation.
+    let before = samples(&meters);
     store
         .confirm(&point(2), &inflight, &[], FINALIZE, KEEP)
         .unwrap();
