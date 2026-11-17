@@ -265,4 +265,107 @@ mod tests {
             "{points:?}"
         );
     }
+
+    /// The result, or the error code, of one call.
+    fn outcome_of<T: serde::Serialize>(response: Result<T, Error>) -> Value {
+        match response {
+            Ok(result) => json!({ "result": result }),
+            Err(err) => json!({ "error": err.code() }),
+        }
+    }
+
+    /// The same outcome, read from a JSON-RPC response.
+    fn outcome(response: &Value) -> Value {
+        match response.get("result") {
+            Some(result) => json!({ "result": result }),
+            None => json!({ "error": response["error"]["code"] }),
+        }
+    }
+
+    /// Calls the handler of `method` directly, outside the module.
+    async fn call_handler(
+        method: &str,
+        params: &Value,
+        context: Arc<crate::Context<dolos_testing::toy_domain::ToyDomain>>,
+    ) -> Value {
+        let raw = params.to_string();
+        let params = Params::new(Some(raw.as_str()));
+
+        match method {
+            "trp.resolve" => outcome_of(methods::trp_resolve(params, context).await),
+            "trp.submit" => outcome_of(methods::trp_submit(params, context).await),
+            "trp.checkStatus" => outcome_of(methods::trp_check_status(params, context).await),
+            "trp.dumpLogs" => outcome_of(methods::trp_dump_logs(params, context).await),
+            "trp.peekPending" => outcome_of(methods::trp_peek_pending(params, context).await),
+            "trp.peekInflight" => outcome_of(methods::trp_peek_inflight(params, context).await),
+            _ => unreachable!("{method}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn every_method_is_served_by_its_handler_and_recorded_under_its_name() {
+        let harness = Harness::new().await;
+
+        let pending = dolos_testing::tx_sequence_to_hash(0);
+        dolos_core::MempoolStore::receive(
+            dolos_core::Domain::mempool(&harness.context.domain),
+            dolos_testing::mempool::make_test_mempool_tx(pending),
+        )
+        .unwrap();
+
+        let cases = [
+            (
+                "trp.resolve",
+                json!({
+                    "tir": {
+                        "version": "v1beta0",
+                        "content": methods::tests::SUBJECT_PROTOCOL,
+                        "encoding": "hex"
+                    },
+                    "args": {},
+                    "env": {},
+                }),
+            ),
+            (
+                "trp.submit",
+                json!({ "tx": { "content": "00", "contentType": "hex" }, "witnesses": [] }),
+            ),
+            (
+                "trp.checkStatus",
+                json!({ "hashes": [hex::encode(pending.as_ref())] }),
+            ),
+            ("trp.dumpLogs", json!({})),
+            ("trp.peekPending", json!({})),
+            // The test mempool has no inflight or finalized transactions, so
+            // peekInflight and dumpLogs both answer an empty list. A cursor
+            // tells them apart: peekInflight ignores it, dumpLogs rejects one
+            // that is not a number.
+            ("trp.peekInflight", json!({ "cursor": "unused" })),
+        ];
+
+        for (method, params) in &cases {
+            let expected = call_handler(method, params, harness.context.clone()).await;
+            let response = harness.call(method, params.clone()).await;
+
+            assert_eq!(outcome(&response), expected, "{method}: {response}");
+        }
+
+        let points = harness.collect();
+        let durations: Vec<_> = points
+            .iter()
+            .filter(|point| point.starts_with("rpc.server.call.duration{"))
+            .collect();
+
+        assert_eq!(durations.len(), cases.len(), "{points:?}");
+
+        for (method, _) in &cases {
+            assert!(
+                durations.iter().any(|point| {
+                    point.contains(&format!("{{rpc.method={method},"))
+                        && point.ends_with(" count=1")
+                }),
+                "{method}: {points:?}"
+            );
+        }
+    }
 }
