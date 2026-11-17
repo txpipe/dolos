@@ -9,6 +9,8 @@ All notable changes to this project will be documented in this file.
 - *(minibf)* Add `/governance/dreps` endpoint
 - *(telemetry)* A configuration with `[telemetry]` now exports metrics over OTLP as well as traces, unless `metrics = false`
 - *(minibf)* [**breaking**] Remove the `/metrics` route: the chain tip is exported as the `dolos.sync.tip.slot` and `dolos.sync.tip.block_number` metrics
+- *(minibf, minikupo)* Export metrics for every request (duration by route template, method and status, active requests, and requests the client abandoned)
+- *(minikupo)* [**breaking**] Remove the `/health` route: the exported request and chain tip metrics replace it
 
 ## [2.0.0-alpha.0] - 2026-09-11
 

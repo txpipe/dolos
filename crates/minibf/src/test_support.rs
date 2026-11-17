@@ -28,7 +28,10 @@ use dolos_testing::{
 use http_body_util::BodyExt;
 use tower::util::ServiceExt;
 
-use crate::{build_router_with_facade, Facade};
+use dolos_core::telemetry::requests::{Family, RequestMetrics};
+use dolos_testing::metrics::MetricsRecorder;
+
+use crate::{build_router_with_metrics, metrics, Facade};
 
 pub use dolos_testing::faults::TestFault;
 
@@ -514,6 +517,7 @@ pub struct TestApp {
     router: Router,
     facade: Facade<dolos_testing::faults::FaultyToyDomain>,
     vectors: SyntheticVectors,
+    metrics: MetricsRecorder,
 }
 
 impl TestApp {
@@ -662,12 +666,19 @@ impl TestApp {
             config: minibf,
         };
 
-        let router = build_router_with_facade(facade.clone());
+        let metrics = MetricsRecorder::default();
+        let requests = RequestMetrics::with_meter(
+            Family::Http,
+            &metrics.meter(metrics::METER),
+            metrics::SURFACE,
+        );
+        let router = build_router_with_metrics(facade.clone(), requests);
 
         Self {
             router,
             facade,
             vectors,
+            metrics,
         }
     }
 
@@ -729,6 +740,29 @@ impl TestApp {
             .expect("failed to read response body")
             .to_bytes();
         (status, bytes.to_vec())
+    }
+
+    /// The status of `request`, its body read to the end.
+    pub async fn send(&self, request: Request<Body>) -> StatusCode {
+        let res = self
+            .router
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("request failed");
+
+        let status = res.status();
+        res.into_body()
+            .collect()
+            .await
+            .expect("failed to read response body");
+        status
+    }
+
+    /// The exported points of the request instrument `name`; see
+    /// [`MetricsRecorder::points_of`].
+    pub fn metric_points(&self, name: &str) -> Vec<String> {
+        self.metrics.points_of(name)
     }
 
     pub fn facade(&self) -> Facade<dolos_testing::faults::FaultyToyDomain> {
