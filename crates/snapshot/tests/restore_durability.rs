@@ -99,8 +99,8 @@ fn seed_entities(domain: &ToyDomain<FjallStores>) {
 
 /// Ruling 12: each epoch layer's `diffId` first appears in the progress file
 /// only after an archive persist that returned after that layer's last archive
-/// commit; and the state and archive are persisted after the cursor commit and
-/// before the progress file is removed.
+/// commit or finished ingest; and the state and archive are persisted after the
+/// cursor commit and before the progress file is removed.
 #[test]
 fn a_layer_is_recorded_only_after_its_writes_are_persisted() {
     let domain: ToyDomain<FjallStores> = harness();
@@ -143,8 +143,8 @@ fn a_layer_is_recorded_only_after_its_writes_are_persisted() {
 
         let last_commit = entries[..recorded_at]
             .iter()
-            .rposition(|entry| entry.op == Op::ArchiveCommit)
-            .unwrap_or_else(|| panic!("layer {layer:?} was recorded before any archive commit"));
+            .rposition(|entry| matches!(entry.op, Op::ArchiveCommit | Op::ArchiveIngest))
+            .unwrap_or_else(|| panic!("layer {layer:?} was recorded before any archive write"));
 
         assert!(
             entries[last_commit + 1..recorded_at]

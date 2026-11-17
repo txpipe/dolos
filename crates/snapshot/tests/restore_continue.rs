@@ -166,17 +166,21 @@ impl Stele {
         )
     }
 
-    /// The same, through stores that stop at the `call`-th commit or persist.
-    fn stopped_at(&self, storage: &Path, blank: &Blank<FjallStores>, call: usize) -> Error {
-        let journal = Journal::crashing_at(progress_path_in(storage), call);
-
+    /// The same, through stores that log to `journal`.
+    fn restore_recorded(
+        &self,
+        storage: &Path,
+        blank: &Blank<FjallStores>,
+        resume: bool,
+        journal: &Journal,
+    ) -> Result<restore::RestoreOutcome, Error> {
         let archive = RecordedArchive {
             inner: blank.archive.clone(),
             journal: journal.clone(),
         };
         let state = RecordedState {
             inner: blank.state().clone(),
-            journal,
+            journal: journal.clone(),
         };
 
         restore::execute(
@@ -184,17 +188,29 @@ impl Stele {
                 path: self.path(),
                 blocks: self.blocks_path(),
             },
-            restoring(storage, self.magic, false, Some(&self.source)),
+            restoring(storage, self.magic, resume, Some(&self.source)),
             Target::new(&archive, &state),
             None,
         )
-        .unwrap_err()
+    }
+
+    /// The same, through stores that stop at the `call`-th commit or persist.
+    fn stopped_at(&self, storage: &Path, blank: &Blank<FjallStores>, call: usize) -> Error {
+        let journal = Journal::crashing_at(progress_path_in(storage), call);
+
+        self.restore_recorded(storage, blank, false, &journal)
+            .unwrap_err()
     }
 
     /// The commits and persists of an uninterrupted recorded restore, in
     /// order, with the digest of the node it leaves.
     fn uninterrupted(&self) -> (Vec<Op>, Digest) {
-        let (entries, digest, _) = self.recorded_run();
+        self.uninterrupted_under(|journal| journal)
+    }
+
+    /// The same, under the journal `adjust` returns.
+    fn uninterrupted_under(&self, adjust: impl FnOnce(Journal) -> Journal) -> (Vec<Op>, Digest) {
+        let (entries, digest, _) = self.recorded_run_under(adjust);
 
         (entries.into_iter().map(|entry| entry.op).collect(), digest)
     }
@@ -202,29 +218,21 @@ impl Stele {
     /// [`Stele::uninterrupted`], each call with the layers the progress file
     /// recorded when it returned, and the plan.
     fn recorded_run(&self) -> (Vec<Entry>, Digest, restore::Plan) {
+        self.recorded_run_under(|journal| journal)
+    }
+
+    /// The same, under the journal `adjust` returns.
+    fn recorded_run_under(
+        &self,
+        adjust: impl FnOnce(Journal) -> Journal,
+    ) -> (Vec<Entry>, Digest, restore::Plan) {
         let storage = tempfile::tempdir().unwrap();
         let blank = Blank::<FjallStores>::open();
-        let journal = Journal::new(progress_path_in(storage.path()));
+        let journal = adjust(Journal::new(progress_path_in(storage.path())));
 
-        let archive = RecordedArchive {
-            inner: blank.archive.clone(),
-            journal: journal.clone(),
-        };
-        let state = RecordedState {
-            inner: blank.state().clone(),
-            journal: journal.clone(),
-        };
-
-        let outcome = restore::execute(
-            Input::Directory {
-                path: self.path(),
-                blocks: self.blocks_path(),
-            },
-            restoring(storage.path(), self.magic, false, Some(&self.source)),
-            Target::new(&archive, &state),
-            None,
-        )
-        .unwrap();
+        let outcome = self
+            .restore_recorded(storage.path(), &blank, false, &journal)
+            .unwrap();
 
         (
             journal.take(),
@@ -250,16 +258,17 @@ fn a_restore_stopped_anywhere_resumes_from_its_records_into_the_same_node() {
     let stele = Stele::export();
     let (ops, control) = stele.uninterrupted();
 
-    let calls = |op: Op| -> Vec<usize> {
+    let calls = |wanted: &[Op]| -> Vec<usize> {
         ops.iter()
             .enumerate()
-            .filter(|(_, at)| **at == op)
+            .filter(|(_, at)| wanted.contains(at))
             .map(|(index, _)| index + 1)
             .collect()
     };
 
-    let archive_commits = calls(Op::ArchiveCommit);
-    let state_commits = calls(Op::StateCommit);
+    // A layer's writes end in a commit, or in an ingest's finish.
+    let archive_commits = calls(&[Op::ArchiveCommit, Op::ArchiveIngest]);
+    let state_commits = calls(&[Op::StateCommit]);
     let cursor_commit = *state_commits.last().unwrap();
 
     assert!(archive_commits.len() >= 3, "{ops:?}");
@@ -303,6 +312,158 @@ fn a_restore_stopped_anywhere_resumes_from_its_records_into_the_same_node() {
             control,
             "stopped at call {stop} of {ops:?}"
         );
+    }
+}
+
+/// The archive ingests the blocks and log layers, and leaves the node a
+/// restore that writes every layer in batches leaves.
+#[test]
+fn an_ingesting_restore_leaves_the_node_a_batched_one_does() {
+    for stele in ingesting_steles() {
+        let (ops, ingested) = stele.uninterrupted();
+        let (batched_ops, batched) = stele.uninterrupted_under(Journal::batched);
+
+        assert!(ops.contains(&Op::ArchiveIngest), "{ops:?}");
+        assert!(!batched_ops.contains(&Op::ArchiveIngest), "{batched_ops:?}");
+        assert_eq!(ingested, batched);
+    }
+}
+
+/// Stopped at an ingested layer's finish, its runs never finished, and at the
+/// persist after it, the layer finished but not recorded: either way the
+/// resume fetches the layer again and builds the uninterrupted node.
+#[test]
+fn a_restore_stopped_around_an_ingest_resumes_into_the_same_node() {
+    for stele in ingesting_steles() {
+        let (ops, control) = stele.uninterrupted();
+
+        let finishes: Vec<usize> = ops
+            .iter()
+            .enumerate()
+            .filter(|(_, op)| **op == Op::ArchiveIngest)
+            .map(|(index, _)| index + 1)
+            .collect();
+
+        assert!(finishes.len() >= 2, "{ops:?}");
+
+        for finish in [finishes[0], finishes[finishes.len() - 1]] {
+            assert_eq!(ops[finish], Op::ArchivePersist, "{ops:?}");
+
+            for stop in [finish, finish + 1] {
+                let storage = tempfile::tempdir().unwrap();
+                let blank = Blank::<FjallStores>::open();
+
+                let error = stele.stopped_at(storage.path(), &blank, stop);
+                assert!(error.to_string().contains("stopped at call"), "{error}");
+
+                let skipped =
+                    progress(storage.path()).map_or(0, |progress| progress.completed.len());
+                let resumed = stele.restore(storage.path(), &blank, true).unwrap();
+
+                assert_eq!(resumed.summary.layers_skipped, skipped, "stopped at {stop}");
+                assert_eq!(
+                    contents_digest(&blank.archive, blank.state()),
+                    control,
+                    "stopped at call {stop} of {ops:?}"
+                );
+            }
+        }
+    }
+}
+
+/// The archive settles once, after the last ingested layer and before the
+/// cursor commit.
+#[test]
+fn an_ingesting_restore_settles_before_the_cursor_commit() {
+    for stele in ingesting_steles() {
+        let (ops, _) = stele.uninterrupted();
+
+        assert_settled_once(&ops);
+    }
+}
+
+/// Stopped at the settle, and at the cursor commit after it: the resume has
+/// no layer left to ingest, settles again, and builds the uninterrupted node.
+#[test]
+fn a_restore_stopped_at_or_after_the_settle_settles_again_on_resume() {
+    for stele in ingesting_steles() {
+        let (ops, control) = stele.uninterrupted();
+
+        let settle = ops.iter().position(|op| *op == Op::ArchiveSettle).unwrap() + 1;
+        let cursor_commit = ops.iter().rposition(|op| *op == Op::StateCommit).unwrap() + 1;
+
+        for stop in [settle, cursor_commit] {
+            let storage = tempfile::tempdir().unwrap();
+            let blank = Blank::<FjallStores>::open();
+
+            let error = stele.stopped_at(storage.path(), &blank, stop);
+            assert!(error.to_string().contains("stopped at call"), "{error}");
+
+            let journal = Journal::new(progress_path_in(storage.path()));
+            stele
+                .restore_recorded(storage.path(), &blank, true, &journal)
+                .unwrap();
+
+            let resumed: Vec<Op> = journal.take().into_iter().map(|entry| entry.op).collect();
+
+            assert!(
+                !resumed.contains(&Op::ArchiveIngest),
+                "stopped at {stop}: {resumed:?}"
+            );
+            assert_settled_once(&resumed);
+            assert_eq!(
+                contents_digest(&blank.archive, blank.state()),
+                control,
+                "stopped at call {stop} of {ops:?}"
+            );
+        }
+    }
+}
+
+/// A settle that fails, as a rewrite that ran out of space, fails the restore
+/// before its cursor: the node stays unfinished and a resume completes it.
+#[test]
+fn a_settle_that_fails_fails_the_restore_before_the_cursor() {
+    for stele in ingesting_steles() {
+        let (_, control) = stele.uninterrupted();
+
+        let storage = tempfile::tempdir().unwrap();
+        let blank = Blank::<FjallStores>::open();
+        let journal = Journal::failing_settle(progress_path_in(storage.path()));
+
+        let error = stele
+            .restore_recorded(storage.path(), &blank, false, &journal)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("the settle failed"), "{error}");
+        assert_eq!(blank.state().read_cursor().unwrap(), None);
+        assert!(progress(storage.path()).is_some());
+
+        stele.restore(storage.path(), &blank, true).unwrap();
+        assert_eq!(contents_digest(&blank.archive, blank.state()), control);
+    }
+}
+
+/// A single stele, and a paired one whose closed epochs' blocks come from the
+/// blocks repository: both ingest their blocks and logs.
+fn ingesting_steles() -> [Stele; 2] {
+    [Stele::export(), Stele::paired()]
+}
+
+fn assert_settled_once(ops: &[Op]) {
+    let settles: Vec<usize> = ops
+        .iter()
+        .enumerate()
+        .filter(|(_, op)| **op == Op::ArchiveSettle)
+        .map(|(index, _)| index)
+        .collect();
+    let cursor_commit = ops.iter().rposition(|op| *op == Op::StateCommit).unwrap();
+
+    assert_eq!(settles.len(), 1, "{ops:?}");
+    assert!(settles[0] < cursor_commit, "{ops:?}");
+
+    if let Some(last_ingest) = ops.iter().rposition(|op| *op == Op::ArchiveIngest) {
+        assert!(last_ingest < settles[0], "{ops:?}");
     }
 }
 
@@ -581,7 +742,11 @@ fn a_record_that_does_not_parse_is_refused() {
 fn a_restore_that_does_not_resume_starts_its_progress_over() {
     let stele = Stele::export();
     let (ops, control) = stele.uninterrupted();
-    let first_archive_commit = ops.iter().position(|op| *op == Op::ArchiveCommit).unwrap() + 1;
+    let first_archive_commit = ops
+        .iter()
+        .position(|op| matches!(op, Op::ArchiveCommit | Op::ArchiveIngest))
+        .unwrap()
+        + 1;
 
     let (storage, _) = interrupted(&stele);
 
@@ -706,15 +871,16 @@ fn a_paired_restore_stopped_in_either_stream_resumes_into_the_same_node() {
     let in_blocks = first_of(Repo::Blocks, first_of(Repo::Blocks, 0) + 1);
     let in_stele = first_of(Repo::Dolos, in_blocks + 1);
 
-    // The call that writes layer `k` first: the first archive commit while
-    // the progress file records exactly the layers before it.
+    // The call that writes layer `k` first: the first archive commit, or an
+    // ingest's finish, while the progress file records exactly the layers
+    // before it.
     let first_commit = |k: usize| {
         let before: BTreeSet<Digest> = layers[..k].iter().map(|layer| layer.diff_id).collect();
 
         entries
             .iter()
             .position(|entry| {
-                entry.op == Op::ArchiveCommit
+                matches!(entry.op, Op::ArchiveCommit | Op::ArchiveIngest)
                     && entry
                         .recorded
                         .iter()
@@ -726,6 +892,9 @@ fn a_paired_restore_stopped_in_either_stream_resumes_into_the_same_node() {
             .unwrap()
             + 1
     };
+
+    // A closed epoch's blocks are ingested, as the stele's own are.
+    assert_eq!(entries[first_commit(in_blocks) - 1].op, Op::ArchiveIngest);
 
     for k in [in_blocks, in_stele] {
         let storage = tempfile::tempdir().unwrap();

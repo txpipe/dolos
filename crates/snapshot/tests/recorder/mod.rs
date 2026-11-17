@@ -6,7 +6,8 @@
 //! call and every one after it without reaching the store, which is a
 //! process that died there: what committed before stays, and the batch in
 //! flight is dropped. One made with [`Journal::failing_persist`] fails a
-//! single persist and nothing else, as an fsync that returned an IO error.
+//! single persist and nothing else, as an fsync that returned an IO error,
+//! and one made with [`Journal::failing_settle`] fails the settle's join.
 
 // Each integration test binary compiles this module in full, so the parts one
 // binary does not reach look dead to it. They are not.
@@ -22,17 +23,23 @@ use std::{
 };
 
 use dolos_core::{
-    ArchiveError, ArchiveIndexDelta, ArchiveStore, ArchiveWriter, BlockBody, BlockSlot, ChainPoint,
-    EntityKey, EntityKind, EntityValue, IndexRecord, KeyRange, LogKey, Namespace, RawBlock,
-    StateError, StateStore, StateWriter, TagDimension, TagEntry, TagOrder, TagStart, TxoRef,
-    UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta,
+    ArchiveError, ArchiveIndexDelta, ArchiveIngest, ArchiveStore, ArchiveWriter, BatchIngest,
+    BlockBody, BlockSlot, ChainPoint, EntityKey, EntityKind, EntityValue, IndexRecord, KeyRange,
+    LogKey, Namespace, RawBlock, Settling, StateError, StateStore, StateWriter, TagDimension,
+    TagEntry, TagOrder, TagStart, TxoRef, UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta,
 };
 use stelae::{plan::RestoreProgress, Digest};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
     ArchiveCommit,
+    /// A finished [`ArchiveIngest`]; refused, the ingest is dropped with its
+    /// runs unfinished.
+    ArchiveIngest,
     ArchivePersist,
+    /// The archive's settle, run to its end inside the call so its entry
+    /// keeps its place among the others; refused, it never starts.
+    ArchiveSettle,
     StateCommit,
     StatePersist,
 }
@@ -57,6 +64,11 @@ pub struct Journal {
     fail_persist: Option<(Op, usize)>,
     archive_persists: Arc<AtomicUsize>,
     state_persists: Arc<AtomicUsize>,
+    /// Whether the archive writes ingested layers through its own writer,
+    /// one commit per chunk, rather than the inner store's ingest.
+    batched: bool,
+    /// Whether the settle's join reports an error after the settle ran.
+    fail_settle: bool,
 }
 
 impl Journal {
@@ -69,6 +81,16 @@ impl Journal {
             fail_persist: None,
             archive_persists: Arc::default(),
             state_persists: Arc::default(),
+            batched: false,
+            fail_settle: false,
+        }
+    }
+
+    /// The same journal, over an archive that writes every layer in batches.
+    pub fn batched(self) -> Self {
+        Self {
+            batched: true,
+            ..self
         }
     }
 
@@ -78,6 +100,15 @@ impl Journal {
     pub fn failing_persist(progress: PathBuf, op: Op, nth: usize) -> Self {
         Self {
             fail_persist: Some((op, nth)),
+            ..Self::new(progress)
+        }
+    }
+
+    /// A journal whose settle runs, then fails when the restore joins it, as
+    /// a major compaction that ran out of space.
+    pub fn failing_settle(progress: PathBuf) -> Self {
+        Self {
+            fail_settle: true,
             ..Self::new(progress)
         }
     }
@@ -108,7 +139,9 @@ impl Journal {
         let counter = match op {
             Op::ArchivePersist => &self.archive_persists,
             Op::StatePersist => &self.state_persists,
-            Op::ArchiveCommit | Op::StateCommit => unreachable!("{op:?} is not a persist"),
+            Op::ArchiveCommit | Op::ArchiveIngest | Op::ArchiveSettle | Op::StateCommit => {
+                unreachable!("{op:?} is not a persist")
+            }
         };
         let nth = counter.fetch_add(1, Ordering::SeqCst) + 1;
 
@@ -197,6 +230,33 @@ impl<W: ArchiveWriter> ArchiveWriter for RecordedArchiveWriter<W> {
     }
 }
 
+pub struct RecordedIngest<'a> {
+    inner: Box<dyn ArchiveIngest + 'a>,
+    journal: Journal,
+}
+
+impl ArchiveIngest for RecordedIngest<'_> {
+    fn blocks(&mut self, blocks: Vec<(ChainPoint, RawBlock)>) -> Result<(), ArchiveError> {
+        self.inner.blocks(blocks)
+    }
+
+    fn logs(
+        &mut self,
+        ns: Namespace,
+        rows: Vec<(LogKey, EntityValue)>,
+    ) -> Result<(), ArchiveError> {
+        self.inner.logs(ns, rows)
+    }
+
+    fn finish(self: Box<Self>) -> Result<(), ArchiveError> {
+        self.journal.gate().map_err(ArchiveError::InternalError)?;
+        self.inner.finish()?;
+        self.journal.log(Op::ArchiveIngest);
+
+        Ok(())
+    }
+}
+
 impl<A: ArchiveStore> ArchiveStore for RecordedArchive<A> {
     type BlockIter<'a> = A::BlockIter<'a>;
     type Writer = RecordedArchiveWriter<A::Writer>;
@@ -268,6 +328,32 @@ impl<A: ArchiveStore> ArchiveStore for RecordedArchive<A> {
         self.journal.log(Op::ArchivePersist);
 
         Ok(())
+    }
+
+    fn start_ingest(&self) -> Result<Box<dyn ArchiveIngest + '_>, ArchiveError> {
+        if self.journal.batched {
+            return Ok(Box::new(BatchIngest::new(self)));
+        }
+
+        Ok(Box::new(RecordedIngest {
+            inner: self.inner.start_ingest()?,
+            journal: self.journal.clone(),
+        }))
+    }
+
+    fn settle_ingested(&self) -> Result<Settling, ArchiveError> {
+        self.journal.gate().map_err(ArchiveError::InternalError)?;
+        self.inner.settle_ingested()?.join()?;
+        self.journal.log(Op::ArchiveSettle);
+
+        // What the restore joins carries only the outcome.
+        let fail = self.journal.fail_settle;
+        let outcome = std::thread::spawn(move || match fail {
+            true => Err(ArchiveError::InternalError("the settle failed".into())),
+            false => Ok(()),
+        });
+
+        Ok(Settling::of(vec![outcome]))
     }
 
     fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
