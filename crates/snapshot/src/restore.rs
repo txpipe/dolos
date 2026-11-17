@@ -22,6 +22,10 @@
 //! 3. Per epoch: `blocks`, then the `log-{ns}` layers the epoch carries, then
 //!    its `entity-{kind}` layers, then `indexes` — all into the archive store.
 //!    A closed epoch's `blocks` may come from a second repository; see below.
+//!    The `blocks` and `log-{ns}` layers arrive in key order and go through
+//!    [`ArchiveStore::start_ingest`]; after the last epoch the archive settles
+//!    what it ingested ([`ArchiveStore::settle_ingested`]) while the tip is
+//!    restored, and the restore joins it before the cursor.
 //! 4. The state tip — every shard of every `state-{ns}` kind. Derive the
 //!    live-UTxO tags from each incoming UTxO chunk and commit them with the
 //!    set. They are never shipped — ADR-004's Amendment 2.
@@ -118,6 +122,7 @@
 //! ends with [`ArchiveStore::persist`] before the checkpoint records its
 //! `diffId`: anything the progress file names is on disk, and a stop between a
 //! layer's writes and its record refetches that layer rather than skipping it.
+//! An ingested layer is finished inside the same step, before that persist.
 //! The same rule holds at the end: the state and the archive are persisted
 //! after the cursor commit and before the progress file is removed, so a stop
 //! leaves a durable cursor or a progress file.
@@ -184,7 +189,7 @@ use std::{
 use dolos_cardano::indexes::utxo_index_delta_from_utxo_delta;
 use dolos_core::{
     ArchiveStore, ArchiveWriter, BlockSlot, ChainPoint, EntityKind, EntityRecord, IndexRecord,
-    Namespace, StateStore, StateWriter, UtxoSetDelta,
+    Namespace, Settling, StateStore, StateWriter, UtxoSetDelta,
 };
 use stelae::{
     frame::Limits,
@@ -227,8 +232,8 @@ pub fn default_budget() -> Budget {
             max_record: crate::MAX_RECORD,
             ..Limits::default()
         },
-        commit_records: 50_000,
-        commit_bytes: 64 * 1024 * 1024,
+        commit_records: 500_000,
+        commit_bytes: 512 * 1024 * 1024,
     }
 }
 
@@ -488,6 +493,17 @@ impl Plan {
             .chain(self.tip_layers())
     }
 
+    /// Whether the plan carries a `blocks` or a `log-*` layer, the layers
+    /// a restore ingests and then settles.
+    ///
+    /// Asked of the plan rather than of what this run fetched: a resume whose
+    /// earlier run stopped during the settle has nothing left to fetch.
+    pub fn ingests(&self) -> bool {
+        self.epochs
+            .iter()
+            .any(|epoch| epoch.blocks.is_some() || !epoch.logs.is_empty())
+    }
+
     /// [`Plan::remaining_layers`], for the layers `repo` serves, in plan order.
     pub fn remaining_in<'a>(
         &'a self,
@@ -588,6 +604,10 @@ impl Plan {
     /// read at check time, so those bytes are already out of it, and the layer
     /// is not recorded as done, so it is charged again in full.
     ///
+    /// **One exception to "still writes": the settle.** It rewrites every
+    /// ingested log layer, recorded or not, so its copy is sized over the
+    /// whole plan.
+    ///
     /// A layer the blocks snapshot serves is sized by `blocks`.
     pub fn estimate<R: SnapshotReader>(
         &self,
@@ -615,12 +635,8 @@ impl Plan {
             ..Estimate::default()
         };
 
-        let mut on_disk =
+        let mut size =
             |kind: OnDisk, repo: Repo, descriptor: &LayerDescriptor| -> Result<u64, Error> {
-                if resume.is_done(&descriptor.diff_id) {
-                    return Ok(0);
-                }
-
                 // The compressed factors were fitted to this profile's own level;
                 // a layer compressed otherwise is sized from what it declares.
                 let sized = match self.foreign_compression.contains(&descriptor.diff_id) {
@@ -637,25 +653,34 @@ impl Plan {
                 })
             };
 
+        let remaining = |descriptor: &&LayerDescriptor| !resume.is_done(&descriptor.diff_id);
+
         let (mut blocks, mut logs, mut entities, mut indexes) = (0u64, 0u64, 0u64, 0u64);
+        let mut settled = 0u64;
 
         for epoch in &self.epochs {
-            if let Some(descriptor) = &epoch.blocks {
+            for descriptor in epoch.blocks.iter().filter(remaining) {
                 let repo = self.blocks_repo(epoch);
-                blocks = blocks.saturating_add(on_disk(BLOCKS_ON_DISK, repo, descriptor)?);
+                blocks = blocks.saturating_add(size(BLOCKS_ON_DISK, repo, descriptor)?);
             }
 
             for descriptor in epoch.logs.values() {
-                logs = logs.saturating_add(on_disk(LOGS_ON_DISK, Repo::Dolos, descriptor)?);
+                let bytes = size(LOGS_ON_DISK, Repo::Dolos, descriptor)?;
+
+                settled = settled.saturating_add(bytes);
+
+                if remaining(&descriptor) {
+                    logs = logs.saturating_add(bytes);
+                }
             }
 
-            for descriptor in epoch.entities.values() {
-                let bytes = on_disk(ENTITIES_ON_DISK, Repo::Dolos, descriptor)?;
+            for descriptor in epoch.entities.values().filter(remaining) {
+                let bytes = size(ENTITIES_ON_DISK, Repo::Dolos, descriptor)?;
                 entities = entities.saturating_add(bytes);
             }
 
-            if let Some(descriptor) = &epoch.indexes {
-                let bytes = on_disk(INDEXES_ON_DISK, Repo::Dolos, descriptor)?;
+            for descriptor in epoch.indexes.iter().filter(remaining) {
+                let bytes = size(INDEXES_ON_DISK, Repo::Dolos, descriptor)?;
                 indexes = indexes.saturating_add(bytes);
             }
         }
@@ -677,7 +702,12 @@ impl Plan {
             .fold(0u64, |sum, layer| sum.saturating_add(layer.records));
 
         estimate.derived_tags = utxo_records.saturating_mul(DERIVED_TAG_BYTES_PER_UTXO);
-        estimate.headroom = scaled(estimate.before_headroom(), COMPACTION_HEADROOM_PER_MILLE);
+        // The settle holds the ingested logs, uncompressed, beside their
+        // rewrite until it ends: one copy of the whole plan's logs, which
+        // overstates the ingested copy (about 66 GB on mainnet's full history
+        // to 75).
+        estimate.headroom = scaled(estimate.before_headroom(), COMPACTION_HEADROOM_PER_MILLE)
+            .saturating_add(settled);
 
         Ok(estimate)
     }
@@ -829,7 +859,8 @@ pub struct Estimate {
     pub derived_tags: u64,
     /// What the destination stores' journals may hold.
     pub journals: u64,
-    /// Compaction headroom over every term above.
+    /// Compaction headroom over every term above, and the ingested logs the
+    /// settle rewrites.
     pub headroom: u64,
     /// Epoch layers sized from their uncompressed size: no compressed size
     /// stated, or a stele not at this profile's compression level.
@@ -2034,6 +2065,13 @@ where
         }
     }
 
+    // The ingested keyspaces are rewritten while the tip, which writes only
+    // the state store, restores.
+    let settling = match plan.ingests() {
+        true => archive.settle_ingested()?,
+        false => Settling::none(),
+    };
+
     info!(
         layers = plan.tip_layers().count(),
         "restoring the state tip"
@@ -2053,6 +2091,8 @@ where
             summary.layers_fetched += 1;
         }
     }
+
+    settling.join()?;
 
     // The last write of the restore, the live-utxo dimensions above included:
     // until this commit lands `has_existing_data()` reports an empty node
@@ -2630,6 +2670,10 @@ fn check_blocks_scope(
 ///
 /// A blocks-repository layer is also held to that profile's record rules:
 /// every block inside the layer's epoch, and no slot going backwards.
+///
+/// Through [`ArchiveStore::start_ingest`], as the layer arrives in slot order;
+/// finished before the layer's persist. An equal slot (a Byron repeat) passes
+/// the blocks profile's order rule and ends the ingest's run.
 fn restore_blocks<R: SnapshotReader, A: ArchiveStore>(
     reader: &Reader<'_, R>,
     descriptor: &LayerDescriptor,
@@ -2669,53 +2713,61 @@ fn restore_blocks<R: SnapshotReader, A: ArchiveStore>(
         ))
     };
 
-    reader.drain(
+    let mut ingest = archive.start_ingest()?;
+
+    let count = reader.drain(
         descriptor,
         decode,
         |record| record.body.len(),
         |chunk| {
-            let writer = archive.start_writer()?;
+            let blocks = chunk
+                .into_iter()
+                .map(|record| {
+                    let point = ChainPoint::Specific(record.slot, record.hash);
 
-            for record in chunk {
-                let point = ChainPoint::Specific(record.slot, record.hash);
+                    (point, Arc::new(record.body))
+                })
+                .collect();
 
-                writer.apply(&point, &Arc::new(record.body))?;
-            }
-
-            writer.commit()?;
-
-            Ok(())
+            Ok(ingest.blocks(blocks)?)
         },
-    )
+    )?;
+
+    ingest.finish()?;
+
+    Ok(count)
 }
 
 /// One epoch's ledger logs for one namespace.
 ///
 /// `ns` comes from the layer's kind, not from its records — the split moved it
 /// there — so a layer restores into exactly the namespace the inscription said
-/// it holds.
+/// it holds. Ingested as the blocks are: the layer arrives in key order.
 fn restore_logs<R: SnapshotReader, A: ArchiveStore>(
     reader: &Reader<'_, R>,
     descriptor: &LayerDescriptor,
     archive: &A,
     ns: Namespace,
 ) -> Result<u64, Error> {
-    reader.drain(
+    let mut ingest = archive.start_ingest()?;
+
+    let count = reader.drain(
         descriptor,
         |bytes: &[u8]| logs::decode(ns, bytes),
         |record| record.key.as_ref().len() + record.value.len(),
         |chunk| {
-            let writer = archive.start_writer()?;
+            let rows = chunk
+                .into_iter()
+                .map(|record| (record.key, record.value))
+                .collect();
 
-            for record in chunk {
-                writer.write_log(ns, &record.key, &record.value)?;
-            }
-
-            writer.commit()?;
-
-            Ok(())
+            Ok(ingest.logs(ns, rows)?)
         },
-    )
+    )?;
+
+    ingest.finish()?;
+
+    Ok(count)
 }
 
 /// One epoch's entity index entries for one kind, written through
@@ -4141,6 +4193,8 @@ mod tests {
         let at_level = plan.estimate_with(&resume, journals, lookup).unwrap();
 
         let terms = 3_600 + 11_000 + 2_200 + 2_100 + 700 + state + derived_tags + journals;
+        // And the settle's copy of the logs.
+        let headroom = (terms * 75).div_ceil(1_000) + 2_100;
         assert_eq!(
             at_level,
             Estimate {
@@ -4151,12 +4205,32 @@ mod tests {
                 state,
                 derived_tags,
                 journals,
-                headroom: (terms * 75).div_ceil(1_000),
+                headroom,
                 fallback_layers: 1,
             }
         );
-        assert_eq!(at_level.total(), terms + (terms * 75).div_ceil(1_000));
+        assert_eq!(at_level.total(), terms + headroom);
         assert_eq!(asked.get(), 5, "the recorded layer is never sized");
+
+        // A resume past the log layer writes no logs, but the settle still
+        // rewrites them: its copy stays in the headroom.
+        progress.record(Digest::from_bytes([0xa1; 32]));
+        let past_logs = Resume::from_progress(Some(&progress));
+        asked.set(0);
+
+        let resumed = plan.estimate_with(&past_logs, journals, lookup).unwrap();
+
+        let resumed_terms = terms - 2_100;
+        assert_eq!(resumed.logs, 0);
+        assert_eq!(
+            resumed.headroom,
+            (resumed_terms * 75).div_ceil(1_000) + 2_100
+        );
+        assert_eq!(
+            asked.get(),
+            5,
+            "the recorded log layer is sized for the settle"
+        );
 
         // Another level: every epoch layer falls back, and the transport is
         // never asked.
@@ -4171,7 +4245,10 @@ mod tests {
         assert_eq!(elsewhere.logs, 3_720);
         assert_eq!(elsewhere.entities, 1_250);
         assert_eq!(elsewhere.fallback_layers, 5);
-        assert_eq!(elsewhere.total(), terms + (terms * 75).div_ceil(1_000));
+        assert_eq!(
+            elsewhere.total(),
+            terms + (terms * 75).div_ceil(1_000) + 3_720
+        );
         assert_eq!(asked.get(), 0);
     }
 
@@ -4267,7 +4344,8 @@ mod tests {
     /// 666, full history and a 10-epoch rolling window, as per-kind declared
     /// and compressed sizes. The estimate plus one staged layer (what those
     /// runs staged) covers each measured peak plus staging, and stays within
-    /// a fifth of it on full history.
+    /// a fifth of it on full history once the settle's copy of the ingested
+    /// logs, measured at 66 GB there, is added to the peak.
     #[test]
     fn the_estimate_covers_the_measured_mainnet_restores() {
         const GIB: f64 = (1u64 << 30) as f64;
@@ -4349,9 +4427,11 @@ mod tests {
             assert!(checked >= run.peak_and_staging, "{name}: {checked} GiB");
         }
 
+        const SETTLED_COPY: f64 = 66e9 / GIB;
+
         let checked = (estimate(&full).total() + STAGED) as f64 / GIB;
         assert!(
-            checked <= full.peak_and_staging * 1.2,
+            checked <= (full.peak_and_staging + SETTLED_COPY) * 1.2,
             "full: {checked} GiB"
         );
     }
