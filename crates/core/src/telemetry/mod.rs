@@ -11,6 +11,7 @@ use std::sync::{Arc, Weak};
 use opentelemetry::{global, metrics::ObservableGauge};
 
 pub mod requests;
+pub mod storage;
 
 /// The meter of the instruments this crate records.
 pub const METER: &str = "dolos-core";
