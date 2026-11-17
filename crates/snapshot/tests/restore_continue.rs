@@ -22,6 +22,7 @@ use std::{
 
 use dolos_core::{Domain as _, StateStore as _};
 use dolos_snapshot::{
+    export::BLOCKS_REPOSITORY,
     restore::{
         self, progress_path_in, source_path_in, Input, Repo, Restoring, ResumeRefusal, Source,
         SourceRecord, Target,
@@ -55,12 +56,11 @@ fn restoring<'a>(
     }
 }
 
-/// A stele directory exported from the harness, with the source naming it.
+/// A network root exported from the harness, with the source naming its
+/// stele layout.
 struct Stele {
     domain: ToyDomain<FjallStores>,
     dir: tempfile::TempDir,
-    /// The blocks repository a paired stele names.
-    blocks: Option<tempfile::TempDir>,
     source: Source,
     magic: u64,
 }
@@ -73,10 +73,9 @@ impl Stele {
         export_to(dir.path(), &domain);
 
         Self {
-            source: Source::Dir(dir.path().to_path_buf()),
+            source: Source::Dir(node::dolos(dir.path())),
             domain,
             dir,
-            blocks: None,
             magic,
         }
     }
@@ -100,48 +99,52 @@ impl Stele {
         }
 
         Self {
-            source: Source::Dir(dir.path().to_path_buf()),
+            source: Source::Dir(node::dolos(dir.path())),
             domain,
             dir,
-            blocks: None,
             magic,
         }
     }
 
-    /// [`Stele::chained`], paired: the stele without its closed epochs'
-    /// blocks, which are in a blocks repository beside it.
+    /// [`Stele::chained`], its pair copied through the blocks profile's plain
+    /// writer into a root of its own.
     fn paired() -> Self {
         let chained = Self::chained();
         let dir = tempfile::tempdir().unwrap();
-        let blocks = tempfile::tempdir().unwrap();
 
         paired::pair(
-            chained.path(),
-            &stelae::dir::SnapshotDir::create(dir.path()).unwrap(),
-            &stelae::dir::SnapshotDir::create(blocks.path()).unwrap(),
+            chained.root(),
+            &stelae::dir::SnapshotDir::create(node::dolos(dir.path())).unwrap(),
+            &stelae::dir::SnapshotDir::create(dir.path().join(BLOCKS_REPOSITORY)).unwrap(),
         );
 
         Self {
-            source: Source::Dir(dir.path().to_path_buf()),
+            source: Source::Dir(node::dolos(dir.path())),
             domain: chained.domain,
             dir,
-            blocks: Some(blocks),
             magic: chained.magic,
         }
     }
 
-    fn path(&self) -> &Path {
+    /// The network root.
+    fn root(&self) -> &Path {
         self.dir.path()
     }
 
-    fn blocks_path(&self) -> Option<&Path> {
-        self.blocks.as_ref().map(|blocks| blocks.path())
+    /// The stele layout of the root, which is the recorded source.
+    fn path(&self) -> PathBuf {
+        node::dolos(self.root())
+    }
+
+    /// The blocks layout of the root.
+    fn blocks_path(&self) -> Option<PathBuf> {
+        node::blocks(self.root())
     }
 
     fn digest(&self) -> Digest {
         use stelae::SnapshotReader as _;
 
-        node::resolved(self.path())
+        node::resolved(self.root())
             .read_inscription()
             .unwrap()
             .digest()
@@ -157,8 +160,8 @@ impl Stele {
     ) -> Result<restore::RestoreOutcome, Error> {
         restore::execute(
             Input::Directory {
-                path: self.path(),
-                blocks: self.blocks_path(),
+                path: &self.path(),
+                blocks: self.blocks_path().as_deref(),
             },
             restoring(storage, self.magic, resume, Some(&self.source)),
             Target::new(&blank.archive, blank.state()),
@@ -181,8 +184,8 @@ impl Stele {
 
         restore::execute(
             Input::Directory {
-                path: self.path(),
-                blocks: self.blocks_path(),
+                path: &self.path(),
+                blocks: self.blocks_path().as_deref(),
             },
             restoring(storage, self.magic, false, Some(&self.source)),
             Target::new(&archive, &state),
@@ -217,8 +220,8 @@ impl Stele {
 
         let outcome = restore::execute(
             Input::Directory {
-                path: self.path(),
-                blocks: self.blocks_path(),
+                path: &self.path(),
+                blocks: self.blocks_path().as_deref(),
             },
             restoring(storage.path(), self.magic, false, Some(&self.source)),
             Target::new(&archive, &state),
@@ -315,7 +318,7 @@ fn a_stopped_restore_of_a_chained_head_resumes_from_its_records() {
 
     let head = {
         use stelae::SnapshotReader as _;
-        node::resolved(stele.path()).read_inscription().unwrap()
+        node::resolved(stele.root()).read_inscription().unwrap()
     };
     assert_eq!(head.sequence, 2);
     assert!(head.previous.is_some());
@@ -358,7 +361,7 @@ fn the_source_record_names_the_source_the_sequence_and_the_digest() {
 
     let inscription = {
         use stelae::SnapshotReader as _;
-        node::resolved(stele.path()).read_inscription().unwrap()
+        node::resolved(stele.root()).read_inscription().unwrap()
     };
 
     assert_eq!(
@@ -468,7 +471,7 @@ fn a_directory_that_no_longer_holds_the_recorded_stele_is_refused() {
 
     let later = harness::<FjallStores>();
     node::stand_at_boundary(&later, 2);
-    export_to(stele.path(), &later);
+    node::export_layout(&stele.path(), &later, &node::plan_for(&later));
 
     let error = stele.restore(storage.path(), &blank, true).unwrap_err();
     let refusal = assert_refused_untouched(error, storage.path(), &blank, before.clone());
@@ -510,13 +513,13 @@ fn a_resume_from_another_source_is_refused() {
     let before = snapshot(storage.path(), &blank);
 
     let copy = tempfile::tempdir().unwrap();
-    copy_dir(stele.path(), copy.path());
+    copy_dir(&stele.path(), copy.path());
     let elsewhere = Source::Dir(copy.path().to_path_buf());
 
     let error = restore::execute(
         Input::Directory {
             path: copy.path(),
-            blocks: None,
+            blocks: stele.blocks_path().as_deref(),
         },
         restoring(storage.path(), stele.magic, true, Some(&elsewhere)),
         Target::new(&blank.archive, blank.state()),
@@ -639,8 +642,8 @@ fn a_restore_given_no_source_records_nothing() {
 
     restore::execute(
         Input::Directory {
-            path: stele.path(),
-            blocks: None,
+            path: &stele.path(),
+            blocks: stele.blocks_path().as_deref(),
         },
         restoring(storage.path(), stele.magic, false, None),
         Target::new(&blank.archive, blank.state()),

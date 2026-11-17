@@ -288,7 +288,7 @@ fn by_key<'a>(
         .collect()
 }
 
-/// Restore the latest stele of the layout at `root` into empty stores.
+/// Restore the latest stele of the network root at `root` into empty stores.
 fn restored(root: &std::path::Path) -> Summary {
     let storage = tempfile::tempdir().unwrap();
     let archive = MemoryArchiveStore::new(dolos_cardano::model::build_log_schema());
@@ -306,8 +306,8 @@ fn restored(root: &std::path::Path) -> Summary {
     };
 
     let (_, _, summary) = restore::restore_dir(
-        root,
-        None,
+        root.join(export::DOLOS_REPOSITORY),
+        Some(&root.join(export::BLOCKS_REPOSITORY)),
         node,
         Target::new(&archive, &state),
         &Observer::silent(),
@@ -384,6 +384,7 @@ fn the_profile_states_the_log_anchors_of_the_code() {
                 assert!(first.starts_with("`b`"), "{kind}: {first}");
                 assert_eq!(last, "`b`", "{kind}");
             }
+            Anchor::Cut => panic!("{kind}: a log kind is anchored to the cut"),
         }
     }
 }
@@ -485,7 +486,7 @@ fn a_chained_publish_lists_its_diff_and_its_tip_and_resolves_to_the_whole() {
 
         // The chain resolves to every diff up to it and its tip, and that is
         // what a lineage started at this boundary lists, digest for digest.
-        let resolved = SnapshotDir::open(&chain)
+        let resolved = SnapshotDir::open(chain.join(export::DOLOS_REPOSITORY))
             .unwrap()
             .resolve_sequence(&DolosProfile, sequence)
             .unwrap();
@@ -519,6 +520,8 @@ fn a_chained_publish_lists_its_diff_and_its_tip_and_resolves_to_the_whole() {
             assert_eq!(chained.layers_fetched, single.layers_fetched);
             // every kind but the UTxOs, which this ledger never writes
             assert!(records(&chained)[..5].iter().all(|count| *count > 0));
+            // two blocks in each closed epoch, and the boundary's first
+            assert_eq!(chained.blocks, 2 * sequence + 1);
         }
 
         previous = Some(inscription);

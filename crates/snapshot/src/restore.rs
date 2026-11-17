@@ -1049,9 +1049,8 @@ pub fn plan(
 }
 
 /// The blocks snapshot a restore of `chain` reads the closed epochs' blocks
-/// from: the one its `position.blocks` names, when the stele lists no
-/// per-epoch `blocks` layer of its own and the history window keeps an epoch
-/// before the cut. `None` when it reads no blocks repository.
+/// from: the one its `position.blocks` names, when the history window keeps an
+/// epoch before the cut. `None` when it reads no blocks repository.
 ///
 /// What a transport asks before [`plan`], to know whether to resolve the
 /// blocks repository at all.
@@ -1072,14 +1071,25 @@ fn select(
 ) -> Result<(Vec<EpochLayers>, usize, Option<Digest>), Error> {
     let epochs = select_epochs(chain.descriptors())?;
 
-    // A stele that still lists its closed epochs' blocks is restored from them.
-    let listed = epochs
+    // A stele lists the boundary window's blocks alone (decision 0080, point
+    // 11); a closed epoch's are the blocks profile's.
+    if let Some(closed) = epochs
         .iter()
-        .any(|epoch| epoch.epoch < sequence && epoch.blocks.is_some());
+        .find(|epoch| epoch.epoch < sequence && epoch.blocks.is_some())
+    {
+        return Err(Error::malformed_inscription(
+            "the stele's layers",
+            format!(
+                "they list a `blocks` layer for closed epoch {}; a stele carries only its boundary \
+                 block, and the blocks snapshot its `position.blocks` names carries the rest",
+                closed.epoch
+            ),
+        ));
+    }
 
     let (kept, skipped) = retain_history(epochs, position.point.slot(), max_history);
 
-    let wanted = !listed && kept.iter().any(|epoch| epoch.epoch < sequence);
+    let wanted = kept.iter().any(|epoch| epoch.epoch < sequence);
     let reference = position.blocks.filter(|_| wanted);
 
     Ok((kept, skipped, reference))

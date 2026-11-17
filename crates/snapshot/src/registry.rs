@@ -988,7 +988,7 @@ mod tests {
         }
     }
 
-    /// What the snapshot at 3 would offer: the closed window 2's blocks, in
+    /// What the snapshot at 3 would offer: the closed window 2's indexes, in
     /// its diff, beside its tip's account rows for window 2 and a state shard,
     /// which no record names and the record refuses to offer.
     fn record(origin: Origin) -> PublishRecord {
@@ -996,7 +996,7 @@ mod tests {
             origin,
             layers: vec![
                 written(
-                    crate::BLOCKS,
+                    crate::INDEXES,
                     json!({"epoch": 2, "startSlot": 200, "endSlot": 299}),
                     1,
                 ),
@@ -1065,8 +1065,8 @@ mod tests {
                 .unwrap()
         };
 
-        let blocks = scope_key(
-            crate::BLOCKS,
+        let indexes = scope_key(
+            crate::INDEXES,
             &json!({"epoch": 2, "startSlot": 200, "endSlot": 299}),
         )
         .unwrap();
@@ -1078,12 +1078,12 @@ mod tests {
 
         assert_eq!(
             offered(3).into_keys().collect::<Vec<_>>(),
-            vec![blocks.clone()]
+            vec![indexes.clone()]
         );
 
         let at_4: Vec<_> = offered(4).into_keys().collect();
         assert!(
-            at_4.contains(&blocks) && at_4.contains(&accounts),
+            at_4.contains(&indexes) && at_4.contains(&accounts),
             "{at_4:?}"
         );
         assert_eq!(at_4.len(), 2);

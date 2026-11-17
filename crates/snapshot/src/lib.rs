@@ -375,13 +375,14 @@ pub const fn state_layer_count() -> usize {
 
 /// The epoch kinds a window always produces a layer for.
 ///
-/// The log and entity kinds are the exception, and the only ones: a log layer
-/// exists if and only if its namespace has at least one record in the window,
-/// and an entity layer if and only if its kind has an entry first seen in it,
-/// so an epoch contributes these plus one layer per log namespace and entity
-/// kind it has records for. Split out because the two arities are what the
-/// layer arithmetic in [`export::export`] and [`registry::preview`] is made
-/// of.
+/// Every window a snapshot lists, that is: `blocks` is listed for the boundary
+/// window alone ([`roles::Anchor::Cut`]). The log and entity kinds are the
+/// exception, and the only ones: a log layer exists if and only if its
+/// namespace has at least one record in the window, and an entity layer if and
+/// only if its kind has an entry first seen in it, so an epoch contributes
+/// these plus one layer per log namespace and entity kind it has records for.
+/// Split out because the two arities are what the layer arithmetic in
+/// [`export::export`] and [`registry::preview`] is made of.
 pub const DENSE_EPOCH_KINDS: [&str; 2] = [BLOCKS, INDEXES];
 
 /// Every layer kind, in the order the inscription lists them.
@@ -1750,7 +1751,8 @@ mod tests {
 
     /// The driver asks the role of a layer being written, from its scope: the
     /// state is the tip, a boundary window is the tip, and a closed window is
-    /// in the diff once [`roles`] says it is final.
+    /// in the diff once [`roles`] says it is final. A closed window's blocks
+    /// are in neither.
     #[test]
     fn the_driver_reads_a_layers_role_off_its_scope() {
         use stelae_driver::{DriverProfile as _, Role};
@@ -1763,7 +1765,7 @@ mod tests {
         assert_eq!(role(STATE_KIND_NAMES[0], tip.descriptor(), 7), Role::Tip);
 
         assert_eq!(role(BLOCKS, json!({"epoch": 7}), 7), Role::Tip);
-        assert_eq!(role(BLOCKS, json!({"epoch": 6}), 7), Role::Diff);
+        assert_eq!(role(INDEXES, json!({"epoch": 6}), 7), Role::Diff);
         assert_eq!(
             role("log-account-epochs", json!({"epoch": 6}), 7),
             Role::Tip
@@ -1778,6 +1780,7 @@ mod tests {
         // a window the snapshot cannot hold yet, a dump's scope and a kind
         // this profile does not define are refused
         for (kind, scope) in [
+            (BLOCKS, json!({"epoch": 6})),
             ("log-pool-epochs", json!({"epoch": 6})),
             (STATE_KIND_NAMES[0], json!({"epoch": 4, "shard": 3})),
             ("state", json!({"shard": 0})),

@@ -59,7 +59,15 @@ fn journaled_restore(
     let stele = node::resolved(root);
     let chain = stele.chain().unwrap();
     let identity = chain.identity();
-    let plan = restore::plan(chain, None, magic, None).unwrap();
+    let blocks = node::resolved_blocks(root);
+    let blocks_index = blocks.as_ref().map(|blocks| blocks.blob_index().unwrap());
+    let plan = restore::plan(
+        chain,
+        blocks.as_ref().and_then(|blocks| blocks.chain()),
+        magic,
+        None,
+    )
+    .unwrap();
     let index = stele.blob_index().unwrap();
     let mut checkpoint = Checkpoint::open(progress_path_in(storage), identity, false).unwrap();
 
@@ -72,7 +80,10 @@ fn journaled_restore(
     let result = restore::restore(
         &stele,
         &index,
-        None,
+        blocks
+            .as_ref()
+            .zip(blocks_index.as_ref())
+            .map(|(snapshot, index)| restore::Blocks { snapshot, index }),
         &plan,
         Target::new(&archive, &state),
         default_budget(),

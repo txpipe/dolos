@@ -78,6 +78,7 @@ use stelae::{
     transport::{LayerSpec, RecordSink, SnapshotWriter, WrittenLayer},
     Digest, SnapshotReader as _,
 };
+use stelae_blocks::BlocksProfile;
 
 use crate::{
     layers::{blocks, logs, state},
@@ -837,14 +838,26 @@ fn landed(
     Ok(layer.into_iter().collect())
 }
 
-/// Export into the image layout at `root`, chained to the latest stele it
-/// holds.
+/// The repository of a network root that holds this profile's snapshots
+/// (decision 0080, point 8).
+pub const DOLOS_REPOSITORY: &str = "dolos";
+
+/// The repository of a network root that holds the blocks profile's
+/// snapshots, which a stele's `position.blocks` names.
+pub const BLOCKS_REPOSITORY: &str = "blocks";
+
+/// Export into the network root at `root`: the blocks snapshot at
+/// `plan.sequence` into `root/blocks`, then the stele naming it into
+/// `root/dolos`, each an image layout chained to the latest snapshot it holds.
 ///
-/// The front door for a caller that has no stele in hand — the CLI, above all —
-/// so the profile stays the only thing in the binary that names the protocol
-/// crate. An empty or absent directory starts a lineage; one whose latest stele
-/// is at `plan.sequence - 1` is appended to, and anything else is refused by
-/// the link rule, as a registry publish is.
+/// A plan that already names its blocks snapshot ([`Plan::with_blocks`]), as
+/// the publisher host's does, writes `root/dolos` alone. An empty or absent
+/// layout starts a lineage; one whose latest snapshot is at
+/// `plan.sequence - 1` is appended to, and anything else is refused by the
+/// link rule, as a registry publish is.
+///
+/// The front door for a caller that has no stele in hand, so the profile stays
+/// the only thing in the binary that names the protocol crate.
 pub fn publish<A, S>(
     root: impl Into<std::path::PathBuf>,
     plan: &Plan,
@@ -856,7 +869,22 @@ where
     A: ArchiveStore,
     S: StateStore,
 {
-    let stele = stelae::dir::SnapshotDir::create(root)?;
+    let root = root.into();
+
+    // Before the blocks snapshot, so a store set this profile does not publish
+    // from has nothing written for it.
+    crate::boundary::check(plan, archive, state)?;
+
+    let plan = match plan.blocks {
+        Some(_) => plan.clone(),
+        None => match publish_blocks(&root.join(BLOCKS_REPOSITORY), plan, archive, observer)? {
+            Some(blocks) => plan.clone().with_blocks(blocks),
+            None => plan.clone(),
+        },
+    };
+    let plan = &plan;
+
+    let stele = stelae::dir::SnapshotDir::create(root.join(DOLOS_REPOSITORY))?;
 
     let latest = match stele.pull_latest(&DolosProfile) {
         Ok(latest) => Some(latest.read_inscription()?),
@@ -875,6 +903,93 @@ where
         ),
         None => export(&stele, plan, archive, state, &First, observer),
     }
+}
+
+/// Write the blocks snapshot at `plan.sequence` into the image layout at
+/// `root`, from the archive, and return its inscription digest.
+///
+/// One layer per whole epoch before the cut, through the blocks profile's
+/// plain writer: the epoch the cut closes when the layout's latest snapshot is
+/// the one before, or every one when the layout is empty. A layout already at
+/// `plan.sequence` is an interrupted export: the snapshot is written again on
+/// the same link, and sealing refuses it unless it is the same one. Sequence 0
+/// closes no epoch and has no blocks snapshot, so it returns `None`.
+fn publish_blocks<A: ArchiveStore>(
+    root: &std::path::Path,
+    plan: &Plan,
+    archive: &A,
+    observer: &Observer,
+) -> Result<Option<Digest>, Error> {
+    let layout = stelae::dir::SnapshotDir::create(root)?;
+    let magic = plan.network.magic();
+
+    let previous = match layout.pull_latest(&BlocksProfile) {
+        Ok(latest) => {
+            let latest = latest.read_inscription()?;
+            let found = stelae_blocks::read_position(&latest.position)?.network_magic;
+
+            if found != magic {
+                return Err(Error::NetworkMismatch {
+                    expected: magic,
+                    found,
+                });
+            }
+
+            match latest.sequence == plan.sequence {
+                true => latest.previous,
+                false => link_for(Some(&latest), plan.sequence)?,
+            }
+        }
+        Err(error) if error.is_absent() => None,
+        Err(error) => return Err(error.into()),
+    };
+
+    let Some(epochs) = stelae_blocks::diff_epochs(plan.sequence, previous.is_none()) else {
+        return Ok(None);
+    };
+
+    layout.observe(observer.clone());
+
+    let mut layers = Vec::new();
+
+    for window in &plan.epochs[epochs.start as usize..epochs.end as usize] {
+        let scope = stelae_blocks::EpochScope::new(
+            magic,
+            window.epoch,
+            window.start_slot,
+            window.end_slot,
+        )?;
+        let mut layer =
+            stelae_blocks::BlocksWriter::open(&layout, scope, stelae_blocks::COMPRESSION_LEVEL)?;
+
+        for block in archive_blocks(archive, window)? {
+            let block = block?;
+            layer.push(&stelae_blocks::BlockRecord::new(
+                block.slot,
+                *block.hash,
+                block.body,
+            ))?;
+        }
+
+        layers.push(layer.finish()?.descriptor);
+    }
+
+    let mut inscription = Inscription::new(
+        &BlocksProfile,
+        plan.sequence,
+        stelae_blocks::position(&stelae_blocks::Position {
+            network_magic: magic,
+            epoch: plan.sequence,
+        }),
+        stelae_blocks::parameters(),
+        stelae_blocks::compression(),
+    );
+
+    inscription.previous = previous;
+    stelae_driver::place_layers(&BlocksProfile, &mut inscription, layers)?;
+    inscription.validate()?;
+
+    Ok(Some(layout.seal(&BlocksProfile, &inscription)?))
 }
 
 /// Reproduce a stele from `plan` and keep nothing.
@@ -984,7 +1099,8 @@ impl Document {
 ///
 /// The published `previous` is taken verbatim ([`Attested`]): a verifier
 /// cannot know a chain it did not publish, so a match proves the layers and the
-/// document around them, never the chain's provenance.
+/// document around them, never the chain's provenance. So is the published
+/// `position.blocks` when `plan` names no blocks snapshot of its own.
 ///
 /// The sequence is checked before a single record is walked. A plan standing
 /// at a different epoch than the published stele cannot match it, and finding
@@ -1021,9 +1137,17 @@ where
     // across networks, so same-sequence-different-chain is reachable.
     same_network(published, plan)?;
 
+    let plan = match (
+        plan.blocks,
+        crate::read_position(&published.position)?.blocks,
+    ) {
+        (None, Some(blocks)) => plan.clone().with_blocks(blocks),
+        _ => plan.clone(),
+    };
+
     let reproduced = export(
         &stelae::Discarding,
-        plan,
+        &plan,
         archive,
         state,
         &Attested::of(published),
@@ -1300,11 +1424,31 @@ pub(crate) fn resume(
     Ok((spec, resumed))
 }
 
-/// One epoch's blocks, ascending slot.
+/// The archive's blocks in `window`, in chain order, each with its hash.
 ///
 /// The hash is not stored beside the block, so it is derived here by decoding
-/// the header — the codec takes it as an input and neither derives nor checks
-/// it, which makes this the one site that has to be right.
+/// the header — neither profile's codec derives or checks it, which makes this
+/// the one site that has to be right.
+fn archive_blocks<'a, A: ArchiveStore>(
+    archive: &'a A,
+    window: &EpochWindow,
+) -> Result<impl Iterator<Item = Result<blocks::BlockRecord, Error>> + 'a, Error> {
+    let slots = window.slots();
+
+    Ok(archive
+        .get_range(Some(slots.start), Some(slots.end))?
+        .map(|(slot, body)| {
+            let decoded = MultiEraBlock::decode(&body).map_err(|e| Error::UndecodableBlock {
+                slot,
+                reason: e.to_string(),
+            })?;
+
+            Ok(blocks::BlockRecord::new(slot, decoded.hash(), body))
+        }))
+}
+
+/// One epoch's blocks, ascending slot: the boundary window's, which is the
+/// only `blocks` layer a stele lists.
 pub(crate) fn write_blocks<W: SnapshotWriter, A: ArchiveStore>(
     stele: &W,
     plan: &Plan,
@@ -1336,15 +1480,8 @@ pub(crate) fn write_blocks<W: SnapshotWriter, A: ArchiveStore>(
     let mut order = blocks::OrderCheck::default();
     let mut records = cursor.records();
 
-    let slots = window.slots();
-
-    for (slot, body) in archive.get_range(Some(slots.start), Some(slots.end))? {
-        let decoded = MultiEraBlock::decode(&body).map_err(|e| Error::UndecodableBlock {
-            slot,
-            reason: e.to_string(),
-        })?;
-
-        let record = blocks::BlockRecord::new(slot, decoded.hash(), body);
+    for record in archive_blocks(archive, window)? {
+        let record = record?;
 
         order.check(&record)?;
         sink.write_record(&blocks::encode(&record)?)?;
