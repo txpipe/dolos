@@ -131,8 +131,8 @@ pub struct Args {
 
     /// Exit 0 without bootstrapping when storage already holds a node, as an
     /// interrupted replay that has committed leaves one for `--continue` to
-    /// resume; data without one, as an interrupted snapshot restore or a
-    /// bootstrap interrupted before it commits a cursor leaves, and a store
+    /// resume; data without one, as an interrupted Dolos snapshot restore or
+    /// a bootstrap interrupted before it commits a cursor leaves, and a store
     /// this release refuses are errors instead
     #[arg(long, global = true)]
     skip_if_data: bool,

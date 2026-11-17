@@ -17,8 +17,8 @@ Options:
       --skip-if-data
           Exit 0 without bootstrapping when storage already holds a node, as an interrupted replay
           that has committed leaves one for `--continue` to resume; data without one, as an
-          interrupted snapshot restore or a bootstrap interrupted before it commits a cursor leaves,
-          and a store this release refuses are errors instead
+          interrupted Dolos snapshot restore or a bootstrap interrupted before it commits a cursor
+          leaves, and a store this release refuses are errors instead
       --insecure
           talk to the repository over plaintext HTTP rather than HTTPS; for a registry on a loopback
           address or a mirror inside a cluster, and for nothing reachable from outside one
