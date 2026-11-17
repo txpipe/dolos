@@ -217,9 +217,14 @@ async fn a_match_past_its_deadline_keeps_its_slot_until_its_read_ends() {
     assert!(started.elapsed() >= SLOW_READ);
     assert_eq!(limiter.heavy_in_use(), 0);
 
-    // The closure lowers both counters as it ends, just after its slot frees.
+    // The closure lowers both counters as it ends, just after its slot frees,
+    // one after the other.
     let ended = Instant::now();
-    while value(&capture.collect(), "dolos.query.blocking.in_flight") > 0.0 {
+    while {
+        let snapshot = capture.collect();
+        value(&snapshot, "dolos.query.blocking.in_flight") > 0.0
+            || value(&snapshot, "dolos.query.blocking.outlived") > 0.0
+    } {
         assert!(
             ended.elapsed() < Duration::from_secs(1),
             "the read never ended"

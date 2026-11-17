@@ -360,9 +360,14 @@ async fn a_request_past_its_deadline_keeps_its_slot_until_its_read_ends() {
     assert_eq!(peaks.heavy_in_use.load(Ordering::SeqCst), 1);
     assert_eq!(limiter.heavy_in_use(), 0);
 
-    // The closure lowers both counters as it ends, just after its slot frees.
+    // The closure lowers both counters as it ends, just after its slot frees,
+    // one after the other.
     let ended = Instant::now();
-    while closures(&capture.collect(), "dolos.query.blocking.in_flight") > 0.0 {
+    while {
+        let snapshot = capture.collect();
+        closures(&snapshot, "dolos.query.blocking.in_flight") > 0.0
+            || closures(&snapshot, "dolos.query.blocking.outlived") > 0.0
+    } {
         assert!(
             ended.elapsed() < Duration::from_secs(1),
             "the read never ended"

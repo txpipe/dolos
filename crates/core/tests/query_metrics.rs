@@ -5,7 +5,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use dolos_core::{telemetry::DURATION_BOUNDARIES, QueryLimiter};
+use dolos_core::{
+    telemetry::{queries::LimiterGauges, DURATION_BOUNDARIES},
+    QueryLimiter,
+};
 use dolos_testing::metrics::{MetricsCapture, Snapshot};
 
 const WAIT: &str = "dolos.query.limiter.wait.duration";
@@ -87,7 +90,11 @@ async fn a_closure_whose_caller_is_dropped_outlives_it_until_it_ends() {
         async move { limiter.run_blocking(move || released.recv()).await }
     });
 
-    wait_for("the closure started", || limiter.in_use() == 1).await;
+    // The permit is taken a moment before the closure is counted.
+    wait_for("the closure started", || {
+        limiter.in_use() == 1 && count(&capture.collect(), IN_FLIGHT) == 1.0
+    })
+    .await;
 
     let snapshot = capture.collect();
     assert_eq!(count(&snapshot, IN_FLIGHT), 1.0);
@@ -103,8 +110,10 @@ async fn a_closure_whose_caller_is_dropped_outlives_it_until_it_ends() {
 
     release.send(()).unwrap();
 
+    // The closure's end lowers the two counters one after the other.
     wait_for("the closure ended", || {
-        count(&capture.collect(), IN_FLIGHT) == 0.0
+        let snapshot = capture.collect();
+        count(&snapshot, IN_FLIGHT) == 0.0 && count(&snapshot, OUTLIVED) == 0.0
     })
     .await;
 
@@ -150,4 +159,60 @@ async fn admission_records_each_outcome() {
     assert_eq!(admitted.count, 1);
     assert_eq!(rejected.count, 1);
     assert!(rejected.min.unwrap() >= 0.1, "{rejected:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_occupancy_gauge_reads_its_own_count() {
+    let capture = MetricsCapture::new();
+    let limiter = QueryLimiter::with_heavy_scans(8, 2, Duration::ZERO).with_meter(&capture.meter());
+    let _gauges = LimiterGauges::with_meter(&limiter, &capture.meter());
+
+    // Two slots taken, one heavy closure and two light ones running: the
+    // in-use, admitted and share readings all differ.
+    let _idle = limiter.admit_heavy().await.expect("a free slot");
+    let busy = limiter.admit_heavy().await.expect("a second slot");
+
+    let mut releases = Vec::new();
+    let mut closures = Vec::new();
+
+    let (release, released) = mpsc::channel::<()>();
+    releases.push(release);
+    closures.push(tokio::spawn({
+        let limiter = limiter.clone();
+        busy.scope(async move { limiter.run_blocking(move || released.recv()).await })
+    }));
+
+    for _ in 0..2 {
+        let (release, released) = mpsc::channel::<()>();
+        releases.push(release);
+        closures.push(tokio::spawn({
+            let limiter = limiter.clone();
+            async move { limiter.run_blocking(move || released.recv()).await }
+        }));
+    }
+
+    wait_for("three closures hold permits", || {
+        limiter.in_use() == 3 && limiter.heavy_in_use() == 1
+    })
+    .await;
+
+    let held = capture.collect();
+    assert_eq!(count(&held, "dolos.query.limiter.capacity"), 8.0);
+    assert_eq!(count(&held, "dolos.query.heavy.capacity"), 2.0);
+    assert_eq!(count(&held, "dolos.query.heavy.share.capacity"), 4.0);
+    assert_eq!(count(&held, "dolos.query.limiter.in_use"), 3.0);
+    assert_eq!(count(&held, "dolos.query.heavy.admitted"), 2.0);
+    assert_eq!(count(&held, "dolos.query.heavy.share.in_use"), 1.0);
+
+    for release in releases {
+        release.send(()).unwrap();
+    }
+    for closure in closures {
+        closure.await.unwrap().unwrap().unwrap();
+    }
+
+    let free = capture.collect();
+    assert_eq!(count(&free, "dolos.query.limiter.in_use"), 0.0);
+    assert_eq!(count(&free, "dolos.query.heavy.admitted"), 1.0);
+    assert_eq!(count(&free, "dolos.query.heavy.share.in_use"), 0.0);
 }
