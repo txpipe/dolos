@@ -212,6 +212,7 @@ async fn each_occupancy_gauge_reads_its_own_count() {
     }
 
     let free = capture.collect();
+    assert_eq!(count(&free, "dolos.query.heavy.capacity"), 2.0);
     assert_eq!(count(&free, "dolos.query.limiter.in_use"), 0.0);
     assert_eq!(count(&free, "dolos.query.heavy.admitted"), 1.0);
     assert_eq!(count(&free, "dolos.query.heavy.share.in_use"), 0.0);
