@@ -353,14 +353,17 @@ fn a_stop_epoch_cut_publishes_and_a_later_cursor_is_refused() {
         matches!(err, dolos_snapshot::Error::NotABoundary { .. }),
         "{err:?}"
     );
-    assert!(
-        !late.join("blobs").join("sha256").exists()
-            || std::fs::read_dir(late.join("blobs").join("sha256"))
-                .unwrap()
-                .next()
-                .is_none(),
-        "a refused publish wrote a layer"
-    );
+    for repository in [
+        dolos_snapshot::export::DOLOS_REPOSITORY,
+        dolos_snapshot::export::BLOCKS_REPOSITORY,
+    ] {
+        let blobs = late.join(repository).join("blobs").join("sha256");
+
+        assert!(
+            !blobs.exists() || std::fs::read_dir(&blobs).unwrap().next().is_none(),
+            "a refused publish wrote a layer into {repository}"
+        );
+    }
     drop(snapshot);
     workspace.finish().unwrap();
 }

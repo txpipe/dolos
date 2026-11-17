@@ -844,6 +844,7 @@ pub use crate::restore::{BLOCKS_REPOSITORY, DOLOS_REPOSITORY};
 /// Export into the network root at `root`: the blocks snapshot at
 /// `plan.sequence` into `root/blocks`, then the stele naming it into
 /// `root/dolos`, each an image layout chained to the latest snapshot it holds.
+/// Both lineages' links and networks are checked before either is written.
 ///
 /// A plan that already names its blocks snapshot ([`Plan::with_blocks`]), as
 /// the publisher host's does, writes `root/dolos` alone. An empty or absent
@@ -870,6 +871,19 @@ where
     // from has nothing written for it.
     crate::boundary::check(plan, archive, state)?;
 
+    // The stele's link and network are settled before the blocks snapshot is
+    // sealed, so a stele this export would refuse leaves no blocks behind.
+    let dolos = root.join(DOLOS_REPOSITORY);
+    let layout = dolos.join(stelae::dir::LAYOUT_FILE);
+    let following = match layout.try_exists().map_err(stelae::Error::from)? {
+        true => match stelae::dir::SnapshotDir::create(&dolos)?.pull_latest(&DolosProfile) {
+            Ok(latest) => Some(Following::new(&latest.read_inscription()?, plan)?),
+            Err(error) if error.is_absent() => None,
+            Err(error) => return Err(error.into()),
+        },
+        false => None,
+    };
+
     let plan = match plan.blocks {
         Some(_) => plan.clone(),
         None => match publish_blocks(&root.join(BLOCKS_REPOSITORY), plan, archive, observer)? {
@@ -879,23 +893,10 @@ where
     };
     let plan = &plan;
 
-    let stele = stelae::dir::SnapshotDir::create(root.join(DOLOS_REPOSITORY))?;
+    let stele = stelae::dir::SnapshotDir::create(dolos)?;
 
-    let latest = match stele.pull_latest(&DolosProfile) {
-        Ok(latest) => Some(latest.read_inscription()?),
-        Err(error) if error.is_absent() => None,
-        Err(error) => return Err(error.into()),
-    };
-
-    match &latest {
-        Some(latest) => export(
-            &stele,
-            plan,
-            archive,
-            state,
-            &Following::new(latest, plan)?,
-            observer,
-        ),
+    match &following {
+        Some(following) => export(&stele, plan, archive, state, following, observer),
         None => export(&stele, plan, archive, state, &First, observer),
     }
 }

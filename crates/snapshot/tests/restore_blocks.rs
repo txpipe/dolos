@@ -439,11 +439,17 @@ fn a_missing_blocks_repository_is_refused() {
 fn a_stele_listing_a_closed_epochs_blocks_is_refused() {
     let fixture = Fixture::new();
 
+    for closed in 0..HEAD {
+        refuses_a_listing_of(&fixture, closed);
+    }
+}
+
+fn refuses_a_listing_of(fixture: &Fixture, closed: u64) {
     let listing = tempfile::tempdir().unwrap();
     paired::listing_closed_blocks(
         fixture.source.path(),
         &SnapshotDir::create(listing.path()).unwrap(),
-        1,
+        closed,
     );
 
     let resolved = SnapshotDir::open(listing.path())
@@ -457,11 +463,11 @@ fn a_stele_listing_a_closed_epochs_blocks_is_refused() {
         .filter(|layer| layer.kind == BLOCKS)
         .map(|layer| layer.scope["epoch"].as_u64().unwrap())
         .collect();
-    assert_eq!(listed, [1, HEAD]);
+    assert_eq!(listed, [closed, HEAD]);
 
     let refused = |error: &Error| {
         matches!(error, Error::MalformedInscription { reason, .. }
-            if reason.contains("closed epoch 1"))
+            if reason.contains(&format!("closed epoch {closed};")))
     };
 
     let error = restore::blocks_wanted(resolved.chain().unwrap(), None).unwrap_err();
@@ -471,8 +477,8 @@ fn a_stele_listing_a_closed_epochs_blocks_is_refused() {
         let (outcome, blank) = fixture.restore(listing.path(), blocks.as_deref(), None);
         let error = outcome.map(|o| o.plan.blocks).unwrap_err();
 
-        assert!(refused(&error), "{blocks:?}: {error:?}");
-        assert!(untouched(&blank), "{blocks:?}");
+        assert!(refused(&error), "{closed}, {blocks:?}: {error:?}");
+        assert!(untouched(&blank), "{closed}, {blocks:?}");
     }
 }
 
@@ -712,6 +718,102 @@ fn a_root_export_onto_another_networks_blocks_is_refused() {
         "{error:?}"
     );
     assert!(!node::dolos(root.path()).exists());
+}
+
+/// A root whose blocks lineage stands ahead of its stele lineage is refused
+/// by the stele's link rule before a blocks snapshot is sealed, so the root
+/// can still be put right by exporting the stele it lacks.
+#[test]
+fn a_root_export_whose_stele_lineage_does_not_follow_seals_no_blocks() {
+    let domain = harness::<MemoryStores>();
+    let (ahead, root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+
+    let publish = |root: &Path, epoch| {
+        export::publish(
+            root,
+            &plan_at_boundary(&domain, epoch),
+            domain.archive(),
+            domain.state(),
+            &Observer::silent(),
+        )
+    };
+
+    publish(ahead.path(), 1).unwrap();
+    publish(root.path(), 1).unwrap();
+    publish(ahead.path(), 2).unwrap();
+
+    // The stele lineage at 1, the blocks lineage at 2.
+    let blocks = root.path().join(export::BLOCKS_REPOSITORY);
+    std::fs::remove_dir_all(&blocks).unwrap();
+    copy_dir(&ahead.path().join(export::BLOCKS_REPOSITORY), &blocks);
+
+    let error = publish(root.path(), HEAD).unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            Error::LinkBreak {
+                latest: 1,
+                publishing: HEAD,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(latest_blocks(root.path()), Some(2));
+}
+
+/// A root whose stele lineage is another network's is refused before a
+/// blocks lineage is started for this one.
+#[test]
+fn a_root_export_onto_another_networks_stele_seals_no_blocks() {
+    let domain = harness::<MemoryStores>();
+    let root = tempfile::tempdir().unwrap();
+
+    let mut foreign = plan_at_boundary(&domain, 1);
+    foreign.network = dolos_snapshot::Network::for_magic(42);
+    export::publish(
+        root.path(),
+        &foreign,
+        domain.archive(),
+        domain.state(),
+        &Observer::silent(),
+    )
+    .unwrap();
+    std::fs::remove_dir_all(root.path().join(export::BLOCKS_REPOSITORY)).unwrap();
+
+    let error = export::publish(
+        root.path(),
+        &plan_at_boundary(&domain, 2),
+        domain.archive(),
+        domain.state(),
+        &Observer::silent(),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(error, Error::NetworkMismatch { found: 42, .. }),
+        "{error:?}"
+    );
+    assert_eq!(latest_blocks(root.path()), None);
+}
+
+/// The sequence of the latest blocks snapshot in the root at `root`, if any.
+fn latest_blocks(root: &Path) -> Option<u64> {
+    let layout = root.join(export::BLOCKS_REPOSITORY);
+
+    if !layout.join(stelae::dir::LAYOUT_FILE).exists() {
+        return None;
+    }
+
+    match SnapshotDir::open(layout)
+        .unwrap()
+        .pull_latest(&stelae_blocks::BlocksProfile)
+    {
+        Ok(latest) => Some(latest.read_inscription().unwrap().sequence),
+        Err(error) if error.is_absent() => None,
+        Err(error) => panic!("{error:?}"),
+    }
 }
 
 fn copy_dir(from: &Path, to: &Path) {

@@ -1744,7 +1744,11 @@ fn every_path_refuses_a_cursor_past_the_boundary_before_a_layer() {
         expected
     );
 
-    for root in [temp.path().join("export"), directory.clone()] {
+    for root in [
+        temp.path().join("export"),
+        directory.join(export::DOLOS_REPOSITORY),
+        directory.join(export::BLOCKS_REPOSITORY),
+    ] {
         let blobs = root.join("blobs").join("sha256");
 
         assert!(
@@ -2688,6 +2692,55 @@ fn the_headless_facade_plans_encodes_and_reproduces_one_document() {
 
     assert_eq!(reproduced.canonicalize().unwrap(), document.canonical);
     assert_eq!(inscription.digest().unwrap(), document.identity);
+}
+
+/// A verifier that names its own blocks snapshot holds the published stele to
+/// it: the published `position.blocks` is taken only when the plan names none.
+#[test]
+fn a_verifiers_own_blocks_reference_is_held_against_the_published_one() {
+    let domain: ToyDomain = harness();
+    let source = StoreSnapshot::new(
+        domain.archive(),
+        domain.state(),
+        dolos_cardano::mutable_slots(&domain.genesis()),
+    );
+    let plan = source
+        .selected_plan(
+            u64::from(domain.genesis().network_magic()),
+            Selection::default(),
+        )
+        .unwrap();
+
+    let destination = tempfile::tempdir().unwrap();
+    let stele = destination.path().join("stele");
+    let inscription = source
+        .publish_directory(&stele, &plan, &Observer::silent())
+        .unwrap();
+    let named = node::resolved_blocks(&stele)
+        .unwrap()
+        .read_inscription()
+        .unwrap()
+        .digest()
+        .unwrap();
+
+    assert_ne!(some_blocks(), named);
+    assert_eq!(
+        source
+            .verify_reproduction(&inscription, &plan.clone().with_blocks(named))
+            .unwrap()
+            .digest()
+            .unwrap(),
+        inscription.digest().unwrap()
+    );
+
+    let refused = source
+        .verify_reproduction(&inscription, &plan.clone().with_blocks(some_blocks()))
+        .unwrap_err();
+
+    assert!(
+        matches!(refused, dolos_snapshot::Error::ReproductionMismatch { .. }),
+        "{refused:?}"
+    );
 }
 
 /// The index staging engine: one tag, one exact and one shared entity

@@ -77,8 +77,7 @@ when the boundary is prepared:
 | Layer | Window | Source |
 |---|---|---|
 | `state-*` tip shards | | The bundle. |
-| `blocks` | `P` | The bundle. |
-| `blocks` | closed | The final archive: closed blocks do not change. |
+| `blocks` | `P` | The bundle. Closed windows' blocks are not in the stele; they are the blocks profile's, named through `position.blocks`. |
 | `indexes` | `P`, the live-boundary tail | The bundle. |
 | `indexes` | closed | The staged run. |
 | `log-*` | `capture_from..=P` | The bundle. A layer it does not hold did not exist at `P`. |

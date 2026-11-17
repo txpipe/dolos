@@ -67,9 +67,9 @@
 //! last epoch from the blocks repository, and the progress file is one file
 //! keyed by the stele's digest, which covers the reference.
 //!
-//! No blocks repository is read for a stele that lists its closed epochs'
-//! `blocks` layers itself, as export still writes them, for one that names no
-//! blocks snapshot, or when the history window keeps no epoch before the cut.
+//! A stele that lists a closed epoch's `blocks` layer is refused, as no export
+//! writes one. No blocks repository is read for a stele that names no blocks
+//! snapshot, or when the history window keeps no epoch before the cut.
 //!
 //! ## Why `set_cursor` is the last write
 //!
@@ -1109,10 +1109,11 @@ fn select(
         .find(|epoch| epoch.epoch < sequence && epoch.blocks.is_some())
     {
         return Err(Error::malformed_inscription(
-            "the stele's layers",
+            "layers",
             format!(
                 "they list a `blocks` layer for closed epoch {}; a stele carries only its boundary \
-                 block, and the blocks snapshot its `position.blocks` names carries the rest",
+                 block, and the blocks snapshot its `position.blocks` names carries the rest. \
+                 Restore from a stele a current Dolos exported",
                 closed.epoch
             ),
         ));
