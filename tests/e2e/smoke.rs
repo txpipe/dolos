@@ -39,6 +39,11 @@ fn daemon_runs(workspace: &ScenarioWorkspace) {
         wait_for_socket_file(workspace, "dolos.socket", Duration::from_secs(30));
     }
 
+    #[cfg(feature = "grpc")]
+    if workspace.expect_ports() {
+        assert_grpc_answers(workspace);
+    }
+
     std::thread::sleep(Duration::from_secs(10));
 
     // The custom network produces its own blocks, so it is the scenario that
@@ -66,6 +71,41 @@ fn daemon_runs(workspace: &ScenarioWorkspace) {
     if inspect_frames {
         assert_archive_is_frames_and_reads_back(workspace);
     }
+}
+
+/// One unary call through the gRPC server and its layers gets its answer.
+#[cfg(feature = "grpc")]
+fn assert_grpc_answers(workspace: &ScenarioWorkspace) {
+    use pallas::interop::utxorpc::v1beta::spec::query::{
+        query_service_client::QueryServiceClient, ReadGenesisRequest,
+    };
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build a runtime");
+
+    let response = runtime
+        .block_on(async {
+            let channel = tonic::transport::Channel::from_shared(format!(
+                "http://127.0.0.1:{}",
+                workspace.port(0)
+            ))
+            .expect("a valid endpoint")
+            .connect()
+            .await
+            .expect("failed to connect to the gRPC server");
+
+            QueryServiceClient::new(channel)
+                .read_genesis(ReadGenesisRequest::default())
+                .await
+        })
+        .expect("ReadGenesis answers");
+
+    assert!(
+        !response.into_inner().genesis.is_empty(),
+        "ReadGenesis returns the genesis hash"
+    );
 }
 
 fn segment_files(workspace: &ScenarioWorkspace) -> Vec<std::path::PathBuf> {
