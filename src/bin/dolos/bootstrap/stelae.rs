@@ -554,7 +554,11 @@ fn restore(
     let mut opened = None;
 
     let input = match &inputs.reader {
-        Reader::Dir(dir) => RestoreInput::Directory(dir),
+        Reader::Dir(dir) => RestoreInput::Directory {
+            path: dir,
+            // Naming the blocks repository on the command line is its own change.
+            blocks: None,
+        },
         Reader::Repo(repo, auth) => {
             // Staging resolution remains node policy. The profile facade
             // receives the resolved inputs and never reads configuration or
@@ -577,6 +581,7 @@ fn restore(
             RestoreInput::Repository {
                 repository,
                 point: inputs.point,
+                blocks: None,
             }
         }
     };

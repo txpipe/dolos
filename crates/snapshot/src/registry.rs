@@ -244,10 +244,17 @@ impl std::str::FromStr for Point {
 /// resume's [`crate::restore::ResumeRefusal::Gone`], decided from the head
 /// before its chain is walked.
 ///
+/// `blocks` is the blocks repository. It is read at the stele's sequence only
+/// when [`crate::restore::blocks_wanted`] names a snapshot, and a restore that
+/// needs it and has none, or finds no snapshot there, is refused. The
+/// preflight sizes the staging of both against `registry`'s scratch
+/// directory, so the two are opened with the same one.
+///
 /// **Never call this from inside an async context.** See [`open`].
 pub fn restore_registry<A, S>(
     registry: &Registry,
     point: Point,
+    blocks: Option<&Registry>,
     node: Restoring<'_>,
     target: Target<'_, A, S>,
     observer: &Observer,
@@ -286,14 +293,54 @@ where
 
     let chain = crate::restore::chain_of(stele.chain())?;
 
+    let blocks = match (
+        crate::restore::blocks_wanted(chain, node.max_history)?,
+        blocks,
+    ) {
+        (Some(reference), Some(blocks)) => Some(resolve_blocks(
+            blocks,
+            reference,
+            chain.head().sequence,
+            observer,
+        )?),
+        // Wanted and not given: the plan refuses it, naming the reference.
+        _ => None,
+    };
+
+    let paired = match &blocks {
+        Some(snapshot) => Some((snapshot, crate::restore::chain_of(snapshot.chain())?)),
+        None => None,
+    };
+
     crate::restore::restore_stele(
         &stele,
         chain,
+        paired,
         node,
         registry.scratch_dir(),
         target,
         observer,
     )
+}
+
+/// The blocks snapshot at `sequence` in `registry`, resolved through its
+/// chain, or [`Error::BlocksMissing`] when the repository holds none there.
+fn resolve_blocks(
+    registry: &Registry,
+    reference: Digest,
+    sequence: u64,
+    observer: &Observer,
+) -> Result<Snapshot, Error> {
+    registry.observe(observer.clone());
+
+    match registry.resolve_sequence(&stelae_blocks::BlocksProfile, sequence) {
+        Ok(snapshot) => Ok(snapshot),
+        Err(error) if error.is_absent() => Err(Error::BlocksMissing {
+            reference,
+            reason: format!("the blocks repository holds no snapshot at epoch-{sequence}"),
+        }),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Whether a pull failed because the repository holds no manifest under the
@@ -363,10 +410,12 @@ impl SnapshotRepository {
         verify(&self.registry, point)
     }
 
-    /// Restore one published stele into the explicit target stores.
+    /// Restore one published stele into the explicit target stores, reading
+    /// closed epochs' blocks from `blocks` when the stele's are there.
     pub fn restore<A, S>(
         &self,
         point: Point,
+        blocks: Option<&SnapshotRepository>,
         node: Restoring<'_>,
         target: Target<'_, A, S>,
         observer: &Observer,
@@ -375,7 +424,14 @@ impl SnapshotRepository {
         A: ArchiveStore,
         S: StateStore,
     {
-        restore_registry(&self.registry, point, node, target, observer)
+        restore_registry(
+            &self.registry,
+            point,
+            blocks.map(|blocks| &blocks.registry),
+            node,
+            target,
+            observer,
+        )
     }
 
     /// Read where `plan` stands against this repository without touching a

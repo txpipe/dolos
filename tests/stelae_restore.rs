@@ -696,7 +696,7 @@ impl Fixture {
         let layout = SnapshotDir::open(&self.stele).unwrap();
         let stele = layout.resolve_latest(&DolosProfile).unwrap();
         let inscription = stele.read_inscription().unwrap();
-        let plan = dolos_snapshot::restore::plan(stele.chain().unwrap(), 2, None).unwrap();
+        let plan = dolos_snapshot::restore::plan(stele.chain().unwrap(), None, 2, None).unwrap();
         let index = stele.blob_index().unwrap();
 
         let blobs = plan
