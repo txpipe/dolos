@@ -1109,9 +1109,9 @@ fn select(
         .find(|epoch| epoch.epoch < sequence && epoch.blocks.is_some())
     {
         return Err(Error::malformed_inscription(
-            "layers",
+            "layer list",
             format!(
-                "they list a `blocks` layer for closed epoch {}; a stele carries only its boundary \
+                "it lists a `blocks` layer for closed epoch {}; a stele carries only its boundary \
                  block, and the blocks snapshot its `position.blocks` names carries the rest. \
                  Restore from a stele a current Dolos exported",
                 closed.epoch
