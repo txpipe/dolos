@@ -319,7 +319,7 @@ pub fn health<D: Domain>(context: &Context<D>) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use dolos_core::config::TrpConfig;
     use dolos_core::import::ImportExt;
     use dolos_core::{MempoolStore, MempoolTxStage, TxoRef};
@@ -335,6 +335,12 @@ mod tests {
     use super::*;
 
     async fn setup_test_context() -> Arc<Context<ToyDomain>> {
+        setup_test_context_with_metrics(Metrics::default()).await
+    }
+
+    pub(crate) async fn setup_test_context_with_metrics(
+        metrics: Metrics,
+    ) -> Arc<Context<ToyDomain>> {
         // Use devnet genesis (protocol 9 = Conway, has Plutus cost models needed by tx3
         // compiler)
         let genesis = std::sync::Arc::new(dolos_cardano::include::devnet::load());
@@ -404,7 +410,7 @@ mod tests {
                 )
                 .with_max_optimize_rounds(3),
             ),
-            metrics: Metrics::default(),
+            metrics,
         })
     }
 
