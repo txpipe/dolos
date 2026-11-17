@@ -10,9 +10,9 @@ use tracing::{error, info, warn};
 
 use crate::{
     sync::drain_pending_work,
-    wal::{block_hash, ChainOrdered},
-    ArchiveStore, ArchiveWriter as _, BlockBody, BlockSlot, ChainLogic, ChainPoint, Domain,
-    DomainError, EntityMap, RawBlock, StateStore, StateWriter as _, WalError, WalStore,
+    wal::{block_hash, parent_hash, ChainOrdered},
+    ArchiveStore, ArchiveWriter as _, BlockBody, BlockHash, BlockSlot, ChainLogic, ChainPoint,
+    Domain, DomainError, EntityMap, RawBlock, StateStore, StateWriter as _, WalError, WalStore,
 };
 
 /// Extension trait for domain bootstrapping operations.
@@ -288,7 +288,8 @@ where
     A: ArchiveStore,
 {
     let state_cursor = state.read_cursor()?;
-    let archive_tip = archive.get_tip()?.map(|(slot, _)| slot);
+    let archived = ArchivedTip::read(archive)?;
+    let archive_tip = archived.slot;
 
     let mut plan = RecoveryPlan {
         wal: None,
@@ -327,9 +328,8 @@ where
         pending,
     );
 
-    // The archive's tip is a slot, so it lacks what the WAL holds past it.
     let blocks = wal.iter_blocks(replay_start(wal, archive_tip)?, Some(target.clone()))?;
-    let pending = blocks.filter(|(point, _)| Some(point.slot()) > archive_tip);
+    let pending = blocks.filter(|(point, block)| archived.lacks(point, block));
     plan.add_step(
         RecoveredStore::Archive,
         archive_tip,
@@ -397,6 +397,50 @@ fn replay_start<W: WalStore>(
     Ok(wal
         .locate_point(slot)?
         .map(|point| ChainPoint::Slot(point.slot())))
+}
+
+/// The blocks an archive holds at its tip slot, to tell which WAL entries it
+/// lacks: those past that slot, and at it, a block chained onto one it holds.
+/// The second is the main block of a same-slot pair whose boundary block the
+/// archive committed before a crash.
+struct ArchivedTip {
+    slot: Option<BlockSlot>,
+    bodies: Vec<BlockBody>,
+    hashes: Vec<BlockHash>,
+}
+
+impl ArchivedTip {
+    fn read<A: ArchiveStore>(archive: &A) -> Result<Self, DomainError> {
+        let slot = archive.get_tip()?.map(|(slot, _)| slot);
+
+        let bodies = match slot {
+            Some(slot) => archive.get_blocks_by_slot(&slot)?,
+            None => vec![],
+        };
+
+        let hashes = bodies.iter().filter_map(|body| block_hash(body)).collect();
+
+        Ok(Self {
+            slot,
+            bodies,
+            hashes,
+        })
+    }
+
+    /// Whether the archive lacks the WAL entry `block` at `point`.
+    fn lacks(&self, point: &ChainPoint, block: &[u8]) -> bool {
+        let Some(tip) = self.slot else {
+            return true;
+        };
+
+        if point.slot() != tip {
+            return point.slot() > tip;
+        }
+
+        !block.is_empty()
+            && !self.bodies.iter().any(|body| body == block)
+            && parent_hash(block).is_some_and(|parent| self.hashes.contains(&parent))
+    }
 }
 
 /// The entries, met in chain order, that a state at `cursor` has not applied.
@@ -577,33 +621,18 @@ fn catch_up_state<D: Domain>(
 /// and the exact lookups the block projects — are re-derived here and land in
 /// the same commit as the block, as they do on the sync path.
 fn catch_up_archive<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), DomainError> {
-    let archive_tip = domain.archive().get_tip()?.map(|(slot, _)| slot);
-    let target_slot = target.slot();
+    let archived = ArchivedTip::read(domain.archive())?;
 
-    if archive_tip == Some(target_slot) {
-        return Ok(());
-    }
-
-    // Find the WAL start point: if archive has data, start from a point
-    // corresponding to the archive tip; otherwise start from the beginning.
-    let start = match archive_tip {
-        Some(slot) => domain.wal().locate_point(slot)?,
-        None => None,
-    };
-
+    let start = replay_start(domain.wal(), archived.slot)?;
     let logs = domain.wal().iter_logs(start, Some(target.clone()))?;
 
     let writer = domain.archive().start_writer()?;
     let mut count = 0u64;
 
-    for (point, log) in logs {
-        // Skip the start point itself (already in archive) and anything at or before it
-        if Some(point.slot()) <= archive_tip {
-            continue;
-        }
-
-        // Skip synthetic entries (from reset_to) — they carry no block
-        if log.block.is_empty() {
+    // In chain order, so a slot's blocks are archived as the chain holds them.
+    for (point, log) in ChainOrdered::forward(logs) {
+        // Synthetic entries (from reset_to) carry no block.
+        if log.block.is_empty() || !archived.lacks(&point, &log.block) {
             continue;
         }
 

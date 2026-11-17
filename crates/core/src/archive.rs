@@ -123,6 +123,26 @@ pub fn check_entity_key(kind: EntityKind, key: &[u8]) -> Result<(), ArchiveError
     Ok(())
 }
 
+/// How many of `bodies`, the blocks an archive holds at `after`'s slot in
+/// chain order, a [`ArchiveStore::truncate_front`] to `after` keeps: those
+/// through the block `after` names. A slot holds more than one only for a
+/// Byron boundary block and the main block chained onto it. A point naming no
+/// hash, or a block the slot does not hold, keeps them all.
+pub fn blocks_through(bodies: &[impl AsRef<[u8]>], after: &ChainPoint) -> usize {
+    let Some(hash) = after.hash() else {
+        return bodies.len();
+    };
+
+    if bodies.len() < 2 {
+        return bodies.len();
+    }
+
+    bodies
+        .iter()
+        .position(|body| crate::wal::block_hash(body.as_ref()) == Some(hash))
+        .map_or(bodies.len(), |at| at + 1)
+}
+
 /// Iterator used by backends that do not implement
 /// [`ArchiveStore::iter_archive_tags`].
 ///
@@ -488,6 +508,8 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
         max_prune_index_rows: Option<u64>,
     ) -> Result<bool, ArchiveError>;
 
+    /// Drop everything the archive holds after `after`: the blocks the chain
+    /// puts after it, at its slot too, and the log rows at or past its slot.
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError>;
 
     /// Sync every write committed before this call to durable storage.
