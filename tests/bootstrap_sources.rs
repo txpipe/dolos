@@ -1252,7 +1252,7 @@ fn force_refuses_a_stele_it_would_lose_the_node_over() {
                 symlink(&path, blobs.join(path.file_name().unwrap())).unwrap();
             }
 
-            dolos_snapshot::dir::SnapshotDir::create(view.join("blocks")).unwrap();
+            copy_tree(&stele.join("blocks"), &view.join("blocks"));
         };
 
         let view = node.root.path().join("stele-view");

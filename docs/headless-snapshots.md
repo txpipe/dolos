@@ -23,7 +23,9 @@ library applies its producer sizing the same way for publication, digest and
 verification. The resulting plan can
 be passed to:
 
-- `publish_directory` with an explicit destination and progress observer;
+- `publish_directory` with an explicit network root and progress observer,
+  which writes the blocks snapshot into its `blocks/` and the stele into its
+  `dolos/` (a plan that names its blocks snapshot writes `dolos/` alone);
 - `preview_repository` or `publish_repository` with explicit
   `SnapshotRepository::publishing()` policy;
 - `digest_document` with an explicit predecessor; or

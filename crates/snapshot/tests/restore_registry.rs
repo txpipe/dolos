@@ -79,10 +79,11 @@ use stelae::{
 
 use watcher::Watcher;
 
-/// Layers epoch 0 contributes: `blocks`, `indexes`, and the two log layers the
-/// harness seeds — `log-account-epochs` and `log-epochs`. The third log kind
-/// has no records in the window, so it has no layer.
-const EPOCH_0: usize = 4;
+/// Layers epoch 0 contributes: `indexes`, and the two log layers the harness
+/// seeds — `log-account-epochs` and `log-epochs`. The third log kind has no
+/// records in the window, so it has no layer. Its blocks belong to the blocks
+/// profile, which these publishes name no snapshot of.
+const EPOCH_0: usize = 3;
 
 /// Layers epoch 1 — the boundary sliver — contributes: `blocks` and `indexes`.
 /// Its logs would key at `epoch_start(1)`, and the harness writes none there.
@@ -387,8 +388,8 @@ fn a_registry_restore_is_a_directory_restore() {
 
     assert_eq!(
         blocks_of(&from_registry.archive),
-        blocks_of(node.earlier.archive()),
-        "the blocks the node published"
+        boundary_blocks_of(node.earlier.archive(), &node.first),
+        "the boundary window's blocks the node published"
     );
 
     for ns in NAMESPACES {
@@ -598,10 +599,11 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
         "epoch 0's layers were kept across the inscription change"
     );
 
+    // Epoch 1 closed at sequence 2, so its blocks left the stele.
     assert_eq!(
         resumed.layers_fetched,
-        2 * EPOCH_1 + state_layer_count(),
-        "epoch 1's and epoch 2's two layers each and every state layer, and nothing else"
+        (EPOCH_1 - 1) + EPOCH_1 + state_layer_count(),
+        "epoch 1's indexes, epoch 2's two layers and every state layer, and nothing else"
     );
 
     // The point resolved to what it claimed. `latest` is sequence 2 here, and
@@ -726,8 +728,8 @@ fn a_publish_writes_the_snapshot_envelope_and_restores() {
 
     assert_eq!(
         blocks_of(&blank.archive),
-        blocks_of(node.earlier.archive()),
-        "the blocks the node published"
+        boundary_blocks_of(node.earlier.archive(), &node.first),
+        "the boundary window's blocks the node published"
     );
 }
 
@@ -1074,6 +1076,17 @@ fn utxos_of<S: StateStore>(store: &S) -> std::collections::BTreeMap<TxoRef, Utxo
 
 fn blocks_of<A: ArchiveStore>(store: &A) -> Vec<(u64, Vec<u8>)> {
     store.get_range(None, None).unwrap().collect()
+}
+
+/// The blocks of `store` from `plan`'s boundary window on: all a stele
+/// carries when its publish names no blocks snapshot.
+fn boundary_blocks_of<A: ArchiveStore>(store: &A, plan: &Plan) -> Vec<(u64, Vec<u8>)> {
+    let cut = plan.epochs.last().unwrap().start_slot;
+
+    blocks_of(store)
+        .into_iter()
+        .filter(|(slot, _)| *slot >= cut)
+        .collect()
 }
 
 fn logs_of<A: ArchiveStore>(store: &A, ns: &'static str) -> Vec<(LogKey, Vec<u8>)> {

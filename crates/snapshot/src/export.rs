@@ -838,13 +838,8 @@ fn landed(
     Ok(layer.into_iter().collect())
 }
 
-/// The repository of a network root that holds this profile's snapshots
-/// (decision 0080, point 8).
-pub const DOLOS_REPOSITORY: &str = "dolos";
-
-/// The repository of a network root that holds the blocks profile's
-/// snapshots, which a stele's `position.blocks` names.
-pub const BLOCKS_REPOSITORY: &str = "blocks";
+/// The repositories of a network root, named once in [`crate::restore`].
+pub use crate::restore::{BLOCKS_REPOSITORY, DOLOS_REPOSITORY};
 
 /// Export into the network root at `root`: the blocks snapshot at
 /// `plan.sequence` into `root/blocks`, then the stele naming it into
