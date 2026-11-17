@@ -1,13 +1,19 @@
-use std::time::Duration;
+use std::{
+    sync::{Mutex, PoisonError},
+    time::Duration,
+};
 
 use axum::{
+    body::Bytes,
     extract::State,
     http::{header, StatusCode},
     response::{IntoResponse, Response},
 };
 use blockfrost_openapi::models::network::Network;
 use dolos_cardano::{model::EpochState, AccountState};
-use dolos_core::{CacheEntry, CacheError, CacheNamespace, CacheStore, Domain, StateStore};
+use dolos_core::{
+    CacheEntry, CacheError, CacheNamespace, CacheStore, Domain, FillError, StateStore,
+};
 
 use crate::{
     mapping::{network::NetworkModelBuilder, IntoModel},
@@ -16,6 +22,14 @@ use crate::{
 
 /// The `/network` body, recomputed at most every 30 s.
 pub const CACHE: CacheNamespace = CacheNamespace::tip_scoped("network", 1, Duration::from_secs(30));
+
+/// Accounts a fill reads between two checks that its epoch is still active.
+const ACCOUNTS_PER_EPOCH_CHECK: u64 = 4096;
+
+/// Held by a fill while it scans the accounts, so a boundary, where the
+/// previous epoch's refill can still be running, never runs two scans at once.
+/// A process serves one store.
+static SCAN: Mutex<()> = Mutex::new(());
 
 /// The body of `epoch` is kept under the epoch's number, so the first request
 /// of an epoch misses and waits for the fill instead of being given the
@@ -28,6 +42,26 @@ pub fn register_cache(cache: &impl CacheStore) -> Result<(), CacheError> {
     cache.register(CACHE)
 }
 
+/// A fill that stopped because a later epoch became active: its body would
+/// carry the previous epoch's pots. Its requests start over in the new epoch.
+#[derive(Debug)]
+struct Superseded {
+    epoch: u64,
+    active: u64,
+}
+
+impl std::fmt::Display for Superseded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self { epoch, active } = self;
+        write!(
+            f,
+            "epoch {active} is active, so the fill of epoch {epoch} stopped"
+        )
+    }
+}
+
+impl std::error::Error for Superseded {}
+
 fn load_active<D: Domain>(domain: &Facade<D>) -> Result<EpochState, StatusCode>
 where
     Option<EpochState>: From<D::Entity>,
@@ -35,17 +69,28 @@ where
     dolos_cardano::load_epoch::<D>(domain.state()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-/// The body for `active`, the epoch read when the request came in, with the
-/// stake of every account as the scan finds it.
-fn compute_network_sync<D: Domain>(
-    domain: &Facade<D>,
-    active: EpochState,
-) -> Result<(Network, u64), StatusCode>
+/// Fails with [`Superseded`] once an epoch after `epoch` is active.
+fn ensure_active<D: Domain>(domain: &Facade<D>, epoch: u64) -> Result<(), FillError>
 where
     Option<EpochState>: From<D::Entity>,
 {
-    let genesis = domain.genesis();
+    let active = load_active(domain)
+        .map_err(|status| format!("/network answered {status}"))?
+        .number;
 
+    if active > epoch {
+        return Err(Superseded { epoch, active }.into());
+    }
+
+    Ok(())
+}
+
+/// The live and active stake of every account, as the scan finds them, and
+/// the accounts read. Stops once `epoch` is no longer the active one.
+fn scan_stake<D: Domain>(domain: &Facade<D>, epoch: u64) -> Result<(u64, u64, u64), FillError>
+where
+    Option<EpochState>: From<D::Entity>,
+{
     let mut live_stake = 0;
     let mut active_stake = 0;
     let mut scanned = 0;
@@ -53,15 +98,41 @@ where
     let accounts = domain
         .state()
         .iter_entities_typed::<AccountState>(None)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|error| error.to_string())?;
 
     for account in accounts {
-        let (_, account) = account.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if scanned % ACCOUNTS_PER_EPOCH_CHECK == 0 {
+            ensure_active(domain, epoch)?;
+        }
+
+        let (_, account) = account.map_err(|error| error.to_string())?;
 
         live_stake += account.live_stake();
         active_stake += account.active_stake();
         scanned += 1;
     }
+
+    ensure_active(domain, epoch)?;
+
+    Ok((live_stake, active_stake, scanned))
+}
+
+/// The body for `active`, the epoch read when the request came in, and the
+/// accounts its scan read.
+fn compute_network_sync<D: Domain>(
+    domain: &Facade<D>,
+    active: EpochState,
+) -> Result<(Network, u64), FillError>
+where
+    Option<EpochState>: From<D::Entity>,
+{
+    let genesis = domain.genesis();
+
+    let (live_stake, active_stake, scanned) = {
+        let _scan = SCAN.lock().unwrap_or_else(PoisonError::into_inner);
+        ensure_active(domain, active.number)?;
+        scan_stake(domain, active.number)?
+    };
 
     let builder = NetworkModelBuilder {
         genesis: &genesis,
@@ -70,33 +141,59 @@ where
         active_stake,
     };
 
-    Ok((builder.into_model()?, scanned))
+    let network = builder
+        .into_model()
+        .map_err(|status| format!("/network answered {status}"))?;
+
+    Ok((network, scanned))
 }
 
-/// The body as JSON, costed by the accounts its scan read. Drops the bodies
-/// of the neighbouring epochs, which a boundary or a rollback across one left
-/// behind.
-fn fill_network<D: Domain>(domain: &Facade<D>, active: EpochState) -> Result<CacheEntry, String>
+/// The body as JSON, costed by the accounts its scan read. Drops the previous
+/// epoch's body, which nothing reads once this epoch is active.
+fn fill_network<D: Domain>(domain: &Facade<D>, active: EpochState) -> Result<CacheEntry, FillError>
 where
     Option<EpochState>: From<D::Entity>,
 {
     let epoch = active.number;
 
-    let (network, scanned) = compute_network_sync(domain, active)
-        .map_err(|status| format!("/network answered {status}"))?;
+    let (network, scanned) = compute_network_sync(domain, active)?;
 
-    let body = serde_json::to_vec(&network).map_err(|error| error.to_string())?;
+    let body = serde_json::to_vec(&network)?;
 
-    for neighbour in [epoch.checked_sub(1), epoch.checked_add(1)]
-        .into_iter()
-        .flatten()
-    {
-        if let Err(error) = domain.cache().remove(CACHE.name, &cache_key(neighbour)) {
-            tracing::warn!(%error, "cannot drop another epoch's /network body");
+    if let Some(previous) = epoch.checked_sub(1) {
+        if let Err(error) = domain.cache().remove(CACHE.name, &cache_key(previous)) {
+            tracing::warn!(%error, "cannot drop the previous epoch's /network body");
         }
     }
 
     Ok(CacheEntry::new(body, scanned))
+}
+
+/// The body for the active epoch. A request whose fill a boundary stopped
+/// starts over once, in the new epoch.
+async fn active_epoch_body<D>(domain: &Facade<D>) -> Result<Bytes, StatusCode>
+where
+    Option<EpochState>: From<D::Entity>,
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let mut started_over = false;
+
+    loop {
+        let active = load_active(domain)?;
+        let key = cache_key(active.number);
+
+        let fill = {
+            let domain = domain.clone();
+            move || fill_network(&domain, active)
+        };
+
+        match domain.cache().get_or_fill(CACHE.name, &key, fill).await {
+            Err(error) if !started_over && error.downcast_fill::<Superseded>().is_some() => {
+                started_over = true;
+            }
+            body => return body.map_err(crate::log_and_500("failed to fill the /network cache")),
+        }
+    }
 }
 
 pub async fn naked<D>(State(domain): State<Facade<D>>) -> Result<Response, StatusCode>
@@ -104,19 +201,7 @@ where
     Option<EpochState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let active = load_active(&domain)?;
-    let key = cache_key(active.number);
-
-    let fill = {
-        let domain = domain.clone();
-        move || fill_network(&domain, active)
-    };
-
-    let body = domain
-        .cache()
-        .get_or_fill(CACHE.name, &key, fill)
-        .await
-        .map_err(crate::log_and_500("failed to fill the /network cache"))?;
+    let body = active_epoch_body(&domain).await?;
 
     Ok(([(header::CONTENT_TYPE, "application/json")], body).into_response())
 }
@@ -223,6 +308,7 @@ mod tests {
     #[tokio::test]
     async fn the_first_request_of_an_epoch_gets_its_pots_whatever_the_entry_age() {
         let app = TestApp::new();
+        let facade = app.facade();
 
         let before = network_body(&app).await;
 
@@ -233,23 +319,96 @@ mod tests {
         let after = network_body(&app).await;
         assert_eq!(treasury(&after), next.initial_pots.treasury.to_string());
 
-        // the entry is stale at once
+        // the entry is stale at once; no request reads it, so nothing refills it
         let stale = CacheNamespace::tip_scoped(CACHE.name, CACHE.version, Duration::ZERO);
-        app.facade().cache().register(stale).unwrap();
-        assert_eq!(network_body(&app).await, after);
+        facade.cache().register(stale).unwrap();
+        assert_eq!(network_entries(&app), 1, "the stale body is kept");
+        assert_eq!(
+            facade.cache().get(CACHE.name, &cache_key(next.number)),
+            None
+        );
 
         let next = cross_into_next_epoch(&app);
         let after = network_body(&app).await;
         assert_eq!(treasury(&after), next.initial_pots.treasury.to_string());
 
-        let facade = app.facade();
-        let (expected, _) = compute_network_sync(&facade, next).unwrap();
+        let (expected, _) = compute_network_sync(&facade, next.clone()).unwrap();
         assert_eq!(after, serde_json::to_vec(&expected).unwrap());
         assert_eq!(
             network_entries(&app),
             1,
             "the previous epoch's body is dropped"
         );
+
+        let fresh = CacheNamespace::tip_scoped(CACHE.name, CACHE.version, Duration::from_secs(60));
+        facade.cache().register(fresh).unwrap();
+        let kept = facade.cache().get(CACHE.name, &cache_key(next.number));
+        assert_eq!(kept.as_deref(), Some(after.as_slice()));
+    }
+
+    #[tokio::test]
+    async fn a_fill_for_an_epoch_no_longer_active_reads_no_account() {
+        let app = TestApp::new();
+        let facade = app.facade();
+
+        let previous = load_active(&facade).unwrap();
+        let next = cross_into_next_epoch(&app);
+        let scans = facade.inner.entity_scans();
+
+        let error = fill_network(&facade, previous.clone()).unwrap_err();
+        let superseded = error.downcast_ref::<Superseded>().expect("superseded");
+        assert_eq!(superseded.epoch, previous.number);
+        assert_eq!(superseded.active, next.number);
+        assert_eq!(facade.inner.entity_scans(), scans);
+    }
+
+    #[tokio::test]
+    async fn a_boundary_during_a_fill_runs_one_scan_at_a_time_and_serves_the_new_epoch() {
+        const SLOW_SCAN: Duration = Duration::from_millis(1000);
+
+        let app = Arc::new(TestApp::new_with_fault(Some(TestFault::SlowStateScans(
+            SLOW_SCAN,
+        ))));
+        let facade = app.facade();
+        let scans = facade.inner.entity_scans();
+
+        // a cold request of epoch E starts its scan
+        let first = {
+            let app = app.clone();
+            tokio::spawn(async move { network_body(&app).await })
+        };
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while facade.inner.entity_scans() == scans {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the first fill never started its scan");
+
+        let next = cross_into_next_epoch(&app);
+
+        let requests: Vec<_> = (0..16)
+            .map(|_| {
+                let app = app.clone();
+                tokio::spawn(async move { network_body(&app).await })
+            })
+            .collect();
+
+        // the fill of E+1 waits for the scan of E instead of running beside it
+        tokio::time::sleep(SLOW_SCAN / 10).await;
+        assert_eq!(facade.inner.entity_scans() - scans, 1);
+
+        let expected = next.initial_pots.treasury.to_string();
+        assert_eq!(treasury(&first.await.unwrap()), expected);
+
+        for request in requests {
+            assert_eq!(treasury(&request.await.unwrap()), expected);
+        }
+
+        // the scan of E, stopped at the boundary, and the one of E+1
+        assert_eq!(facade.inner.entity_scans() - scans, 2);
+        assert_eq!(network_entries(&app), 1);
     }
 
     #[tokio::test]
