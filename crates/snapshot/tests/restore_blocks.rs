@@ -747,6 +747,7 @@ fn a_root_export_whose_stele_lineage_does_not_follow_seals_no_blocks() {
     std::fs::remove_dir_all(&blocks).unwrap();
     copy_dir(&ahead.path().join(export::BLOCKS_REPOSITORY), &blocks);
     let blobs = blocks_blobs(root.path());
+    assert!(!blobs.is_empty());
 
     let error = publish(root.path(), HEAD).unwrap_err();
 
