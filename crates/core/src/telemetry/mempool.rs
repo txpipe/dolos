@@ -4,7 +4,9 @@
 //! The size gauge reads the store when the meter collects it. The lifecycle
 //! counter and the confirmation histogram come from one [`Lifecycle`]
 //! subscriber over the store's event stream, which keeps its timings in
-//! memory only: a transaction received before a restart is not timed.
+//! memory only: a transaction received before a restart is not timed. When
+//! the stream skips events, the subscriber checks what it remembers against
+//! the store, so a missed terminal event does not leave a timing behind.
 
 use std::{
     collections::HashMap,
@@ -96,7 +98,9 @@ struct Timing {
 /// `dolos.mempool.confirmation.duration`.
 ///
 /// A `confirmed` event with more than one confirmation only deepens a
-/// confirmation already counted, so it is not a transition.
+/// confirmation already counted, so it is not a transition. A transaction
+/// that reaches `finalized` untimed, as with a finalize threshold of one, is
+/// timed there.
 pub struct Lifecycle {
     transitions: Counter<u64>,
     confirmation: Histogram<f64>,
@@ -145,18 +149,38 @@ impl Lifecycle {
             }
             MempoolTxStage::Confirmed => {
                 if let Some(timing) = self.pending.get_mut(&tx.hash) {
-                    if !timing.timed {
-                        timing.timed = true;
-                        let took = timing.since.elapsed().as_secs_f64();
-                        self.confirmation.record(took, &[]);
-                    }
+                    time_confirmation(&self.confirmation, timing);
                 }
             }
-            MempoolTxStage::Finalized | MempoolTxStage::Dropped => {
+            MempoolTxStage::Finalized => {
+                if let Some(mut timing) = self.pending.remove(&tx.hash) {
+                    time_confirmation(&self.confirmation, &mut timing);
+                }
+            }
+            MempoolTxStage::Dropped => {
                 self.pending.remove(&tx.hash);
             }
             _ => (),
         }
+    }
+
+    /// Checks every remembered transaction against `store`, after the stream
+    /// skipped events: it forgets those the store no longer tracks, and times
+    /// one the store reports confirmed that was not timed yet.
+    pub fn reconcile<M: MempoolStore>(&mut self, store: &M) {
+        let confirmation = &self.confirmation;
+
+        self.pending
+            .retain(|hash, timing| match store.check_status(hash).stage {
+                MempoolTxStage::Pending
+                | MempoolTxStage::Propagated
+                | MempoolTxStage::Acknowledged => true,
+                MempoolTxStage::Confirmed => {
+                    time_confirmation(confirmation, timing);
+                    true
+                }
+                _ => false,
+            });
     }
 
     /// Counts `missed` events the stream skipped as `unknown`.
@@ -172,8 +196,27 @@ impl Lifecycle {
         self.pending.len()
     }
 
-    /// Consumes `stream` until it ends.
-    pub async fn run<S>(&mut self, mut stream: S)
+    /// Consumes `stream` until it ends, without a store to reconcile against
+    /// when it skips events.
+    pub async fn run<S>(&mut self, stream: S)
+    where
+        S: futures_core::Stream<Item = Result<MempoolEvent, MempoolError>> + Unpin,
+    {
+        self.consume(stream, |_| ()).await
+    }
+
+    /// Consumes `stream`, `store`'s events, until it ends, reconciling with
+    /// `store` whenever the stream skips events.
+    pub async fn follow<M, S>(&mut self, store: &M, stream: S)
+    where
+        M: MempoolStore,
+        S: futures_core::Stream<Item = Result<MempoolEvent, MempoolError>> + Unpin,
+    {
+        self.consume(stream, |lifecycle| lifecycle.reconcile(store))
+            .await
+    }
+
+    async fn consume<S>(&mut self, mut stream: S, mut on_missed: impl FnMut(&mut Self))
     where
         S: futures_core::Stream<Item = Result<MempoolEvent, MempoolError>> + Unpin,
     {
@@ -181,11 +224,22 @@ impl Lifecycle {
             match item {
                 Ok(event) => self.observe(&event),
                 Err(error) => match missed_events(&error) {
-                    Some(missed) => self.missed(missed),
+                    Some(missed) => {
+                        self.missed(missed);
+                        on_missed(self);
+                    }
                     None => warn!(%error, "mempool event stream failed"),
                 },
             }
         }
+    }
+}
+
+/// Records how long `timing`'s transaction took to confirm, once.
+fn time_confirmation(confirmation: &Histogram<f64>, timing: &mut Timing) {
+    if !timing.timed {
+        timing.timed = true;
+        confirmation.record(timing.since.elapsed().as_secs_f64(), &[]);
     }
 }
 

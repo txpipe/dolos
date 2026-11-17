@@ -106,7 +106,7 @@ Dolos logs an error at startup if the OTLP exporter cannot reach the configured 
 
 - `inflight` covers the propagated, acknowledged and confirmed stages.
 - A transition's `state` is `pending`, `propagated`, `acknowledged`, `confirmed`, `finalized`, `dropped`, `rolled_back` or `unknown`. Each new confirmation of a transaction already confirmed is not counted again. Events the node missed under load are counted as `unknown`.
-- The confirmation time runs from when the node first saw a transaction pending to its first confirmation, with buckets from 5 seconds to an hour. It is kept in memory only, so a transaction received before a restart is not timed, and one confirmed again after a rollback is not timed twice.
+- The confirmation time runs from when the node first saw a transaction pending to its first confirmation, with buckets from 5 seconds to an hour. A transaction finalized in the block that confirms it is timed at finalization. The time is kept in memory only, so a transaction received before a restart is not timed, and one confirmed again after a rollback is not timed twice. When the node misses events under load, it checks the transactions it is timing against the mempool, so a confirmation it missed is timed when it notices, a little late.
 - A submission's `outcome` is `accepted`, `invalid` (phase-1 validation), `script_failed` (phase-2 validation), `duplicate` or `error`. Every submit API records it: gRPC, TRP and MiniBF.
 - A stale transaction is one the node stops offering upstream after three offers no peer acknowledged. It counts once.
 

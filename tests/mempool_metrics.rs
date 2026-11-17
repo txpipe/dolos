@@ -3,7 +3,7 @@
 
 use dolos_core::builtin::EphemeralMempool;
 use dolos_core::telemetry::mempool::{stage_name, Lifecycle, MempoolGauge};
-use dolos_core::{ChainPoint, MempoolStore, MempoolTxStage, TxHash};
+use dolos_core::{ChainPoint, MempoolError, MempoolEvent, MempoolStore, MempoolTxStage, TxHash};
 use dolos_redb3::mempool::RedbMempool;
 use dolos_testing::mempool::make_test_mempool_tx;
 use dolos_testing::{slot_to_chainpoint, tx_sequence_to_hash};
@@ -301,6 +301,115 @@ async fn assert_missed_events_count_as_unknown<S: MempoolStore>(store: S) {
     assert_eq!(value(&counted[0]) + value(&counted[1]), 20);
 }
 
+/// More transactions than the store's channel holds, each seen pending.
+/// The tests that use it run unconstrained: tokio's cooperative budget would
+/// otherwise end a backlog early, as if the stream were empty.
+const LAGGING: u64 = 40;
+
+/// A subscriber that has seen `LAGGING` transactions reach acknowledged.
+fn lagging<S: MempoolStore>(store: &S, meters: &Meters) -> Subscriber<S> {
+    let mut subscriber = Subscriber::new(store, meters);
+
+    for n in 0..LAGGING {
+        acknowledged(store, n);
+        subscriber.drain();
+    }
+    assert_eq!(subscriber.lifecycle.remembered(), LAGGING as usize);
+
+    subscriber
+}
+
+/// Every item the stream holds now, including what it reports it skipped.
+fn backlog<S: MempoolStore>(
+    subscriber: &mut Subscriber<S>,
+) -> futures_util::stream::Iter<std::vec::IntoIter<Result<MempoolEvent, MempoolError>>> {
+    let mut items = Vec::new();
+    while let Some(Some(item)) = subscriber.events.next().now_or_never() {
+        items.push(item);
+    }
+    assert!(items.iter().any(Result::is_err), "the stream did not lag");
+
+    futures_util::stream::iter(items)
+}
+
+fn hashes() -> Vec<TxHash> {
+    (0..LAGGING).map(hash).collect()
+}
+
+/// The confirmed and finalized events of every transaction are lost to the
+/// lag: reconciling with the store forgets them all.
+async fn assert_a_lagged_subscriber_forgets_settled_txs<S: MempoolStore>(store: S) {
+    let meters = Meters::new();
+    let mut subscriber = lagging(&store, &meters);
+
+    for slot in 1..=FINALIZE as u64 {
+        store
+            .confirm(&point(slot), &hashes(), &[], FINALIZE, DROP)
+            .unwrap();
+    }
+    let items = backlog(&mut subscriber);
+    subscriber.lifecycle.follow(&store, items).await;
+
+    assert_eq!(subscriber.lifecycle.remembered(), 0);
+}
+
+/// The first confirmations are lost to the lag: the store reports them
+/// confirmed, so each is timed once, and a later lag over their
+/// finalization forgets them without timing them again.
+async fn assert_a_lagged_subscriber_times_confirmed_txs<S: MempoolStore>(store: S) {
+    let meters = Meters::new();
+    let mut subscriber = lagging(&store, &meters);
+
+    store
+        .confirm(&point(1), &hashes(), &[], FINALIZE, DROP)
+        .unwrap();
+    let items = backlog(&mut subscriber);
+    subscriber.lifecycle.follow(&store, items).await;
+
+    assert_eq!(subscriber.lifecycle.remembered(), LAGGING as usize);
+    assert_eq!(
+        confirmations(&meters),
+        [format!(
+            "dolos.mempool.confirmation.duration[s]{{}} {LAGGING}"
+        )]
+    );
+
+    store
+        .confirm(&point(2), &hashes(), &[], FINALIZE, DROP)
+        .unwrap();
+    let items = backlog(&mut subscriber);
+    subscriber.lifecycle.follow(&store, items).await;
+
+    assert_eq!(subscriber.lifecycle.remembered(), 0);
+    assert_eq!(
+        confirmations(&meters),
+        [format!(
+            "dolos.mempool.confirmation.duration[s]{{}} {LAGGING}"
+        )]
+    );
+}
+
+/// With a finalize threshold of one there is no `confirmed` event: the
+/// transaction is timed at `finalized`.
+fn assert_a_tx_finalized_at_once_is_timed<S: MempoolStore>(store: S) {
+    let meters = Meters::new();
+    let mut subscriber = Subscriber::new(&store, &meters);
+
+    let tx = acknowledged(&store, 1);
+    store.confirm(&point(1), &[tx], &[], 1, DROP).unwrap();
+    subscriber.drain();
+
+    assert_eq!(
+        subscriber.stages,
+        ["pending", "propagated", "acknowledged", "finalized"]
+    );
+    assert_eq!(
+        confirmations(&meters),
+        ["dolos.mempool.confirmation.duration[s]{} 1"]
+    );
+    assert_eq!(subscriber.lifecycle.remembered(), 0);
+}
+
 // ---------------------------------------------------------------------------
 // Ephemeral
 // ---------------------------------------------------------------------------
@@ -331,6 +440,27 @@ fn ephemeral_dropped_tx_is_forgotten() {
 #[tokio::test]
 async fn ephemeral_missed_events_count_as_unknown() {
     assert_missed_events_count_as_unknown(EphemeralMempool::new()).await;
+}
+
+#[tokio::test]
+async fn ephemeral_lagged_subscriber_forgets_settled_txs() {
+    tokio::task::unconstrained(assert_a_lagged_subscriber_forgets_settled_txs(
+        EphemeralMempool::new(),
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn ephemeral_lagged_subscriber_times_confirmed_txs() {
+    tokio::task::unconstrained(assert_a_lagged_subscriber_times_confirmed_txs(
+        EphemeralMempool::new(),
+    ))
+    .await;
+}
+
+#[test]
+fn ephemeral_tx_finalized_at_once_is_timed() {
+    assert_a_tx_finalized_at_once_is_timed(EphemeralMempool::new());
 }
 
 // ---------------------------------------------------------------------------
@@ -364,4 +494,19 @@ fn redb_dropped_tx_is_forgotten() {
 #[tokio::test]
 async fn redb_missed_events_count_as_unknown() {
     assert_missed_events_count_as_unknown(redb()).await;
+}
+
+#[tokio::test]
+async fn redb_lagged_subscriber_forgets_settled_txs() {
+    tokio::task::unconstrained(assert_a_lagged_subscriber_forgets_settled_txs(redb())).await;
+}
+
+#[tokio::test]
+async fn redb_lagged_subscriber_times_confirmed_txs() {
+    tokio::task::unconstrained(assert_a_lagged_subscriber_times_confirmed_txs(redb())).await;
+}
+
+#[test]
+fn redb_tx_finalized_at_once_is_timed() {
+    assert_a_tx_finalized_at_once_is_timed(redb());
 }

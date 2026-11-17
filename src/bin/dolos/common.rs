@@ -460,12 +460,12 @@ impl Drop for MempoolMetrics {
 pub fn mempool_metrics(domain: &DomainAdapter) -> MempoolMetrics {
     use dolos_core::telemetry::mempool::{Lifecycle, MempoolGauge};
 
-    let mempool = domain.mempool();
+    let mempool = domain.mempool().clone();
     let events = mempool.subscribe();
 
     MempoolMetrics {
         _gauge: MempoolGauge::register(mempool.clone()),
-        subscriber: tokio::spawn(async move { Lifecycle::new().run(events).await }),
+        subscriber: tokio::spawn(async move { Lifecycle::new().follow(&mempool, events).await }),
     }
 }
 
