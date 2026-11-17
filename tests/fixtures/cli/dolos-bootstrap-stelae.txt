@@ -7,12 +7,13 @@ Options:
           Replace any data already in storage, and with it what an interrupted bootstrap left for
           `--continue`
       --source <SOURCE>
-          Where to restore from, as a URL: `file://DIR` naming a stele directory, or
-          `oci://HOST/PATH` naming a repository in a registry. Defaults to the configured network's
-          official repository, and is required for a custom network
+          Where to restore from, as a URL naming a network root: `file://DIR`, a directory holding
+          `dolos/` and `blocks/`, each an OCI image layout, or `oci://HOST/PATH`, whose `PATH/dolos`
+          and `PATH/blocks` repositories are read. Defaults to the configured network's official
+          root, and is required for a custom network
       --point <POINT>
-          which stele in the repository to restore: `latest`, or `epoch-N` for the stele published
-          at the end of epoch N. Registry sources only [default: latest]
+          which stele to restore: `latest`, or `epoch-N` for the stele cut at the boundary that
+          opens epoch N. Registry sources only [default: latest]
       --skip-if-data
           Exit 0 without bootstrapping when storage already holds a node, as an interrupted replay
           that has committed leaves one for `--continue` to resume; data without one, as an
