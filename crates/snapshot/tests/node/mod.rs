@@ -330,7 +330,24 @@ pub fn export_plan<B: ToyStores>(
     domain: &ToyDomain<B>,
     plan: &Plan,
 ) -> Inscription {
-    let stele = SnapshotDir::create(root).unwrap();
+    export::publish(
+        root,
+        plan,
+        domain.archive(),
+        domain.state(),
+        &Observer::silent(),
+    )
+    .unwrap()
+}
+
+/// [`export_plan`] into a bare image layout at `layout`, starting a lineage
+/// and writing no blocks snapshot: the stele alone, as a host writes it.
+pub fn export_layout<B: ToyStores>(
+    layout: &std::path::Path,
+    domain: &ToyDomain<B>,
+    plan: &Plan,
+) -> Inscription {
+    let stele = SnapshotDir::create(layout).unwrap();
 
     export::export(
         &stele,
@@ -353,16 +370,44 @@ pub fn plan_for<B: ToyStores>(domain: &ToyDomain<B>) -> Plan {
     .unwrap()
 }
 
+/// Export `domain` into the network root at `root`: its blocks snapshot,
+/// where it closed an epoch, and the stele naming it.
 pub fn export_to<B: ToyStores>(root: &std::path::Path, domain: &ToyDomain<B>) -> Inscription {
     export_plan(root, domain, &plan_for(domain))
 }
 
-/// The latest stele of the image layout at `root`, resolved through its chain.
+/// The stele layout of the network root at `root`.
+pub fn dolos(root: &std::path::Path) -> std::path::PathBuf {
+    root.join(export::DOLOS_REPOSITORY)
+}
+
+/// The blocks layout of the network root at `root`, where an export wrote
+/// one.
+pub fn blocks(root: &std::path::Path) -> Option<std::path::PathBuf> {
+    let blocks = root.join(export::BLOCKS_REPOSITORY);
+
+    blocks.exists().then_some(blocks)
+}
+
+/// The latest stele of the network root at `root`, resolved through its
+/// chain.
 pub fn resolved(root: &std::path::Path) -> stelae::dir::Snapshot {
-    SnapshotDir::open(root)
+    SnapshotDir::open(dolos(root))
         .unwrap()
         .resolve_latest(&dolos_snapshot::DolosProfile)
         .unwrap()
+}
+
+/// The latest blocks snapshot of the network root at `root`, resolved through
+/// its chain, where it holds one.
+pub fn resolved_blocks(root: &std::path::Path) -> Option<stelae::dir::Snapshot> {
+    let layout = SnapshotDir::open(blocks(root)?).unwrap();
+
+    match layout.resolve_latest(&stelae_blocks::BlocksProfile) {
+        Ok(snapshot) => Some(snapshot),
+        Err(error) if error.is_absent() => None,
+        Err(error) => panic!("{error}"),
+    }
 }
 
 /// An account's row of `window`, written straight to `domain`'s archive.

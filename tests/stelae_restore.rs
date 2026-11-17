@@ -367,31 +367,22 @@ fn a_root_without_its_blocks_directory_is_refused_naming_it() {
 }
 
 /// Write `root` as a network root whose stele reads its closed epochs' blocks
-/// from its `blocks` repository: the node's own stele, paired
-/// ([`paired::pair`]). Unless `with_blocks`, the root's `blocks` is an empty
-/// image layout, and the blocks lineage goes elsewhere.
+/// from its `blocks` repository: the node's own root export. Unless
+/// `with_blocks`, the root's `blocks` is an empty image layout, and the blocks
+/// lineage goes elsewhere.
 fn write_paired_root(node: &Node, root: &std::path::Path, with_blocks: bool) {
     use dolos_snapshot::dir::SnapshotDir;
 
-    let unpaired = node.root.path().join("unpaired");
-    node.write_stele(&unpaired);
+    node.write_stele(root);
 
-    let blocks = match with_blocks {
-        true => root.join("blocks"),
-        false => {
-            SnapshotDir::create(root.join("blocks")).unwrap();
-            node.root.path().join("elsewhere")
-        }
-    };
-
-    let paired = paired::pair(
-        &unpaired.join("dolos"),
-        &SnapshotDir::create(root.join("dolos")).unwrap(),
-        &SnapshotDir::create(&blocks).unwrap(),
-    );
+    let paired = paired::digests(root);
     assert!(!paired.blocks.is_empty(), "the stele closed no epoch");
 
-    std::fs::remove_dir_all(unpaired).unwrap();
+    if !with_blocks {
+        let blocks = root.join("blocks");
+        std::fs::rename(&blocks, node.root.path().join("elsewhere")).unwrap();
+        SnapshotDir::create(blocks).unwrap();
+    }
 }
 
 /// A stele whose closed epochs' blocks are in its root's `blocks`
@@ -821,13 +812,22 @@ impl Fixture {
 
         let layout = SnapshotDir::open(self.stele.join("dolos")).unwrap();
         let stele = layout.resolve_latest(&DolosProfile).unwrap();
+        let blocks_layout = SnapshotDir::open(self.stele.join("blocks")).unwrap();
+        let blocks = blocks_layout
+            .resolve_latest(&stelae_blocks::BlocksProfile)
+            .unwrap();
         let inscription = stele.read_inscription().unwrap();
-        let plan = dolos_snapshot::restore::plan(stele.chain().unwrap(), None, 2, None).unwrap();
-        let index = stele.blob_index().unwrap();
+        let plan =
+            dolos_snapshot::restore::plan(stele.chain().unwrap(), blocks.chain(), 2, None).unwrap();
+        let (index, blocks_index) = (stele.blob_index().unwrap(), blocks.blob_index().unwrap());
 
+        // A closed epoch's blocks layer is in the root's blocks repository.
         let blobs = plan
             .immutable_layers()
-            .map(|layer| layout.blob_path(&index.blob_for(&layer.diff_id).unwrap()))
+            .map(|layer| match index.blob_for(&layer.diff_id) {
+                Some(blob) => layout.blob_path(&blob),
+                None => blocks_layout.blob_path(&blocks_index.blob_for(&layer.diff_id).unwrap()),
+            })
             .collect();
 
         (

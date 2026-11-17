@@ -37,6 +37,10 @@ pub enum Anchor {
     /// Written whole by the seal at the boundary that seals window `e`, which
     /// [`Rule::seal`] names.
     Seal,
+    /// Listed only by the snapshot at `e`, in its tip, and by no diff: what is
+    /// true only at the cut. The boundary window's `blocks` (decision 0080,
+    /// points 11 and 13); a closed epoch's blocks are the blocks profile's.
+    Cut,
 }
 
 impl Anchor {
@@ -61,7 +65,7 @@ impl Anchor {
 /// then the entity kinds. Every log row keys at `epoch_start(e)`.
 pub const ANCHORS: [(&str, Anchor);
     DENSE_EPOCH_KINDS.len() + LOG_KINDS.len() + ENTITY_KINDS.len()] = [
-    (BLOCKS, Anchor::CLOSED),
+    (BLOCKS, Anchor::Cut),
     (INDEXES, Anchor::CLOSED),
     ("log-account-address-epochs", Anchor::Seal),
     // ESTART opening e, stake leg alone; EWRAP closing e + 1 rewrites them in
@@ -127,6 +131,12 @@ pub fn written_role(kind: &str, window: Option<u64>, sequence: u64) -> Result<Ro
 
     match anchor {
         Anchor::Seal => Ok(Role::Diff),
+        Anchor::Cut if sequence == epoch => Ok(Role::Tip),
+        Anchor::Cut => Err(Error::Unlisted {
+            kind: kind.to_owned(),
+            window: epoch,
+            sequence,
+        }),
         Anchor::After { first, settled } => match sequence {
             sequence if sequence < epoch + first => Err(Error::Unlisted {
                 kind: kind.to_owned(),
@@ -240,26 +250,29 @@ impl<'a> Rule<'a> {
         window: Option<u64>,
         sequence: u64,
     ) -> Result<Option<Role>, Error> {
-        let Some((first, settled)) = self.span(kind, window)? else {
-            return Ok(Some(Role::Tip));
-        };
-
-        Ok(match sequence {
-            sequence if sequence < first => None,
-            sequence if sequence < settled => Some(Role::Tip),
-            _ => Some(Role::Diff),
+        Ok(match self.span(kind, window)? {
+            Span::State => Some(Role::Tip),
+            Span::Cut(epoch) => (sequence == epoch).then_some(Role::Tip),
+            Span::Window { first, settled } => match sequence {
+                sequence if sequence < first => None,
+                sequence if sequence < settled => Some(Role::Tip),
+                _ => Some(Role::Diff),
+            },
         })
     }
 
     /// The sequence whose `diff` would first list a layer of `kind` for
-    /// `window`, or `None` for a state shard, which no `diff` lists.
+    /// `window`, or `None` for a layer no `diff` lists: a state shard, or the
+    /// boundary window's blocks.
     pub fn first_listed(&self, kind: &str, window: Option<u64>) -> Result<Option<u64>, Error> {
-        Ok(self.span(kind, window)?.map(|(_, settled)| settled))
+        Ok(match self.span(kind, window)? {
+            Span::Window { settled, .. } => Some(settled),
+            Span::State | Span::Cut(_) => None,
+        })
     }
 
-    /// The first sequence that can hold the layer and the first that holds it
-    /// final, or `None` for a state shard.
-    fn span(&self, kind: &str, window: Option<u64>) -> Result<Option<(u64, u64)>, Error> {
+    /// Which snapshots hold a layer of `kind` for `window`.
+    fn span(&self, kind: &str, window: Option<u64>) -> Result<Span, Error> {
         let mismatch = |scope| Error::ScopeMismatch {
             kind: kind.to_owned(),
             scope,
@@ -269,7 +282,7 @@ impl<'a> Rule<'a> {
             // a state scope that names an epoch is a retained dump, which
             // decision 0080 removes
             return match window {
-                None => Ok(None),
+                None => Ok(Span::State),
                 Some(_) => Err(mismatch("an epoch in a state scope")),
             };
         }
@@ -277,14 +290,31 @@ impl<'a> Rule<'a> {
         let anchor = anchor_for(kind).ok_or_else(|| Error::Unassigned(kind.to_owned()))?;
         let epoch = window.ok_or_else(|| mismatch("a scope without an epoch"))?;
 
-        Ok(Some(match anchor {
-            Anchor::After { first, settled } => (epoch + first, epoch + settled),
+        Ok(match anchor {
+            Anchor::After { first, settled } => Span::Window {
+                first: epoch + first,
+                settled: epoch + settled,
+            },
             Anchor::Seal => {
                 let seal = self.seal(epoch);
-                (seal, seal)
+                Span::Window {
+                    first: seal,
+                    settled: seal,
+                }
             }
-        }))
+            Anchor::Cut => Span::Cut(epoch),
+        })
     }
+}
+
+/// The snapshots that hold one layer.
+enum Span {
+    /// Every snapshot's tip: a state shard.
+    State,
+    /// The tip of the snapshot at this sequence alone.
+    Cut(u64),
+    /// From `first`, in the tip until `settled` and in the diff after.
+    Window { first: u64, settled: u64 },
 }
 
 #[cfg(test)]
@@ -427,17 +457,15 @@ mod tests {
             let rule = Rule::new(&summary, window);
 
             for epoch in [0, 207, 208, 400] {
-                for kind in DENSE_EPOCH_KINDS {
-                    assert_eq!(
-                        roles(&rule, kind, epoch),
-                        expected(epoch, epoch, epoch + 1),
-                        "{network} {kind} {epoch}"
-                    );
-                    assert_eq!(
-                        rule.first_listed(kind, Some(epoch)).unwrap(),
-                        Some(epoch + 1)
-                    );
-                }
+                assert_eq!(
+                    roles(&rule, INDEXES, epoch),
+                    expected(epoch, epoch, epoch + 1),
+                    "{network} {epoch}"
+                );
+                assert_eq!(
+                    rule.first_listed(INDEXES, Some(epoch)).unwrap(),
+                    Some(epoch + 1)
+                );
 
                 for kind in ORDINARY {
                     assert_eq!(
@@ -452,6 +480,31 @@ mod tests {
                     expected(epoch, epoch + 2, epoch + 2),
                     "{network} log-pool-epochs {epoch}"
                 );
+            }
+        }
+    }
+
+    /// A window's blocks are in its own boundary's tip and in no other
+    /// snapshot: a closed epoch's blocks are the blocks profile's.
+    #[test]
+    fn blocks_are_the_tip_of_their_own_boundary_alone() {
+        for (network, summary, window) in networks() {
+            let rule = Rule::new(&summary, window);
+
+            for epoch in [0, 207, 208, 400] {
+                let mut found = roles(&rule, BLOCKS, epoch);
+
+                assert_eq!(found.remove(0), Some(Role::Tip), "{network} {epoch}");
+                assert!(found.iter().all(Option::is_none), "{network} {epoch}");
+                assert_eq!(rule.first_listed(BLOCKS, Some(epoch)).unwrap(), None);
+                assert_eq!(written_role(BLOCKS, Some(epoch), epoch).unwrap(), Role::Tip);
+
+                for sequence in [epoch + 1, epoch + 9] {
+                    assert!(matches!(
+                        written_role(BLOCKS, Some(epoch), sequence),
+                        Err(Error::Unlisted { .. })
+                    ));
+                }
             }
         }
     }
@@ -646,12 +699,15 @@ mod tests {
         let chained = Listing::new(rule, 10, false);
         let first = Listing::new(rule, 10, true);
 
-        assert_eq!(chained.role(BLOCKS, Some(9)).unwrap(), Some(Role::Diff));
-        assert_eq!(chained.role(BLOCKS, Some(8)).unwrap(), None);
-        assert_eq!(first.role(BLOCKS, Some(0)).unwrap(), Some(Role::Diff));
+        assert_eq!(chained.role(INDEXES, Some(9)).unwrap(), Some(Role::Diff));
+        assert_eq!(chained.role(INDEXES, Some(8)).unwrap(), None);
+        assert_eq!(first.role(INDEXES, Some(0)).unwrap(), Some(Role::Diff));
 
         for listing in [chained, first] {
+            assert_eq!(listing.role(INDEXES, Some(10)).unwrap(), Some(Role::Tip));
             assert_eq!(listing.role(BLOCKS, Some(10)).unwrap(), Some(Role::Tip));
+            assert_eq!(listing.role(BLOCKS, Some(9)).unwrap(), None);
+            assert_eq!(listing.role(BLOCKS, Some(0)).unwrap(), None);
             assert_eq!(
                 listing.role("log-account-epochs", Some(9)).unwrap(),
                 Some(Role::Tip)

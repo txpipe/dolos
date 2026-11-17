@@ -65,8 +65,8 @@ use dolos_testing::{
     toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores},
 };
 use node::{
-    account_layer, export_plan, export_to, extend_archive_past_cursor, harness, plan_at_boundary,
-    plan_for, settled, stake_only, step_past_boundary, write_account_row,
+    account_layer, export_layout, export_plan, export_to, extend_archive_past_cursor, harness,
+    plan_at_boundary, plan_for, settled, stake_only, step_past_boundary, write_account_row,
 };
 use stelae::{
     dir::SnapshotDir,
@@ -76,9 +76,15 @@ use stelae::{
 
 use watcher::Watcher;
 
+/// The `diffId` of the skeleton's boundary block layer, as the export that
+/// still listed every epoch's blocks wrote it. Only the closed epochs' blocks
+/// left the stele; this layer's kind, scope and codec did not move.
+const BOUNDARY_BLOCKS: &str =
+    "sha256:8013ed25e0a7280f0cb5e9fdcf70a8b3218356b27d25852566fed6515b85b894";
+
 /// The identity of an export over the skeleton store set.
 const GOLDEN_SKELETON: &str =
-    "sha256:cb4327a859c94b2fe27e2c124c915ab15d1fd75b21c04d9f37f61de25001391f";
+    "sha256:a729d2938cf32b7a45756a02723e70744e36e16358168d3b7f45c4ee5ad861d8";
 
 /// Where the skeleton fixture stands: on the first block of epoch 2 under
 /// [`skeleton_summary`], after fifty empty slots, so the export covers three
@@ -203,14 +209,20 @@ fn a_bare_boundary_exports_the_pinned_skeleton() {
     )
     .unwrap();
 
-    // A lineage's first stele: the two closed epochs' blocks and indexes in
-    // its diff, the boundary window's and every state layer in its tip, and
-    // **no log layers at all**, which is the omit-if-empty rule seen from the
-    // other side: a store with no logs in it publishes no layer claiming there
-    // are none.
+    // A lineage's first stele: the two closed epochs' indexes in its diff, the
+    // boundary window's blocks and indexes and every state layer in its tip,
+    // and **no log layers at all**, which is the omit-if-empty rule seen from
+    // the other side: a store with no logs in it publishes no layer claiming
+    // there are none. The closed epochs' blocks are the blocks profile's.
     assert_eq!(inscription.previous, None);
-    assert_eq!(inscription.diff.len(), 2 * 2);
+    assert_eq!(inscription.diff.len(), 2);
     assert_eq!(inscription.tip.len(), 2 + state_layer_count());
+
+    let blocks: Vec<_> = inscription.layers_of_kind(BLOCKS).collect();
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0].scope["epoch"], 2);
+    assert_eq!(blocks[0].diff_id.to_string(), BOUNDARY_BLOCKS);
+    assert_eq!(inscription.tip[0], *blocks[0]);
 
     for (kind, _) in LOG_KINDS {
         assert_eq!(
@@ -320,7 +332,9 @@ fn some_blocks() -> stelae::Digest {
 // --------------------------------------------------------------------------
 
 /// The reference a plan takes with `with_blocks` is the one its stele names,
-/// and a plan without one publishes the position it always did.
+/// and an export into a network root writes no blocks snapshot of its own for
+/// it; a plan without one, exported alone, publishes the position it always
+/// did.
 #[test]
 fn a_plan_naming_its_blocks_publishes_them_in_position() {
     let domain: ToyDomain = harness();
@@ -331,7 +345,10 @@ fn a_plan_naming_its_blocks_publishes_them_in_position() {
         &domain,
         &plan_for(&domain).with_blocks(some_blocks()),
     );
-    let without = export_to(without_root.path(), &domain);
+    let without = export_layout(without_root.path(), &domain, &plan_for(&domain));
+
+    assert!(with.sequence > 0, "the fixture closes no epoch");
+    assert_eq!(node::blocks(with_root.path()), None);
 
     let read = dolos_snapshot::read_position(&with.position).unwrap();
     assert_eq!(read.blocks, Some(some_blocks()));
@@ -391,7 +408,7 @@ fn a_harness_domain_exports_a_complete_stele() {
 
     // The whole directory verifies: every blob hashes to its own name and
     // decompresses to a layer the inscription points at.
-    let stele = common::resolve(temp.path());
+    let stele = node::resolved(temp.path());
     let index = stele.blob_index().unwrap();
 
     for descriptor in inscription.layers() {
@@ -421,21 +438,45 @@ fn every_layer_reads_back_as_the_store_yields_it() {
     let temp = tempfile::tempdir().unwrap();
     let inscription = export_to(temp.path(), &domain);
 
-    let stele = common::resolve(temp.path());
+    let stele = node::resolved(temp.path());
     let index = stele.blob_index().unwrap();
 
     let windows: Vec<EpochWindow> = plan.epochs.clone();
 
     // --- blocks -----------------------------------------------------------
+    //
+    // The stele carries the boundary window's; the blocks snapshot beside it
+    // every closed epoch's, under the blocks profile.
+    let (boundary, closed) = windows.split_last().unwrap();
     let written: Vec<_> = inscription.layers_of_kind(BLOCKS).collect();
-    assert_eq!(written.len(), windows.len());
+    assert_eq!(written.len(), 1);
+
+    let found: Vec<blocks::BlockRecord> = read_both_ways(&stele, &index, written[0])
+        .iter()
+        .map(|raw| blocks::decode(raw).unwrap())
+        .collect();
+
+    assert_eq!(found, expected_blocks(&domain, boundary), "the boundary");
+    assert!(!found.is_empty(), "the boundary window has no block");
+
+    let snapshot = node::resolved_blocks(temp.path()).unwrap();
+    let blocks_index = snapshot.blob_index().unwrap();
+    let blocks_layers: Vec<_> = snapshot.chain().unwrap().descriptors().cloned().collect();
+    assert_eq!(blocks_layers.len(), closed.len());
 
     let mut any_blocks = false;
 
-    for (descriptor, window) in written.iter().zip(&windows) {
-        let found: Vec<blocks::BlockRecord> = read_both_ways(&stele, &index, descriptor)
-            .iter()
-            .map(|raw| blocks::decode(raw).unwrap())
+    for (descriptor, window) in blocks_layers.iter().zip(closed) {
+        assert_eq!(descriptor.scope["epoch"], window.epoch);
+
+        let found: Vec<blocks::BlockRecord> = snapshot
+            .read_layer(&blocks_index, &stelae_blocks::BlocksProfile, descriptor)
+            .unwrap()
+            .records()
+            .map(|raw| {
+                let record = stelae_blocks::record::decode(raw.unwrap()).unwrap();
+                blocks::BlockRecord::new(record.slot, record.hash.into(), record.body)
+            })
             .collect();
 
         any_blocks |= !found.is_empty();
@@ -448,7 +489,7 @@ fn every_layer_reads_back_as_the_store_yields_it() {
         );
     }
 
-    assert!(any_blocks, "the fixture archived no blocks");
+    assert!(any_blocks, "the fixture archived no closed epoch's blocks");
 
     // --- logs -------------------------------------------------------------
     //
@@ -609,7 +650,7 @@ fn accounts_export_into_the_shard_of_their_hash() {
     let temp = tempfile::tempdir().unwrap();
     let inscription = export_to(temp.path(), &domain);
 
-    let stele = common::resolve(temp.path());
+    let stele = node::resolved(temp.path());
     let index = stele.blob_index().unwrap();
 
     let mut found: BTreeMap<Vec<u8>, u8> = BTreeMap::new();
@@ -815,14 +856,18 @@ fn same_inscription_from_both_backends(at: Option<u64>) {
         "the two backends do not publish the same identity"
     );
 
-    // Same manifests on disk, and the same blobs behind them.
-    assert_eq!(
-        std::fs::read(memory_root.path().join("index.json")).unwrap(),
-        std::fs::read(fjall_root.path().join("index.json")).unwrap(),
-    );
+    // Same manifests on disk, the blocks snapshot's among them, and the same
+    // blobs behind them.
+    for repository in [export::DOLOS_REPOSITORY, export::BLOCKS_REPOSITORY] {
+        assert_eq!(
+            std::fs::read(memory_root.path().join(repository).join("index.json")).unwrap(),
+            std::fs::read(fjall_root.path().join(repository).join("index.json")).unwrap(),
+            "{repository}"
+        );
+    }
 
-    let left = common::resolve(memory_root.path()).blob_index().unwrap();
-    let right = common::resolve(fjall_root.path()).blob_index().unwrap();
+    let left = node::resolved(memory_root.path()).blob_index().unwrap();
+    let right = node::resolved(fjall_root.path()).blob_index().unwrap();
 
     for descriptor in from_memory.layers() {
         assert_eq!(
@@ -878,12 +923,12 @@ fn a_pooled_production_is_byte_identical_to_the_serial_walk() {
 
     // Same manifests on disk, and the same blobs behind them.
     assert_eq!(
-        std::fs::read(serial_root.path().join("index.json")).unwrap(),
-        std::fs::read(pooled_root.path().join("index.json")).unwrap(),
+        std::fs::read(node::dolos(serial_root.path()).join("index.json")).unwrap(),
+        std::fs::read(node::dolos(pooled_root.path()).join("index.json")).unwrap(),
     );
 
-    let left = common::resolve(serial_root.path()).blob_index().unwrap();
-    let right = common::resolve(pooled_root.path()).blob_index().unwrap();
+    let left = node::resolved(serial_root.path()).blob_index().unwrap();
+    let right = node::resolved(pooled_root.path()).blob_index().unwrap();
 
     for descriptor in serial.layers() {
         assert_eq!(
@@ -1174,11 +1219,18 @@ fn a_chained_export_lists_what_becomes_final_at_its_sequence() {
     assert_eq!(
         windows(&chained.diff),
         [
-            (BLOCKS.to_owned(), 2),
             (INDEXES.to_owned(), 2),
             ("log-account-epochs".to_owned(), 1),
         ],
         "the diff at 3: the window 3 closes and the rows settled at 3"
+    );
+    assert_eq!(
+        chained
+            .layers_of_kind(BLOCKS)
+            .map(|layer| &layer.scope["epoch"])
+            .collect::<Vec<_>>(),
+        [3],
+        "the boundary window's blocks, in the tip, and no closed epoch's"
     );
 
     // The tip at 2 held window 1's rows as ESTART wrote them, the diff at 3 as
@@ -1215,8 +1267,12 @@ fn a_chained_export_lists_what_becomes_final_at_its_sequence() {
     // Nothing was recorded, so nothing was lent.
     assert_eq!(lending.lent(), 0);
     let asked = lending.asked.lock().unwrap().clone();
-    assert!(asked.contains(&(BLOCKS.to_owned(), 2)), "{asked:?}");
-    assert!(!asked.contains(&(BLOCKS.to_owned(), 1)), "{asked:?}");
+    assert!(asked.contains(&(INDEXES.to_owned(), 2)), "{asked:?}");
+    assert!(!asked.contains(&(INDEXES.to_owned(), 1)), "{asked:?}");
+    assert!(
+        !asked.iter().any(|(kind, _)| kind == BLOCKS),
+        "a tip layer is asked for: {asked:?}"
+    );
 }
 
 /// A first stele lists in its diff every layer final by its cut, and in its
@@ -1235,7 +1291,7 @@ fn a_lineage_start_lists_everything_final_by_its_cut() {
     let tip = windows(&first.tip);
 
     for epoch in 0..3 {
-        assert!(diff.contains(&(BLOCKS.to_owned(), epoch)), "{diff:?}");
+        assert!(!diff.contains(&(BLOCKS.to_owned(), epoch)), "{diff:?}");
         assert!(diff.contains(&(INDEXES.to_owned(), epoch)), "{diff:?}");
     }
 
@@ -1327,7 +1383,7 @@ fn a_retry_at_a_later_sequence_builds_what_settled_since() {
     assert!(resuming.lent() > 0);
 
     let asked = resuming.asked.lock().unwrap().clone();
-    assert!(asked.contains(&(BLOCKS.to_owned(), 1)), "{asked:?}");
+    assert!(asked.contains(&(INDEXES.to_owned(), 1)), "{asked:?}");
 }
 
 /// Every epoch layer an export builds lands once, in either array, and the
@@ -1408,8 +1464,6 @@ fn a_forecast_counts_what_the_export_lists() {
 /// is this profile's.
 const CANONICAL_SKELETON: &str = concat!(
     r#"{"compression":{"algo":"zstd","level":9},"diff":["#,
-    r#"{"diffId":"sha256:922ee4d9b71402ecba461e7b11a76ff61354d2a0be45bb040e5e2ccb80ccb5a1","kind":"blocks","mediaType":"application/vnd.dolos.stelae.blocks.v1+zstd","records":1,"scope":{"endSlot":99,"epoch":0,"startSlot":0},"uncompressedSize":43},"#,
-    r#"{"diffId":"sha256:c0dba8cfa17803797dc39470fa963f21e19e61a534fdea1c480f4160000f4b6d","kind":"blocks","mediaType":"application/vnd.dolos.stelae.blocks.v1+zstd","records":2,"scope":{"endSlot":199,"epoch":1,"startSlot":100},"uncompressedSize":144},"#,
     r#"{"diffId":"sha256:0517f93e76f9fe6059bcde6218af5c90f51020af09890c5e3a05cc8f3a32e447","kind":"indexes","mediaType":"application/vnd.dolos.stelae.indexes.v1+zstd","records":1,"scope":{"endSlot":99,"epoch":0,"startSlot":0},"uncompressedSize":44},"#,
     r#"{"diffId":"sha256:b64ae324280c4335089cdf9918ac0596fe7f429dbf5a54c2fd2d44f25280b935","kind":"indexes","mediaType":"application/vnd.dolos.stelae.indexes.v1+zstd","records":1,"scope":{"endSlot":199,"epoch":1,"startSlot":100},"uncompressedSize":45}"#,
     r#"],"parameters":{"#,
@@ -1514,7 +1568,7 @@ fn a_discarding_export_reproduces_what_a_publish_stores() {
     let plan = plan_for(&domain);
 
     let temp = tempfile::tempdir().unwrap();
-    let stored = export_to(temp.path(), &domain);
+    let stored = export_layout(temp.path(), &domain, &plan);
 
     let reproduced = export::export(
         &Discarding,
@@ -1690,7 +1744,11 @@ fn every_path_refuses_a_cursor_past_the_boundary_before_a_layer() {
         expected
     );
 
-    for root in [temp.path().join("export"), directory.clone()] {
+    for root in [
+        temp.path().join("export"),
+        directory.join(export::DOLOS_REPOSITORY),
+        directory.join(export::BLOCKS_REPOSITORY),
+    ] {
         let blobs = root.join("blobs").join("sha256");
 
         assert!(
@@ -2397,8 +2455,8 @@ fn entity_layers_exist_only_where_an_entity_was_first_seen() {
 
     assert_eq!(
         inscription.layers().count(),
-        3 * 2 + 2 + state_layer_count(),
-        "three windows of blocks and indexes, two entity layers and the state"
+        1 + 3 + 2 + state_layer_count(),
+        "the boundary window's blocks, three windows of indexes, two entity layers and the state"
     );
     assert!(
         inscription
@@ -2616,10 +2674,73 @@ fn the_headless_facade_plans_encodes_and_reproduces_one_document() {
         .publish_directory(&stele, &plan, &Observer::silent())
         .unwrap();
     let reproduced = source.verify_reproduction(&inscription, &plan).unwrap();
-    let document = source.digest_document(&plan, &export::First).unwrap();
+
+    // The directory's blocks snapshot is the one the stele names, and a digest
+    // takes it as the host's plan would.
+    let blocks = node::resolved_blocks(&stele).unwrap();
+    let named = blocks.read_inscription().unwrap().digest().unwrap();
+    assert_eq!(
+        dolos_snapshot::read_position(&inscription.position)
+            .unwrap()
+            .blocks,
+        Some(named)
+    );
+
+    let document = source
+        .digest_document(&plan.clone().with_blocks(named), &export::First)
+        .unwrap();
 
     assert_eq!(reproduced.canonicalize().unwrap(), document.canonical);
     assert_eq!(inscription.digest().unwrap(), document.identity);
+}
+
+/// A verifier that names its own blocks snapshot holds the published stele to
+/// it: the published `position.blocks` is taken only when the plan names none.
+#[test]
+fn a_verifiers_own_blocks_reference_is_held_against_the_published_one() {
+    let domain: ToyDomain = harness();
+    let source = StoreSnapshot::new(
+        domain.archive(),
+        domain.state(),
+        dolos_cardano::mutable_slots(&domain.genesis()),
+    );
+    let plan = source
+        .selected_plan(
+            u64::from(domain.genesis().network_magic()),
+            Selection::default(),
+        )
+        .unwrap();
+
+    let destination = tempfile::tempdir().unwrap();
+    let stele = destination.path().join("stele");
+    let inscription = source
+        .publish_directory(&stele, &plan, &Observer::silent())
+        .unwrap();
+    let named = node::resolved_blocks(&stele)
+        .unwrap()
+        .read_inscription()
+        .unwrap()
+        .digest()
+        .unwrap();
+
+    assert_ne!(some_blocks(), named);
+    assert_eq!(
+        source
+            .verify_reproduction(&inscription, &plan.clone().with_blocks(named))
+            .unwrap()
+            .digest()
+            .unwrap(),
+        inscription.digest().unwrap()
+    );
+
+    let refused = source
+        .verify_reproduction(&inscription, &plan.clone().with_blocks(some_blocks()))
+        .unwrap_err();
+
+    assert!(
+        matches!(refused, dolos_snapshot::Error::ReproductionMismatch { .. }),
+        "{refused:?}"
+    );
 }
 
 /// The index staging engine: one tag, one exact and one shared entity

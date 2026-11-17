@@ -2,12 +2,13 @@
 
 The snapshot profile can be embedded without Dolos service features. The
 `headless_snapshot` example opens committed stores through the replay facade,
-builds one selected plan, writes a directory stele, and reproduces it through
-the public API:
+builds one selected plan, writes it into a directory network root (the stele
+in `dolos/`, the closed epochs' blocks it names through `position.blocks` in
+`blocks/`), and reproduces it through the public API:
 
 ```sh
 cargo run --no-default-features --example headless_snapshot -- \
-  ./dolos.toml ./stele
+  ./dolos.toml ./root
 ```
 
 This facade was qualified from Dolos revision
@@ -23,7 +24,9 @@ library applies its producer sizing the same way for publication, digest and
 verification. The resulting plan can
 be passed to:
 
-- `publish_directory` with an explicit destination and progress observer;
+- `publish_directory` with an explicit network root and progress observer,
+  which writes the blocks snapshot into its `blocks/` and the stele into its
+  `dolos/` (a plan that names its blocks snapshot writes `dolos/` alone);
 - `preview_repository` or `publish_repository` with explicit
   `SnapshotRepository::publishing()` policy;
 - `digest_document` with an explicit predecessor; or

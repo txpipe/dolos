@@ -56,9 +56,10 @@ pub trait SnapshotSource {
     /// the boundary and do not.
     fn boundary(&self, plan: &Plan) -> Result<Boundary, Error>;
 
-    /// Write a stele into a directory's image layout, chained onto the latest
-    /// one it holds, through the same profile encoder registry publication
-    /// uses.
+    /// Export into the network root at `destination`: the closed epochs'
+    /// blocks into its `blocks` layout, then the stele naming them into its
+    /// `dolos` layout, each chained onto the latest snapshot it holds, through
+    /// the same profile encoder registry publication uses.
     fn publish_directory(
         &self,
         destination: &Path,

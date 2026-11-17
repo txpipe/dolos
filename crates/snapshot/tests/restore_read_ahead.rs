@@ -26,7 +26,7 @@ use dolos_snapshot::{
 };
 use dolos_testing::toy_domain::{FjallStores, MemoryStores, ToyDomain};
 use fault_registry::FaultRegistry;
-use node::{export_to, harness, plan_at_boundary, Blank};
+use node::{harness, plan_at_boundary, Blank};
 use recorder::{contents_digest, Journal, Op, RecordedArchive, RecordedState};
 use stelae::{
     inscription::LayerDescriptor,
@@ -560,23 +560,27 @@ fn a_depth_of_zero_or_one_fetches_one_layer_at_a_time() {
     }
 }
 
-/// The harness node, exported into a fresh directory, and its magic.
+/// The harness node, exported alone into a fresh image layout, naming no
+/// blocks snapshot, and its magic: one stream to stage.
 fn exported() -> (tempfile::TempDir, u64) {
     let domain: ToyDomain<MemoryStores> = harness();
     let magic = u64::from(domain.genesis().network_magic());
 
-    let root = tempfile::tempdir().unwrap();
-    export_to(root.path(), &domain);
+    let layout = tempfile::tempdir().unwrap();
+    node::export_layout(layout.path(), &domain, &node::plan_for(&domain));
 
-    (root, magic)
+    (layout, magic)
 }
 
 /// The staging need is the compressed size of the layers a restore holds at
 /// once: at the default depth, the nine largest still to pull.
 #[test]
 fn the_staging_preflight_charges_the_largest_layers_a_read_ahead_holds() {
-    let (root, magic) = exported();
-    let dir = node::resolved(root.path());
+    let (layout, magic) = exported();
+    let dir = stelae::dir::SnapshotDir::open(layout.path())
+        .unwrap()
+        .resolve_latest(&dolos_snapshot::DolosProfile)
+        .unwrap();
     let plan = restore::plan(dir.chain().unwrap(), None, magic, None).unwrap();
     let index = dir.blob_index().unwrap();
 
@@ -879,7 +883,10 @@ fn the_staging_preflight_charges_each_stream_its_share() {
         &stelae::dir::SnapshotDir::create(blocks_root.path()).unwrap(),
     );
 
-    let stele = node::resolved(stele_root.path());
+    let stele = stelae::dir::SnapshotDir::open(stele_root.path())
+        .unwrap()
+        .resolve_latest(&dolos_snapshot::DolosProfile)
+        .unwrap();
     let blocks = stelae::dir::SnapshotDir::open(blocks_root.path())
         .unwrap()
         .resolve_sequence(&stelae_blocks::BlocksProfile, pair.head().0)

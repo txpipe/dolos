@@ -153,9 +153,9 @@ fn a_blob_that_is_not_the_layer_is_refused_with_the_layer_named() {
 
     assert!(matches!(err, Error::LayerVerification { .. }), "{err:?}");
 
-    // Layer 0 is epoch 0's blocks layer, and the message names it with its
+    // Layer 0 is epoch 0's indexes layer, and the message names it with its
     // scope — the two things an operator needs to know what to re-publish.
-    assert!(message.contains("blocks"), "{message}");
+    assert!(message.contains("indexes"), "{message}");
     assert!(message.contains("epoch"), "{message}");
 
     eprintln!("corrupted blob: {message}");
@@ -606,7 +606,7 @@ fn a_record_from_before_the_diff_chain_is_rebuilt() {
         .unwrap()
         .blob_for(&stake_only.diff_id)
         .unwrap();
-    let blob_path = stelae::dir::SnapshotDir::open(stele.path())
+    let blob_path = stelae::dir::SnapshotDir::open(node::dolos(stele.path()))
         .unwrap()
         .blob_path(&blob_digest);
 

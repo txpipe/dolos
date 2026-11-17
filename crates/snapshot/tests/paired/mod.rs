@@ -1,13 +1,14 @@
 //! A stele paired with a blocks repository, as decision 0080 lays the two
-//! out, copied from an ordinary export.
+//! out, copied from an export into a network root.
 //!
-//! Export still lists each closed epoch's `blocks` layer in the stele's own
-//! chain. [`pair`] copies such a chain twice: those layers' blocks into a
-//! lineage of the `io.txpipe.cardano.blocks` profile, written with its plain
-//! writer, and the stele's chain without them, each inscription naming the
-//! blocks snapshot at its sequence in `position.blocks`. Every other layer is
-//! copied record for record, so its `diffId` does not move, and the tip's
-//! boundary block stays in the stele.
+//! An export writes the closed epochs' blocks into the root's `blocks`
+//! lineage and the stele, naming it, into its `dolos` one. [`pair`] copies the
+//! two into other writers, a registry above all: the blocks into a lineage of
+//! the `io.txpipe.cardano.blocks` profile, written with its plain writer from
+//! any sequence, and the stele's chain re-pointed at it, each inscription
+//! naming the blocks snapshot at its sequence in `position.blocks`. Every
+//! stele layer is copied record for record, so its `diffId` does not move,
+//! and the tip's boundary block stays in the stele.
 
 // Each integration test binary compiles this module in full, so the parts one
 // binary does not reach look dead to it.
@@ -15,7 +16,11 @@
 
 use std::{collections::BTreeMap, fs::File, path::Path};
 
-use dolos_snapshot::{restore::default_budget, DolosProfile, BLOCKS, COMPRESSION_LEVEL};
+use dolos_snapshot::{
+    export::{BLOCKS_REPOSITORY, DOLOS_REPOSITORY},
+    restore::default_budget,
+    DolosProfile, EpochScope as DolosScope, Scope as _, BLOCKS, COMPRESSION_LEVEL,
+};
 use serde_json::json;
 use stelae::{
     dir::SnapshotDir,
@@ -42,9 +47,31 @@ impl Paired {
     }
 }
 
-/// Pair the stele at `source`'s `latest`: its closed epochs' blocks into
-/// `blocks` as a lineage from sequence 1, and its chain without them into
-/// `dolos`.
+/// The digests of the pair an export wrote into the network root at
+/// `source`, by sequence.
+pub fn digests(source: &Path) -> Paired {
+    let heads = |repository: &str, profile: &dyn Profile| -> BTreeMap<u64, Digest> {
+        let layout = SnapshotDir::open(source.join(repository)).unwrap();
+        let latest = layout.resolve_latest(profile).unwrap();
+
+        latest
+            .chain()
+            .unwrap()
+            .inscriptions()
+            .iter()
+            .map(|inscription| (inscription.sequence, inscription.digest().unwrap()))
+            .collect()
+    };
+
+    Paired {
+        blocks: heads(BLOCKS_REPOSITORY, &BlocksProfile),
+        dolos: heads(DOLOS_REPOSITORY, &DolosProfile),
+    }
+}
+
+/// Pair the network root at `source`: the closed epochs' blocks of its
+/// `latest` into `blocks` as a lineage from sequence 1, and its stele chain,
+/// naming them, into `dolos`.
 pub fn pair<D: SnapshotWriter, B: SnapshotWriter>(source: &Path, dolos: &D, blocks: &B) -> Paired {
     pair_tampered(source, dolos, blocks, None)
 }
@@ -79,8 +106,9 @@ pub enum Tamper {
     Backwards,
 }
 
-/// The closed epochs' blocks of the stele at `source`'s `latest`, sealed into
-/// `writer` as a blocks lineage from sequence `first` up to the stele's own.
+/// The closed epochs' blocks of the network root at `source`'s `latest`,
+/// sealed into `writer` as a blocks lineage from sequence `first` up to the
+/// root's own.
 ///
 /// The snapshot at `first` lists every epoch before its cut and links to
 /// nothing; each later one adds the epoch its cut closes.
@@ -98,19 +126,20 @@ fn lineage<W: SnapshotWriter>(
     first: u64,
     tampered: Option<(u64, Tamper)>,
 ) -> BTreeMap<u64, Digest> {
-    let layout = SnapshotDir::open(source).unwrap();
-    let stele = layout.resolve_latest(&DolosProfile).unwrap();
-    let chain = stele.chain().unwrap();
-    let index = stele.blob_index().unwrap();
+    let layout = SnapshotDir::open(source.join(BLOCKS_REPOSITORY)).unwrap();
+    let snapshot = layout.resolve_latest(&BlocksProfile).unwrap();
+    let chain = snapshot.chain().unwrap();
+    let index = snapshot.blob_index().unwrap();
     let sequence = chain.head().sequence;
-    let magic = chain.head().position["network"]["magic"].as_u64().unwrap();
+    let magic = stelae_blocks::read_position(&chain.head().position)
+        .unwrap()
+        .network_magic;
 
     let closed: BTreeMap<u64, &LayerDescriptor> = chain
         .descriptors()
-        .filter(|layer| layer.kind == BLOCKS)
         .map(|layer| (layer.scope["epoch"].as_u64().unwrap(), layer))
-        .filter(|(epoch, _)| *epoch < sequence)
         .collect();
+    assert_eq!(closed.len() as u64, sequence, "every epoch before the cut");
 
     let mut heads = BTreeMap::new();
     let mut previous = None;
@@ -167,15 +196,35 @@ fn lineage<W: SnapshotWriter>(
     heads
 }
 
-/// The stele chain at `source`'s `latest`, sealed into `writer` without its
-/// closed epochs' `blocks` layers. Each inscription names `blocks` at its own
-/// sequence in `position.blocks` and links to the copy of its predecessor.
+/// The stele chain of the network root at `source`'s `latest`, sealed into
+/// `writer`. Each inscription names `blocks` at its own sequence in
+/// `position.blocks` and links to the copy of its predecessor.
 pub fn without_blocks<W: SnapshotWriter>(
     source: &Path,
     writer: &W,
     blocks: &BTreeMap<u64, Digest>,
 ) -> BTreeMap<u64, Digest> {
-    let layout = SnapshotDir::open(source).unwrap();
+    relinked(source, writer, blocks, None)
+}
+
+/// [`without_blocks`], with the inscription at `epoch + 1` also listing a
+/// `blocks` layer of this profile for the epoch it closes, as the stele did
+/// before decision 0080.
+pub fn listing_closed_blocks<W: SnapshotWriter>(
+    source: &Path,
+    writer: &W,
+    epoch: u64,
+) -> BTreeMap<u64, Digest> {
+    relinked(source, writer, &digests(source).blocks, Some(epoch))
+}
+
+fn relinked<W: SnapshotWriter>(
+    source: &Path,
+    writer: &W,
+    blocks: &BTreeMap<u64, Digest>,
+    closed: Option<u64>,
+) -> BTreeMap<u64, Digest> {
+    let layout = SnapshotDir::open(source.join(DOLOS_REPOSITORY)).unwrap();
     let stele = layout.resolve_latest(&DolosProfile).unwrap();
 
     let mut heads = BTreeMap::new();
@@ -188,12 +237,19 @@ pub fn without_blocks<W: SnapshotWriter>(
         let index = own.blob_index().unwrap();
 
         let mut inscription = original.clone();
-        inscription.diff.retain(|layer| layer.kind != BLOCKS);
         inscription.position["blocks"] = json!(blocks[&inscription.sequence].to_string());
         inscription.previous = previous;
 
+        if let Some(epoch) = closed.filter(|epoch| epoch + 1 == inscription.sequence) {
+            inscription
+                .diff
+                .insert(0, closed_blocks(source, writer, epoch));
+        }
+
         for layer in inscription.diff.iter().chain(&inscription.tip) {
-            copy_layer(&layout, &index, layer, writer);
+            if layer.kind != BLOCKS || layer.scope["epoch"] == inscription.sequence {
+                copy_layer(&layout, &index, layer, writer);
+            }
         }
 
         let digest = writer.seal(&DolosProfile, &inscription).unwrap();
@@ -206,6 +262,45 @@ pub fn without_blocks<W: SnapshotWriter>(
     }
 
     heads
+}
+
+/// Epoch `epoch`'s blocks from the root at `source`'s blocks lineage, written
+/// into `writer` as a `blocks` layer of this profile.
+fn closed_blocks<W: SnapshotWriter>(source: &Path, writer: &W, epoch: u64) -> LayerDescriptor {
+    let layout = SnapshotDir::open(source.join(BLOCKS_REPOSITORY)).unwrap();
+    let snapshot = layout.resolve_latest(&BlocksProfile).unwrap();
+    let index = snapshot.blob_index().unwrap();
+    let chain = snapshot.chain().unwrap();
+    let magic = stelae_blocks::read_position(&chain.head().position)
+        .unwrap()
+        .network_magic;
+
+    let layer = chain
+        .descriptors()
+        .find(|layer| layer.scope["epoch"] == epoch)
+        .unwrap();
+    let scope = EpochScope::read_descriptor(magic, &layer.scope).unwrap();
+    let records: Vec<CanonicalCbor> = read_blocks(&layout, &index, layer)
+        .iter()
+        .map(|block| stelae_blocks::record::encode(block).unwrap())
+        .collect();
+
+    let scope = DolosScope {
+        network_magic: magic,
+        epoch,
+        start_slot: scope.start_slot,
+        end_slot: scope.end_slot,
+    };
+
+    writer
+        .write_layer(
+            &DolosProfile,
+            &scope.layer_spec(BLOCKS).unwrap(),
+            COMPRESSION_LEVEL,
+            &records,
+        )
+        .unwrap()
+        .descriptor
 }
 
 /// `blocks` as `scope`'s layer, broken as `tamper` says, through a raw sink
@@ -249,14 +344,13 @@ fn write_tampered<W: SnapshotWriter>(
     sink.finish().unwrap().descriptor
 }
 
-/// The blocks of one of the stele's own `blocks` layers. The two profiles'
-/// records share one codec: slot, hash and body.
+/// The blocks of one layer of a blocks lineage.
 fn read_blocks(
     layout: &SnapshotDir,
     index: &BlobIndex,
     layer: &LayerDescriptor,
 ) -> Vec<BlockRecord> {
-    let mut reader = open_layer(layout, index, &DolosProfile, layer);
+    let mut reader = open_layer(layout, index, &BlocksProfile, layer);
     let mut blocks = Vec::new();
 
     while let Some(record) = reader.next_record() {

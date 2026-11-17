@@ -1,16 +1,17 @@
 //! A stele whose closed epochs' blocks are in a blocks repository restores
 //! them from there.
 //!
-//! The pair is copied from an ordinary export ([`paired`]), so the export
-//! restored alone, from its own per-epoch `blocks` layers, is the control: a
-//! paired restore writes the same archive blocks, block by block, and the
-//! same node. Every refusal leaves the stores as they were.
+//! The fixture is an export into a network root, which writes the blocks
+//! lineage beside the stele ([`export::publish`]); its control is the archive
+//! the export was cut from. [`paired`] copies the pair into other layouts to
+//! build the wrong, missing and tampered ones. Every refusal leaves the stores
+//! as they were.
 
 mod node;
 mod paired;
 mod recorder;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use dolos_core::{ArchiveStore as _, BlockSlot, Domain as _, StateStore as _};
 use dolos_snapshot::{
@@ -29,15 +30,13 @@ use stelae::{
 /// The boundary the fixture's head is cut at; epochs 0 to 2 are closed.
 const HEAD: u64 = 3;
 
-/// The harness published on boundaries 1 to [`HEAD`], and its pair.
+/// The harness published on boundaries 1 to [`HEAD`] into a network root.
 struct Fixture {
     magic: u64,
-    /// The export, which lists its closed epochs' blocks itself.
+    /// The stores the export was cut from.
+    domain: ToyDomain<MemoryStores>,
+    /// The network root: the stele lineage and the blocks lineage it names.
     source: tempfile::TempDir,
-    /// The export's chain without them.
-    dolos: tempfile::TempDir,
-    /// The blocks lineage the stele names.
-    blocks: tempfile::TempDir,
     paired: Paired,
 }
 
@@ -45,27 +44,40 @@ impl Fixture {
     fn new() -> Self {
         let (domain, source) = published(HEAD, |_| None);
         let magic = u64::from(domain.genesis().network_magic());
-
-        let dolos = tempfile::tempdir().unwrap();
-        let blocks = tempfile::tempdir().unwrap();
-        let paired = paired::pair(
-            source.path(),
-            &SnapshotDir::create(dolos.path()).unwrap(),
-            &SnapshotDir::create(blocks.path()).unwrap(),
-        );
+        let paired = paired::digests(source.path());
 
         Self {
             magic,
+            domain,
             source,
-            dolos,
-            blocks,
             paired,
         }
     }
 
-    /// The blocks snapshot the paired head names.
+    /// The root's stele layout.
+    fn dolos(&self) -> PathBuf {
+        node::dolos(self.source.path())
+    }
+
+    /// The root's blocks layout.
+    fn blocks(&self) -> PathBuf {
+        node::blocks(self.source.path()).unwrap()
+    }
+
+    /// The blocks snapshot the head names.
     fn reference(&self) -> stelae::Digest {
         self.paired.blocks[&HEAD]
+    }
+
+    /// The archive's blocks from `slot` on, as a restore keeping them writes
+    /// them.
+    fn archived_from(&self, slot: BlockSlot) -> Vec<(BlockSlot, Vec<u8>)> {
+        self.domain
+            .archive()
+            .get_range(Some(slot), None)
+            .unwrap()
+            .map(|(slot, body)| (slot, body.to_vec()))
+            .collect()
     }
 
     /// Restore the layout at `stele`, with `blocks` beside it, into fresh
@@ -102,8 +114,9 @@ impl Fixture {
     }
 }
 
-/// The harness published into a fresh layout on boundaries 1 to `head`, each
-/// plan's `position.blocks` set to what `blocks` gives for its sequence.
+/// The harness published into a fresh network root on boundaries 1 to
+/// `head`, each plan's `position.blocks` set to what `blocks` gives for its
+/// sequence, which writes no blocks snapshot.
 fn published(
     head: u64,
     blocks: impl Fn(u64) -> Option<stelae::Digest>,
@@ -163,21 +176,17 @@ fn blocks_layers(outcome: &RestoreOutcome) -> Vec<(u64, Repo, String)> {
 
 const DOLOS_BLOCKS: &str = "application/vnd.dolos.stelae.blocks.v1+zstd";
 
-/// The paired stele writes the blocks the export's own layers did, block by
-/// block, reading the closed epochs' from the blocks repository and the
-/// boundary block, last, from its own tip.
+/// An export into a network root restores every block its archive holds,
+/// reading the closed epochs' from the blocks repository and the boundary
+/// block, last, from the stele's own tip; a copy of the pair through the
+/// blocks profile's plain writer restores the same node.
 #[test]
-fn a_paired_stele_restores_the_blocks_its_own_layers_did() {
+fn an_exported_root_restores_every_block_of_its_archive() {
     let fixture = Fixture::new();
 
-    let (control, alone) = fixture.restore(fixture.source.path(), None, None);
-    let control = control.unwrap();
-
-    let (outcome, paired) =
-        fixture.restore(fixture.dolos.path(), Some(fixture.blocks.path()), None);
+    let (outcome, restored) = fixture.restore(&fixture.dolos(), Some(&fixture.blocks()), None);
     let outcome = outcome.unwrap();
 
-    assert_eq!(control.plan.blocks, None);
     assert_eq!(outcome.plan.blocks, Some(fixture.reference()));
 
     let read = blocks_layers(&outcome);
@@ -196,17 +205,25 @@ fn a_paired_stele_restores_the_blocks_its_own_layers_did() {
         "the boundary block is not the stele's own, after the closed epochs"
     );
 
-    let blocks = blocks_of(&paired);
+    let blocks = blocks_of(&restored);
     assert!(blocks.len() > HEAD as usize, "{} blocks", blocks.len());
-    assert_eq!(blocks, blocks_of(&alone));
-    assert_eq!(outcome.summary.blocks, control.summary.blocks);
-    assert_eq!(
-        outcome.summary.layers_fetched,
-        control.summary.layers_fetched
+    assert_eq!(blocks, fixture.archived_from(0));
+    assert_eq!(outcome.summary.blocks, blocks.len() as u64);
+
+    let (dolos, copied) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let copy = paired::pair(
+        fixture.source.path(),
+        &SnapshotDir::create(dolos.path()).unwrap(),
+        &SnapshotDir::create(copied.path()).unwrap(),
     );
+    assert_eq!(copy.blocks, fixture.paired.blocks);
+    assert_eq!(copy.dolos, fixture.paired.dolos);
+
+    let (again, from_copy) = fixture.restore(dolos.path(), Some(copied.path()), None);
+    assert_eq!(again.unwrap().summary, outcome.summary);
     assert_eq!(
-        contents_digest(&paired.archive, paired.state()),
-        contents_digest(&alone.archive, alone.state())
+        contents_digest(&from_copy.archive, from_copy.state()),
+        contents_digest(&restored.archive, restored.state())
     );
 }
 
@@ -216,7 +233,7 @@ fn a_paired_stele_restores_the_blocks_its_own_layers_did() {
 fn the_remaining_work_and_the_estimate_cover_both_repositories() {
     let fixture = Fixture::new();
 
-    let (outcome, _) = fixture.restore(fixture.dolos.path(), Some(fixture.blocks.path()), None);
+    let (outcome, _) = fixture.restore(&fixture.dolos(), Some(&fixture.blocks()), None);
     let outcome = outcome.unwrap();
 
     assert_eq!(
@@ -225,8 +242,8 @@ fn the_remaining_work_and_the_estimate_cover_both_repositories() {
     );
     assert_eq!(outcome.outlook.remaining.unsized_layers, 0);
 
-    let stele = node::resolved(fixture.dolos.path());
-    let blocks = SnapshotDir::open(fixture.blocks.path())
+    let stele = node::resolved(fixture.source.path());
+    let blocks = SnapshotDir::open(fixture.blocks())
         .unwrap()
         .resolve_sequence(&stelae_blocks::BlocksProfile, HEAD)
         .unwrap();
@@ -287,14 +304,21 @@ fn the_remaining_work_and_the_estimate_cover_both_repositories() {
 #[test]
 fn a_history_window_reads_the_blocks_of_the_epochs_it_keeps() {
     let fixture = Fixture::new();
-    let chain = node::resolved(fixture.dolos.path());
+    let chain = node::resolved(fixture.source.path());
     let chain = chain.chain().unwrap();
+    let start = |outcome: &RestoreOutcome, epoch: u64| {
+        outcome
+            .plan
+            .epochs
+            .iter()
+            .find(|layers| layers.epoch == epoch)
+            .unwrap()
+            .start_slot
+    };
 
     // One slot back from the cut reaches the last slot of epoch 2.
-    let (control, alone) = fixture.restore(fixture.source.path(), None, Some(1));
-    let (outcome, paired) =
-        fixture.restore(fixture.dolos.path(), Some(fixture.blocks.path()), Some(1));
-    let (control, outcome) = (control.unwrap(), outcome.unwrap());
+    let (outcome, paired) = fixture.restore(&fixture.dolos(), Some(&fixture.blocks()), Some(1));
+    let outcome = outcome.unwrap();
 
     assert_eq!(
         blocks_layers(&outcome)
@@ -303,8 +327,11 @@ fn a_history_window_reads_the_blocks_of_the_epochs_it_keeps() {
             .collect::<Vec<_>>(),
         vec![(HEAD - 1, Repo::Blocks), (HEAD, Repo::Dolos)]
     );
-    assert_eq!(outcome.plan.skipped_epochs, control.plan.skipped_epochs);
-    assert_eq!(blocks_of(&paired), blocks_of(&alone));
+    assert_eq!(outcome.plan.skipped_epochs, HEAD as usize - 1);
+    assert_eq!(
+        blocks_of(&paired),
+        fixture.archived_from(start(&outcome, HEAD - 1))
+    );
     assert_eq!(
         restore::blocks_wanted(chain, Some(1)).unwrap(),
         Some(fixture.reference())
@@ -314,13 +341,15 @@ fn a_history_window_reads_the_blocks_of_the_epochs_it_keeps() {
     // stele's: no blocks repository is needed.
     assert_eq!(restore::blocks_wanted(chain, Some(0)).unwrap(), None);
 
-    let (control, alone) = fixture.restore(fixture.source.path(), None, Some(0));
-    let (outcome, paired) = fixture.restore(fixture.dolos.path(), None, Some(0));
-    let (control, outcome) = (control.unwrap(), outcome.unwrap());
+    let (outcome, paired) = fixture.restore(&fixture.dolos(), None, Some(0));
+    let outcome = outcome.unwrap();
 
     assert_eq!(outcome.plan.blocks, None);
-    assert_eq!(outcome.summary.blocks, control.summary.blocks);
-    assert_eq!(blocks_of(&paired), blocks_of(&alone));
+    assert_eq!(
+        blocks_of(&paired),
+        fixture.archived_from(start(&outcome, HEAD))
+    );
+    assert_eq!(outcome.summary.blocks, blocks_of(&paired).len() as u64);
 }
 
 /// A blocks repository whose snapshot at the stele's sequence is not the one
@@ -339,7 +368,7 @@ fn a_blocks_repository_holding_another_snapshot_is_refused() {
     );
     assert_ne!(others[&HEAD], fixture.reference());
 
-    let (outcome, blank) = fixture.restore(fixture.dolos.path(), Some(other.path()), None);
+    let (outcome, blank) = fixture.restore(&fixture.dolos(), Some(other.path()), None);
 
     let Err(Error::BlocksMismatch { expected, found }) = outcome else {
         panic!("{:?}", outcome.map(|o| o.plan.blocks));
@@ -376,7 +405,7 @@ fn a_missing_blocks_repository_is_refused() {
             format!("no blocks snapshot at epoch-{HEAD}"),
         ),
     ] {
-        let (outcome, blank) = fixture.restore(fixture.dolos.path(), blocks, None);
+        let (outcome, blank) = fixture.restore(&fixture.dolos(), blocks, None);
 
         let Err(error @ Error::BlocksMissing { reference, .. }) = &outcome else {
             panic!("{blocks:?}: {:?}", outcome.map(|o| o.plan.blocks));
@@ -393,7 +422,7 @@ fn a_missing_blocks_repository_is_refused() {
 
     // A layout holding another profile's snapshot at that sequence is not a
     // missing blocks repository, and is refused as what it is.
-    let (outcome, blank) = fixture.restore(fixture.dolos.path(), Some(fixture.dolos.path()), None);
+    let (outcome, blank) = fixture.restore(&fixture.dolos(), Some(&fixture.dolos()), None);
     let error = outcome.map(|o| o.plan.blocks).unwrap_err();
     assert!(
         matches!(error, Error::Stelae(stelae::Error::UnknownProfile { .. })),
@@ -402,44 +431,54 @@ fn a_missing_blocks_repository_is_refused() {
     assert!(untouched(&blank));
 }
 
-/// A stele that still lists its closed epochs' `blocks` layers restores from
-/// them and reads no blocks repository, even when it names a blocks snapshot
-/// and the repository given holds another.
+/// A stele chain that lists a closed epoch's `blocks` layer, as steles did
+/// before decision 0080, is refused before anything is written, whether a
+/// blocks repository is given or not: only the boundary window's blocks are
+/// the stele's.
 #[test]
-fn a_stele_listing_its_own_blocks_reads_no_blocks_repository() {
+fn a_stele_listing_a_closed_epochs_blocks_is_refused() {
     let fixture = Fixture::new();
-    let (_, named) = published(HEAD, |sequence| Some(fixture.paired.blocks[&sequence]));
 
-    let head = node::resolved(named.path()).read_inscription().unwrap();
-    assert_eq!(
-        head.position["blocks"],
-        serde_json::json!(fixture.reference().to_string())
-    );
-    assert!(head.diff.iter().any(|layer| layer.kind == BLOCKS));
+    for closed in 0..HEAD {
+        refuses_a_listing_of(&fixture, closed);
+    }
+}
 
-    let elsewhere = tempfile::tempdir().unwrap();
-    paired::blocks_lineage(
+fn refuses_a_listing_of(fixture: &Fixture, closed: u64) {
+    let listing = tempfile::tempdir().unwrap();
+    paired::listing_closed_blocks(
         fixture.source.path(),
-        &SnapshotDir::create(elsewhere.path()).unwrap(),
-        HEAD,
+        &SnapshotDir::create(listing.path()).unwrap(),
+        closed,
     );
 
-    let (control, alone) = fixture.restore(fixture.source.path(), None, None);
-    let control = control.unwrap();
+    let resolved = SnapshotDir::open(listing.path())
+        .unwrap()
+        .resolve_latest(&dolos_snapshot::DolosProfile)
+        .unwrap();
+    let listed: Vec<_> = resolved
+        .chain()
+        .unwrap()
+        .descriptors()
+        .filter(|layer| layer.kind == BLOCKS)
+        .map(|layer| layer.scope["epoch"].as_u64().unwrap())
+        .collect();
+    assert_eq!(listed, [closed, HEAD]);
 
-    for blocks in [None, Some(elsewhere.path())] {
-        let (outcome, restored) = fixture.restore(named.path(), blocks, None);
-        let outcome = outcome.unwrap();
+    let refused = |error: &Error| {
+        matches!(error, Error::MalformedInscription { reason, .. }
+            if reason.contains(&format!("closed epoch {closed};")))
+    };
 
-        assert_eq!(outcome.plan.blocks, None, "{blocks:?}");
-        assert!(
-            blocks_layers(&outcome)
-                .iter()
-                .all(|(_, repo, media_type)| *repo == Repo::Dolos && media_type == DOLOS_BLOCKS),
-            "{blocks:?}"
-        );
-        assert_eq!(outcome.summary.blocks, control.summary.blocks);
-        assert_eq!(blocks_of(&restored), blocks_of(&alone), "{blocks:?}");
+    let error = restore::blocks_wanted(resolved.chain().unwrap(), None).unwrap_err();
+    assert!(refused(&error), "{error:?}");
+
+    for blocks in [None, Some(fixture.blocks())] {
+        let (outcome, blank) = fixture.restore(listing.path(), blocks.as_deref(), None);
+        let error = outcome.map(|o| o.plan.blocks).unwrap_err();
+
+        assert!(refused(&error), "{closed}, {blocks:?}: {error:?}");
+        assert!(untouched(&blank), "{closed}, {blocks:?}");
     }
 }
 
@@ -487,5 +526,449 @@ fn a_blocks_layer_breaking_the_profiles_reader_rules_is_refused() {
 
         assert!(refused, "{tamper:?}: {error:?}");
         assert_eq!(blank.state().read_cursor().unwrap(), None, "{tamper:?}");
+    }
+}
+
+/// Done criterion 3: a single-boundary export into an empty root starts both
+/// lineages at its cut, the blocks snapshot listing every epoch before it,
+/// and the root restores every block the archive holds.
+#[test]
+fn a_single_boundary_export_to_a_root_restores_its_full_block_history() {
+    let domain = harness::<MemoryStores>();
+    let magic = u64::from(domain.genesis().network_magic());
+    let root = tempfile::tempdir().unwrap();
+
+    let stele = export::publish(
+        root.path(),
+        &plan_at_boundary(&domain, HEAD),
+        domain.archive(),
+        domain.state(),
+        &Observer::silent(),
+    )
+    .unwrap();
+
+    let blocks = node::resolved_blocks(root.path()).unwrap();
+    let head = blocks.read_inscription().unwrap();
+
+    assert_eq!((stele.sequence, stele.previous), (HEAD, None));
+    assert_eq!((head.sequence, head.previous), (HEAD, None));
+    assert_eq!(head.diff.len() as u64, HEAD, "one layer per closed epoch");
+    assert!(head.tip.is_empty());
+    assert_eq!(
+        dolos_snapshot::read_position(&stele.position)
+            .unwrap()
+            .blocks,
+        Some(head.digest().unwrap())
+    );
+    assert_eq!(stele.layers_of_kind(BLOCKS).count(), 1);
+
+    let storage = tempfile::tempdir().unwrap();
+    let blank = Blank::<MemoryStores>::open();
+    let outcome = restore::execute(
+        Input::Directory {
+            path: &node::dolos(root.path()),
+            blocks: node::blocks(root.path()).as_deref(),
+        },
+        Restoring {
+            network_magic: magic,
+            max_history: None,
+            storage_path: storage.path(),
+            resume: false,
+            skip_space_check: false,
+            journals: 0,
+            read_ahead: DEFAULT_READ_AHEAD,
+            source: None,
+        },
+        Target::new(&blank.archive, blank.state()),
+        None,
+    )
+    .unwrap();
+
+    let archived: Vec<_> = domain
+        .archive()
+        .get_range(None, None)
+        .unwrap()
+        .map(|(slot, body)| (slot, body.to_vec()))
+        .collect();
+
+    assert_eq!(outcome.plan.blocks, Some(head.digest().unwrap()));
+    assert_eq!(blocks_of(&blank), archived);
+    assert_eq!(
+        blank.state().read_cursor().unwrap(),
+        domain.state().read_cursor().unwrap()
+    );
+}
+
+/// A root export interrupted after its blocks snapshot sealed is written
+/// again on the same link: the retry seals the same blocks snapshot and the
+/// stele an uninterrupted export writes.
+#[test]
+fn an_interrupted_root_export_writes_the_same_pair_again() {
+    let domain = harness::<MemoryStores>();
+    let (whole, interrupted) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+
+    let publish = |root: &Path, epoch| {
+        export::publish(
+            root,
+            &plan_at_boundary(&domain, epoch),
+            domain.archive(),
+            domain.state(),
+            &Observer::silent(),
+        )
+        .unwrap()
+    };
+
+    publish(whole.path(), 1);
+    publish(interrupted.path(), 1);
+    let expected = publish(whole.path(), 2);
+
+    // What the interrupted export left: the blocks snapshot at 2, no stele.
+    let blocks = interrupted.path().join(export::BLOCKS_REPOSITORY);
+    std::fs::remove_dir_all(&blocks).unwrap();
+    copy_dir(&whole.path().join(export::BLOCKS_REPOSITORY), &blocks);
+
+    assert_eq!(publish(interrupted.path(), 2), expected);
+    assert_eq!(
+        paired::digests(interrupted.path()).blocks,
+        paired::digests(whole.path()).blocks
+    );
+}
+
+/// A root whose blocks lineage stands two sequences behind the export is
+/// refused by the link rule before a stele layer is written.
+#[test]
+fn a_root_export_whose_blocks_lineage_does_not_follow_is_refused() {
+    let domain = harness::<MemoryStores>();
+    let root = tempfile::tempdir().unwrap();
+
+    export::publish(
+        root.path(),
+        &plan_at_boundary(&domain, 1),
+        domain.archive(),
+        domain.state(),
+        &Observer::silent(),
+    )
+    .unwrap();
+    std::fs::remove_dir_all(node::dolos(root.path())).unwrap();
+
+    let error = export::publish(
+        root.path(),
+        &plan_at_boundary(&domain, HEAD),
+        domain.archive(),
+        domain.state(),
+        &Observer::silent(),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            Error::LinkBreak {
+                latest: 1,
+                publishing: HEAD,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert!(!node::dolos(root.path()).exists());
+}
+
+/// A root whose blocks lineage is another network's is refused before a
+/// stele layer is written.
+#[test]
+fn a_root_export_onto_another_networks_blocks_is_refused() {
+    use stelae::SnapshotWriter as _;
+
+    let domain = harness::<MemoryStores>();
+    let root = tempfile::tempdir().unwrap();
+    let other = 42;
+
+    // The blocks snapshot at 1 of a network with magic 42.
+    let layout = SnapshotDir::create(root.path().join(export::BLOCKS_REPOSITORY)).unwrap();
+    let scope = stelae_blocks::EpochScope::new(other, 0, 0, 86_399).unwrap();
+    let layer =
+        stelae_blocks::write_layer(&layout, scope, stelae_blocks::COMPRESSION_LEVEL, []).unwrap();
+    let mut inscription = stelae::Inscription::new(
+        &stelae_blocks::BlocksProfile,
+        1,
+        stelae_blocks::position(&stelae_blocks::Position {
+            network_magic: other,
+            epoch: 1,
+        }),
+        stelae_blocks::parameters(),
+        stelae_blocks::compression(),
+    );
+    inscription.diff.push(layer.descriptor);
+    layout
+        .seal(&stelae_blocks::BlocksProfile, &inscription)
+        .unwrap();
+
+    let error = export::publish(
+        root.path(),
+        &plan_at_boundary(&domain, 2),
+        domain.archive(),
+        domain.state(),
+        &Observer::silent(),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(error, Error::NetworkMismatch { found: 42, .. }),
+        "{error:?}"
+    );
+    assert!(!node::dolos(root.path()).exists());
+}
+
+/// A root whose blocks lineage stands ahead of its stele lineage is refused
+/// by the stele's link rule before a blocks snapshot is sealed, so the root
+/// can still be put right by exporting the stele it lacks.
+#[test]
+fn a_root_export_whose_stele_lineage_does_not_follow_seals_no_blocks() {
+    let domain = harness::<MemoryStores>();
+    let (ahead, root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+
+    let publish = |root: &Path, epoch| {
+        export::publish(
+            root,
+            &plan_at_boundary(&domain, epoch),
+            domain.archive(),
+            domain.state(),
+            &Observer::silent(),
+        )
+    };
+
+    publish(ahead.path(), 1).unwrap();
+    publish(root.path(), 1).unwrap();
+    publish(ahead.path(), 2).unwrap();
+
+    // The stele lineage at 1, the blocks lineage at 2.
+    let blocks = root.path().join(export::BLOCKS_REPOSITORY);
+    std::fs::remove_dir_all(&blocks).unwrap();
+    copy_dir(&ahead.path().join(export::BLOCKS_REPOSITORY), &blocks);
+    let blobs = blocks_blobs(root.path());
+    assert!(!blobs.is_empty());
+
+    let error = publish(root.path(), HEAD).unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            Error::LinkBreak {
+                latest: 1,
+                publishing: HEAD,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(latest_blocks(root.path()), Some(2));
+    assert_eq!(blocks_blobs(root.path()), blobs);
+}
+
+/// A root whose stele lineage is another network's is refused before a
+/// blocks lineage is started for this one.
+#[test]
+fn a_root_export_onto_another_networks_stele_seals_no_blocks() {
+    let domain = harness::<MemoryStores>();
+    let root = tempfile::tempdir().unwrap();
+
+    let mut foreign = plan_at_boundary(&domain, 1);
+    foreign.network = dolos_snapshot::Network::for_magic(42);
+    export::publish(
+        root.path(),
+        &foreign,
+        domain.archive(),
+        domain.state(),
+        &Observer::silent(),
+    )
+    .unwrap();
+    std::fs::remove_dir_all(root.path().join(export::BLOCKS_REPOSITORY)).unwrap();
+
+    let error = export::publish(
+        root.path(),
+        &plan_at_boundary(&domain, 2),
+        domain.archive(),
+        domain.state(),
+        &Observer::silent(),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(error, Error::NetworkMismatch { found: 42, .. }),
+        "{error:?}"
+    );
+    assert_eq!(latest_blocks(root.path()), None);
+    assert!(!root.path().join(export::BLOCKS_REPOSITORY).exists());
+}
+
+/// A first root export interrupted after its blocks snapshot sealed and its
+/// stele layout was created, before the stele sealed, leaves `dolos/` a
+/// layout with no stele: the retry starts the stele lineage and writes what
+/// an uninterrupted export does.
+#[test]
+fn a_first_root_export_interrupted_before_its_stele_seals_starts_the_lineage() {
+    let domain = harness::<MemoryStores>();
+    let (whole, interrupted) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+
+    let publish = |root: &Path| {
+        export::publish(
+            root,
+            &plan_at_boundary(&domain, 1),
+            domain.archive(),
+            domain.state(),
+            &Observer::silent(),
+        )
+        .unwrap()
+    };
+
+    let expected = publish(whole.path());
+
+    copy_dir(
+        &whole.path().join(export::BLOCKS_REPOSITORY),
+        &interrupted.path().join(export::BLOCKS_REPOSITORY),
+    );
+    SnapshotDir::create(node::dolos(interrupted.path())).unwrap();
+    assert!(node::dolos(interrupted.path())
+        .join(stelae::dir::LAYOUT_FILE)
+        .exists());
+
+    assert_eq!(publish(interrupted.path()), expected);
+    assert_eq!(
+        paired::digests(interrupted.path()).dolos,
+        paired::digests(whole.path()).dolos
+    );
+}
+
+/// A plan that names its blocks snapshot, as the publisher host's does, is
+/// held to the stele lineage's link rule: a root whose stele lineage stands
+/// two sequences behind is refused.
+#[test]
+fn a_referenced_root_export_whose_stele_lineage_does_not_follow_is_refused() {
+    let domain = harness::<MemoryStores>();
+    let root = tempfile::tempdir().unwrap();
+
+    export::publish(
+        root.path(),
+        &plan_at_boundary(&domain, 1),
+        domain.archive(),
+        domain.state(),
+        &Observer::silent(),
+    )
+    .unwrap();
+    let stele = paired::digests(root.path()).dolos;
+
+    let error = export::publish(
+        root.path(),
+        &plan_at_boundary(&domain, HEAD).with_blocks(some_blocks()),
+        domain.archive(),
+        domain.state(),
+        &Observer::silent(),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            Error::LinkBreak {
+                latest: 1,
+                publishing: HEAD,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(paired::digests(root.path()).dolos, stele);
+}
+
+/// A plan that names its blocks snapshot is held to the stele lineage's
+/// network: a root whose stele lineage is another network's is refused.
+#[test]
+fn a_referenced_root_export_onto_another_networks_stele_is_refused() {
+    let domain = harness::<MemoryStores>();
+    let root = tempfile::tempdir().unwrap();
+
+    let mut foreign = plan_at_boundary(&domain, 1);
+    foreign.network = dolos_snapshot::Network::for_magic(42);
+    export::publish(
+        root.path(),
+        &foreign,
+        domain.archive(),
+        domain.state(),
+        &Observer::silent(),
+    )
+    .unwrap();
+    let stele = paired::digests(root.path()).dolos;
+
+    let error = export::publish(
+        root.path(),
+        &plan_at_boundary(&domain, 2).with_blocks(some_blocks()),
+        domain.archive(),
+        domain.state(),
+        &Observer::silent(),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(error, Error::NetworkMismatch { found: 42, .. }),
+        "{error:?}"
+    );
+    assert_eq!(paired::digests(root.path()).dolos, stele);
+}
+
+/// A blocks reference for the tests that name one.
+fn some_blocks() -> stelae::Digest {
+    format!("sha256:{}", "ab".repeat(32)).parse().unwrap()
+}
+
+/// The blobs in the blocks layout of the root at `root`, if it has any.
+fn blocks_blobs(root: &Path) -> Vec<std::ffi::OsString> {
+    let blobs = root
+        .join(export::BLOCKS_REPOSITORY)
+        .join("blobs")
+        .join("sha256");
+
+    if !blobs.exists() {
+        return Vec::new();
+    }
+
+    let mut names: Vec<_> = std::fs::read_dir(blobs)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    names.sort();
+    names
+}
+
+/// The sequence of the latest blocks snapshot in the root at `root`, if any.
+fn latest_blocks(root: &Path) -> Option<u64> {
+    let layout = root.join(export::BLOCKS_REPOSITORY);
+
+    if !layout.join(stelae::dir::LAYOUT_FILE).exists() {
+        return None;
+    }
+
+    match SnapshotDir::open(layout)
+        .unwrap()
+        .pull_latest(&stelae_blocks::BlocksProfile)
+    {
+        Ok(latest) => Some(latest.read_inscription().unwrap().sequence),
+        Err(error) if error.is_absent() => None,
+        Err(error) => panic!("{error:?}"),
+    }
+}
+
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).unwrap();
+        }
     }
 }
