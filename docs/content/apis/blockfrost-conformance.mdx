@@ -54,7 +54,6 @@ The failures in the first class, by endpoint group. A number is the count of fai
 | `/accounts/{stake_address}/transactions` | Order of entries that share a block and index | 4 | – | – | – |
 | `/pools/extended` | A pool whose metadata host can't be reached has no `metadata.error` | 2 | – | 2 | – |
 | `/` | `url` reports the address the server binds when `public_url` is unset | 1 | 1 | 1 | – |
-| `/addresses/{address}/extended` | A CIP-68 image split in chunks is served as hex | 1 | – | – | – |
 | `/governance/dreps/{drep_id}/metadata`, `/governance/proposals/{gov_action_id}/metadata` | An anchor that serves something other than JSON is reported as `HASH_MISMATCH`, where Blockfrost reports `HTTP_RESPONSE_ERROR` | 1 | – | 2 | – |
 | `/governance/dreps/{drep_id}/metadata` | The message for an anchor that answers 404 is worded differently | – | 1 | – | – |
 | `/governance/proposals/{tx_hash}/{cert_index}/parameters` | A cost-model update with no language is served as `cost_models: null`, where Blockfrost serves `{}` | – | – | 2 | [dolos#1375](https://github.com/txpipe/dolos/issues/1375), `null` instead of `{}` for an empty cost-model update |

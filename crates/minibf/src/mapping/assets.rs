@@ -936,4 +936,98 @@ mod tests {
             asset_bytes(metadata)
         });
     }
+
+    #[test]
+    fn cip68_chunked_fields_serialize_as_strings_for_all_versions_and_standards() {
+        let text = |x: &str| PlutusData::BoundedBytes(x.as_bytes().to_vec().into());
+        let split = |left: &str, right: &str| {
+            PlutusData::Array(MaybeIndefArray::Def(vec![text(left), text(right)]))
+        };
+        let map = |entries: Vec<(&str, PlutusData)>| {
+            PlutusData::Map(KeyValuePairs::Def(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (text(key), value))
+                    .collect(),
+            ))
+        };
+
+        for (version, expected_version) in [
+            (1, OnchainMetadataStandard::Cip68v1),
+            (2, OnchainMetadataStandard::Cip68v2),
+            (3, OnchainMetadataStandard::Cip68v3),
+        ] {
+            for standard in [
+                Cip68TokenStandard::Nft,
+                Cip68TokenStandard::Ft,
+                Cip68TokenStandard::Rft,
+            ] {
+                let mut fields = vec![
+                    ("name", "Chunked ", "asset"),
+                    ("description", "Split ", "description"),
+                ];
+                match standard {
+                    Cip68TokenStandard::Ft => fields.extend([
+                        ("ticker", "T", "KN"),
+                        ("url", "https://", "example.test"),
+                        ("logo", "YW", "Jj"),
+                    ]),
+                    _ => fields.extend([
+                        ("image", "ipfs://", "image"),
+                        ("mediaType", "image/", "png"),
+                    ]),
+                }
+                let mut entries = Vec::new();
+                let mut expected = serde_json::Map::new();
+                for (key, left, right) in fields {
+                    entries.push((key, split(left, right)));
+                    expected.insert(key.to_string(), serde_json::json!(format!("{left}{right}")));
+                }
+                if !matches!(standard, Cip68TokenStandard::Ft) {
+                    entries.push((
+                        "files",
+                        PlutusData::Array(MaybeIndefArray::Def(vec![map(vec![
+                            ("name", split("File ", "name")),
+                            ("mediaType", split("image/", "png")),
+                            ("src", split("ipfs://", "file")),
+                        ])])),
+                    ));
+                    expected.insert(
+                        "files".to_string(),
+                        serde_json::json!([{
+                            "name": "File name",
+                            "mediaType": "image/png",
+                            "src": "ipfs://file",
+                        }]),
+                    );
+                }
+                if !matches!(standard, Cip68TokenStandard::Nft) {
+                    entries.push(("decimals", PlutusData::BigInt(BigInt::Int(6.into()))));
+                    expected.insert("decimals".to_string(), serde_json::json!(6));
+                }
+                let datum = PlutusData::Constr(Constr {
+                    tag: 121,
+                    any_constructor: None,
+                    fields: MaybeIndefArray::Def(vec![
+                        map(entries),
+                        PlutusData::BigInt(BigInt::Int(version.into())),
+                    ]),
+                });
+                let metadata = OnchainMetadata::from_plutus_data(datum, standard)
+                    .unwrap()
+                    .unwrap();
+                let body: serde_json::Value =
+                    serde_json::from_slice(&asset_bytes(metadata)).unwrap();
+
+                assert_eq!(
+                    body["onchain_metadata"],
+                    serde_json::Value::Object(expected)
+                );
+                assert_eq!(
+                    body["onchain_metadata_standard"],
+                    serde_json::to_value(expected_version).unwrap()
+                );
+            }
+        }
+    }
 }
