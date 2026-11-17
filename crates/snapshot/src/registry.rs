@@ -1,22 +1,22 @@
-//! Publishing a Dolos stele into an OCI repository.
+//! Publishing a Dolos snapshot into an OCI repository.
 //!
 //! [`crate::export`] knows how to walk a store set into any transport, and
 //! `stelae::oci` knows how to move bytes into a registry. This module is the
 //! part that only exists once a publisher is standing in front of a
-//! *repository*: what the new stele says about the ones already in it, and what
-//! it may take from them.
+//! *repository*: what the new snapshot says about the ones already in it, and
+//! what it may take from them.
 //!
 //! ## A publish is chained, or it is refused
 //!
-//! Every stele but the first of a lineage carries `previous`: the sequence and
-//! inscription digest of the stele it follows, which is `sequence - 1`. A
-//! publish therefore reads the repository's moving tag before it writes
+//! Every snapshot but the first of a lineage carries `previous`: the sequence
+//! and inscription digest of the snapshot it follows, which is `sequence - 1`.
+//! A publish therefore reads the repository's moving tag before it writes
 //! anything, and there are exactly three outcomes — the repository is empty
-//! and this stele starts a lineage, the latest stele is this one's predecessor
-//! and the chain extends, or **the publish is refused**. A publisher that
-//! skipped an epoch has an operational fault, and silently starting a second
-//! lineage in one repository is precisely what the link exists to prevent.
-//! There is no flag here that overrides that.
+//! and this snapshot starts a lineage, the latest snapshot is this one's
+//! predecessor and the chain extends, or **the publish is refused**. A
+//! publisher that skipped an epoch has an operational fault, and silently
+//! starting a second lineage in one repository is precisely what the link
+//! exists to prevent. There is no flag here that overrides that.
 //!
 //! The rule itself is [`crate::export::link_for`], one function shared with
 //! the verifier that reproduces a chained digest without a registry.
@@ -36,15 +36,16 @@
 //!
 //! An inscription lists only the layers its own sequence adds to the lineage
 //! and the ones that belong to it alone (decision 0080), so a publish never
-//! re-lists, adopts or carries a layer of an earlier stele: those stay in the
-//! inscriptions that listed them, and a reader resolves them through the chain.
-//! What a publish builds is [`crate::roles::Listing`]'s, and its manifests are
-//! as large as one epoch makes them, whatever the length of the chain.
+//! re-lists, adopts or carries a layer of an earlier snapshot: those stay in
+//! the inscriptions that listed them, and a reader resolves them through the
+//! chain. What a publish builds is [`crate::roles::Listing`]'s, and its
+//! manifests are as large as one epoch makes them, whatever the length of the
+//! chain.
 //!
 //! ## Two consequences a publisher should hear from the documentation
 //!
 //! **A repository's identity is path-dependent.** `previous` is inside the
-//! canonical document, so a stele's digest depends on the chain it extends.
+//! canonical document, so a snapshot's digest depends on the chain it extends.
 //! Two repositories that were published into differently — even once, even by
 //! the same node from the same stores — never agree on a digest again at any
 //! later sequence. That is deliberate: it is what makes the newest inscription
@@ -57,8 +58,8 @@
 //! time and the manifests are written last, so an interrupted publish leaves
 //! uploaded blobs that no manifest references. They are harmless — a registry's
 //! garbage collection reclaims exactly that — and the moving tag still resolves
-//! to the previous stele, which is a stele, and restores. Publishing again
-//! re-uploads nothing it already sent, because the blob check finds them.
+//! to the previous snapshot, which is whole, and restores. Publishing
+//! again re-uploads nothing it already sent, because the blob check finds them.
 //!
 //! ## A restarted publish skips the layers that finished
 //!
@@ -152,7 +153,7 @@ use crate::{
     DolosProfile, Error,
 };
 
-/// Which stele in a repository a restore wants.
+/// Which snapshot in a repository a restore wants.
 ///
 /// The two tags every repository has, named the way an operator names them.
 /// `Epoch(n)` is deliberately a *sequence* and not the string `epoch-n`: this
@@ -162,13 +163,13 @@ use crate::{
 /// builds a tag by formatting.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Point {
-    /// The most recent stele in the repository — the moving tag.
+    /// The most recent snapshot in the repository — the moving tag.
     ///
     /// The default, because it is what an operator restoring a node wants
     /// without having to know which epoch the publisher last closed.
     #[default]
     Latest,
-    /// The stele published for a given epoch — the immutable tag.
+    /// The snapshot published for a given epoch — the immutable tag.
     Epoch(u64),
 }
 
@@ -182,7 +183,7 @@ impl Point {
         })
     }
 
-    /// Resolve this point into the whole stele: its sequence and every
+    /// Resolve this point into the whole snapshot: its sequence and every
     /// inscription its chain reaches back to the first of its lineage.
     pub fn resolve(&self, registry: &Registry) -> Result<Snapshot, Error> {
         Ok(match self {
@@ -223,14 +224,14 @@ impl std::str::FromStr for Point {
         }
 
         Err(format!(
-            "{raw:?} is not a point in a stele repository; \
+            "{raw:?} is not a point in a snapshot repository; \
              it is `{}` or `epoch-N`",
             stelae::MOVING_TAG,
         ))
     }
 }
 
-/// Restore a node from a stele in `registry`.
+/// Restore a node from a snapshot in `registry`.
 ///
 /// The registry counterpart of [`crate::restore::restore_dir`], and everything
 /// after the chain is resolved is the same code: an inscription that names
@@ -238,15 +239,15 @@ impl std::str::FromStr for Point {
 /// preflighted against free space, and each epoch layer is checkpointed as it
 /// commits so `resume` can pick the run back up.
 ///
-/// A stele whose tip the repository no longer holds is [`Error::TipGone`]:
+/// A snapshot whose tip the repository no longer holds is [`Error::TipGone`]:
 /// its diff is still there, but it cannot be restored as a node. A resume
-/// whose recorded stele the tag no longer names, absent or another, is the
+/// whose recorded snapshot the tag no longer names, absent or another, is the
 /// resume's [`crate::restore::ResumeRefusal::Gone`], decided from the head
 /// before its chain is walked.
 ///
-/// `blocks` is the blocks repository. It is read at the stele's sequence only
-/// when [`crate::restore::blocks_wanted`] names a snapshot, and a restore that
-/// needs it and has none, or finds no snapshot there, is refused. The
+/// `blocks` is the blocks repository. It is read at the snapshot's sequence
+/// only when [`crate::restore::blocks_wanted`] names a snapshot, and a restore
+/// that needs it and has none, or finds no snapshot there, is refused. The
 /// preflight sizes the staging of both against `registry`'s scratch
 /// directory, so the two are opened with the same one.
 ///
@@ -264,7 +265,7 @@ where
     S: StateStore,
 {
     // Attached before the pull, so a retried manifest or config read reaches
-    // the operator too; the stele shares this connection's observer.
+    // the operator too; the snapshot shares this connection's observer.
     registry.observe(observer.clone());
 
     let record = crate::restore::pinned(&node)?;
@@ -281,8 +282,8 @@ where
         }
     }
 
-    let stele = match point.resolve(registry) {
-        Ok(stele) => stele,
+    let snapshot = match point.resolve(registry) {
+        Ok(snapshot) => snapshot,
         Err(error) => {
             return Err(match record {
                 Some(record) if is_absent(&error) => crate::restore::gone(record),
@@ -291,7 +292,7 @@ where
         }
     };
 
-    let chain = crate::restore::chain_of(stele.chain())?;
+    let chain = crate::restore::chain_of(snapshot.chain())?;
 
     let blocks = match (
         crate::restore::blocks_wanted(chain, node.max_history)?,
@@ -312,8 +313,8 @@ where
         None => None,
     };
 
-    crate::restore::restore_stele(
-        &stele,
+    crate::restore::restore_snapshot(
+        &snapshot,
         chain,
         paired,
         node,
@@ -413,8 +414,8 @@ impl SnapshotRepository {
         verify(&self.registry, point)
     }
 
-    /// Restore one published stele into the explicit target stores, reading
-    /// closed epochs' blocks from `blocks` when the stele's are there.
+    /// Restore one published snapshot into the explicit target stores, reading
+    /// closed epochs' blocks from `blocks` when the snapshot's are there.
     pub fn restore<A, S>(
         &self,
         point: Point,
@@ -472,7 +473,7 @@ pub use stelae_driver::publish::Publishing;
 /// Beside [`crate::restore::PROGRESS_FILE`] and spelled the same way, because
 /// they are the same kind of thing: host-local state about a run in flight,
 /// inside `storage.path` so that anything clearing a node's storage clears it
-/// too. "Snapshot" is this profile's word for a stele.
+/// too.
 pub const PUBLISH_RECORD_FILE: &str = ".snapshot-publish.json";
 
 /// Where a node with storage at `storage_path` keeps its resumption record.
@@ -491,7 +492,7 @@ pub use stelae_driver::publish::{Origin, PublishRecord};
 #[derive(Debug, Clone)]
 pub struct Published {
     pub inscription: Inscription,
-    /// The stele's identity: sha256 of the canonical inscription.
+    /// The snapshot's identity: sha256 of the canonical inscription.
     pub identity: Digest,
     /// Layers this publish read out of the stores and compressed.
     pub layers_built: usize,
@@ -512,9 +513,9 @@ pub struct Published {
 pub struct Preview {
     /// The sequence this publish would write.
     pub sequence: u64,
-    /// The stele it would chain to, if the repository holds one.
+    /// The snapshot it would chain to, if the repository holds one.
     pub predecessor: Option<(u64, Digest)>,
-    /// The layers the stele would list, in its `diff` and its `tip`.
+    /// The layers the snapshot would list, in its `diff` and its `tip`.
     pub layers_built: usize,
 }
 
@@ -539,7 +540,8 @@ pub fn standing(registry: &Registry, plan: &Plan) -> Result<Standing, Error> {
     )?)
 }
 
-/// What `snapshot verify` established about a published stele, transport side.
+/// What `snapshot verify` established about a published snapshot, transport
+/// side.
 ///
 /// By the time this exists, every check that needs no store has run:
 ///
@@ -566,13 +568,13 @@ pub struct Verified {
     pub inscription: Inscription,
     /// The chain every layer was checked through.
     pub chain: Chain,
-    /// The stele's identity — what a Phase 5 signature will be over.
+    /// The snapshot's identity — what a Phase 5 signature will be over.
     pub identity: Digest,
     /// Compressed bytes streamed and checked, counted off the wire.
     pub compressed_bytes: u64,
 }
 
-/// Check a published stele's digests: its chain, manifests against
+/// Check a published snapshot's digests: its chain, manifests against
 /// inscriptions, then every blob of its layer set against both of its digests.
 ///
 /// The whole report is [`Verified`]; the whole verdict is the `Result`. A
@@ -582,14 +584,14 @@ pub struct Verified {
 ///
 /// **Never call this from inside an async context.** See [`open`].
 pub fn verify(registry: &Registry, point: Point) -> Result<Verified, Error> {
-    let stele = point.resolve(registry)?;
-    let chain = crate::restore::chain_of(stele.chain())?.clone();
-    let inscription = stele.read_inscription()?;
-    let blobs = stele.blob_index()?;
+    let snapshot = point.resolve(registry)?;
+    let chain = crate::restore::chain_of(snapshot.chain())?.clone();
+    let inscription = snapshot.read_inscription()?;
+    let blobs = snapshot.blob_index()?;
 
     // The profile's record ceiling, not the protocol's default, for the reason
     // a restore uses it: a verifier reading under a tighter limit than the
-    // publisher wrote under would refuse this profile's own steles.
+    // publisher wrote under would refuse this profile's own snapshots.
     let limits = Limits {
         max_record: crate::MAX_RECORD,
         ..Limits::default()
@@ -598,7 +600,7 @@ pub fn verify(registry: &Registry, point: Point) -> Result<Verified, Error> {
     let mut compressed_bytes = 0u64;
 
     for descriptor in chain.descriptors() {
-        let digests = check_layer(&stele, &blobs, descriptor, limits).map_err(|source| {
+        let digests = check_layer(&snapshot, &blobs, descriptor, limits).map_err(|source| {
             Error::LayerVerification {
                 kind: descriptor.kind.clone(),
                 scope: descriptor.scope.to_string(),
@@ -628,12 +630,12 @@ pub fn verify(registry: &Registry, point: Point) -> Result<Verified, Error> {
 /// the digest again out of [`LayerDigests`] costs nothing and keeps the check
 /// in code this crate can point at.
 fn check_layer(
-    stele: &Snapshot,
+    snapshot: &Snapshot,
     blobs: &BlobIndex,
     descriptor: &LayerDescriptor,
     limits: Limits,
 ) -> Result<LayerDigests, Error> {
-    let reader = stele.stream_layer(blobs, &DolosProfile, descriptor, limits)?;
+    let reader = snapshot.stream_layer(blobs, &DolosProfile, descriptor, limits)?;
     let digests = reader.finish()?;
 
     let mismatch = |what: &str, manifest: String, blob: String| {
@@ -652,7 +654,7 @@ fn check_layer(
         }
     }
 
-    if let Some(claimed) = stele.compressed_size(blobs, descriptor)? {
+    if let Some(claimed) = snapshot.compressed_size(blobs, descriptor)? {
         if digests.compressed_size != claimed {
             return Err(mismatch(
                 "compressed size",
@@ -673,7 +675,7 @@ pub struct Inspected {
     /// Every inscription back to the first of the lineage, and the layer set
     /// they make.
     pub chain: Chain,
-    /// The stele's identity: sha256 of the head's canonical inscription.
+    /// The snapshot's identity: sha256 of the head's canonical inscription.
     pub identity: Digest,
     /// Each layer's compressed size as its manifest carries it, in the order
     /// of the chain's layer set. `None` where the manifest claims something
@@ -684,36 +686,36 @@ pub struct Inspected {
     pub total_compressed: u64,
 }
 
-/// Read a stele's documents and nothing else.
+/// Read a snapshot's documents and nothing else.
 ///
 /// The first thing an operator does when a restore behaves oddly, priced
 /// accordingly: the manifests and inscriptions of its chain, read ahead
 /// several sequences at a time, and no layer is fetched. Everything the
 /// resolve verifies ([`Registry::resolve`]) is verified here too, so what is
-/// reported is a stele, not merely a manifest that looked like one.
+/// reported is a snapshot, not merely a manifest that looked like one.
 ///
 /// **Never call this from inside an async context.** See [`open`].
 pub fn inspect(registry: &Registry, point: Point) -> Result<Inspected, Error> {
-    let stele = point.resolve(registry)?;
-    let chain = crate::restore::chain_of(stele.chain())?.clone();
-    let blobs = stele.blob_index()?;
+    let snapshot = point.resolve(registry)?;
+    let chain = crate::restore::chain_of(snapshot.chain())?.clone();
+    let blobs = snapshot.blob_index()?;
 
     let compressed = chain
         .descriptors()
-        .map(|descriptor| stele.compressed_size(&blobs, descriptor))
+        .map(|descriptor| snapshot.compressed_size(&blobs, descriptor))
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(Inspected {
         identity: chain.identity(),
-        total_compressed: stele.total_compressed_size(),
-        inscription: stele.read_inscription()?,
+        total_compressed: snapshot.total_compressed_size(),
+        inscription: snapshot.read_inscription()?,
         chain,
         compressed,
     })
 }
 
 /// What a publish holds staged on disk at its peak, and the free-space refusal
-/// built on it — which are [`stelae_driver::publish`]'s: sizing a stele's
+/// built on it — which are [`stelae_driver::publish`]'s: sizing a snapshot's
 /// layers is lifecycle arithmetic, and the only thing about it that was ever
 /// this profile's is which kinds carry the tip. That is now
 /// [`stelae_driver::DriverProfile::is_state_kind`], answered by
@@ -761,12 +763,12 @@ where
 /// suite's transport, which fails at a layer the test chose, is what this
 /// exists for.
 ///
-/// **`stele` must write into `publishing.registry`.** The manifest is built
+/// **`snapshot` must write into `publishing.registry`.** The manifest is built
 /// from what that transport is carrying, so a writer that puts the layers
 /// somewhere else would seal a manifest with holes in it. A decorator over the
 /// registry is the shape this takes; anything else is a caller misusing it.
 pub fn publish_into<W, A, S>(
-    stele: &W,
+    snapshot: &W,
     publishing: Publishing<'_>,
     plan: &Plan,
     archive: &A,
@@ -783,7 +785,7 @@ where
     crate::boundary::check(plan, archive, state)?;
 
     publish_chained(publishing, plan, |previous| {
-        export::export(stele, plan, archive, state, previous, observer)
+        export::export(snapshot, plan, archive, state, previous, observer)
     })
 }
 
@@ -791,7 +793,7 @@ where
 /// to whatever is already there.
 ///
 /// The same chain rule as [`publish`], read when the sequence is really being
-/// committed, so a batch's predecessor is the stele its last publish left.
+/// committed, so a batch's predecessor is the snapshot its last publish left.
 pub fn publish_prepared<A: ArchiveStore>(
     publishing: Publishing<'_>,
     finalizing: &prepare::Finalizing<'_>,
@@ -805,8 +807,8 @@ pub fn publish_prepared<A: ArchiveStore>(
     })
 }
 
-/// Chain `plan` onto the repository's latest stele, build the inscription and
-/// report what it cost.
+/// Chain `plan` onto the repository's latest snapshot, build the inscription
+/// and report what it cost.
 fn publish_chained(
     publishing: Publishing<'_>,
     plan: &Plan,
@@ -822,7 +824,7 @@ fn publish_chained(
 
     let inscription = build(&previous)?;
 
-    // Only here: the stele is sealed, so the note about what was uploaded on the
+    // Only here: the snapshot is sealed, so the note about what was uploaded on the
     // way to it has nothing left to say. Before the seal it would be a record
     // that outlived neither the run nor its usefulness.
     previous.forget_record()?;

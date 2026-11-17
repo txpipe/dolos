@@ -12,7 +12,7 @@
 //! The types below are synthetic — they model nothing in the ledger — and
 //! exist so that a minicbor upgrade which changed any of the three breaks
 //! *here*, in a test with a name that says what happened, rather than in a
-//! stele in production. They also carry the pinned array shape, so a change
+//! snapshot in production. They also carry the pinned array shape, so a change
 //! from array to map encoding, or a change in how a gap is padded, is a
 //! failure and not a silent re-encoding of every record the profile carries.
 //!

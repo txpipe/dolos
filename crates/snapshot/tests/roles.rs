@@ -288,7 +288,7 @@ fn by_key<'a>(
         .collect()
 }
 
-/// Restore the latest stele of the network root at `root` into empty stores.
+/// Restore the latest snapshot of the network root at `root` into empty stores.
 fn restored(root: &std::path::Path) -> Summary {
     let storage = tempfile::tempdir().unwrap();
     let archive = MemoryArchiveStore::new(dolos_cardano::model::build_log_schema());
@@ -330,7 +330,7 @@ fn records(summary: &Summary) -> [u64; 6] {
 }
 
 /// `PROFILE.md`'s "Log anchors" table names every log kind once, with the
-/// first and the final stele of [`ANCHORS`].
+/// first and the final snapshot of [`ANCHORS`].
 #[test]
 fn the_profile_states_the_log_anchors_of_the_code() {
     let profile = include_str!("../PROFILE.md");

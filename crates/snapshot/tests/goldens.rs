@@ -315,11 +315,11 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 45] = [
     ),
 ];
 
-/// The stele's identity: sha256 of the canonical inscription.
+/// The snapshot's identity: sha256 of the canonical inscription.
 const GOLDEN_INSCRIPTION: &str =
     "sha256:aa516d6e2e165af5add28943c687249e0f267a6348a7a8a6917a7a121c0dc73e";
 
-/// The stele the fixture follows.
+/// The snapshot the fixture follows.
 fn previous() -> Link {
     Link {
         sequence: EPOCH - 1,
@@ -327,25 +327,25 @@ fn previous() -> Link {
     }
 }
 
-/// The blocks snapshot a fixture stele names in `position.blocks`.
+/// The blocks snapshot a fixture snapshot names in `position.blocks`.
 const BLOCKS_INSCRIPTION: [u8; 32] = [0x77; 32];
 
-/// The identity of the same stele when its `position` names
+/// The identity of the same snapshot when its `position` names
 /// [`BLOCKS_INSCRIPTION`].
 const GOLDEN_INSCRIPTION_WITH_BLOCKS: &str =
     "sha256:36ed809939600d529888ea2955d8ad72b10b2cbc1add0db3e7d7fd5b37906439";
 
-/// Write the whole fixture stele into `root`: its layers and an inscription.
+/// Write the whole fixture snapshot into `root`: its layers and an inscription.
 ///
 /// A shape golden, not an export: every epoch layer is in `diff` and the state
 /// is the `tip`, so both arrays and the link are frozen.
-fn write_stele(root: &std::path::Path) -> (Inscription, Digest) {
-    write_stele_naming(root, None)
+fn write_snapshot(root: &std::path::Path) -> (Inscription, Digest) {
+    write_snapshot_naming(root, None)
 }
 
-/// [`write_stele`], with `blocks` in its `position`.
-fn write_stele_naming(root: &std::path::Path, blocks: Option<&Digest>) -> (Inscription, Digest) {
-    let stele = SnapshotDir::create(root).unwrap();
+/// [`write_snapshot`], with `blocks` in its `position`.
+fn write_snapshot_naming(root: &std::path::Path, blocks: Option<&Digest>) -> (Inscription, Digest) {
+    let snapshot = SnapshotDir::create(root).unwrap();
 
     let point = ChainPoint::Specific(END_SLOT, BlockHash::new(POINT_HASH));
 
@@ -360,7 +360,7 @@ fn write_stele_naming(root: &std::path::Path, blocks: Option<&Digest>) -> (Inscr
     inscription.previous = Some(previous());
 
     for (kind, scope, records) in all_layers() {
-        let descriptor = write_layer(&stele, kind, scope.as_ref(), &records).descriptor;
+        let descriptor = write_layer(&snapshot, kind, scope.as_ref(), &records).descriptor;
 
         match dolos_snapshot::is_state_kind(kind) {
             true => inscription.tip.push(descriptor),
@@ -368,7 +368,7 @@ fn write_stele_naming(root: &std::path::Path, blocks: Option<&Digest>) -> (Inscr
         }
     }
 
-    let digest = stele.seal(&DolosProfile, &inscription).unwrap();
+    let digest = snapshot.seal(&DolosProfile, &inscription).unwrap();
 
     (inscription, digest)
 }
@@ -385,7 +385,7 @@ fn per_kind_diff_ids_are_pinned() {
     assert_eq!(
         layers.len(),
         GOLDEN_LAYERS.len(),
-        "the stele no longer has the layers the goldens pin"
+        "the snapshot no longer has the layers the goldens pin"
     );
 
     for ((kind, scope, records), (expected_kind, diff_id, count, size)) in
@@ -405,12 +405,13 @@ fn per_kind_diff_ids_are_pinned() {
     }
 }
 
-/// The whole stele: written, read back through the streaming reader under the
-/// default limits, and reproduced byte for byte by a second, independent write.
+/// The whole snapshot: written, read back through the streaming reader under
+/// the default limits, and reproduced byte for byte by a second, independent
+/// write.
 #[test]
-fn a_complete_stele_reads_back_and_reproduces_its_digest() {
+fn a_complete_snapshot_reads_back_and_reproduces_its_digest() {
     let first = tempfile::tempdir().unwrap();
-    let (inscription, digest) = write_stele(first.path());
+    let (inscription, digest) = write_snapshot(first.path());
 
     assert_eq!(
         digest.to_string(),
@@ -419,10 +420,10 @@ fn a_complete_stele_reads_back_and_reproduces_its_digest() {
     );
 
     // The document survives the trip to disk in canonical form, and belongs to
-    // this profile. Its own sequence alone: the stele it links to is not here.
+    // this profile. Its own sequence alone: the snapshot it links to is not here.
     let layout = SnapshotDir::open(first.path()).unwrap();
-    let stele = layout.pull_sequence(&DolosProfile, EPOCH).unwrap();
-    let read = stele.read_inscription().unwrap();
+    let snapshot = layout.pull_sequence(&DolosProfile, EPOCH).unwrap();
+    let read = snapshot.read_inscription().unwrap();
 
     assert_eq!(read, inscription);
     assert_eq!(read.digest().unwrap(), digest);
@@ -431,11 +432,11 @@ fn a_complete_stele_reads_back_and_reproduces_its_digest() {
     // Every layer streams back under the *default* record ceiling — the
     // confirmation the stelae crate's streaming reader was left waiting for from
     // its first real profile.
-    let index = stele.blob_index().unwrap();
+    let index = snapshot.blob_index().unwrap();
     assert_eq!(index.len(), GOLDEN_LAYERS.len());
 
     for descriptor in read.layers() {
-        let mut reader = stele
+        let mut reader = snapshot
             .stream_layer(&index, &DolosProfile, descriptor, Limits::default())
             .unwrap();
 
@@ -463,7 +464,7 @@ fn a_complete_stele_reads_back_and_reproduces_its_digest() {
     // Written twice, independently: same document, same bytes, same blobs. This
     // is the property the whole protocol rests on, now under a real profile.
     let second = tempfile::tempdir().unwrap();
-    let (again, again_digest) = write_stele(second.path());
+    let (again, again_digest) = write_snapshot(second.path());
 
     assert_eq!(again, inscription);
     assert_eq!(again_digest, digest);
@@ -500,12 +501,12 @@ fn a_complete_stele_reads_back_and_reproduces_its_digest() {
 #[test]
 fn descriptors_match_the_per_kind_goldens() {
     let temp = tempfile::tempdir().unwrap();
-    let (inscription, _) = write_stele(temp.path());
+    let (inscription, _) = write_snapshot(temp.path());
 
     assert_eq!(
         inscription.layers().count(),
         GOLDEN_LAYERS.len(),
-        "the stele no longer has the layers the goldens pin"
+        "the snapshot no longer has the layers the goldens pin"
     );
 
     for (descriptor, (kind, diff_id, records, size)) in inscription.layers().zip(GOLDEN_LAYERS) {
@@ -522,7 +523,7 @@ fn descriptors_match_the_per_kind_goldens() {
 #[test]
 fn the_canonical_inscription_is_pinned() {
     let temp = tempfile::tempdir().unwrap();
-    let (inscription, _) = write_stele(temp.path());
+    let (inscription, _) = write_snapshot(temp.path());
 
     let canonical = String::from_utf8(inscription.canonicalize().unwrap()).unwrap();
 
@@ -551,13 +552,13 @@ fn the_position_is_pinned_with_and_without_its_blocks_reference() {
     assert!(CANONICAL_INSCRIPTION.contains(&format!(r#""position":{CANONICAL_POSITION}"#)));
 }
 
-/// The stele that names its blocks snapshot, end to end: the field moves the
-/// identity, and the document reads back with it.
+/// The Dolos snapshot that names its blocks snapshot, end to end: the field
+/// moves the identity, and the document reads back with it.
 #[test]
-fn a_stele_naming_its_blocks_is_pinned() {
+fn a_snapshot_naming_its_blocks_is_pinned() {
     let temp = tempfile::tempdir().unwrap();
     let blocks = Digest::from_bytes(BLOCKS_INSCRIPTION);
-    let (inscription, digest) = write_stele_naming(temp.path(), Some(&blocks));
+    let (inscription, digest) = write_snapshot_naming(temp.path(), Some(&blocks));
 
     assert_eq!(digest.to_string(), GOLDEN_INSCRIPTION_WITH_BLOCKS);
 

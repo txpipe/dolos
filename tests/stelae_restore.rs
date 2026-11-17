@@ -93,7 +93,7 @@ fn wal_tip(node: &Node) -> Option<dolos_core::ChainPoint> {
 
 /// Done criterion 1 and 3, at the CLI.
 #[test]
-fn a_directory_stele_restores_the_node_that_encoded_it() {
+fn a_directory_snapshot_restores_the_node_that_encoded_it() {
     let node = Node::new();
     node.sync();
     node.stand_at_boundary();
@@ -101,10 +101,10 @@ fn a_directory_stele_restores_the_node_that_encoded_it() {
     let before = Contents::read(&node);
     before.assert_populated();
 
-    let stele = node.root.path().join("stele");
-    node.write_stele(&stele);
+    let snapshot = node.root.path().join("snapshot");
+    node.write_snapshot(&snapshot);
 
-    let output = node.bootstrap_stelae(&format!("file://{}", stele.display()));
+    let output = node.bootstrap_stelae(&format!("file://{}", snapshot.display()));
     let stdout = assert_ok(&output);
 
     // The name comes from the magic, the same on both sides of the roundtrip.
@@ -129,7 +129,7 @@ fn a_directory_stele_restores_the_node_that_encoded_it() {
 
     assert_eq!(Contents::read(&node), before);
 
-    // The stores are the restoring binary's, whatever wrote the stele.
+    // The stores are the restoring binary's, whatever wrote the snapshot.
     assert_eq!(identities(&node), [current_identity(), current_identity()]);
 }
 
@@ -145,8 +145,8 @@ fn a_forced_restore_replaces_a_store_this_release_refuses() {
 
     let before = Contents::read(&node);
 
-    let stele = node.root.path().join("stele");
-    node.write_stele(&stele);
+    let snapshot = node.root.path().join("snapshot");
+    node.write_snapshot(&snapshot);
 
     // A state store as a release that predates store identities left it.
     let state = node.config.storage.state_path().unwrap();
@@ -175,7 +175,7 @@ fn a_forced_restore_replaces_a_store_this_release_refuses() {
         );
     }
 
-    assert_ok(&node.bootstrap_stelae(&format!("file://{}", stele.display())));
+    assert_ok(&node.bootstrap_stelae(&format!("file://{}", snapshot.display())));
 
     assert_eq!(Contents::read(&node), before);
     assert_eq!(identities(&node), [current_identity(), current_identity()]);
@@ -184,19 +184,19 @@ fn a_forced_restore_replaces_a_store_this_release_refuses() {
 /// The restore is a wipe followed by a rebuild, so a node whose storage
 /// directory is gone entirely comes back the same way.
 #[test]
-fn a_stele_restores_into_a_directory_that_does_not_exist() {
+fn a_snapshot_restores_into_a_directory_that_does_not_exist() {
     let node = Node::new();
     node.sync();
     node.stand_at_boundary();
 
     let before = Contents::read(&node);
 
-    let stele = node.root.path().join("stele");
-    node.write_stele(&stele);
+    let snapshot = node.root.path().join("snapshot");
+    node.write_snapshot(&snapshot);
 
     std::fs::remove_dir_all(&node.config.storage.path).unwrap();
 
-    assert_ok(&node.bootstrap_stelae(&format!("file://{}", stele.display())));
+    assert_ok(&node.bootstrap_stelae(&format!("file://{}", snapshot.display())));
 
     assert_eq!(Contents::read(&node), before);
 }
@@ -220,7 +220,7 @@ fn an_unusable_source_is_refused_before_force_clears_anything() {
     let cases = [
         // Not a scheme this understands: the message names both that are.
         ("https://example.invalid/snapshot", "file://DIR"),
-        ("/var/lib/dolos/stele", "file://DIR"),
+        ("/var/lib/dolos/snapshot", "file://DIR"),
         // Well-formed scheme, unusable repository.
         ("oci://ghcr.io", "no repository path"),
         ("oci:///txpipe/dolos", "no registry host"),
@@ -287,7 +287,7 @@ fn an_unusable_point_is_refused_before_force_clears_anything() {
 /// grammar so strict it refused everything: this URL is accepted, the command
 /// runs, and what stops it is the registry not being there — which happens
 /// after `--force`, as a runtime failure, exactly like a `file://` directory
-/// that turns out not to hold a stele.
+/// that turns out not to hold a snapshot.
 #[test]
 fn a_well_formed_repository_reaches_the_registry() {
     let node = Node::new();
@@ -305,7 +305,7 @@ fn a_well_formed_repository_reaches_the_registry() {
     // trying to use it. Which of the two it is depends on how the binary was
     // built, and both are the right answer.
     assert!(
-        stderr.contains("restoring the stele")
+        stderr.contains("restoring the snapshot")
             || stderr.contains("opening the repository")
             || stderr.contains("--features registry"),
         "the repository was refused before it was tried: {stderr}"
@@ -350,7 +350,7 @@ fn a_root_without_its_blocks_directory_is_refused_naming_it() {
     let before = Contents::read(&node);
 
     let root = node.root.path().join("root");
-    node.write_stele(&root);
+    node.write_snapshot(&root);
     std::fs::remove_dir_all(root.join("blocks")).unwrap();
 
     let output = node.bootstrap_stelae(&format!("file://{}", root.display()));
@@ -366,17 +366,17 @@ fn a_root_without_its_blocks_directory_is_refused_naming_it() {
     assert_eq!(Contents::read(&node), before);
 }
 
-/// Write `root` as a network root whose stele reads its closed epochs' blocks
-/// from its `blocks` repository: the node's own root export. Unless
+/// Write `root` as a network root whose snapshot reads its closed epochs'
+/// blocks from its `blocks` repository: the node's own root export. Unless
 /// `with_blocks`, the root's `blocks` is an empty image layout, and the blocks
 /// lineage goes elsewhere.
 fn write_paired_root(node: &Node, root: &std::path::Path, with_blocks: bool) {
     use dolos_snapshot::dir::SnapshotDir;
 
-    node.write_stele(root);
+    node.write_snapshot(root);
 
     let paired = paired::digests(root);
-    assert!(!paired.blocks.is_empty(), "the stele closed no epoch");
+    assert!(!paired.blocks.is_empty(), "the snapshot closed no epoch");
 
     if !with_blocks {
         let blocks = root.join("blocks");
@@ -385,7 +385,7 @@ fn write_paired_root(node: &Node, root: &std::path::Path, with_blocks: bool) {
     }
 }
 
-/// A stele whose closed epochs' blocks are in its root's `blocks`
+/// A snapshot whose closed epochs' blocks are in its root's `blocks`
 /// repository restores them from there, at the CLI.
 #[test]
 fn a_paired_root_restores_its_blocks_from_its_blocks_repository() {
@@ -404,10 +404,10 @@ fn a_paired_root_restores_its_blocks_from_its_blocks_repository() {
     assert_eq!(Contents::read(&node), before);
 }
 
-/// A root whose `blocks` layout lacks the blocks snapshot the stele reads is
-/// refused before `--force` clears anything.
+/// A root whose `blocks` layout lacks the blocks snapshot the Dolos snapshot
+/// reads is refused before `--force` clears anything.
 #[test]
-fn a_root_whose_blocks_lack_the_steles_snapshot_is_refused_before_force_clears() {
+fn a_root_whose_blocks_lack_the_dolos_snapshots_blocks_is_refused_before_force_clears() {
     let node = Node::new();
     node.sync();
     node.stand_at_boundary();
@@ -441,7 +441,7 @@ fn a_root_whose_blocks_directory_is_no_layout_is_refused() {
     let before = Contents::read(&node);
 
     let root = node.root.path().join("root");
-    node.write_stele(&root);
+    node.write_snapshot(&root);
     std::fs::remove_dir_all(root.join("blocks")).unwrap();
     std::fs::create_dir_all(root.join("blocks")).unwrap();
 
@@ -455,16 +455,16 @@ fn a_root_whose_blocks_directory_is_no_layout_is_refused() {
     assert_eq!(Contents::read(&node), before);
 }
 
-/// An image layout that holds no stele, as a refused publish leaves one, is
+/// An image layout that holds no snapshot, as a refused publish leaves one, is
 /// refused the same way: before `--force` clears anything.
 #[test]
-fn a_layout_with_no_stele_is_refused() {
+fn a_layout_with_no_snapshot_is_refused() {
     let node = Node::new();
     node.sync();
     let before = Contents::read(&node);
     assert!(before.cursor.is_some());
 
-    let layout = node.root.path().join("no-stele");
+    let layout = node.root.path().join("no-snapshot");
     for name in ["dolos", "blocks"] {
         dolos_snapshot::dir::SnapshotDir::create(layout.join(name)).unwrap();
     }
@@ -477,13 +477,13 @@ fn a_layout_with_no_stele_is_refused() {
         .split_whitespace()
         .filter(|word| *word != "│")
         .collect();
-    assert!(said.join(" ").contains("holds no stele"), "{stderr}");
+    assert!(said.join(" ").contains("holds no snapshot"), "{stderr}");
     assert_eq!(Contents::read(&node), before);
 }
 
-/// A layout whose latest stele links to one it no longer holds, as a copy of a
-/// lineage cut short leaves one, is refused the same way. The head and its tip
-/// are whole, so only resolving the chain behind them refuses it before
+/// A layout whose latest snapshot links to one it no longer holds, as a copy of
+/// a lineage cut short leaves one, is refused the same way. The head and its
+/// tip are whole, so only resolving the chain behind them refuses it before
 /// `--force` clears anything.
 #[test]
 fn a_layout_whose_chain_is_broken_is_refused() {
@@ -496,13 +496,13 @@ fn a_layout_whose_chain_is_broken_is_refused() {
     node.sync();
 
     // Boundaries 1 and 2 into one layout, the second linked to the first.
-    let stele = node.root.path().join("stele");
+    let snapshot = node.root.path().join("snapshot");
     node.stand_at_boundary();
-    node.write_stele(&stele);
+    node.write_snapshot(&snapshot);
     node.stand_at_boundary_of(2);
-    node.write_stele(&stele);
+    node.write_snapshot(&snapshot);
 
-    let head = SnapshotDir::open(stele.join("dolos"))
+    let head = SnapshotDir::open(snapshot.join("dolos"))
         .unwrap()
         .resolve_latest(&DolosProfile)
         .unwrap()
@@ -512,7 +512,7 @@ fn a_layout_whose_chain_is_broken_is_refused() {
     assert_eq!(head.previous.map(|link| link.sequence), Some(1));
 
     // Sequence 1's tags leave the index, and the head keeps its own.
-    let index_path = stele.join("dolos").join(INDEX_FILE);
+    let index_path = snapshot.join("dolos").join(INDEX_FILE);
     let mut index: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&index_path).unwrap()).unwrap();
     let manifests = index["manifests"].as_array_mut().unwrap();
@@ -529,7 +529,7 @@ fn a_layout_whose_chain_is_broken_is_refused() {
     );
     std::fs::write(&index_path, serde_json::to_vec(&index).unwrap()).unwrap();
 
-    let layout = SnapshotDir::open(stele.join("dolos")).unwrap();
+    let layout = SnapshotDir::open(snapshot.join("dolos")).unwrap();
     assert!(layout.pull_latest(&DolosProfile).is_ok());
     let broken = layout
         .resolve_latest(&DolosProfile)
@@ -540,7 +540,7 @@ fn a_layout_whose_chain_is_broken_is_refused() {
     let before = Contents::read(&node);
     assert!(before.cursor.is_some());
 
-    let output = node.bootstrap_stelae(&format!("file://{}", stele.display()));
+    let output = node.bootstrap_stelae(&format!("file://{}", snapshot.display()));
     assert_eq!(output.status.code(), Some(1));
     assert!(
         reports(&output.stderr, "its chain is broken"),
@@ -554,8 +554,8 @@ fn a_layout_whose_chain_is_broken_is_refused() {
 /// fully resolved.
 ///
 /// With no subcommand, bootstrap prompts for the method and — for `stelae` —
-/// for the stele's location. Those prompts come after the flags are parsed, so
-/// a `--force` that clears first would destroy a working node on a typo, a
+/// for the snapshot's location. Those prompts come after the flags are parsed,
+/// so a `--force` that clears first would destroy a working node on a typo, a
 /// cancel, or a machine with no terminal, and hand back nothing. The
 /// non-interactive half of this is covered above, where clap refuses a bad
 /// `--source`; this is the half clap cannot reach.
@@ -663,7 +663,7 @@ fn a_decision_that_needs_no_command_does_not_ask_for_one() {
     assert_eq!(Contents::read(&node), before);
 }
 
-/// The WAL is not in a stele, and does not need to be.
+/// The WAL is not in a snapshot, and does not need to be.
 ///
 /// `dolos_snapshot::restore` carries no `WalStore` at all — deliberately,
 /// because `bootstrap::run` reseeds the WAL from the state cursor after a
@@ -688,9 +688,9 @@ fn a_restored_node_has_a_wal_seeded_from_its_own_cursor() {
         "the fixture gained a WAL; this test no longer shows what it claims to"
     );
 
-    let stele = node.root.path().join("stele");
-    node.write_stele(&stele);
-    assert_ok(&node.bootstrap_stelae(&format!("file://{}", stele.display())));
+    let snapshot = node.root.path().join("snapshot");
+    node.write_snapshot(&snapshot);
+    assert_ok(&node.bootstrap_stelae(&format!("file://{}", snapshot.display())));
 
     let restored = Contents::read(&node);
     restored.assert_populated();
@@ -775,11 +775,11 @@ fn digest(node: &Node) -> String {
     pallas::crypto::hash::Hasher::<256>::hash(seen.join("\n").as_bytes()).to_string()
 }
 
-/// A network root holding a stele cut from a synced node, and the node an
+/// A network root holding a snapshot cut from a synced node, and the node an
 /// uninterrupted restore of it builds.
 struct Fixture {
     _origin: Node,
-    stele: std::path::PathBuf,
+    snapshot: std::path::PathBuf,
     url: String,
     control: String,
 }
@@ -790,9 +790,9 @@ impl Fixture {
         origin.sync();
         origin.stand_at_boundary();
 
-        let stele = origin.root.path().join("stele");
-        origin.write_stele(&stele);
-        let url = format!("file://{}", stele.display());
+        let snapshot = origin.root.path().join("snapshot");
+        origin.write_snapshot(&snapshot);
+        let url = format!("file://{}", snapshot.display());
 
         let control = Node::new();
         assert_ok(&control.run(&["bootstrap", "stelae", "--source", &url]));
@@ -800,26 +800,27 @@ impl Fixture {
         Self {
             control: digest(&control),
             _origin: origin,
-            stele,
+            snapshot,
             url,
         }
     }
 
-    /// The stele's digest and sequence, and the epoch layers in the order the
-    /// restore reads them.
+    /// The snapshot's digest and sequence, and the epoch layers in the order
+    /// the restore reads them.
     fn layers(&self) -> (String, u64, Vec<std::path::PathBuf>) {
         use dolos_snapshot::{dir::SnapshotDir, DolosProfile, SnapshotReader as _};
 
-        let layout = SnapshotDir::open(self.stele.join("dolos")).unwrap();
-        let stele = layout.resolve_latest(&DolosProfile).unwrap();
-        let blocks_layout = SnapshotDir::open(self.stele.join("blocks")).unwrap();
+        let layout = SnapshotDir::open(self.snapshot.join("dolos")).unwrap();
+        let snapshot = layout.resolve_latest(&DolosProfile).unwrap();
+        let blocks_layout = SnapshotDir::open(self.snapshot.join("blocks")).unwrap();
         let blocks = blocks_layout
             .resolve_latest(&stelae_blocks::BlocksProfile)
             .unwrap();
-        let inscription = stele.read_inscription().unwrap();
+        let inscription = snapshot.read_inscription().unwrap();
         let plan =
-            dolos_snapshot::restore::plan(stele.chain().unwrap(), blocks.chain(), 2, None).unwrap();
-        let (index, blocks_index) = (stele.blob_index().unwrap(), blocks.blob_index().unwrap());
+            dolos_snapshot::restore::plan(snapshot.chain().unwrap(), blocks.chain(), 2, None)
+                .unwrap();
+        let (index, blocks_index) = (snapshot.blob_index().unwrap(), blocks.blob_index().unwrap());
 
         // A closed epoch's blocks layer is in the root's blocks repository.
         let blobs = plan
@@ -919,13 +920,13 @@ fn kill_at_layer(fixture: &Fixture, node: &Node, k: usize) {
 }
 
 /// Killed mid-run with a layer recorded, and `--continue` resumes it: the
-/// recorded stele read again, its recorded layers skipped, and the node an
+/// recorded snapshot read again, its recorded layers skipped, and the node an
 /// uninterrupted restore builds.
 #[cfg(unix)]
 #[test]
 fn a_killed_restore_resumes_with_continue() {
     let fixture = Fixture::new();
-    let (digest_of_stele, sequence, blobs) = fixture.layers();
+    let (digest_of_snapshot, sequence, blobs) = fixture.layers();
     let k = blobs.len() / 2;
     assert!(k >= 1, "the fixture needs an epoch layer to record first");
 
@@ -946,7 +947,7 @@ fn a_killed_restore_resumes_with_continue() {
 
     assert!(
         stdout.contains(&format!(
-            "resuming: {} epoch-{sequence} ({digest_of_stele}), {k} layers recorded",
+            "resuming: {} epoch-{sequence} ({digest_of_snapshot}), {k} layers recorded",
             fixture.url
         )),
         "{stdout}"
@@ -999,12 +1000,12 @@ fn continue_with_nothing_to_resume_restores_into_empty_storage_only() {
 #[test]
 fn continue_refuses_progress_without_a_source_record() {
     let fixture = Fixture::new();
-    let (digest_of_stele, _, _) = fixture.layers();
+    let (digest_of_snapshot, _, _) = fixture.layers();
 
     let node = Node::new();
     std::fs::create_dir_all(&node.config.storage.path).unwrap();
 
-    dolos_snapshot::restore::RestoreProgress::new(digest_of_stele.parse().unwrap())
+    dolos_snapshot::restore::RestoreProgress::new(digest_of_snapshot.parse().unwrap())
         .save(&storage_file(&node, dolos_snapshot::restore::PROGRESS_FILE))
         .unwrap();
 
@@ -1022,26 +1023,26 @@ fn continue_refuses_progress_without_a_source_record() {
     assert!(stderr.contains("--force"), "{stderr}");
 }
 
-/// The recorded stele gone from its directory, or another one under it, is
-/// refused, naming the recorded stele and `--force`.
+/// The recorded snapshot gone from its directory, or another one under it, is
+/// refused, naming the recorded snapshot and `--force`.
 #[cfg(unix)]
 #[test]
-fn continue_refuses_a_stele_no_longer_in_its_source() {
+fn continue_refuses_a_snapshot_no_longer_in_its_source() {
     let fixture = Fixture::new();
-    let (digest_of_stele, sequence, _) = fixture.layers();
+    let (digest_of_snapshot, sequence, _) = fixture.layers();
 
     let node = Node::new();
     kill_at_layer(&fixture, &node, 1);
 
     let expected = format!(
-        "the stele this restore started from ({digest_of_stele}, epoch-{sequence}) is no longer \
+        "the snapshot this restore started from ({digest_of_snapshot}, epoch-{sequence}) is no longer \
          in {}",
         fixture.url
     );
 
-    // Another stele under the same path.
-    let original = fixture.stele.with_extension("original");
-    std::fs::rename(&fixture.stele, &original).unwrap();
+    // Another snapshot under the same path.
+    let original = fixture.snapshot.with_extension("original");
+    std::fs::rename(&fixture.snapshot, &original).unwrap();
 
     let other = Node::new();
     other.sync_chain(
@@ -1055,7 +1056,7 @@ fn continue_refuses_a_stele_no_longer_in_its_source() {
         },
     );
     other.stand_at_boundary();
-    other.write_stele(&fixture.stele);
+    other.write_snapshot(&fixture.snapshot);
 
     let refused = || {
         let output = node.run(&["bootstrap", "stelae", "--continue"]);
@@ -1070,12 +1071,12 @@ fn continue_refuses_a_stele_no_longer_in_its_source() {
 
     refused();
 
-    // And no stele there at all.
-    std::fs::remove_dir_all(&fixture.stele).unwrap();
+    // And no snapshot there at all.
+    std::fs::remove_dir_all(&fixture.snapshot).unwrap();
     refused();
 
     // `--force` starts over from what `--source` names.
-    std::fs::rename(&original, &fixture.stele).unwrap();
+    std::fs::rename(&original, &fixture.snapshot).unwrap();
     assert_ok(&node.run(&["bootstrap", "stelae", "--force", "--source", &fixture.url]));
     assert_eq!(digest(&node), fixture.control);
 }
@@ -1373,7 +1374,7 @@ fn continue_resumes_a_node_whose_archive_is_in_memory() {
 
 /// Stores something else wrote after the restore was interrupted are refused,
 /// naming `--force`: a WAL with entries, which a restore never writes, and a
-/// state cursor other than the stele's, as a daemon syncing from genesis
+/// state cursor other than the snapshot's, as a daemon syncing from genesis
 /// over them leaves.
 #[cfg(unix)]
 #[test]
@@ -1402,7 +1403,7 @@ fn continue_refuses_stores_another_writer_touched() {
     stores.wal.reset_to(&theirs).unwrap();
     drop(stores);
 
-    refused("has entries, which a stele restore never writes");
+    refused("has entries, which a snapshot restore never writes");
 
     let wal = node.config.wal_path().unwrap();
     match wal.is_dir() {

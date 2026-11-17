@@ -1,4 +1,4 @@
-//! Verifying and inspecting a published stele, end to end.
+//! Verifying and inspecting a published snapshot, end to end.
 //!
 //! Nearly everything here needs a **registry**, and spawns one: `docker run`
 //! of an OCI Distribution server, torn down on the way out. So all of it but
@@ -11,7 +11,7 @@
 //!
 //! ## What this suite proves
 //!
-//! 1. **A freshly published stele verifies clean**, through its chain: the
+//! 1. **A freshly published snapshot verifies clean**, through its chain: the
 //!    manifests and the inscriptions agree, and every blob of the layer set
 //!    streams back to both of its digests.
 //! 2. **Each of the three tampers is refused with the offence named**: a blob
@@ -66,12 +66,12 @@ fn link_to(published: &registry::Published) -> Option<Link> {
 
 /// The pass, before the refusals mean anything.
 ///
-/// The stele verified at `latest` is the interesting one: it lists only its
+/// The snapshot verified at `latest` is the interesting one: it lists only its
 /// own layers and links to its predecessor, so a clean verification streams
 /// and checks the layers of both inscriptions.
 #[test]
 #[ignore = "spawns a registry"]
-fn a_freshly_published_stele_verifies_clean() {
+fn a_freshly_published_snapshot_verifies_clean() {
     let fixture = Fixture::spawn();
     let node = Node::build();
     let repository_name = "dolos/verify-clean";
@@ -309,10 +309,10 @@ fn a_link_to_another_document_is_refused() {
 // Done criterion 4: verify --repo --reproduce
 // ---------------------------------------------------------------------------
 
-/// The reproduction passes against the store the stele was published from,
+/// The reproduction passes against the store the snapshot was published from,
 /// and a store standing at a different epoch is refused before the walk.
 ///
-/// The published stele lists its own layers and its link, and the pass here
+/// The published snapshot lists its own layers and its link, and the pass here
 /// is every one of them coming back out of the stores byte-identical, under
 /// the link it carries. The refusal is the same ledger one epoch earlier —
 /// which is what "a store at a different epoch" is — and it costs a
@@ -366,7 +366,7 @@ fn a_reproduction_passes_at_the_published_epoch_and_fails_at_another() {
 
 /// A registry publish and its dry run refuse stores past their boundary, and
 /// the refusal comes before the repository is touched: nothing is published,
-/// and a stele at the boundary still publishes into it afterwards.
+/// and a snapshot at the boundary still publishes into it afterwards.
 #[test]
 #[ignore = "spawns a registry"]
 fn a_registry_publish_and_its_dry_run_refuse_a_cursor_past_the_boundary() {
@@ -405,7 +405,7 @@ fn a_registry_publish_and_its_dry_run_refuse_a_cursor_past_the_boundary() {
 
     assert!(
         repository.latest(&DolosProfile).unwrap().is_none(),
-        "a refused publish left a stele behind"
+        "a refused publish left a snapshot behind"
     );
 
     let published = node.publish(&repository, &node.first, false);
@@ -464,8 +464,8 @@ fn a_registry_refusal_comes_before_any_request() {
 
 /// A publish that dies at the seal leaves a record of the layers its sequence
 /// lists in `diff`, and none of its tip. The publish that resumes from it
-/// carries every recorded layer, builds the tip again, and seals the stele the
-/// stores reproduce; the dry run counts every layer the stele lists.
+/// carries every recorded layer, builds the tip again, and seals the snapshot
+/// the stores reproduce; the dry run counts every layer the snapshot lists.
 #[test]
 #[ignore = "spawns a registry"]
 fn a_resumed_registry_publish_carries_its_diff_and_builds_its_tip() {
@@ -592,21 +592,21 @@ fn a_record_from_before_the_diff_chain_is_rebuilt() {
     assert!(interrupted.is_err(), "the seal was meant to fail");
 
     // The tip layer as the interrupted publish uploaded it, measured on the
-    // same stele exported to a directory.
-    let stele = tempfile::tempdir().unwrap();
-    let at_2 = node::export_plan(stele.path(), &host, &cut_at_2);
+    // same snapshot exported to a directory.
+    let snapshot = tempfile::tempdir().unwrap();
+    let at_2 = node::export_plan(snapshot.path(), &host, &cut_at_2);
     let stake_only = node::account_layer(&at_2, 1);
     assert!(
         at_2.tip.contains(&stake_only),
         "window 1's rows are the tip at 2"
     );
 
-    let blob_digest = node::resolved(stele.path())
+    let blob_digest = node::resolved(snapshot.path())
         .blob_index()
         .unwrap()
         .blob_for(&stake_only.diff_id)
         .unwrap();
-    let blob_path = stelae::dir::SnapshotDir::open(node::dolos(stele.path()))
+    let blob_path = stelae::dir::SnapshotDir::open(node::dolos(snapshot.path()))
         .unwrap()
         .blob_path(&blob_digest);
 
@@ -666,7 +666,7 @@ fn a_record_from_before_the_diff_chain_is_rebuilt() {
 
 /// A batch prepared and staged once, then published in sequence, is the chain
 /// the direct publishes write: same identities, and each chained onto the
-/// stele its predecessor left.
+/// snapshot its predecessor left.
 #[test]
 #[ignore = "spawns a registry"]
 fn a_prepared_batch_publishes_what_direct_publishes_do() {
@@ -749,7 +749,7 @@ fn a_prepared_batch_publishes_what_direct_publishes_do() {
 }
 
 /// The registry, except that the seal fails: every layer is up and recorded,
-/// and the stele never becomes readable.
+/// and the snapshot never becomes readable.
 struct SealFails<'a>(&'a stelae::oci::Registry);
 
 impl stelae::SnapshotWriter for SealFails<'_> {
@@ -784,7 +784,7 @@ impl stelae::SnapshotWriter for SealFails<'_> {
 ///
 /// The round trip is the criterion's own: inspect the predecessor, hand the
 /// bytes to the same `Following::read` that `digest --chain-from` calls, and
-/// the reproduction arrives at the digest of the stele published against it.
+/// the reproduction arrives at the digest of the snapshot published against it.
 #[test]
 #[ignore = "spawns a registry"]
 fn an_inspection_reports_the_manifest_and_its_json_chains_a_digest() {
@@ -839,7 +839,7 @@ fn an_inspection_reports_the_manifest_and_its_json_chains_a_digest() {
     assert_eq!(
         reproduced.digest().unwrap(),
         second.identity,
-        "inspect's own output chained the digest of the stele published against it"
+        "inspect's own output chained the digest of the snapshot published against it"
     );
 
     eprintln!(

@@ -30,7 +30,7 @@ use watcher::Watcher;
 
 const REPOSITORY: &str = "dolos/faults";
 
-/// Where the blocks snapshot the published stele names lives.
+/// Where the blocks snapshot the published snapshot names lives.
 const BLOCKS_REPOSITORY: &str = "dolos/faults-blocks";
 
 /// Install `ring` as the process-default crypto provider, which `stelae::oci`
@@ -46,7 +46,7 @@ fn install_crypto_provider() {
 }
 
 /// A node's stores, published once into `registry`, the closed epoch's blocks
-/// beside the stele in [`BLOCKS_REPOSITORY`].
+/// beside the snapshot in [`BLOCKS_REPOSITORY`].
 fn published(
     registry: &FaultRegistry,
     scratch: &std::path::Path,
@@ -253,8 +253,8 @@ fn an_exhausted_layer_read_names_the_blob_and_the_attempts() {
 /// Restore with `fault` armed, and return what the observer saw retried.
 ///
 /// The reads before the first layer (the manifest and the config blob) run
-/// before the restore has a stele to watch, so this is what shows the
-/// observer is attached to the registry, not only to the stele it yields.
+/// before the restore has a snapshot to watch, so this is what shows the
+/// observer is attached to the registry, not only to the snapshot it yields.
 fn retries_seen_with(fault: impl FnOnce(&FaultRegistry)) -> (FaultRegistry, usize) {
     let registry = FaultRegistry::spawn();
     let scratch = tempfile::tempdir().unwrap();
@@ -323,7 +323,7 @@ fn a_retried_manifest_read_is_announced() {
     assert_eq!(retries, 1, "the manifest retry reaches the observer");
 }
 
-/// A resume whose recorded stele the registry won't serve is refused as gone
+/// A resume whose recorded snapshot the registry won't serve is refused as gone
 /// only when the registry says the tag is absent. Any other failure, here a
 /// refused read, is reported as itself, since starting over with `--force`
 /// is not the fix for it.

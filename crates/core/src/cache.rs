@@ -2,7 +2,7 @@
 //! 0059).
 //!
 //! A use registers a [`CacheNamespace`] and keeps entries under it, keyed and
-//! valued by bytes in its own encoding. Nothing here enters the WAL, steles,
+//! valued by bytes in its own encoding. Nothing here enters the WAL, snapshots,
 //! restore or any ledger computation; deleting the cache changes no answer.
 //!
 //! [`TieredCache`] is the store: the memory tier

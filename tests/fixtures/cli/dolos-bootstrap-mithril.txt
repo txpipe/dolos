@@ -15,8 +15,8 @@ Options:
       --skip-if-data
           Exit 0 without bootstrapping when storage already holds a node, as an interrupted replay
           that has committed leaves one for `--continue` to resume; data without one, as an
-          interrupted stele restore or a bootstrap interrupted before it commits a cursor leaves,
-          and a store this release refuses are errors instead
+          interrupted Dolos snapshot restore or a bootstrap interrupted before it commits a cursor
+          leaves, and a store this release refuses are errors instead
       --download-dir <DOWNLOAD_DIR>
           [default: ./snapshot]
       --verbose

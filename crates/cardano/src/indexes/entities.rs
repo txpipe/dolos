@@ -23,8 +23,8 @@ pub const SCRIPT: EntityKind = EntityKind::new("script", ScriptKey::LEN);
 /// files it under: the header, then the credential's hash.
 pub const STAKE: EntityKind = EntityKind::new("stake", 29);
 
-/// Every kind, in name order: the list a stele export walks and a restore
-/// holds a stele's declaration against.
+/// Every kind, in name order: the list a snapshot export walks and a restore
+/// holds a snapshot's declaration against.
 pub const ALL: [EntityKind; 3] = [ASSET, SCRIPT, STAKE];
 
 #[cfg(test)]
@@ -36,7 +36,7 @@ mod tests {
         assert!(ALL.windows(2).all(|pair| pair[0].name() < pair[1].name()));
     }
 
-    /// The names are hashed into stored keys and name the stele layers, so a
+    /// The names are hashed into stored keys and name the snapshot layers, so a
     /// rename that looks cosmetic orphans every entry of the kind.
     #[test]
     fn names_and_widths_are_storage_format() {

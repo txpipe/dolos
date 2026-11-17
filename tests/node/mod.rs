@@ -197,7 +197,7 @@ impl Node {
     }
 
     /// Put the synced stores on the first block of epoch 1, as a
-    /// `stop_epoch` sync leaves them, so a stele can be cut from them.
+    /// `stop_epoch` sync leaves them, so a snapshot can be cut from them.
     ///
     /// Appends two empty blocks chained onto the archive's tip — the last block
     /// of epoch 0 and the first of epoch 1 — and moves the state cursor onto
@@ -211,7 +211,7 @@ impl Node {
 
     /// The same at the first block of `epoch`, chained onto the archive's tip:
     /// after `stand_at_boundary`, `stand_at_boundary_of(2)` moves the stores
-    /// on to the next boundary, so a second stele can follow the first.
+    /// on to the next boundary, so a second snapshot can follow the first.
     pub fn stand_at_boundary_of(&self, epoch: u64) -> dolos_core::ChainPoint {
         use dolos_cardano::pallas::ledger::traverse::MultiEraBlock;
         use dolos_core::{ArchiveStore as _, ArchiveWriter as _, StateWriter as _};
@@ -245,8 +245,9 @@ impl Node {
     }
 
     /// Write a network root as a restore fixture: the export's blocks
-    /// snapshot in its `blocks` directory and the stele naming it in `dolos`.
-    pub fn write_stele(&self, output: &std::path::Path) {
+    /// snapshot in its `blocks` directory and the snapshot naming it in
+    /// `dolos`.
+    pub fn write_snapshot(&self, output: &std::path::Path) {
         use dolos_snapshot::facade::{Selection, SnapshotSource as _, StoreSnapshot};
 
         let stores =
@@ -279,7 +280,7 @@ impl Node {
         command.output().unwrap()
     }
 
-    /// The same, naming which stele in a repository to read.
+    /// The same, naming which snapshot in a repository to read.
     pub fn bootstrap_stelae_at(&self, source: &str, point: &str) -> std::process::Output {
         let mut command = self.command();
 
@@ -299,9 +300,9 @@ impl Node {
     /// `dolos bootstrap <flags>` with no subcommand and no terminal.
     ///
     /// With no subcommand, bootstrap asks which method to use — and, for a
-    /// stele, where the stele is. With no stdin the first prompt cannot be
-    /// answered, which is the cheapest stand-in for the cases that matter: a
-    /// typo, a cancel, a machine with no terminal.
+    /// snapshot, where the snapshot is. With no stdin the first prompt cannot
+    /// be answered, which is the cheapest stand-in for the cases that
+    /// matter: a typo, a cancel, a machine with no terminal.
     pub fn bootstrap_headless(&self, flags: &[&str]) -> std::process::Output {
         let mut command = self.command();
 
