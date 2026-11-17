@@ -471,16 +471,7 @@ fn check_dir(config: &RootConfig, root: &Path, clears: bool) -> miette::Result<P
     let [dolos, blocks] = [DOLOS_REPOSITORY, BLOCKS_REPOSITORY].map(|name| root.join(name));
 
     for (dir, name) in [(&dolos, DOLOS_REPOSITORY), (&blocks, BLOCKS_REPOSITORY)] {
-        if !dir.is_dir() {
-            miette::bail!(
-                help = format!(
-                    "a file:// source names a network root holding `{DOLOS_REPOSITORY}/` and \
-                     `{BLOCKS_REPOSITORY}/`, each an OCI image layout"
-                ),
-                "{} holds no `{name}` directory",
-                root.display(),
-            );
-        }
+        check_root_dir(&root, dir, name)?;
     }
 
     let stele = SnapshotDir::open(&dolos)
@@ -527,6 +518,33 @@ fn check_dir(config: &RootConfig, root: &Path, clears: bool) -> miette::Result<P
     }
 
     Ok(root)
+}
+
+/// Refuse a network root whose `name` directory, `dir`, is absent or is not
+/// a directory. Any other fault reading it, such as a permission or a
+/// symlink loop, is refused with its own cause rather than read as absent.
+fn check_root_dir(root: &Path, dir: &Path, name: &str) -> miette::Result<()> {
+    use std::io::ErrorKind;
+
+    let help = format!(
+        "a file:// source names a network root holding `{DOLOS_REPOSITORY}/` and \
+         `{BLOCKS_REPOSITORY}/`, each an OCI image layout"
+    );
+
+    match std::fs::metadata(dir) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => miette::bail!(help = help, "{} is not a directory", dir.display()),
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+            miette::bail!(
+                help = help,
+                "{} holds no `{name}` directory",
+                root.display()
+            )
+        }
+        Err(error) => Err(error)
+            .into_diagnostic()
+            .with_context(|| format!("reading {}", dir.display())),
+    }
 }
 
 /// What every restore needs before it can read a layer, whatever the source is.
@@ -657,19 +675,12 @@ fn restore(
                 .with_context(|| format!("opening the repository {repo}"))
             };
 
-            let (repository, blocks_repository) = opened.insert((open(dolos)?, open(blocks)?));
+            let opened = opened.insert(open_both(dolos, blocks, open)?);
 
             println!("source:   {dolos} ({})", inputs.point);
             println!("blocks:   {blocks}");
 
-            (
-                RestoreInput::Repository {
-                    repository,
-                    point: inputs.point,
-                    blocks: Some(blocks_repository),
-                },
-                dolos.to_string(),
-            )
+            (repository_input(opened, inputs.point), dolos.to_string())
         }
     };
 
@@ -689,6 +700,29 @@ fn restore(
     report(&outcome.plan, &outcome.outlook, &outcome.summary);
 
     Ok(())
+}
+
+/// The stele's repository and the blocks repository beside it, opened by
+/// `open` in that order.
+fn open_both<T>(
+    dolos: &Repository,
+    blocks: &Repository,
+    open: impl Fn(&Repository) -> miette::Result<T>,
+) -> miette::Result<(T, T)> {
+    Ok((open(dolos)?, open(blocks)?))
+}
+
+/// A registry restore's input: the stele at `point` in the first repository
+/// of `opened`, its closed epochs' blocks in the second.
+fn repository_input(
+    (repository, blocks): &(SnapshotRepository, SnapshotRepository),
+    point: Point,
+) -> RestoreInput<'_> {
+    RestoreInput::Repository {
+        repository,
+        point,
+        blocks: Some(blocks),
+    }
 }
 
 /// The line a resumed restore starts with, before its first layer.
@@ -1000,6 +1034,104 @@ mod tests {
                 "{message}"
             );
         }
+    }
+
+    /// A root whose `dolos` is a file is refused as not a directory, not as
+    /// lacking one.
+    #[test]
+    fn a_root_whose_directory_is_a_file_is_refused_as_not_a_directory() {
+        let (root, config) = root_without(Some(DOLOS_REPOSITORY));
+        let dolos = root.path().join(DOLOS_REPOSITORY);
+        std::fs::write(&dolos, b"").unwrap();
+
+        let message = check_dir(&config, root.path(), false)
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(message, format!("{} is not a directory", dolos.display()));
+    }
+
+    /// A fault reading a root's directory other than its absence, here a
+    /// symlink loop, is refused with the OS cause, not as a missing directory.
+    #[cfg(unix)]
+    #[test]
+    fn a_root_that_cannot_be_read_is_refused_with_its_cause() {
+        let (root, config) = root_without(Some(DOLOS_REPOSITORY));
+        let dolos = root.path().join(DOLOS_REPOSITORY);
+        std::os::unix::fs::symlink(&dolos, &dolos).unwrap();
+
+        let report = check_dir(&config, root.path(), false).unwrap_err();
+        let message = report.to_string();
+        let causes: Vec<String> = report.chain().skip(1).map(ToString::to_string).collect();
+
+        assert!(!message.contains("holds no"), "{message}");
+        assert_eq!(message, format!("reading {}", dolos.display()));
+
+        let looped = std::io::Error::from_raw_os_error(nix::libc::ELOOP).to_string();
+        assert!(
+            causes.iter().any(|cause| cause.contains(&looped)),
+            "{causes:?}"
+        );
+    }
+
+    /// A registry restore opens the root's `dolos` repository for the stele
+    /// and its `blocks` repository for the blocks, in that order.
+    #[test]
+    fn a_registry_restore_opens_the_dolos_then_the_blocks_repository() {
+        let storage = tempfile::tempdir().unwrap();
+
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = storage.path().to_path_buf();
+
+        let root = "oci://127.0.0.1:5000/mirror/preview";
+        let inputs = resolve(&config, &args(Some(root)), None, false).unwrap();
+        let Reader::Repo { dolos, blocks, .. } = &inputs.reader else {
+            panic!("{root} did not resolve to repositories");
+        };
+
+        let opened = open_both(dolos, blocks, |repo| Ok(repo.to_string())).unwrap();
+
+        assert_eq!(opened, (format!("{root}/dolos"), format!("{root}/blocks")));
+    }
+
+    /// The registry input reads the stele from the first opened repository
+    /// and hands the second over as the blocks repository.
+    #[test]
+    fn a_registry_input_hands_over_the_blocks_repository() {
+        // What `main` installs before any client is built.
+        #[allow(clippy::let_underscore_must_use)]
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let scratch = tempfile::tempdir().unwrap();
+        let open = |path: &str| {
+            let repository: Repository = format!("oci://127.0.0.1:1/mirror/preview/{path}")
+                .parse()
+                .unwrap();
+
+            SnapshotRepository::open(
+                &repository,
+                true,
+                Auth::Anonymous,
+                scratch.path().to_path_buf(),
+                registry::Tuning::default(),
+            )
+            .unwrap()
+        };
+
+        let opened = (open(DOLOS_REPOSITORY), open(BLOCKS_REPOSITORY));
+
+        let RestoreInput::Repository {
+            repository,
+            point,
+            blocks: Some(blocks),
+        } = repository_input(&opened, Point::Epoch(7))
+        else {
+            panic!("the registry input hands over no blocks repository");
+        };
+
+        assert!(std::ptr::eq(repository, &opened.0));
+        assert!(std::ptr::eq(blocks, &opened.1));
+        assert_eq!(point, Point::Epoch(7));
     }
 
     /// A root with both directories is read for its stele: an empty `dolos`

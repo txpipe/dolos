@@ -11,6 +11,8 @@
 //! nothing but a directory the retained profile encoder wrote.
 
 mod node;
+#[path = "../crates/snapshot/tests/paired/mod.rs"]
+mod paired;
 
 use dolos_core::{ArchiveStore as _, StateStore as _, WalStore as _};
 use node::{assert_ok, Node};
@@ -357,6 +359,81 @@ fn a_root_without_its_blocks_directory_is_refused_naming_it() {
         reports(
             &output.stderr,
             &format!("{} holds no `blocks` directory", root.display())
+        ),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(Contents::read(&node), before);
+}
+
+/// Write `root` as a network root whose stele reads its closed epochs' blocks
+/// from its `blocks` repository: the node's own stele, paired
+/// ([`paired::pair`]). Unless `with_blocks`, the root's `blocks` is an empty
+/// image layout, and the blocks lineage goes elsewhere.
+fn write_paired_root(node: &Node, root: &std::path::Path, with_blocks: bool) {
+    use dolos_snapshot::dir::SnapshotDir;
+
+    let unpaired = node.root.path().join("unpaired");
+    node.write_stele(&unpaired);
+
+    let blocks = match with_blocks {
+        true => root.join("blocks"),
+        false => {
+            SnapshotDir::create(root.join("blocks")).unwrap();
+            node.root.path().join("elsewhere")
+        }
+    };
+
+    let paired = paired::pair(
+        &unpaired.join("dolos"),
+        &SnapshotDir::create(root.join("dolos")).unwrap(),
+        &SnapshotDir::create(&blocks).unwrap(),
+    );
+    assert!(!paired.blocks.is_empty(), "the stele closed no epoch");
+
+    std::fs::remove_dir_all(unpaired).unwrap();
+}
+
+/// A stele whose closed epochs' blocks are in its root's `blocks`
+/// repository restores them from there, at the CLI.
+#[test]
+fn a_paired_root_restores_its_blocks_from_its_blocks_repository() {
+    let node = Node::new();
+    node.sync();
+    node.stand_at_boundary();
+    let before = Contents::read(&node);
+    before.assert_populated();
+
+    let root = node.root.path().join("root");
+    write_paired_root(&node, &root, true);
+
+    let output = node.bootstrap_stelae(&format!("file://{}", root.display()));
+    assert_ok(&output);
+
+    assert_eq!(Contents::read(&node), before);
+}
+
+/// A root whose `blocks` layout lacks the blocks snapshot the stele reads is
+/// refused before `--force` clears anything.
+#[test]
+fn a_root_whose_blocks_lack_the_steles_snapshot_is_refused_before_force_clears() {
+    let node = Node::new();
+    node.sync();
+    node.stand_at_boundary();
+    let before = Contents::read(&node);
+
+    let root = node.root.path().join("root");
+    write_paired_root(&node, &root, false);
+
+    let output = node.bootstrap_stelae(&format!("file://{}", root.display()));
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        reports(
+            &output.stderr,
+            &format!(
+                "{} holds no blocks snapshot at epoch-",
+                root.join("blocks").display()
+            )
         ),
         "{}",
         String::from_utf8_lossy(&output.stderr)
