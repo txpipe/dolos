@@ -17,21 +17,34 @@ use crate::{
 /// The `/network` body, recomputed at most every 30 s.
 pub const CACHE: CacheNamespace = CacheNamespace::tip_scoped("network", 1, Duration::from_secs(30));
 
-/// The namespace holds the one body.
-const CACHE_KEY: &[u8] = b"";
+/// The body of `epoch` is kept under the epoch's number, so the first request
+/// of an epoch misses and waits for the fill instead of being given the
+/// previous epoch's pots.
+fn cache_key(epoch: u64) -> [u8; 8] {
+    epoch.to_be_bytes()
+}
 
 pub fn register_cache(cache: &impl CacheStore) -> Result<(), CacheError> {
     cache.register(CACHE)
 }
 
-fn compute_network_sync<D: Domain>(domain: &Facade<D>) -> Result<(Network, u64), StatusCode>
+fn load_active<D: Domain>(domain: &Facade<D>) -> Result<EpochState, StatusCode>
+where
+    Option<EpochState>: From<D::Entity>,
+{
+    dolos_cardano::load_epoch::<D>(domain.state()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// The body for `active`, the epoch read when the request came in, with the
+/// stake of every account as the scan finds it.
+fn compute_network_sync<D: Domain>(
+    domain: &Facade<D>,
+    active: EpochState,
+) -> Result<(Network, u64), StatusCode>
 where
     Option<EpochState>: From<D::Entity>,
 {
     let genesis = domain.genesis();
-
-    let active = dolos_cardano::load_epoch::<D>(domain.state())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut live_stake = 0;
     let mut active_stake = 0;
@@ -60,15 +73,28 @@ where
     Ok((builder.into_model()?, scanned))
 }
 
-/// The body as JSON, costed by the accounts its scan read.
-fn fill_network<D: Domain>(domain: &Facade<D>) -> Result<CacheEntry, String>
+/// The body as JSON, costed by the accounts its scan read. Drops the bodies
+/// of the neighbouring epochs, which a boundary or a rollback across one left
+/// behind.
+fn fill_network<D: Domain>(domain: &Facade<D>, active: EpochState) -> Result<CacheEntry, String>
 where
     Option<EpochState>: From<D::Entity>,
 {
-    let (network, scanned) =
-        compute_network_sync(domain).map_err(|status| format!("/network answered {status}"))?;
+    let epoch = active.number;
+
+    let (network, scanned) = compute_network_sync(domain, active)
+        .map_err(|status| format!("/network answered {status}"))?;
 
     let body = serde_json::to_vec(&network).map_err(|error| error.to_string())?;
+
+    for neighbour in [epoch.checked_sub(1), epoch.checked_add(1)]
+        .into_iter()
+        .flatten()
+    {
+        if let Err(error) = domain.cache().remove(CACHE.name, &cache_key(neighbour)) {
+            tracing::warn!(%error, "cannot drop another epoch's /network body");
+        }
+    }
 
     Ok(CacheEntry::new(body, scanned))
 }
@@ -78,14 +104,17 @@ where
     Option<EpochState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
+    let active = load_active(&domain)?;
+    let key = cache_key(active.number);
+
     let fill = {
         let domain = domain.clone();
-        move || fill_network(&domain)
+        move || fill_network(&domain, active)
     };
 
     let body = domain
         .cache()
-        .get_or_fill(CACHE.name, CACHE_KEY, fill)
+        .get_or_fill(CACHE.name, &key, fill)
         .await
         .map_err(crate::log_and_500("failed to fill the /network cache"))?;
 
@@ -121,7 +150,8 @@ mod tests {
     #[tokio::test]
     async fn network_body_is_the_model_as_json() {
         let app = TestApp::new();
-        let (expected, _) = compute_network_sync(&app.facade()).unwrap();
+        let facade = app.facade();
+        let (expected, _) = compute_network_sync(&facade, load_active(&facade).unwrap()).unwrap();
 
         let (status, headers, body) = app.get_with_headers("/network").await;
 
@@ -137,7 +167,7 @@ mod tests {
 
         let first = network_body(&app).await;
         replicate_accounts_and_pools(&facade.inner, 1);
-        let (changed, _) = compute_network_sync(&facade).unwrap();
+        let (changed, _) = compute_network_sync(&facade, load_active(&facade).unwrap()).unwrap();
         let changed = serde_json::to_vec(&changed).unwrap();
         assert_ne!(
             first, changed,
@@ -159,6 +189,92 @@ mod tests {
         })
         .await
         .expect("the refill never replaced the stale body");
+    }
+
+    /// Writes the next epoch's state, as ESTART would, with reserves moved to
+    /// the treasury so the pots differ from every earlier epoch's.
+    fn cross_into_next_epoch(app: &TestApp) -> EpochState {
+        use dolos_core::StateWriter as _;
+
+        let facade = app.facade();
+        let mut state = load_active(&facade).unwrap();
+        state.number += 1;
+        state.initial_pots.reserves -= 1_000_000;
+        state.initial_pots.treasury += 1_000_000;
+
+        let writer = facade.state().start_writer().expect("state writer");
+        writer.write_entity_typed(&(), &state).expect("epoch write");
+        writer.commit().expect("state commit");
+
+        state
+    }
+
+    fn treasury(body: &[u8]) -> String {
+        let network: Network = serde_json::from_slice(body).unwrap();
+        network.supply.treasury
+    }
+
+    fn network_entries(app: &TestApp) -> u64 {
+        let stats = app.facade().cache().stats().unwrap();
+        let ns = stats.namespaces.iter().find(|ns| ns.name == CACHE.name);
+        ns.expect("the namespace is registered").memory.entries
+    }
+
+    #[tokio::test]
+    async fn the_first_request_of_an_epoch_gets_its_pots_whatever_the_entry_age() {
+        let app = TestApp::new();
+
+        let before = network_body(&app).await;
+
+        // the entry is fresh, well within its ttl
+        let next = cross_into_next_epoch(&app);
+        assert_ne!(treasury(&before), next.initial_pots.treasury.to_string());
+
+        let after = network_body(&app).await;
+        assert_eq!(treasury(&after), next.initial_pots.treasury.to_string());
+
+        // the entry is stale at once
+        let stale = CacheNamespace::tip_scoped(CACHE.name, CACHE.version, Duration::ZERO);
+        app.facade().cache().register(stale).unwrap();
+        assert_eq!(network_body(&app).await, after);
+
+        let next = cross_into_next_epoch(&app);
+        let after = network_body(&app).await;
+        assert_eq!(treasury(&after), next.initial_pots.treasury.to_string());
+
+        let facade = app.facade();
+        let (expected, _) = compute_network_sync(&facade, next).unwrap();
+        assert_eq!(after, serde_json::to_vec(&expected).unwrap());
+        assert_eq!(
+            network_entries(&app),
+            1,
+            "the previous epoch's body is dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn requests_after_a_boundary_share_one_fill() {
+        let slow = TestFault::SlowStateScans(Duration::from_millis(200));
+        let app = Arc::new(TestApp::new_with_fault(Some(slow)));
+
+        let before = network_body(&app).await;
+        let next = cross_into_next_epoch(&app);
+        let scans = app.facade().inner.entity_scans();
+
+        let requests: Vec<_> = (0..16)
+            .map(|_| {
+                let app = app.clone();
+                tokio::spawn(async move { network_body(&app).await })
+            })
+            .collect();
+
+        for request in requests {
+            let body = request.await.unwrap();
+            assert_ne!(body, before);
+            assert_eq!(treasury(&body), next.initial_pots.treasury.to_string());
+        }
+
+        assert_eq!(app.facade().inner.entity_scans() - scans, 1);
     }
 
     #[tokio::test]
