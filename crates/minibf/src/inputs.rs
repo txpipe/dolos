@@ -15,8 +15,8 @@
 //!   a block's txs into a single round of deduped fetches (via
 //!   [`dolos_core::AsyncQueryFacade::tx_cbor_batch_with_positions`]) and only
 //!   asks for hashes it does not already hold, so a dependency shared across
-//!   blocks is fetched once per request.
-//!   Misses (genesis or pruned txs) are recorded too, so they are not retried.
+//!   blocks is fetched once per request. Misses (genesis or pruned txs) are
+//!   recorded too, so they are not retried.
 //! - [`InputResolver`] borrows those bytes and memoizes the decoding, handing
 //!   out transient [`MultiEraOutput`] borrows tied to `&mut self` — the same
 //!   ownership constraint `TxModelBuilder` manages for the `/txs/{hash}/*`
