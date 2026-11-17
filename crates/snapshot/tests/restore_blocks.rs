@@ -746,6 +746,7 @@ fn a_root_export_whose_stele_lineage_does_not_follow_seals_no_blocks() {
     let blocks = root.path().join(export::BLOCKS_REPOSITORY);
     std::fs::remove_dir_all(&blocks).unwrap();
     copy_dir(&ahead.path().join(export::BLOCKS_REPOSITORY), &blocks);
+    let blobs = blocks_blobs(root.path());
 
     let error = publish(root.path(), HEAD).unwrap_err();
 
@@ -761,6 +762,7 @@ fn a_root_export_whose_stele_lineage_does_not_follow_seals_no_blocks() {
         "{error:?}"
     );
     assert_eq!(latest_blocks(root.path()), Some(2));
+    assert_eq!(blocks_blobs(root.path()), blobs);
 }
 
 /// A root whose stele lineage is another network's is refused before a
@@ -796,6 +798,145 @@ fn a_root_export_onto_another_networks_stele_seals_no_blocks() {
         "{error:?}"
     );
     assert_eq!(latest_blocks(root.path()), None);
+    assert!(!root.path().join(export::BLOCKS_REPOSITORY).exists());
+}
+
+/// A first root export interrupted after its blocks snapshot sealed and its
+/// stele layout was created, before the stele sealed, leaves `dolos/` a
+/// layout with no stele: the retry starts the stele lineage and writes what
+/// an uninterrupted export does.
+#[test]
+fn a_first_root_export_interrupted_before_its_stele_seals_starts_the_lineage() {
+    let domain = harness::<MemoryStores>();
+    let (whole, interrupted) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+
+    let publish = |root: &Path| {
+        export::publish(
+            root,
+            &plan_at_boundary(&domain, 1),
+            domain.archive(),
+            domain.state(),
+            &Observer::silent(),
+        )
+        .unwrap()
+    };
+
+    let expected = publish(whole.path());
+
+    copy_dir(
+        &whole.path().join(export::BLOCKS_REPOSITORY),
+        &interrupted.path().join(export::BLOCKS_REPOSITORY),
+    );
+    SnapshotDir::create(node::dolos(interrupted.path())).unwrap();
+    assert!(node::dolos(interrupted.path())
+        .join(stelae::dir::LAYOUT_FILE)
+        .exists());
+
+    assert_eq!(publish(interrupted.path()), expected);
+    assert_eq!(
+        paired::digests(interrupted.path()).dolos,
+        paired::digests(whole.path()).dolos
+    );
+}
+
+/// A plan that names its blocks snapshot, as the publisher host's does, is
+/// held to the stele lineage's link rule: a root whose stele lineage stands
+/// two sequences behind is refused.
+#[test]
+fn a_referenced_root_export_whose_stele_lineage_does_not_follow_is_refused() {
+    let domain = harness::<MemoryStores>();
+    let root = tempfile::tempdir().unwrap();
+
+    export::publish(
+        root.path(),
+        &plan_at_boundary(&domain, 1),
+        domain.archive(),
+        domain.state(),
+        &Observer::silent(),
+    )
+    .unwrap();
+    let stele = paired::digests(root.path()).dolos;
+
+    let error = export::publish(
+        root.path(),
+        &plan_at_boundary(&domain, HEAD).with_blocks(some_blocks()),
+        domain.archive(),
+        domain.state(),
+        &Observer::silent(),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            Error::LinkBreak {
+                latest: 1,
+                publishing: HEAD,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(paired::digests(root.path()).dolos, stele);
+}
+
+/// A plan that names its blocks snapshot is held to the stele lineage's
+/// network: a root whose stele lineage is another network's is refused.
+#[test]
+fn a_referenced_root_export_onto_another_networks_stele_is_refused() {
+    let domain = harness::<MemoryStores>();
+    let root = tempfile::tempdir().unwrap();
+
+    let mut foreign = plan_at_boundary(&domain, 1);
+    foreign.network = dolos_snapshot::Network::for_magic(42);
+    export::publish(
+        root.path(),
+        &foreign,
+        domain.archive(),
+        domain.state(),
+        &Observer::silent(),
+    )
+    .unwrap();
+    let stele = paired::digests(root.path()).dolos;
+
+    let error = export::publish(
+        root.path(),
+        &plan_at_boundary(&domain, 2).with_blocks(some_blocks()),
+        domain.archive(),
+        domain.state(),
+        &Observer::silent(),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(error, Error::NetworkMismatch { found: 42, .. }),
+        "{error:?}"
+    );
+    assert_eq!(paired::digests(root.path()).dolos, stele);
+}
+
+/// A blocks reference for the tests that name one.
+fn some_blocks() -> stelae::Digest {
+    format!("sha256:{}", "ab".repeat(32)).parse().unwrap()
+}
+
+/// The blobs in the blocks layout of the root at `root`, if it has any.
+fn blocks_blobs(root: &Path) -> Vec<std::ffi::OsString> {
+    let blobs = root
+        .join(export::BLOCKS_REPOSITORY)
+        .join("blobs")
+        .join("sha256");
+
+    if !blobs.exists() {
+        return Vec::new();
+    }
+
+    let mut names: Vec<_> = std::fs::read_dir(blobs)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    names.sort();
+    names
 }
 
 /// The sequence of the latest blocks snapshot in the root at `root`, if any.
