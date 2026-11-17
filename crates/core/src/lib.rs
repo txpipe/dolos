@@ -44,6 +44,7 @@ pub mod point;
 pub mod state;
 pub mod submit;
 pub mod sync;
+pub mod telemetry;
 pub mod wal;
 pub mod work_unit;
 

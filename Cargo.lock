@@ -1583,6 +1583,7 @@ dependencies = [
  "unicase",
  "unicode-normalization",
  "vergen-gitcl",
+ "whoami",
  "xxhash-rust",
  "zstd",
 ]
@@ -1630,6 +1631,7 @@ dependencies = [
  "hex",
  "itertools 0.14.0",
  "opentelemetry",
+ "opentelemetry_sdk",
  "pallas",
  "proptest",
  "rayon",
@@ -6329,11 +6331,13 @@ dependencies = [
  "pin-project",
  "sync_wrapper",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tower 0.5.2",
  "tower-layer",
  "tower-service",
  "tracing",
+ "webpki-roots",
 ]
 
 [[package]]

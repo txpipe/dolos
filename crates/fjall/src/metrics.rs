@@ -3,6 +3,7 @@
 use std::cmp::Reverse;
 use std::sync::{Arc, Weak};
 
+use dolos_core::telemetry;
 use fjall::{AbstractTree as _, Keyspace};
 use opentelemetry::{global, metrics::ObservableGauge, KeyValue};
 
@@ -10,7 +11,7 @@ use opentelemetry::{global, metrics::ObservableGauge, KeyValue};
 pub const METER: &str = "dolos-fjall";
 
 /// The gauge of a store's largest L0 run count.
-pub const L0_RUNS_MAX: &str = "fjall_l0_runs_max";
+pub const L0_RUNS_MAX: &str = "dolos.storage.l0_runs_max";
 
 /// A writable store's keyspaces and the gauge that reads them. The gauge
 /// holds them weakly, so it reads nothing once the store has closed.
@@ -38,8 +39,8 @@ impl L0Runs {
                 };
 
                 let attributes = [
-                    KeyValue::new("store", store),
-                    KeyValue::new("keyspace", keyspace),
+                    KeyValue::new(telemetry::STORE, store),
+                    KeyValue::new(telemetry::KEYSPACE, keyspace),
                 ];
                 observer.observe(runs as u64, &attributes);
             })

@@ -34,3 +34,4 @@ futures-executor = "0.3.31"
 proptest = "1.7.0"
 serde_json.workspace = true
 dolos-testing = { path = "../testing" }
+opentelemetry_sdk = { workspace = true, features = ["testing"] }

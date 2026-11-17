@@ -50,6 +50,20 @@ pub struct DomainAdapter {
     pub cache: CacheBackend,
     pub tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
     pub query_limiter: QueryLimiter,
+    /// The chain tip gauges over `archive`, reporting while the domain lives.
+    pub tip_gauges: Arc<dolos_core::telemetry::TipGauges>,
+}
+
+/// Registers the `dolos.sync.tip.*` gauges over the archive's tip block.
+pub fn tip_gauges(archive: &ArchiveStoreBackend) -> Arc<dolos_core::telemetry::TipGauges> {
+    let archive = archive.clone();
+
+    Arc::new(dolos_core::telemetry::TipGauges::register(move || {
+        let (_, body) = archive.get_tip().ok()??;
+        let block = MultiEraBlock::decode(&body).ok()?;
+
+        Some((block.slot(), block.number()))
+    }))
 }
 
 impl DomainAdapter {

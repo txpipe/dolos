@@ -32,7 +32,7 @@ use tokio::{
     sync::{oneshot, Semaphore},
 };
 
-use crate::{builtin::MemoryCacheTier, config::CacheConfig, QueryLimiter};
+use crate::{builtin::MemoryCacheTier, config::CacheConfig, telemetry, QueryLimiter};
 
 /// What an entry cost to build, in the unit its use measures.
 pub type Cost = u64;
@@ -967,7 +967,7 @@ struct Metrics {
 impl Metrics {
     /// The gauges read the cache's stats when the meter collects them.
     fn new<D: CacheDiskTier>(cache: Weak<Inner<D>>) -> Self {
-        let meter = global::meter("dolos-cache");
+        let meter = global::meter(telemetry::METER);
 
         let gauge = |name: &'static str, unit: &'static str, read: fn(&TierStats) -> u64| {
             let cache = cache.clone();
@@ -994,16 +994,17 @@ impl Metrics {
         };
 
         Self {
-            hits: meter.u64_counter("cache_hits").build(),
-            misses: meter.u64_counter("cache_misses").build(),
-            fills: meter.u64_counter("cache_fills").build(),
-            evictions: meter.u64_counter("cache_evictions").build(),
+            hits: meter.u64_counter("dolos.cache.hits").build(),
+            misses: meter.u64_counter("dolos.cache.misses").build(),
+            fills: meter.u64_counter("dolos.cache.fills").build(),
+            evictions: meter.u64_counter("dolos.cache.evictions").build(),
             fill_time: meter
-                .f64_histogram("cache_fill_time")
+                .f64_histogram("dolos.cache.fill.duration")
                 .with_unit("s")
+                .with_boundaries(telemetry::DURATION_BOUNDARIES.to_vec())
                 .build(),
-            _bytes: gauge("cache_bytes", "By", |usage| usage.bytes),
-            _entries: gauge("cache_entries", "{entry}", |usage| usage.entries),
+            _bytes: gauge("dolos.cache.bytes", "By", |usage| usage.bytes),
+            _entries: gauge("dolos.cache.entries", "{entry}", |usage| usage.entries),
         }
     }
 
@@ -1020,7 +1021,7 @@ impl Metrics {
     }
 
     fn filled(&self, namespace: &'static str, took: Duration) {
-        let attributes = [KeyValue::new("namespace", namespace)];
+        let attributes = [KeyValue::new(telemetry::NAMESPACE, namespace)];
         self.fills.add(1, &attributes);
         self.fill_time.record(took.as_secs_f64(), &attributes);
     }
@@ -1028,8 +1029,8 @@ impl Metrics {
 
 fn attributes(namespace: &'static str, tier: Tier) -> [KeyValue; 2] {
     [
-        KeyValue::new("namespace", namespace),
-        KeyValue::new("tier", tier.name()),
+        KeyValue::new(telemetry::NAMESPACE, namespace),
+        KeyValue::new(telemetry::TIER, tier.name()),
     ]
 }
 

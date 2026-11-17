@@ -37,6 +37,7 @@ opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
 opentelemetry-otlp.workspace = true
 tracing-opentelemetry.workspace = true
+whoami = "2.1"
 
 dolos-core = { path = "crates/core" }
 dolos-cardano = { path = "crates/cardano", features = ["include-genesis"] }
@@ -112,6 +113,7 @@ toml = "0.8.13"
 dolos-cardano = { path = "crates/cardano" }
 dolos-core = { path = "crates/core" }
 dolos-testing = { path = "crates/testing" }
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 bech32 = { workspace = true }
 hex = { workspace = true }
 pallas = { workspace = true }
@@ -272,7 +274,16 @@ num-rational = "0.4.2"
 num-bigint = "0.4.6"
 opentelemetry = "0.32.0"
 opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.32.0", features = ["grpc-tonic"] }
+opentelemetry-otlp = { version = "0.32.0", features = [
+    "grpc-tonic",
+    "http-proto",
+    "reqwest-blocking-client",
+    "reqwest-rustls",
+    "tls-ring",
+    "tls-webpki-roots",
+    "metrics",
+    "trace",
+] }
 tracing-opentelemetry = "0.33"
 
 # `minicbor` is pinned to the 0.26 line that Pallas already pulls in, so the

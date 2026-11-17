@@ -207,6 +207,7 @@ fn the_full_reference_parses() {
         Some(TelemetryConfig {
             otlp_endpoint: "http://localhost:4317".into(),
             service_name: "dolos-mainnet".into(),
+            ..Default::default()
         })
     );
 }

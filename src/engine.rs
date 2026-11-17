@@ -161,6 +161,7 @@ impl<'a> DomainBuilder<'a> {
             cache,
             tip_broadcast,
             query_limiter,
+            tip_gauges: crate::adapters::tip_gauges(&stores.archive),
         })
     }
 }

@@ -7,7 +7,6 @@ pub mod genesis;
 pub mod governance;
 pub mod health;
 pub mod metadata;
-pub mod metrics;
 pub mod network;
 pub mod pools;
 pub mod scripts;
