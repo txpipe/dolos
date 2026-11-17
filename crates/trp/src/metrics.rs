@@ -334,12 +334,12 @@ mod tests {
                 "trp.checkStatus",
                 json!({ "hashes": [hex::encode(pending.as_ref())] }),
             ),
-            ("trp.dumpLogs", json!({})),
-            ("trp.peekPending", json!({})),
             // The test mempool has no inflight or finalized transactions, so
-            // peekInflight and dumpLogs both answer an empty list. A cursor
-            // tells them apart: peekInflight ignores it, dumpLogs rejects one
-            // that is not a number.
+            // dumpLogs and peekInflight both answer an empty list. A cursor
+            // that is not a number tells them apart: dumpLogs rejects it,
+            // peekInflight ignores it.
+            ("trp.dumpLogs", json!({ "cursor": "unused" })),
+            ("trp.peekPending", json!({})),
             ("trp.peekInflight", json!({ "cursor": "unused" })),
         ];
 
