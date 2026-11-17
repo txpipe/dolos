@@ -1,5 +1,7 @@
 use dolos_cardano::networks::{KnownNetwork, ResolvedNetwork};
-use dolos_core::config::{ConfigError, LoggingConfig, RootConfig, DEFAULT_CONFIG_FILE};
+use dolos_core::config::{
+    ConfigError, LoggingConfig, RootConfig, TelemetryConfig, DEFAULT_CONFIG_FILE,
+};
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use miette::{Context as _, IntoDiagnostic};
 use opentelemetry::trace::TracerProvider as _;
@@ -325,14 +327,28 @@ fn telemetry_providers(
         return Ok(None);
     };
 
-    let resource = crate::telemetry::resource(telemetry, network_label(config)?);
-    let (mut guard, tracer) = telemetry_pipeline(exporters.spans, resource.clone());
+    telemetry_providers_over(config, telemetry, exporters.spans, exporters.metrics).map(Some)
+}
 
-    guard.meters = exporters.metrics.map(|exporter| {
+/// [`telemetry_providers`] over the given exporters.
+pub(crate) fn telemetry_providers_over<S, M>(
+    config: &RootConfig,
+    telemetry: &TelemetryConfig,
+    spans: S,
+    metrics: Option<M>,
+) -> miette::Result<(TracingGuard, opentelemetry_sdk::trace::SdkTracer)>
+where
+    S: opentelemetry_sdk::trace::SpanExporter + 'static,
+    M: opentelemetry_sdk::metrics::exporter::PushMetricExporter,
+{
+    let resource = crate::telemetry::resource(telemetry, network_label(config)?);
+    let (mut guard, tracer) = telemetry_pipeline(spans, resource.clone());
+
+    guard.meters = metrics.map(|exporter| {
         crate::telemetry::install_meter_provider(exporter, telemetry.metrics_interval(), resource)
     });
 
-    Ok(Some((guard, tracer)))
+    Ok((guard, tracer))
 }
 
 /// The `dolos.network` resource attribute: a known network's name, else the
@@ -779,5 +795,33 @@ mod tests {
 
         assert_eq!(exported(), 1, "dropping the guard should flush the span");
         drop(provider);
+    }
+
+    /// The periodic reader holds metrics until its next interval, so dropping
+    /// the guard has to export them, as it does buffered spans.
+    #[test]
+    fn dropping_the_tracing_guard_exports_pending_metrics() {
+        use opentelemetry::metrics::MeterProvider as _;
+
+        let exporter = opentelemetry_sdk::metrics::InMemoryMetricExporter::default();
+        let meters = crate::telemetry::meter_provider(
+            exporter.clone(),
+            std::time::Duration::from_secs(3600),
+            opentelemetry_sdk::Resource::builder_empty().build(),
+        );
+        let guard = TracingGuard {
+            provider: None,
+            meters: Some(meters.clone()),
+        };
+
+        // `meters` stands in for the globally registered copy, as above.
+        meters.meter("test").u64_counter("work").build().add(1, &[]);
+        let exported = || exporter.get_finished_metrics().unwrap().len();
+        assert_eq!(exported(), 0, "the sample should wait for the interval");
+
+        drop(guard);
+
+        assert_eq!(exported(), 1, "dropping the guard should export the sample");
+        drop(meters);
     }
 }

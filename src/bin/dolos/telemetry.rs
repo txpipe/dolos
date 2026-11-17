@@ -6,11 +6,19 @@ use miette::{Context as _, IntoDiagnostic as _};
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::{Protocol, WithExportConfig as _, WithTonicConfig as _};
 use opentelemetry_sdk::{
-    metrics::{exporter::PushMetricExporter, PeriodicReader, SdkMeterProvider},
+    error::OTelSdkResult,
+    metrics::{
+        data::ResourceMetrics, exporter::PushMetricExporter, PeriodicReader, SdkMeterProvider,
+        Temporality,
+    },
     resource::{EnvResourceDetector, TelemetryResourceDetector},
     Resource,
 };
-use std::time::Duration;
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
+use tracing::{info, warn};
 
 /// The resource attribute naming the network: its name when it is known,
 /// else its magic.
@@ -29,9 +37,13 @@ fn signal_endpoint(config: &TelemetryConfig, path: &str) -> String {
 }
 
 /// Tonic adds no trust roots on its own, so an `https` endpoint gets the
-/// bundled ones.
+/// bundled ones. The scheme is matched in any case, as URLs allow.
 fn tls(endpoint: &str) -> Option<opentelemetry_otlp::tonic_types::transport::ClientTlsConfig> {
-    endpoint.starts_with("https://").then(|| {
+    let https = endpoint
+        .get(..8)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"));
+
+    https.then(|| {
         opentelemetry_otlp::tonic_types::transport::ClientTlsConfig::new().with_enabled_roots()
     })
 }
@@ -135,12 +147,65 @@ pub fn resource(config: &TelemetryConfig, network: String) -> Resource {
         .build()
 }
 
-/// A meter provider pushing to `exporter` every `interval`.
-fn meter_provider<E>(exporter: E, interval: Duration, resource: Resource) -> SdkMeterProvider
+/// A metric exporter that logs its failures under the `dolos` target, which
+/// the SDK reports only at debug: one warning when exports start failing and
+/// one line when they recover, so a rejecting collector is seen but not
+/// repeated every interval.
+struct LoggedExporter<E> {
+    inner: E,
+    failing: AtomicBool,
+}
+
+impl<E> LoggedExporter<E> {
+    fn new(inner: E) -> Self {
+        Self {
+            inner,
+            failing: AtomicBool::new(false),
+        }
+    }
+}
+
+impl<E: PushMetricExporter> PushMetricExporter for LoggedExporter<E> {
+    async fn export(&self, metrics: &ResourceMetrics) -> OTelSdkResult {
+        let result = self.inner.export(metrics).await;
+
+        match &result {
+            Err(err) if !self.failing.swap(true, Ordering::Relaxed) => {
+                warn!(%err, "OTLP metric export failed; repeats are not logged until one succeeds");
+            }
+            Ok(()) if self.failing.swap(false, Ordering::Relaxed) => {
+                info!("OTLP metric export recovered");
+            }
+            _ => (),
+        }
+
+        result
+    }
+
+    fn force_flush(&self) -> OTelSdkResult {
+        self.inner.force_flush()
+    }
+
+    fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
+        self.inner.shutdown_with_timeout(timeout)
+    }
+
+    fn temporality(&self) -> Temporality {
+        self.inner.temporality()
+    }
+}
+
+/// A meter provider pushing to `exporter` every `interval`, logging failed
+/// exports.
+pub(crate) fn meter_provider<E>(
+    exporter: E,
+    interval: Duration,
+    resource: Resource,
+) -> SdkMeterProvider
 where
     E: PushMetricExporter,
 {
-    let reader = PeriodicReader::builder(exporter)
+    let reader = PeriodicReader::builder(LoggedExporter::new(exporter))
         .with_interval(interval)
         .build();
 
@@ -180,6 +245,7 @@ mod tests {
         config::RootConfig,
         ArchiveStore as _, ArchiveWriter as _, ChainPoint, Domain as _,
     };
+    use dolos_testing::synthetic::SyntheticBlockConfig;
     use opentelemetry::{
         metrics::MeterProvider as _,
         trace::{Span as _, Tracer as _, TracerProvider as _},
@@ -197,6 +263,13 @@ mod tests {
         crate::common::ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The HTTP exporter's client takes its crypto provider from the process
+    /// default, which `main()` installs.
+    fn install_crypto_provider() {
+        #[allow(clippy::let_underscore_must_use)]
+        let _ = rustls::crypto::ring::default_provider().install_default();
     }
 
     fn telemetry(toml: &str) -> TelemetryConfig {
@@ -256,26 +329,53 @@ mod tests {
         gauge.data_points().next().map(|point| point.value())
     }
 
-    /// The provider the setup path builds exports what the domain records
-    /// under the new names, and nothing under the old bare ones.
+    /// A span exporter that keeps the resource its provider hands it.
+    #[derive(Debug, Clone, Default)]
+    struct ResourceProbe(Arc<std::sync::Mutex<Option<Resource>>>);
+
+    impl opentelemetry_sdk::trace::SpanExporter for ResourceProbe {
+        async fn export(&self, _: Vec<opentelemetry_sdk::trace::SpanData>) -> OTelSdkResult {
+            Ok(())
+        }
+
+        fn set_resource(&mut self, resource: &Resource) {
+            *self.0.lock().unwrap() = Some(resource.clone());
+        }
+    }
+
+    /// The providers the setup path builds export what the domain records on
+    /// the global meter, under the new names and the process's resource, when
+    /// the guard is dropped.
     #[tokio::test(flavor = "multi_thread")]
-    async fn the_setup_provider_exports_the_cache_and_the_chain_tip() {
+    async fn the_setup_providers_export_the_cache_and_the_chain_tip() {
         let dir = tempfile::tempdir().unwrap();
         let config = preview_config(dir.path(), "[telemetry]");
         let telemetry = config.telemetry.clone().unwrap();
 
+        let spans = ResourceProbe::default();
         let exporter = InMemoryMetricExporter::default();
-        let provider = install_meter_provider(
-            exporter.clone(),
-            telemetry.metrics_interval(),
-            resource(&telemetry, "preview".into()),
-        );
+        let (guard, _tracer) = {
+            let _env = env_lock();
+            crate::common::telemetry_providers_over(
+                &config,
+                &telemetry,
+                spans.clone(),
+                Some(exporter.clone()),
+            )
+            .unwrap()
+        };
 
         let domain = preview_domain(&config);
 
-        let (blocks, _, _) = dolos_testing::synthetic::build_synthetic_blocks(Default::default());
+        // Slots step by 5, so the tip's slot and number differ.
+        let (blocks, _, _) =
+            dolos_testing::synthetic::build_synthetic_blocks(SyntheticBlockConfig {
+                slot_step: 5,
+                ..Default::default()
+            });
         let tip = blocks.last().unwrap().clone();
         let block = MultiEraBlock::decode(&tip).unwrap();
+        assert_ne!(block.slot(), block.number());
         let writer = domain.archive().start_writer().unwrap();
         writer
             .apply(&ChainPoint::Specific(block.slot(), block.hash()), &tip)
@@ -289,22 +389,52 @@ mod tests {
         domain
             .cache()
             .get_or_fill("telemetry-test", b"key", || {
+                std::thread::sleep(Duration::from_millis(15));
+                Ok::<_, FillError>(CacheEntry::new("value", 1))
+            })
+            .await
+            .unwrap();
+        // The same key again is a hit, so every cache counter is exported.
+        domain
+            .cache()
+            .get_or_fill("telemetry-test", b"key", || {
                 Ok::<_, FillError>(CacheEntry::new("value", 1))
             })
             .await
             .unwrap();
 
-        provider.force_flush().unwrap();
+        // The interval is a minute, so only the guard's shutdown exports.
+        assert!(exporter.get_finished_metrics().unwrap().is_empty());
+        drop(guard);
+
         let resources = exporter.get_finished_metrics().unwrap();
         let metrics = dolos_metrics(&resources);
+
+        for resource in [
+            resources.first().expect("an export").resource().clone(),
+            spans.0.lock().unwrap().clone().expect("a span resource"),
+        ] {
+            assert_eq!(
+                attribute(&resource, "service.name").as_deref(),
+                Some("dolos")
+            );
+            assert_eq!(attribute(&resource, NETWORK).as_deref(), Some("preview"));
+        }
 
         for metric in &metrics {
             assert!(metric.name().starts_with("dolos."), "{}", metric.name());
         }
 
-        assert!(metrics
-            .iter()
-            .any(|metric| metric.name() == "dolos.cache.fills"));
+        for name in [
+            "dolos.cache.hits",
+            "dolos.cache.misses",
+            "dolos.cache.fills",
+        ] {
+            assert!(
+                metrics.iter().any(|metric| metric.name() == name),
+                "{name} was not exported"
+            );
+        }
         assert_eq!(gauge(&metrics, "dolos.sync.tip.slot"), Some(block.slot()));
         assert_eq!(
             gauge(&metrics, "dolos.sync.tip.block_number"),
@@ -318,18 +448,139 @@ mod tests {
         let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = fill.data() else {
             panic!("the fill duration is not a histogram");
         };
-        let point = histogram.data_points().next().unwrap();
-        let below_5s: u64 = point
-            .bounds()
-            .zip(point.bucket_counts())
-            .filter(|(bound, _)| *bound <= 5.0)
-            .map(|(_, count)| count)
-            .sum();
+        // Other tests in this binary fill their own namespaces on the same
+        // global meter.
+        let point = histogram
+            .data_points()
+            .find(|point| {
+                point.attributes().any(|kv| {
+                    kv.key.as_str() == dolos_core::telemetry::NAMESPACE
+                        && kv.value.as_str() == "telemetry-test"
+                })
+            })
+            .expect("the test namespace's fill");
         assert_eq!(point.count(), 1);
-        assert_eq!(below_5s, 1, "the fill took seconds, not milliseconds");
+        assert_eq!(
+            point.bounds().collect::<Vec<_>>(),
+            dolos_core::telemetry::DURATION_BOUNDARIES
+        );
+        // 15 ms recorded in seconds, not in milliseconds.
+        assert!((0.015..1.0).contains(&point.sum()), "{}", point.sum());
 
         domain.shutdown().unwrap();
-        provider.shutdown().unwrap();
+    }
+
+    #[test]
+    fn only_an_https_endpoint_gets_tls() {
+        assert!(tls("https://otlp.example.com:4317").is_some());
+        assert!(tls("HTTPS://otlp.example.com:4317").is_some());
+        assert!(tls("http://localhost:4317").is_none());
+        assert!(tls("localhost:4317").is_none());
+    }
+
+    #[test]
+    fn the_metrics_interval_is_read_in_seconds_and_refuses_zero() {
+        assert_eq!(telemetry("").metrics_interval(), Duration::from_secs(60));
+        assert_eq!(
+            telemetry("metrics_interval_seconds = 5").metrics_interval(),
+            Duration::from_secs(5)
+        );
+        assert!(toml::from_str::<TelemetryConfig>("metrics_interval_seconds = 0").is_err());
+    }
+
+    /// A metric exporter that refuses every export until told otherwise.
+    #[derive(Clone, Default)]
+    struct Refusing(Arc<AtomicBool>);
+
+    impl PushMetricExporter for Refusing {
+        async fn export(&self, _: &ResourceMetrics) -> OTelSdkResult {
+            if self.0.load(Ordering::Relaxed) {
+                Ok(())
+            } else {
+                Err(opentelemetry_sdk::error::OTelSdkError::InternalFailure(
+                    "refused".into(),
+                ))
+            }
+        }
+
+        fn force_flush(&self) -> OTelSdkResult {
+            Ok(())
+        }
+
+        fn shutdown_with_timeout(&self, _: Duration) -> OTelSdkResult {
+            Ok(())
+        }
+
+        fn temporality(&self) -> Temporality {
+            Temporality::Cumulative
+        }
+    }
+
+    /// Collects what the `dolos` target logs at info and above.
+    #[derive(Clone, Default)]
+    struct Logs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Logs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_failing_metric_export_warns_once_until_it_recovers() {
+        use tracing_subscriber::prelude::*;
+
+        let logs = Logs::default();
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(move || writer.clone())
+                .with_filter(
+                    tracing_subscriber::filter::Targets::new()
+                        .with_target("dolos", tracing::Level::INFO),
+                ),
+        );
+
+        let inner = Refusing::default();
+        let exporter = LoggedExporter::new(inner.clone());
+        let export = || block_on(exporter.export(&ResourceMetrics::default()));
+
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(export().is_err());
+            assert!(export().is_err());
+            inner.0.store(true, Ordering::Relaxed);
+            assert!(export().is_ok());
+            assert!(export().is_ok());
+            inner.0.store(false, Ordering::Relaxed);
+            assert!(export().is_err());
+        });
+
+        let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        let lines: Vec<&str> = logs.lines().collect();
+        assert_eq!(lines.len(), 3, "{logs}");
+        assert!(
+            lines[0].contains("WARN") && lines[0].contains("refused"),
+            "{logs}"
+        );
+        assert!(
+            lines[1].contains("INFO") && lines[1].contains("recovered"),
+            "{logs}"
+        );
+        assert!(lines[2].contains("WARN"), "{logs}");
+    }
+
+    /// Runs `future` to completion on a runtime of its own.
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(future)
     }
 
     #[test]
@@ -350,6 +601,7 @@ mod tests {
 
     #[test]
     fn http_protobuf_builds_http_exporters() {
+        install_crypto_provider();
         let _env = env_lock();
         let config = telemetry(
             r#"
@@ -365,7 +617,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_https_grpc_endpoint_builds_with_tls() {
+    async fn an_https_grpc_endpoint_builds() {
         let _env = env_lock();
         let config = telemetry(r#"otlp_endpoint = "https://otlp.example.com:4317""#);
 
@@ -429,6 +681,7 @@ mod tests {
 
     #[test]
     fn http_protobuf_posts_each_signal_under_the_base_url_with_the_env_headers() {
+        install_crypto_provider();
         let (address, received) = collector();
         let config = telemetry(&format!(
             r#"

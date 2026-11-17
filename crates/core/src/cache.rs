@@ -994,10 +994,22 @@ impl Metrics {
         };
 
         Self {
-            hits: meter.u64_counter("dolos.cache.hits").build(),
-            misses: meter.u64_counter("dolos.cache.misses").build(),
-            fills: meter.u64_counter("dolos.cache.fills").build(),
-            evictions: meter.u64_counter("dolos.cache.evictions").build(),
+            hits: meter
+                .u64_counter("dolos.cache.hits")
+                .with_unit("{hit}")
+                .build(),
+            misses: meter
+                .u64_counter("dolos.cache.misses")
+                .with_unit("{miss}")
+                .build(),
+            fills: meter
+                .u64_counter("dolos.cache.fills")
+                .with_unit("{fill}")
+                .build(),
+            evictions: meter
+                .u64_counter("dolos.cache.evictions")
+                .with_unit("{eviction}")
+                .build(),
             fill_time: meter
                 .f64_histogram("dolos.cache.fill.duration")
                 .with_unit("s")

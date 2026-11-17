@@ -909,12 +909,12 @@ mod tests {
 
     use crate::test_support::TestApp;
 
-    /// These paths match no route. The first five paths are from issue #1323:
-    /// unknown endpoints and paths with too few segments. The sixth path
+    /// These paths match no route. `/metrics` was a route until the chain tip
+    /// moved to the exported metrics. The next five paths are from issue
+    /// #1323: unknown endpoints and paths with too few segments. The last path
     /// contains an empty segment in the middle. `NormalizePathLayer` removes
     /// only the slashes at the start and at the end of a path. As a result,
-    /// the router receives `/blocks//latest` unchanged. `/metrics` was a
-    /// route until the chain tip moved to the exported metrics.
+    /// the router receives `/blocks//latest` unchanged.
     const UNMATCHED_PATHS: &[&str] = &[
         "/metrics",
         "/nonexistent",

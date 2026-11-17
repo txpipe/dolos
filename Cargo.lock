@@ -1555,6 +1555,7 @@ dependencies = [
  "protoc-wkt",
  "rayon",
  "redb-extras",
+ "reqwest 0.13.5",
  "rustls",
  "serde",
  "serde_json",

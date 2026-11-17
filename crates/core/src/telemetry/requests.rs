@@ -241,10 +241,12 @@ mod tests {
     }
 
     #[test]
-    fn the_duration_histogram_uses_the_shared_boundaries() {
+    fn the_duration_is_recorded_in_seconds_over_the_shared_boundaries() {
         let (provider, exporter, metrics) = setup(Family::Http);
 
-        metrics.start([]).finish([]);
+        let guard = metrics.start([]);
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        guard.finish([]);
 
         exporter.reset();
         provider.force_flush().unwrap();
@@ -264,5 +266,7 @@ mod tests {
 
         assert_eq!(point.bounds().collect::<Vec<_>>(), DURATION_BOUNDARIES);
         assert_eq!(metric.unit(), "s");
+        // 15 ms recorded in seconds, not in milliseconds.
+        assert!((0.015..1.0).contains(&point.sum()), "{}", point.sum());
     }
 }

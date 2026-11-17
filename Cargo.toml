@@ -95,6 +95,13 @@ rustls = { version = "0.23", default-features = false, features = [
     "tls12",
 ] }
 
+# The OTLP/HTTP exporter's client. `rustls-no-provider` gives it TLS without
+# reqwest's hard-wired aws-lc-rs provider; it uses the ring provider `main()`
+# installs as the process default (the tests install it themselves).
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls-no-provider",
+] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 tikv-jemallocator = { version = "0.7", optional = true }
 
@@ -278,7 +285,6 @@ opentelemetry-otlp = { version = "0.32.0", features = [
     "grpc-tonic",
     "http-proto",
     "reqwest-blocking-client",
-    "reqwest-rustls",
     "tls-ring",
     "tls-webpki-roots",
     "metrics",
