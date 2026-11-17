@@ -9,6 +9,7 @@ All notable changes to this project will be documented in this file.
 - *(minibf)* Add `/governance/dreps` endpoint
 - *(telemetry)* A configuration with `[telemetry]` now exports metrics over OTLP as well as traces, unless `metrics = false`
 - *(minibf)* [**breaking**] Remove the `/metrics` route: the chain tip is exported as the `dolos.sync.tip.slot` and `dolos.sync.tip.block_number` metrics
+- *(telemetry)* Export the running build (`dolos.build.info`), `process.uptime` and, on Linux, the process's CPU time, memory, open file descriptors and threads
 
 ## [2.0.0-alpha.0] - 2026-09-11
 

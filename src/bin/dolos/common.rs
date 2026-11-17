@@ -4,7 +4,7 @@ use dolos_core::config::{
 };
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use miette::{Context as _, IntoDiagnostic};
-use opentelemetry::trace::TracerProvider as _;
+use opentelemetry::{metrics::MeterProvider as _, trace::TracerProvider as _};
 use std::sync::Arc;
 use std::{
     path::{Path, PathBuf},
@@ -211,6 +211,7 @@ fn render_domain_build_error(error: DomainBuildError) -> miette::Report {
 pub struct TracingGuard {
     provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
     meters: Option<opentelemetry_sdk::metrics::SdkMeterProvider>,
+    _process: Option<crate::telemetry::process::ProcessMetrics>,
 }
 
 impl Drop for TracingGuard {
@@ -250,6 +251,7 @@ where
     let guard = TracingGuard {
         provider: Some(provider),
         meters: None,
+        _process: None,
     };
 
     (guard, tracer)
@@ -346,6 +348,11 @@ where
 
     guard.meters = metrics.map(|exporter| {
         crate::telemetry::install_meter_provider(exporter, telemetry.metrics_interval(), resource)
+    });
+    guard._process = guard.meters.as_ref().map(|meters| {
+        crate::telemetry::process::ProcessMetrics::register(
+            &meters.meter(crate::telemetry::process::METER),
+        )
     });
 
     Ok((guard, tracer))
@@ -781,6 +788,7 @@ mod tests {
         let guard = TracingGuard {
             provider: Some(provider.clone()),
             meters: None,
+            _process: None,
         };
 
         // `provider` stands in for the copy `setup_tracing` registers globally,
@@ -812,6 +820,7 @@ mod tests {
         let guard = TracingGuard {
             provider: None,
             meters: Some(meters.clone()),
+            _process: None,
         };
 
         // `meters` stands in for the globally registered copy, as above.
