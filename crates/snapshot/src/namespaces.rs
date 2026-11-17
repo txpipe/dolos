@@ -1,4 +1,4 @@
-//! The closed set of namespaces a Dolos stele carries.
+//! The closed set of namespaces a Dolos snapshot carries.
 //!
 //! ADR-004 defines state as one uniform key-value space: the entity
 //! namespaces of `dolos_cardano::model::build_schema()` plus [`UTXOS`], which
@@ -12,7 +12,7 @@
 //! entity types' own `FixedNamespace::NS`, and `utxos` is defined here because
 //! nothing else in the tree defines it. A namespace that exists in either
 //! schema and not in [`NAMESPACES`] would be silently dropped from every
-//! published stele, so `namespace_registry_matches_the_schemas` in
+//! published snapshot, so `namespace_registry_matches_the_schemas` in
 //! `tests/coverage.rs` makes that a build failure instead.
 
 use dolos_cardano::model::{
@@ -205,7 +205,7 @@ pub fn check_log_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
 ///
 /// Zero is not a schema revision — no record has ever been at revision 0 — so
 /// it reads as "this profile version defines no records for this namespace",
-/// which is a statement a stele can make and an absent entry cannot.
+/// which is a statement a snapshot can make and an absent entry cannot.
 pub const RETIRED_SCHEMA_REV: u64 = 0;
 
 /// The namespaces this profile version once defined and no longer does.

@@ -324,8 +324,8 @@ pub fn stage_watched<A: ArchiveStore>(
 
 /// [`stage_watched`] for a batch that may be restarting on its own `root`: runs
 /// of the same source are reused while they hold every window asked for, which
-/// shrinks as layers are recorded and steles commit, and were staged for every
-/// one of `captures`, which only shrinks as well.
+/// shrinks as layers are recorded and snapshots commit, and were staged for
+/// every one of `captures`, which only shrinks as well.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn stage_restarting<A: ArchiveStore>(
     root: &Path,
@@ -730,14 +730,14 @@ impl<'a> Runs<'a> {
 
     pub(crate) fn write_layer_ticking<W: SnapshotWriter>(
         &self,
-        stele: &W,
+        snapshot: &W,
         family: Family,
         epoch: u64,
         sequence: u64,
         tick: &mut dyn FnMut(),
     ) -> Result<Option<LayerDescriptor>, Error> {
         self.batch
-            .write_layer_ticking(stele, family, epoch, sequence, tick)
+            .write_layer_ticking(snapshot, family, epoch, sequence, tick)
     }
 }
 
@@ -805,18 +805,18 @@ impl Staged {
     /// before the sink is finished, so no descriptor is produced.
     pub fn write_layer<W: SnapshotWriter>(
         &self,
-        stele: &W,
+        snapshot: &W,
         family: Family,
         epoch: u64,
         sequence: u64,
     ) -> Result<Option<LayerDescriptor>, Error> {
-        self.write_layer_ticking(stele, family, epoch, sequence, &mut || {})
+        self.write_layer_ticking(snapshot, family, epoch, sequence, &mut || {})
     }
 
     /// [`Staged::write_layer`], calling `tick` once per record.
     pub(crate) fn write_layer_ticking<W: SnapshotWriter>(
         &self,
-        stele: &W,
+        snapshot: &W,
         family: Family,
         epoch: u64,
         sequence: u64,
@@ -837,7 +837,7 @@ impl Staged {
         .scope(marker.identity.network_magic);
 
         let mut sink =
-            stele.layer_sink(&DolosProfile, &scope.layer_spec(kind)?, COMPRESSION_LEVEL)?;
+            snapshot.layer_sink(&DolosProfile, &scope.layer_spec(kind)?, COMPRESSION_LEVEL)?;
         let path = run_path(&self.root, kind, epoch);
 
         replay(&path, run, |record| {
@@ -852,7 +852,7 @@ impl Staged {
     /// [`Budget::workers`] at once, in input order.
     pub fn write_layers<W: SnapshotWriter + Sync>(
         &self,
-        stele: &W,
+        snapshot: &W,
         layers: &[(Family, u64)],
         sequence: u64,
     ) -> Result<Vec<Option<LayerDescriptor>>, Error> {
@@ -870,7 +870,7 @@ impl Staged {
                             return;
                         };
 
-                        let outcome = self.write_layer(stele, family, epoch, sequence);
+                        let outcome = self.write_layer(snapshot, family, epoch, sequence);
                         failed.fetch_or(outcome.is_err(), Ordering::Relaxed);
 
                         outcomes.lock().unwrap_or_else(|e| e.into_inner())[at] = Some(outcome);

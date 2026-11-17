@@ -40,7 +40,7 @@ use watcher::Watcher;
 
 const REPOSITORY: &str = "dolos/read-ahead";
 
-/// Where a paired stele's blocks are, beside [`REPOSITORY`].
+/// Where a paired snapshot's blocks are, beside [`REPOSITORY`].
 const BLOCKS_REPOSITORY: &str = "dolos/read-ahead/blocks";
 
 /// Install `ring` as the process-default crypto provider, which `stelae::oci`
@@ -77,15 +77,15 @@ fn opened_at(registry: &FaultRegistry, scratch: &Path, name: &str) -> Registry {
     .unwrap()
 }
 
-/// The harness node published into a fresh registry, and the stele a restore
+/// The harness node published into a fresh registry, and the snapshot a restore
 /// reads it back from.
 struct Published {
     registry: FaultRegistry,
     /// Where the restore's registry stages its pulls.
     scratch: tempfile::TempDir,
-    stele: Snapshot,
+    snapshot: Snapshot,
     index: BlobIndex,
-    /// The blocks snapshot a paired stele names, and its blob index.
+    /// The blocks snapshot a paired snapshot names, and its blob index.
     blocks: Option<(Snapshot, BlobIndex)>,
     plan: Plan,
     identity: Digest,
@@ -126,25 +126,25 @@ impl Published {
         );
 
         let scratch = tempfile::tempdir().unwrap();
-        let stele = Point::Latest
+        let snapshot = Point::Latest
             .resolve(&opened(&registry, scratch.path()))
             .unwrap();
         let blocks = opened_at(&registry, scratch.path(), BLOCKS_REPOSITORY)
             .resolve_sequence(&stelae_blocks::BlocksProfile, pair.head().0)
             .unwrap();
 
-        let plan = restore::plan(stele.chain().unwrap(), blocks.chain(), magic, None).unwrap();
+        let plan = restore::plan(snapshot.chain().unwrap(), blocks.chain(), magic, None).unwrap();
         assert_eq!(plan.blocks, Some(pair.blocks[&pair.head().0]));
 
         let blocks_index = blocks.blob_index().unwrap();
 
         Self {
-            identity: stele.chain().unwrap().identity(),
-            index: stele.blob_index().unwrap(),
+            identity: snapshot.chain().unwrap().identity(),
+            index: snapshot.blob_index().unwrap(),
             blocks: Some((blocks, blocks_index)),
             registry,
             scratch,
-            stele,
+            snapshot,
             plan,
             magic,
         }
@@ -166,17 +166,17 @@ impl Published {
         .unwrap();
 
         let scratch = tempfile::tempdir().unwrap();
-        let stele = Point::Latest
+        let snapshot = Point::Latest
             .resolve(&opened(&registry, scratch.path()))
             .unwrap();
-        let index = stele.blob_index().unwrap();
-        let plan = restore::plan(stele.chain().unwrap(), None, magic, None).unwrap();
-        let identity = stele.chain().unwrap().identity();
+        let index = snapshot.blob_index().unwrap();
+        let plan = restore::plan(snapshot.chain().unwrap(), None, magic, None).unwrap();
+        let identity = snapshot.chain().unwrap().identity();
 
         Self {
             registry,
             scratch,
-            stele,
+            snapshot,
             index,
             blocks: None,
             plan,
@@ -211,7 +211,7 @@ impl Published {
         S: dolos_core::StateStore,
     {
         restore::restore(
-            &self.stele,
+            &self.snapshot,
             &self.index,
             self.blocks
                 .as_ref()
@@ -627,8 +627,8 @@ fn the_staging_preflight_charges_the_largest_layers_a_read_ahead_holds() {
     );
 }
 
-/// A paired stele reads both repositories ahead, its blocks stream as well as
-/// its own, never more layers at once than the depth, and writes and records
+/// A paired snapshot reads both repositories ahead, its blocks stream as well
+/// as its own, never more layers at once than the depth, and writes and records
 /// them as a restore reading one layer at a time does, into the same node.
 #[test]
 fn both_repositories_are_read_ahead_under_one_depth() {
@@ -670,7 +670,7 @@ fn both_repositories_are_read_ahead_under_one_depth() {
 
 /// Each stream keeps to its share of the depth, whatever it has left to read:
 /// at the default, the blocks stream fetches two layers at once and the
-/// stele's own six, and the staging preflight charges each of them one layer
+/// snapshot's own six, and the staging preflight charges each of them one layer
 /// more, the one it drains.
 #[test]
 fn each_stream_reads_ahead_at_its_share_of_the_depth() {
@@ -710,12 +710,12 @@ fn each_stream_reads_ahead_at_its_share_of_the_depth() {
     let own = registry.peak_in(REPOSITORY);
     assert!(
         (depths.dolos..=depths.dolos + 1).contains(&own),
-        "the stele's stream fetched {own} layers at once at a share of {}",
+        "the snapshot's stream fetched {own} layers at once at a share of {}",
         depths.dolos
     );
 }
 
-/// The registry transport resolves the blocks repository at the stele's
+/// The registry transport resolves the blocks repository at the snapshot's
 /// sequence and restores the node the direct restore does; a blocks
 /// repository holding nothing there is refused, naming the snapshot, and one
 /// holding another profile's snapshot is refused as what it is.
@@ -876,14 +876,14 @@ fn the_staging_preflight_charges_each_stream_its_share() {
         .unwrap();
     }
 
-    let (stele_root, blocks_root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (snapshot_root, blocks_root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let pair = paired::pair(
         source.path(),
-        &stelae::dir::SnapshotDir::create(stele_root.path()).unwrap(),
+        &stelae::dir::SnapshotDir::create(snapshot_root.path()).unwrap(),
         &stelae::dir::SnapshotDir::create(blocks_root.path()).unwrap(),
     );
 
-    let stele = stelae::dir::SnapshotDir::open(stele_root.path())
+    let snapshot = stelae::dir::SnapshotDir::open(snapshot_root.path())
         .unwrap()
         .resolve_latest(&dolos_snapshot::DolosProfile)
         .unwrap();
@@ -891,8 +891,8 @@ fn the_staging_preflight_charges_each_stream_its_share() {
         .unwrap()
         .resolve_sequence(&stelae_blocks::BlocksProfile, pair.head().0)
         .unwrap();
-    let (index, blocks_index) = (stele.blob_index().unwrap(), blocks.blob_index().unwrap());
-    let plan = restore::plan(stele.chain().unwrap(), blocks.chain(), magic, None).unwrap();
+    let (index, blocks_index) = (snapshot.blob_index().unwrap(), blocks.blob_index().unwrap());
+    let plan = restore::plan(snapshot.chain().unwrap(), blocks.chain(), magic, None).unwrap();
 
     let pair = restore::Blocks {
         snapshot: &blocks,
@@ -901,7 +901,7 @@ fn the_staging_preflight_charges_each_stream_its_share() {
 
     let sizes = |repo| -> Vec<u64> {
         let (snapshot, index) = match repo {
-            Repo::Dolos => (&stele, &index),
+            Repo::Dolos => (&snapshot, &index),
             Repo::Blocks => (&blocks, &blocks_index),
         };
 
@@ -919,11 +919,11 @@ fn the_staging_preflight_charges_each_stream_its_share() {
     assert!(own.len() > DEFAULT_READ_AHEAD && theirs.len() == 2);
 
     let peak = |depth| {
-        plan.staging_peak(&stele, &index, Some(pair), &Resume::none(), depth)
+        plan.staging_peak(&snapshot, &index, Some(pair), &Resume::none(), depth)
             .unwrap()
     };
 
-    // Seven of the stele's own at depth 6 and both blocks layers at depth 2.
+    // Seven of the snapshot's own at depth 6 and both blocks layers at depth 2.
     assert_eq!(
         peak(DEFAULT_READ_AHEAD),
         Some(largest(&own, DEFAULT_READ_AHEAD - 1) + largest(&theirs, 3))
@@ -936,7 +936,7 @@ fn the_staging_preflight_charges_each_stream_its_share() {
 
     // Without the blocks snapshot, the layers it serves have no transport.
     assert!(matches!(
-        plan.staging_peak(&stele, &index, None, &Resume::none(), 1),
+        plan.staging_peak(&snapshot, &index, None, &Resume::none(), 1),
         Err(Error::BlocksMissing { .. })
     ));
 }

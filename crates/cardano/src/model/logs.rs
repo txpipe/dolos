@@ -44,8 +44,8 @@ use super::pools::PoolHash;
 /// collects N refunds. Under the four namespaces those collapsed onto one
 /// `LogKey` and all but one were lost; here they are elements. Both encode
 /// sorted by pool id, then amount, whatever their order in memory, because the
-/// ledger holds them in a `HashMap` and a stele's bytes have to be reproducible
-/// across publishers.
+/// ledger holds them in a `HashMap` and a snapshot's bytes have to be
+/// reproducible across publishers.
 #[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default, Serialize)]
 pub struct AccountEpochLog {
     /// Active stake in Lovelaces, at the snapshot epoch the boundary rewards.

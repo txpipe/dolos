@@ -2,15 +2,15 @@
 //!
 //! Four properties, in increasing order of what they cost to check:
 //!
-//! 1. **The skeleton is pinned.** An export over the smallest store set a stele
-//!    can be cut from — an era, a cursor, and the two empty blocks that show
-//!    the cursor is its epoch's first — produces a document with no ledger
-//!    content in it, so the golden below is a function of literals only: the
-//!    network table, the `sequence`/`position`/`parameters` shapes, the order
-//!    the layers are listed in, and every layer's header and scope encoding. A
-//!    ledger change cannot move it, which is what makes it a golden rather than
-//!    a value that gets re-pinned as a matter of routine.
-//! 2. **A live node exports a complete stele.** Built by the harness domain
+//! 1. **The skeleton is pinned.** An export over the smallest store set a
+//!    snapshot can be cut from — an era, a cursor, and the two empty blocks
+//!    that show the cursor is its epoch's first — produces a document with no
+//!    ledger content in it, so the golden below is a function of literals only:
+//!    the network table, the `sequence`/`position`/`parameters` shapes, the
+//!    order the layers are listed in, and every layer's header and scope
+//!    encoding. A ledger change cannot move it, which is what makes it a golden
+//!    rather than a value that gets re-pinned as a matter of routine.
+//! 2. **A live node exports a complete snapshot.** Built by the harness domain
 //!    from synthetic blocks, read back through `SnapshotDir`, verified clean.
 //! 3. **Read-back equality.** Every layer, decoded through its own codec, is
 //!    what walking the store yields — compared against an expectation that is
@@ -20,11 +20,11 @@
 //!    stores and to the builtin memory stores publish the same inscription
 //!    digest. This is the claim ADR-004 rests on and the first place it is
 //!    measured rather than asserted.
-//! 5. **A stele can be reproduced without being stored.** The discarding writer
-//!    walks the same stores and produces the same canonical document, byte for
-//!    byte, as the publish that wrote one to disk — which is what `dolos
-//!    snapshot digest` is, and what makes an independent verifier possible at
-//!    all.
+//! 5. **A snapshot can be reproduced without being stored.** The discarding
+//!    writer walks the same stores and produces the same canonical document,
+//!    byte for byte, as the publish that wrote one to disk — which is what
+//!    `dolos snapshot digest` is, and what makes an independent verifier
+//!    possible at all.
 
 mod common;
 mod node;
@@ -78,7 +78,7 @@ use watcher::Watcher;
 
 /// The `diffId` of the skeleton's boundary block layer, as the export that
 /// still listed every epoch's blocks wrote it. Only the closed epochs' blocks
-/// left the stele; this layer's kind, scope and codec did not move.
+/// left the snapshot; this layer's kind, scope and codec did not move.
 const BOUNDARY_BLOCKS: &str =
     "sha256:8013ed25e0a7280f0cb5e9fdcf70a8b3218356b27d25852566fed6515b85b894";
 
@@ -167,7 +167,7 @@ fn skeleton_state() -> MemoryStateStore {
     state
 }
 
-/// The smallest store set a stele can be cut from: an era, a cursor, and the
+/// The smallest store set a snapshot can be cut from: an era, a cursor, and the
 /// two blocks that show the cursor is the first of its epoch.
 fn skeleton_stores() -> (MemoryArchiveStore, MemoryStateStore) {
     let archive = with_skeleton_blocks(MemoryArchiveStore::new(
@@ -187,7 +187,7 @@ fn skeleton_stores() -> (MemoryArchiveStore, MemoryStateStore) {
 #[test]
 fn a_bare_boundary_exports_the_pinned_skeleton() {
     let temp = tempfile::tempdir().unwrap();
-    let stele = SnapshotDir::create(temp.path()).unwrap();
+    let snapshot = SnapshotDir::create(temp.path()).unwrap();
 
     let (archive, state) = skeleton_stores();
 
@@ -200,7 +200,7 @@ fn a_bare_boundary_exports_the_pinned_skeleton() {
     .unwrap();
 
     let inscription = export::export(
-        &stele,
+        &snapshot,
         &plan,
         &archive,
         &state,
@@ -209,7 +209,7 @@ fn a_bare_boundary_exports_the_pinned_skeleton() {
     )
     .unwrap();
 
-    // A lineage's first stele: the two closed epochs' indexes in its diff, the
+    // A lineage's first snapshot: the two closed epochs' indexes in its diff, the
     // boundary window's blocks and indexes and every state layer in its tip,
     // and **no log layers at all**, which is the omit-if-empty rule seen from
     // the other side: a store with no logs in it publishes no layer claiming
@@ -237,7 +237,7 @@ fn a_bare_boundary_exports_the_pinned_skeleton() {
 
     assert_eq!(inscription.digest().unwrap().to_string(), GOLDEN_SKELETON);
 
-    // And the directory it wrote is a stele by the protocol's own reckoning.
+    // And the directory it wrote is a snapshot by the protocol's own reckoning.
     let read = common::resolve(temp.path()).read_inscription().unwrap();
 
     assert_eq!(read, inscription);
@@ -254,7 +254,7 @@ fn a_bare_boundary_exports_the_pinned_skeleton() {
 #[test]
 fn a_log_under_an_uncovered_namespace_fails_the_export() {
     let temp = tempfile::tempdir().unwrap();
-    let stele = SnapshotDir::create(temp.path()).unwrap();
+    let snapshot = SnapshotDir::create(temp.path()).unwrap();
 
     let state = skeleton_state();
 
@@ -286,7 +286,7 @@ fn a_log_under_an_uncovered_namespace_fails_the_export() {
     .unwrap();
 
     let err = export::export(
-        &stele,
+        &snapshot,
         &plan,
         &archive,
         &state,
@@ -328,10 +328,10 @@ fn some_blocks() -> stelae::Digest {
 }
 
 // --------------------------------------------------------------------------
-// 2. A complete stele from a live store set
+// 2. A complete snapshot from a live store set
 // --------------------------------------------------------------------------
 
-/// The reference a plan takes with `with_blocks` is the one its stele names,
+/// The reference a plan takes with `with_blocks` is the one its snapshot names,
 /// and an export into a network root writes no blocks snapshot of its own for
 /// it; a plan without one, exported alone, publishes the position it always
 /// did.
@@ -366,7 +366,7 @@ fn a_plan_naming_its_blocks_publishes_them_in_position() {
 
 /// Done criterion 1.
 #[test]
-fn a_harness_domain_exports_a_complete_stele() {
+fn a_harness_domain_exports_a_complete_snapshot() {
     let domain: ToyDomain = harness();
     let plan = plan_for(&domain);
 
@@ -408,8 +408,8 @@ fn a_harness_domain_exports_a_complete_stele() {
 
     // The whole directory verifies: every blob hashes to its own name and
     // decompresses to a layer the inscription points at.
-    let stele = node::resolved(temp.path());
-    let index = stele.blob_index().unwrap();
+    let snapshot = node::resolved(temp.path());
+    let index = snapshot.blob_index().unwrap();
 
     for descriptor in inscription.layers() {
         assert!(
@@ -438,20 +438,20 @@ fn every_layer_reads_back_as_the_store_yields_it() {
     let temp = tempfile::tempdir().unwrap();
     let inscription = export_to(temp.path(), &domain);
 
-    let stele = node::resolved(temp.path());
-    let index = stele.blob_index().unwrap();
+    let snapshot = node::resolved(temp.path());
+    let index = snapshot.blob_index().unwrap();
 
     let windows: Vec<EpochWindow> = plan.epochs.clone();
 
     // --- blocks -----------------------------------------------------------
     //
-    // The stele carries the boundary window's; the blocks snapshot beside it
-    // every closed epoch's, under the blocks profile.
+    // The Dolos snapshot carries the boundary window's; the blocks snapshot beside
+    // it every closed epoch's, under the blocks profile.
     let (boundary, closed) = windows.split_last().unwrap();
     let written: Vec<_> = inscription.layers_of_kind(BLOCKS).collect();
     assert_eq!(written.len(), 1);
 
-    let found: Vec<blocks::BlockRecord> = read_both_ways(&stele, &index, written[0])
+    let found: Vec<blocks::BlockRecord> = read_both_ways(&snapshot, &index, written[0])
         .iter()
         .map(|raw| blocks::decode(raw).unwrap())
         .collect();
@@ -459,9 +459,14 @@ fn every_layer_reads_back_as_the_store_yields_it() {
     assert_eq!(found, expected_blocks(&domain, boundary), "the boundary");
     assert!(!found.is_empty(), "the boundary window has no block");
 
-    let snapshot = node::resolved_blocks(temp.path()).unwrap();
-    let blocks_index = snapshot.blob_index().unwrap();
-    let blocks_layers: Vec<_> = snapshot.chain().unwrap().descriptors().cloned().collect();
+    let blocks_snapshot = node::resolved_blocks(temp.path()).unwrap();
+    let blocks_index = blocks_snapshot.blob_index().unwrap();
+    let blocks_layers: Vec<_> = blocks_snapshot
+        .chain()
+        .unwrap()
+        .descriptors()
+        .cloned()
+        .collect();
     assert_eq!(blocks_layers.len(), closed.len());
 
     let mut any_blocks = false;
@@ -469,7 +474,7 @@ fn every_layer_reads_back_as_the_store_yields_it() {
     for (descriptor, window) in blocks_layers.iter().zip(closed) {
         assert_eq!(descriptor.scope["epoch"], window.epoch);
 
-        let found: Vec<blocks::BlockRecord> = snapshot
+        let found: Vec<blocks::BlockRecord> = blocks_snapshot
             .read_layer(&blocks_index, &stelae_blocks::BlocksProfile, descriptor)
             .unwrap()
             .records()
@@ -515,7 +520,7 @@ fn every_layer_reads_back_as_the_store_yields_it() {
         for (descriptor, window) in written.iter().zip(&populated) {
             assert_eq!(descriptor.scope["epoch"], window.epoch, "{kind}");
 
-            let found: Vec<logs::LogRecord> = read_both_ways(&stele, &index, descriptor)
+            let found: Vec<logs::LogRecord> = read_both_ways(&snapshot, &index, descriptor)
                 .iter()
                 .map(|raw| logs::decode(ns, raw).unwrap())
                 .collect();
@@ -544,7 +549,7 @@ fn every_layer_reads_back_as_the_store_yields_it() {
     let mut exact = 0usize;
 
     for (descriptor, window) in written.iter().zip(&windows) {
-        let found: Vec<IndexRecord> = read_both_ways(&stele, &index, descriptor)
+        let found: Vec<IndexRecord> = read_both_ways(&snapshot, &index, descriptor)
             .iter()
             .map(|raw| indexes::decode(raw).unwrap())
             .collect();
@@ -587,7 +592,7 @@ fn every_layer_reads_back_as_the_store_yields_it() {
         for (shard, descriptor) in written.iter().enumerate() {
             assert_eq!(descriptor.scope["shard"], shard, "{kind}");
 
-            let found: Vec<state::StateRecord> = read_both_ways(&stele, &index, descriptor)
+            let found: Vec<state::StateRecord> = read_both_ways(&snapshot, &index, descriptor)
                 .iter()
                 .map(|raw| state::decode(ns, raw).unwrap())
                 .collect();
@@ -650,15 +655,15 @@ fn accounts_export_into_the_shard_of_their_hash() {
     let temp = tempfile::tempdir().unwrap();
     let inscription = export_to(temp.path(), &domain);
 
-    let stele = node::resolved(temp.path());
-    let index = stele.blob_index().unwrap();
+    let snapshot = node::resolved(temp.path());
+    let index = snapshot.blob_index().unwrap();
 
     let mut found: BTreeMap<Vec<u8>, u8> = BTreeMap::new();
 
     for descriptor in inscription.layers_of_kind("state-accounts") {
         let shard = descriptor.scope["shard"].as_u64().unwrap() as u8;
 
-        for raw in read_both_ways(&stele, &index, descriptor) {
+        for raw in read_both_ways(&snapshot, &index, descriptor) {
             let record = state::decode(AccountState::NS, &raw).unwrap();
             found.insert(record.key, shard);
         }
@@ -988,9 +993,9 @@ fn a_failing_producer_fails_the_pooled_export() {
     let domain: ToyDomain = harness();
 
     let root = tempfile::tempdir().unwrap();
-    let stele = SnapshotDir::create(root.path()).unwrap();
+    let snapshot = SnapshotDir::create(root.path()).unwrap();
     let dying = DyingAt {
-        inner: &stele,
+        inner: &snapshot,
         kind: BLOCKS,
     };
 
@@ -1054,8 +1059,9 @@ fn a_publish_writes_each_state_shard_once_as_the_tip() {
     assert_eq!(keys, ["entities", "indexKeyHash", "schemas", "shards"]);
 }
 
-/// A predecessor as a registry's chained publish is one: the link to the stele
-/// before, and the layers an interrupted attempt of the same publish recorded.
+/// A predecessor as a registry's chained publish is one: the link to the
+/// snapshot before, and the layers an interrupted attempt of the same publish
+/// recorded.
 ///
 /// It records and offers what the driver does: a layer the profile places in
 /// `diff` at the attempt's sequence goes in, and comes out where it is in
@@ -1187,9 +1193,9 @@ fn windows<'a>(
         .collect()
 }
 
-/// A stele cut at 2 carries window 1's account rows in its tip, as ESTART
-/// wrote them; the EWRAP closing 2 rewrites them before 3 is cut. The stele at
-/// 3 links to 2 and lists in its diff what becomes final at 3, window 1's
+/// A snapshot cut at 2 carries window 1's account rows in its tip, as ESTART
+/// wrote them; the EWRAP closing 2 rewrites them before 3 is cut. The snapshot
+/// at 3 links to 2 and lists in its diff what becomes final at 3, window 1's
 /// rewritten rows among it, and nothing an earlier diff listed. Its chain is
 /// the layer set a lineage started at 3 lists.
 #[test]
@@ -1250,7 +1256,7 @@ fn a_chained_export_lists_what_becomes_final_at_its_sequence() {
         chained.layers().all(
             |layer| !listed_before.contains_key(&(layer.kind.clone(), layer.scope.to_string()))
         ),
-        "the stele at 3 lists a layer the diff at 2 already did"
+        "the snapshot at 3 lists a layer the diff at 2 already did"
     );
 
     let chain = stelae::Chain::walk(&DolosProfile, chained.clone(), |link| {
@@ -1275,7 +1281,7 @@ fn a_chained_export_lists_what_becomes_final_at_its_sequence() {
     );
 }
 
-/// A first stele lists in its diff every layer final by its cut, and in its
+/// A first snapshot lists in its diff every layer final by its cut, and in its
 /// tip what is true only there.
 #[test]
 fn a_lineage_start_lists_everything_final_by_its_cut() {
@@ -1319,7 +1325,7 @@ fn a_lineage_start_lists_everything_final_by_its_cut() {
 
 /// An attempt at 3 that was interrupted recorded its diff. The retry takes
 /// those layers rather than build them, builds its tip, and writes the same
-/// stele.
+/// snapshot.
 #[test]
 fn a_resumed_export_takes_the_diff_an_interrupted_attempt_recorded() {
     let domain: ToyDomain<MemoryStores> = harness();
@@ -1545,7 +1551,7 @@ const CANONICAL_SKELETON: &str = concat!(
 );
 
 // --------------------------------------------------------------------------
-// 5. A stele reproduced without being stored
+// 5. A snapshot reproduced without being stored
 // --------------------------------------------------------------------------
 
 /// The check that the discarding writer is *faithful* rather than merely fast,
@@ -1580,7 +1586,7 @@ fn a_discarding_export_reproduces_what_a_publish_stores() {
     )
     .unwrap();
 
-    // Non-trivial: a stele of empty layers would compare equal for the wrong
+    // Non-trivial: a snapshot of empty layers would compare equal for the wrong
     // reason.
     assert!(
         stored.uncompressed_size() > 1024,
@@ -1594,7 +1600,7 @@ fn a_discarding_export_reproduces_what_a_publish_stores() {
 
     assert_eq!(reproduced.digest().unwrap(), stored.digest().unwrap());
 
-    // Nothing was written on the reproduction's behalf: the only stele on disk
+    // Nothing was written on the reproduction's behalf: the only snapshot on disk
     // is the one the directory export made, and it holds exactly its own
     // blobs, its inscription and its two manifests.
     let blobs = std::fs::read_dir(temp.path().join("blobs").join("sha256"))
@@ -1629,10 +1635,10 @@ fn a_tip_with_unfinished_bookkeeping_is_refused_before_a_layer() {
     let refusal = || {
         let watcher = Arc::new(Watcher::default());
         let temp = tempfile::tempdir().unwrap();
-        let stele = SnapshotDir::create(temp.path()).unwrap();
+        let snapshot = SnapshotDir::create(temp.path()).unwrap();
 
         let refused = export::export(
-            &stele,
+            &snapshot,
             &plan,
             domain.archive(),
             domain.state(),
@@ -1716,11 +1722,11 @@ fn every_path_refuses_a_cursor_past_the_boundary_before_a_layer() {
 
     let temp = tempfile::tempdir().unwrap();
     let watcher = Arc::new(Watcher::default());
-    let stele = SnapshotDir::create(temp.path().join("export")).unwrap();
+    let snapshot = SnapshotDir::create(temp.path().join("export")).unwrap();
 
     assert_eq!(
         reason(export::export(
-            &stele,
+            &snapshot,
             &plan,
             domain.archive(),
             domain.state(),
@@ -1822,10 +1828,10 @@ fn a_plan_the_stores_have_moved_past_is_refused_before_a_layer() {
 
     let watcher = Arc::new(Watcher::default());
     let temp = tempfile::tempdir().unwrap();
-    let stele = SnapshotDir::create(temp.path()).unwrap();
+    let snapshot = SnapshotDir::create(temp.path()).unwrap();
 
     let refused = export::export(
-        &stele,
+        &snapshot,
         &plan,
         domain.archive(),
         domain.state(),
@@ -1850,7 +1856,7 @@ fn a_plan_the_stores_have_moved_past_is_refused_before_a_layer() {
 
 /// An archive that runs past a boundary state, as `data rebuild
 /// --stop-epoch` over a synced archive leaves one, is refused before a layer:
-/// the blocks after the cursor wrote log and index rows inside the stele's
+/// the blocks after the cursor wrote log and index rows inside the snapshot's
 /// windows. A plan at the archive's tip is refused for the state it does not
 /// describe.
 #[test]
@@ -1879,10 +1885,10 @@ fn an_archive_past_a_boundary_state_is_refused_before_a_layer() {
     ] {
         let watcher = Arc::new(Watcher::default());
         let temp = tempfile::tempdir().unwrap();
-        let stele = SnapshotDir::create(temp.path()).unwrap();
+        let snapshot = SnapshotDir::create(temp.path()).unwrap();
 
         let refused = export::export(
-            &stele,
+            &snapshot,
             &plan,
             domain.archive(),
             domain.state(),
@@ -1901,10 +1907,10 @@ fn an_archive_past_a_boundary_state_is_refused_before_a_layer() {
     }
 }
 
-/// Log rows keyed past the cursor stay out of the stele: the last window ends
-/// at the cursor's slot whatever the log tables hold beyond it.
+/// Log rows keyed past the cursor stay out of the snapshot: the last window
+/// ends at the cursor's slot whatever the log tables hold beyond it.
 #[test]
-fn log_rows_past_the_cursor_stay_out_of_the_stele() {
+fn log_rows_past_the_cursor_stay_out_of_the_snapshot() {
     let domain: ToyDomain = harness();
 
     let cursor = domain.state().read_cursor().unwrap().unwrap();
@@ -1958,10 +1964,10 @@ fn a_block_beside_the_cursor_at_its_slot_is_refused_before_a_layer() {
 
     let watcher = Arc::new(Watcher::default());
     let temp = tempfile::tempdir().unwrap();
-    let stele = SnapshotDir::create(temp.path()).unwrap();
+    let snapshot = SnapshotDir::create(temp.path()).unwrap();
 
     let refused = export::export(
-        &stele,
+        &snapshot,
         &plan,
         domain.archive(),
         domain.state(),
@@ -1979,7 +1985,7 @@ fn a_block_beside_the_cursor_at_its_slot_is_refused_before_a_layer() {
     assert_eq!(watcher.layers(), 0, "a refused export announced a layer");
 }
 
-/// How many blobs a stele's layers occupy: distinct `diffId`s, because two
+/// How many blobs a snapshot's layers occupy: distinct `diffId`s, because two
 /// layers with identical content are one content-addressed file.
 fn distinct_layers(inscription: &stelae::Inscription) -> usize {
     inscription
@@ -2355,7 +2361,7 @@ fn index_across_the_skeleton() -> MemoryArchiveStore {
 #[test]
 fn an_export_costs_one_index_traversal_however_many_epochs_it_covers() {
     let temp = tempfile::tempdir().unwrap();
-    let stele = SnapshotDir::create(temp.path()).unwrap();
+    let snapshot = SnapshotDir::create(temp.path()).unwrap();
 
     let state = skeleton_state();
     let archive = Counted::new(with_skeleton_blocks(index_across_the_skeleton()));
@@ -2371,7 +2377,7 @@ fn an_export_costs_one_index_traversal_however_many_epochs_it_covers() {
     let watcher = Arc::new(Watcher::default());
 
     let inscription = export::export(
-        &stele,
+        &snapshot,
         &plan,
         &archive,
         &state,
@@ -2437,14 +2443,14 @@ fn skeleton_plan() -> Plan {
 #[test]
 fn entity_layers_exist_only_where_an_entity_was_first_seen() {
     let temp = tempfile::tempdir().unwrap();
-    let stele = SnapshotDir::create(temp.path()).unwrap();
+    let snapshot = SnapshotDir::create(temp.path()).unwrap();
 
     let archive = with_skeleton_blocks(entities_across_the_skeleton());
     let state = skeleton_state();
     let plan = skeleton_plan();
 
     let inscription = export::export(
-        &stele,
+        &snapshot,
         &plan,
         &archive,
         &state,
@@ -2466,8 +2472,8 @@ fn entity_layers_exist_only_where_an_entity_was_first_seen() {
         "an entity layer has no tip form"
     );
 
-    let stele = common::resolve(temp.path());
-    let index = stele.blob_index().unwrap();
+    let snapshot = common::resolve(temp.path());
+    let index = snapshot.blob_index().unwrap();
     let (asset_layer, asset) = ENTITY_KINDS[0];
     let (script_layer, script) = ENTITY_KINDS[1];
 
@@ -2481,7 +2487,7 @@ fn entity_layers_exist_only_where_an_entity_was_first_seen() {
                 );
 
                 let epoch = descriptor.scope["epoch"].as_u64().unwrap();
-                let records = read_both_ways(&stele, &index, descriptor)
+                let records = read_both_ways(&snapshot, &index, descriptor)
                     .iter()
                     .map(|bytes| entities::decode(entity, bytes).unwrap())
                     .collect();
@@ -2669,15 +2675,15 @@ fn the_headless_facade_plans_encodes_and_reproduces_one_document() {
         .unwrap();
 
     let destination = tempfile::tempdir().unwrap();
-    let stele = destination.path().join("stele");
+    let snapshot = destination.path().join("snapshot");
     let inscription = source
-        .publish_directory(&stele, &plan, &Observer::silent())
+        .publish_directory(&snapshot, &plan, &Observer::silent())
         .unwrap();
     let reproduced = source.verify_reproduction(&inscription, &plan).unwrap();
 
-    // The directory's blocks snapshot is the one the stele names, and a digest
-    // takes it as the host's plan would.
-    let blocks = node::resolved_blocks(&stele).unwrap();
+    // The directory's blocks snapshot is the one the Dolos snapshot names, and a
+    // digest takes it as the host's plan would.
+    let blocks = node::resolved_blocks(&snapshot).unwrap();
     let named = blocks.read_inscription().unwrap().digest().unwrap();
     assert_eq!(
         dolos_snapshot::read_position(&inscription.position)
@@ -2694,8 +2700,9 @@ fn the_headless_facade_plans_encodes_and_reproduces_one_document() {
     assert_eq!(inscription.digest().unwrap(), document.identity);
 }
 
-/// A verifier that names its own blocks snapshot holds the published stele to
-/// it: the published `position.blocks` is taken only when the plan names none.
+/// A verifier that names its own blocks snapshot holds the published snapshot
+/// to it: the published `position.blocks` is taken only when the plan names
+/// none.
 #[test]
 fn a_verifiers_own_blocks_reference_is_held_against_the_published_one() {
     let domain: ToyDomain = harness();
@@ -2712,11 +2719,11 @@ fn a_verifiers_own_blocks_reference_is_held_against_the_published_one() {
         .unwrap();
 
     let destination = tempfile::tempdir().unwrap();
-    let stele = destination.path().join("stele");
+    let snapshot = destination.path().join("snapshot");
     let inscription = source
-        .publish_directory(&stele, &plan, &Observer::silent())
+        .publish_directory(&snapshot, &plan, &Observer::silent())
         .unwrap();
-    let named = node::resolved_blocks(&stele)
+    let named = node::resolved_blocks(&snapshot)
         .unwrap()
         .read_inscription()
         .unwrap()
@@ -4275,7 +4282,7 @@ mod boundary_preparation {
 
     /// The canonical document, layer by layer first so a failure names one,
     /// and every compressed blob.
-    fn assert_same_stele(
+    fn assert_same_snapshot(
         frozen: (&Path, &Inscription),
         finalized: (&Path, &Inscription),
         at: &str,
@@ -4302,7 +4309,7 @@ mod boundary_preparation {
         assert_eq!(blobs(frozen.0), blobs(finalized.0), "{at}");
     }
 
-    /// Whether the layout at `root` tags no stele: a refused finalize seals
+    /// Whether the layout at `root` tags no snapshot: a refused finalize seals
     /// nothing.
     fn sealed_nothing(root: &Path) -> bool {
         SnapshotDir::open(root).unwrap().tags().unwrap().is_empty()
@@ -4382,7 +4389,7 @@ mod boundary_preparation {
                     .finalize(finished_root.path(), &store, bundle, &staged, &following())
                     .unwrap();
 
-                assert_same_stele(
+                assert_same_snapshot(
                     (frozen_root.path(), &frozen),
                     (finished_root.path(), &finished),
                     &format!("{shape:?} at {}", bundle.sequence()),
@@ -4402,7 +4409,7 @@ mod boundary_preparation {
         }
     }
 
-    /// The same equality for a batch whose first publication follows a stele
+    /// The same equality for a batch whose first publication follows a snapshot
     /// already published: the link and the diff land only at finalization, and
     /// a window an earlier diff listed is never staged.
     #[test]
@@ -4461,7 +4468,7 @@ mod boundary_preparation {
                     )
                     .unwrap();
 
-                assert_same_stele(
+                assert_same_snapshot(
                     (frozen_root.path(), &frozen),
                     (finished_root.path(), &finished),
                     &at,
@@ -5047,7 +5054,7 @@ mod boundary_preparation {
         let read = dolos_snapshot::read_position(&finished.position).unwrap();
         assert_eq!(read.blocks, Some(some_blocks()));
 
-        assert_same_stele(
+        assert_same_snapshot(
             (frozen_root.path(), &frozen),
             (finished_root.path(), &finished),
             "with a blocks reference",
@@ -5564,8 +5571,8 @@ mod boundary_preparation {
         refusal
     }
 
-    /// Old records would land in a sealed stele under this build's labels, and
-    /// no layer header stops them.
+    /// Old records would land in a sealed snapshot under this build's labels,
+    /// and no layer header stops them.
     #[test]
     fn a_bundle_of_another_media_type_version_is_refused() {
         let refusal = load_as_another_build(|manifest| {
@@ -5696,7 +5703,7 @@ mod boundary_preparation {
             )
             .unwrap();
 
-        assert_same_stele(
+        assert_same_snapshot(
             (frozen_root.path(), &frozen),
             (finished_root.path(), &finished),
             "rebuilt",
@@ -5919,7 +5926,7 @@ mod boundary_preparation {
 
     /// Prepare at `chain`'s boundary, advance, prune past a closed window and
     /// finish: closed blocks are read from the archive, so that is
-    /// `PrunedArchive` and never a stele whose closed blocks read as empty.
+    /// `PrunedArchive` and never a snapshot whose closed blocks read as empty.
     fn assert_a_prune_is_refused(mut chain: Chain, prune_at_epoch: u64) {
         let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
         let store = store(root.path());
@@ -6080,7 +6087,7 @@ mod boundary_preparation {
             chain.advance_to(3);
 
             let bundles = std::slice::from_ref(&bundle);
-            let stele = SnapshotDir::create(finished_root.path()).unwrap();
+            let snapshot = SnapshotDir::create(finished_root.path()).unwrap();
             let finished = if on_fjall {
                 let fjall = fjall_copy(&chain);
                 let staged = prepare::stage_batch(
@@ -6095,7 +6102,7 @@ mod boundary_preparation {
                 .unwrap();
 
                 prepare::finalize(
-                    &stele,
+                    &snapshot,
                     &Finalizing {
                         store: &store,
                         bundle: &bundle,
@@ -6110,7 +6117,7 @@ mod boundary_preparation {
                 let staged = chain.stage(stage_root.path(), bundles, &export::First);
 
                 prepare::finalize(
-                    &stele,
+                    &snapshot,
                     &Finalizing {
                         store: &store,
                         bundle: &bundle,
@@ -6169,7 +6176,7 @@ mod boundary_preparation {
                 &export::First,
             );
             let max_slots = chain.tip.as_ref().unwrap().slot() - (origin + 1);
-            let stele = SnapshotDir::create(finished_root.path()).unwrap();
+            let snapshot = SnapshotDir::create(finished_root.path()).unwrap();
             let finalizing = Finalizing {
                 store: &store,
                 bundle: &bundle,
@@ -6183,7 +6190,7 @@ mod boundary_preparation {
                 assert!(fjall.prune_history(max_slots, None, None).unwrap());
 
                 prepare::finalize(
-                    &stele,
+                    &snapshot,
                     &finalizing,
                     &fjall,
                     &export::First,
@@ -6193,7 +6200,7 @@ mod boundary_preparation {
                 assert!(chain.archive.prune_history(max_slots, None, None).unwrap());
 
                 prepare::finalize(
-                    &stele,
+                    &snapshot,
                     &finalizing,
                     &chain.archive,
                     &export::First,
@@ -6854,7 +6861,7 @@ mod boundary_preparation {
             )
             .unwrap();
 
-        assert_same_stele(
+        assert_same_snapshot(
             (frozen_root.path(), &frozen),
             (finished_root.path(), &finished),
             "after a restart",
@@ -6893,7 +6900,7 @@ mod boundary_preparation {
     }
 
     /// A restart wanting more than the root holds says so, in its own refusal,
-    /// and the documented recovery gives the same stele: a batch staged to
+    /// and the documented recovery gives the same snapshot: a batch staged to
     /// follow a seed, restarted as the start of a lineage.
     #[test]
     fn a_restart_wanting_more_is_refused_and_a_new_root_recovers() {
@@ -7295,7 +7302,7 @@ mod boundary_preparation {
             )
             .unwrap();
 
-        assert_same_stele(
+        assert_same_snapshot(
             (frozen_root.path(), &frozen),
             (finished_root.path(), &finished),
             what,

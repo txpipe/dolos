@@ -672,9 +672,9 @@ fn managed_paths(config: &RootConfig) -> miette::Result<Removal> {
 /// first, so a reset that stops part-way leaves no state over a fresh
 /// archive, and before them what a reset that stopped moved aside: its stores,
 /// wherever the configuration puts them under the root, the cache and mempool
-/// even while they are off, a stele transfer's scratch, a snapshot download's
-/// staging, a restore's progress and a publish's resumption record, and the
-/// read-only views of the fjall stores an interrupted observer left.
+/// even while they are off, a snapshot transfer's scratch, a snapshot
+/// download's staging, a restore's progress and a publish's resumption record,
+/// and the read-only views of the fjall stores an interrupted observer left.
 fn store_paths(config: &RootConfig) -> std::io::Result<Vec<PathBuf>> {
     let paths = configured_paths(config)?;
 
@@ -771,7 +771,7 @@ fn written_paths(config: &RootConfig) -> Written {
         storage.blocks_path(),
         Some(storage.resolve(config.mempool.path.as_ref(), "mempool")),
         Some(storage.resolve(storage.cache.path.as_ref(), "cache")),
-        Some(root.join(dolos_snapshot::node::STELE_SCRATCH_DIR)),
+        Some(root.join(dolos_snapshot::node::SNAPSHOT_SCRATCH_DIR)),
         Some(root.join(SNAPSHOT_STAGING_DIR)),
         Some(dolos_snapshot::restore::progress_path_in(root)),
         Some(dolos_snapshot::restore::source_path_in(root)),

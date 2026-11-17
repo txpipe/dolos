@@ -104,7 +104,7 @@ Internal prefix constants:
 
 ## Stelae
 
-The `indexes` stele layer is the sorted output of
+The `indexes` snapshot layer is the sorted output of
 `ArchiveStore::iter_archive_tags` followed by `iter_exact_records`, and the
 input of `ArchiveWriter::append_prehashed`. The `entity-{kind}` layers are
 `ArchiveStore::iter_entity_records` per kind, restored through

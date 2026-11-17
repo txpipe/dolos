@@ -608,7 +608,7 @@ impl Default for CacheConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct StorageConfig {
     /// Root directory for the stores, relative to the working directory. Also
-    /// holds `scratch/`, where a stele transfer over an OCI registry stages
+    /// holds `scratch/`, where a snapshot transfer over an OCI registry stages
     /// layers in flight.
     pub path: PathBuf,
     #[serde(skip_serializing_if = "is_default")]

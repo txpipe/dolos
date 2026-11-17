@@ -25,8 +25,9 @@ pub enum TestFault {
     /// succeeds.
     ///
     /// The narrow one, for a caller that has to reach a specific write and
-    /// would never get there if opening the store failed too — a stele restore
-    /// above all, which writes tags alongside each incoming UTxO batch.
+    /// would never get there if opening the store failed too — a snapshot
+    /// restore above all, which writes tags alongside each incoming UTxO
+    /// batch.
     StateTagsApplyError,
     /// Only reads and scans of this namespace fail; every other state call
     /// succeeds.

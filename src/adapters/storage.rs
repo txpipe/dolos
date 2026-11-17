@@ -62,7 +62,7 @@ pub fn ensure_storage_path(config: &RootConfig) -> Result<PathBuf, Error> {
 /// Empty the storage directory.
 ///
 /// A `remove_dir_all` of the whole path and not a per-store wipe, which matters
-/// for one thing that is not a store: a stele restore's progress file lives
+/// for one thing that is not a store: a snapshot restore's progress file lives
 /// inside `storage.path`, and a progress file that outlived the stores it
 /// describes would tell a resumed restore to skip layers whose data is gone.
 /// Anything that clears storage has to clear that too, and taking the directory
@@ -367,10 +367,10 @@ pub fn normalize(path: &Path) -> std::io::Result<PathBuf> {
 ///
 /// Deciding is separated from doing because only one of the outcomes is
 /// destructive, and it must not happen until the run is fully known. An
-/// interactive bootstrap asks which method to use — and, for a stele, where the
-/// stele is — *after* the flags are parsed, so a `--force` that cleared first
-/// would take a working node away on a typo, a cancel, or a machine with no
-/// terminal, and hand back nothing in its place.
+/// interactive bootstrap asks which method to use — and, for a snapshot, where
+/// the snapshot is — *after* the flags are parsed, so a `--force` that cleared
+/// first would take a working node away on a typo, a cancel, or a machine with
+/// no terminal, and hand back nothing in its place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Existing {
     /// Data is there and `--skip-if-data` says to leave it alone.
@@ -390,7 +390,7 @@ pub struct ExistingDataPolicy {
     /// node, and a store this release refuses, are not skipped.
     pub skip_if_data: bool,
     /// `--continue`: go ahead and resume, a replay from its committed
-    /// position and a stele restore from its records. The source decides
+    /// position and a snapshot restore from its records. The source decides
     /// whether there is anything to resume.
     pub r#continue: bool,
 }
@@ -3609,11 +3609,11 @@ mod tests {
     fn a_relative_link_is_followed_from_its_own_directory() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("data");
-        std::fs::create_dir_all(root.join("stele")).unwrap();
+        std::fs::create_dir_all(root.join("snapshot")).unwrap();
         std::fs::create_dir_all(temp.path().join("srv")).unwrap();
 
-        let link = temp.path().join("srv").join("stele");
-        std::os::unix::fs::symlink(Path::new("..").join("data").join("stele"), &link).unwrap();
+        let link = temp.path().join("srv").join("snapshot");
+        std::os::unix::fs::symlink(Path::new("..").join("data").join("snapshot"), &link).unwrap();
 
         assert!(reaches_into(&link, &root).unwrap());
         assert!(reaches_into(&link.join("blobs"), &root).unwrap());

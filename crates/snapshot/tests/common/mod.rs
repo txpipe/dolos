@@ -1,4 +1,4 @@
-//! One small, hand-pinned Dolos stele, shared by the roundtrip and golden
+//! One small, hand-pinned Dolos snapshot, shared by the roundtrip and golden
 //! tests.
 //!
 //! Every value here is a literal. Nothing is drawn from `dolos-testing`'s
@@ -57,12 +57,12 @@ use stelae::{
 
 pub const NETWORK_MAGIC: u64 = dolos_snapshot::MAINNET_MAGIC;
 
-/// The stele's sequence, which for this profile is the epoch.
+/// The snapshot's sequence, which for this profile is the epoch.
 pub const EPOCH: u64 = 7;
 pub const START_SLOT: u64 = 100;
 pub const END_SLOT: u64 = 101;
 
-/// The boundary block this stele stands at.
+/// The boundary block this snapshot stands at.
 pub const POINT_HASH: [u8; 32] = [0x0b; 32];
 
 /// The shards the fixture populates for a sixteen-way state kind. Sixteen
@@ -340,12 +340,12 @@ pub fn sequence(kind: &str, scope: &dyn Scope, records: &[CanonicalCbor]) -> Vec
 }
 
 pub fn write_layer(
-    stele: &SnapshotDir,
+    snapshot: &SnapshotDir,
     kind: &str,
     scope: &dyn Scope,
     records: &[CanonicalCbor],
 ) -> WrittenLayer {
-    stele
+    snapshot
         .write_layer(
             &DolosProfile,
             &scope.layer_spec(kind).unwrap(),
@@ -411,9 +411,9 @@ pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
     layers
 }
 
-/// Seal the layers `stele` has written since its last seal as the tip of a
-/// stele at [`EPOCH`] that starts its lineage, and read that sequence back.
-pub fn seal_alone(stele: &SnapshotDir, tip: Vec<LayerDescriptor>) -> Snapshot {
+/// Seal the layers `snapshot` has written since its last seal as the tip of a
+/// snapshot at [`EPOCH`] that starts its lineage, and read that sequence back.
+pub fn seal_alone(snapshot: &SnapshotDir, tip: Vec<LayerDescriptor>) -> Snapshot {
     let mut inscription = Inscription::new(
         &DolosProfile,
         EPOCH,
@@ -423,11 +423,12 @@ pub fn seal_alone(stele: &SnapshotDir, tip: Vec<LayerDescriptor>) -> Snapshot {
     );
     inscription.tip = tip;
 
-    stele.seal(&DolosProfile, &inscription).unwrap();
-    stele.pull_sequence(&DolosProfile, EPOCH).unwrap()
+    snapshot.seal(&DolosProfile, &inscription).unwrap();
+    snapshot.pull_sequence(&DolosProfile, EPOCH).unwrap()
 }
 
-/// The latest stele of the image layout at `root`, resolved through its chain.
+/// The latest snapshot of the image layout at `root`, resolved through its
+/// chain.
 pub fn resolve(root: &std::path::Path) -> Snapshot {
     SnapshotDir::open(root)
         .unwrap()
@@ -435,11 +436,12 @@ pub fn resolve(root: &std::path::Path) -> Snapshot {
         .unwrap()
 }
 
-/// The layer set of a resolved stele: every `diff` of its chain, then its tip.
-pub fn layer_set(stele: &Snapshot) -> Vec<LayerDescriptor> {
-    stele
+/// The layer set of a resolved snapshot: every `diff` of its chain, then its
+/// tip.
+pub fn layer_set(snapshot: &Snapshot) -> Vec<LayerDescriptor> {
+    snapshot
         .chain()
-        .expect("a resolved stele")
+        .expect("a resolved snapshot")
         .descriptors()
         .cloned()
         .collect()
@@ -452,11 +454,13 @@ pub fn layer_set(stele: &Snapshot) -> Vec<LayerDescriptor> {
 /// determinism bug in the format, and this profile is the first real one to put
 /// that to the test.
 pub fn read_both_ways(
-    stele: &Snapshot,
+    snapshot: &Snapshot,
     index: &BlobIndex,
     descriptor: &LayerDescriptor,
 ) -> Vec<Vec<u8>> {
-    let buffered = stele.read_layer(index, &DolosProfile, descriptor).unwrap();
+    let buffered = snapshot
+        .read_layer(index, &DolosProfile, descriptor)
+        .unwrap();
 
     // A window far below one record, so the refill path is exercised rather
     // than swallowing the layer in a single read.
@@ -465,7 +469,7 @@ pub fn read_both_ways(
         ..Limits::default()
     };
 
-    let mut reader = stele
+    let mut reader = snapshot
         .stream_layer(index, &DolosProfile, descriptor, limits)
         .unwrap();
 

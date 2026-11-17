@@ -2,7 +2,7 @@
 //!
 //! What `dolos bootstrap stelae --continue` drives: a restore given its
 //! source writes the source record before the first layer, and a resume
-//! given the same source reads the stele the record names, skips the layers
+//! given the same source reads the snapshot the record names, skips the layers
 //! the progress file names, and refuses records it can't trust before
 //! anything is written.
 //!
@@ -57,15 +57,15 @@ fn restoring<'a>(
 }
 
 /// A network root exported from the harness, with the source naming its
-/// stele layout.
-struct Stele {
+/// snapshot layout.
+struct Snapshot {
     domain: ToyDomain<FjallStores>,
     dir: tempfile::TempDir,
     source: Source,
     magic: u64,
 }
 
-impl Stele {
+impl Snapshot {
     fn export() -> Self {
         let domain = harness::<FjallStores>();
         let magic = magic_of(&domain);
@@ -80,7 +80,7 @@ impl Stele {
         }
     }
 
-    /// Steles published on boundaries 1 and 2, the second linked to the
+    /// Snapshots published on boundaries 1 and 2, the second linked to the
     /// first, so the head is not where its chain starts.
     fn chained() -> Self {
         let domain = harness::<FjallStores>();
@@ -106,8 +106,8 @@ impl Stele {
         }
     }
 
-    /// [`Stele::chained`], its pair copied through the blocks profile's plain
-    /// writer into a root of its own.
+    /// [`Snapshot::chained`], its pair copied through the blocks profile's
+    /// plain writer into a root of its own.
     fn paired() -> Self {
         let chained = Self::chained();
         let dir = tempfile::tempdir().unwrap();
@@ -131,7 +131,7 @@ impl Stele {
         self.dir.path()
     }
 
-    /// The stele layout of the root, which is the recorded source.
+    /// The snapshot layout of the root, which is the recorded source.
     fn path(&self) -> PathBuf {
         node::dolos(self.root())
     }
@@ -218,7 +218,7 @@ impl Stele {
         (entries.into_iter().map(|entry| entry.op).collect(), digest)
     }
 
-    /// [`Stele::uninterrupted`], each call with the layers the progress file
+    /// [`Snapshot::uninterrupted`], each call with the layers the progress file
     /// recorded when it returned, and the plan.
     fn recorded_run(&self) -> (Vec<Entry>, Digest, restore::Plan) {
         self.recorded_run_under(|journal| journal)
@@ -258,8 +258,8 @@ fn progress(storage: &Path) -> Option<RestoreProgress> {
 /// restore builds, with every layer the progress file named skipped.
 #[test]
 fn a_restore_stopped_anywhere_resumes_from_its_records_into_the_same_node() {
-    let stele = Stele::export();
-    let (ops, control) = stele.uninterrupted();
+    let snapshot = Snapshot::export();
+    let (ops, control) = snapshot.uninterrupted();
 
     let calls = |wanted: &[Op]| -> Vec<usize> {
         ops.iter()
@@ -296,16 +296,16 @@ fn a_restore_stopped_anywhere_resumes_from_its_records_into_the_same_node() {
         let storage = tempfile::tempdir().unwrap();
         let blank = Blank::<FjallStores>::open();
 
-        let error = stele.stopped_at(storage.path(), &blank, stop);
+        let error = snapshot.stopped_at(storage.path(), &blank, stop);
         assert!(error.to_string().contains("stopped at call"), "{error}");
 
         let record = recorded(storage.path()).expect("a stopped restore left no source record");
-        assert_eq!(record.source, stele.source.to_string());
-        assert_eq!(record.inscription_digest, stele.digest());
+        assert_eq!(record.source, snapshot.source.to_string());
+        assert_eq!(record.inscription_digest, snapshot.digest());
 
         let skipped = progress(storage.path()).map_or(0, |progress| progress.completed.len());
 
-        let resumed = stele.restore(storage.path(), &blank, true).unwrap();
+        let resumed = snapshot.restore(storage.path(), &blank, true).unwrap();
 
         assert_eq!(resumed.summary.layers_skipped, skipped, "stopped at {stop}");
         assert_eq!(recorded(storage.path()), None, "stopped at {stop}");
@@ -322,9 +322,9 @@ fn a_restore_stopped_anywhere_resumes_from_its_records_into_the_same_node() {
 /// restore that writes every layer in batches leaves.
 #[test]
 fn an_ingesting_restore_leaves_the_node_a_batched_one_does() {
-    for stele in ingesting_steles() {
-        let (ops, ingested) = stele.uninterrupted();
-        let (batched_ops, batched) = stele.uninterrupted_under(Journal::batched);
+    for snapshot in ingesting_snapshots() {
+        let (ops, ingested) = snapshot.uninterrupted();
+        let (batched_ops, batched) = snapshot.uninterrupted_under(Journal::batched);
 
         assert!(ops.contains(&Op::ArchiveIngest), "{ops:?}");
         assert!(!batched_ops.contains(&Op::ArchiveIngest), "{batched_ops:?}");
@@ -337,8 +337,8 @@ fn an_ingesting_restore_leaves_the_node_a_batched_one_does() {
 /// resume fetches the layer again and builds the uninterrupted node.
 #[test]
 fn a_restore_stopped_around_an_ingest_resumes_into_the_same_node() {
-    for stele in ingesting_steles() {
-        let (ops, control) = stele.uninterrupted();
+    for snapshot in ingesting_snapshots() {
+        let (ops, control) = snapshot.uninterrupted();
 
         let finishes: Vec<usize> = ops
             .iter()
@@ -356,12 +356,12 @@ fn a_restore_stopped_around_an_ingest_resumes_into_the_same_node() {
                 let storage = tempfile::tempdir().unwrap();
                 let blank = Blank::<FjallStores>::open();
 
-                let error = stele.stopped_at(storage.path(), &blank, stop);
+                let error = snapshot.stopped_at(storage.path(), &blank, stop);
                 assert!(error.to_string().contains("stopped at call"), "{error}");
 
                 let skipped =
                     progress(storage.path()).map_or(0, |progress| progress.completed.len());
-                let resumed = stele.restore(storage.path(), &blank, true).unwrap();
+                let resumed = snapshot.restore(storage.path(), &blank, true).unwrap();
 
                 assert_eq!(resumed.summary.layers_skipped, skipped, "stopped at {stop}");
                 assert_eq!(
@@ -378,8 +378,8 @@ fn a_restore_stopped_around_an_ingest_resumes_into_the_same_node() {
 /// cursor commit.
 #[test]
 fn an_ingesting_restore_settles_before_the_cursor_commit() {
-    for stele in ingesting_steles() {
-        let (ops, _) = stele.uninterrupted();
+    for snapshot in ingesting_snapshots() {
+        let (ops, _) = snapshot.uninterrupted();
 
         assert_settled_once(&ops);
     }
@@ -389,8 +389,8 @@ fn an_ingesting_restore_settles_before_the_cursor_commit() {
 /// no layer left to ingest, settles again, and builds the uninterrupted node.
 #[test]
 fn a_restore_stopped_at_or_after_the_settle_settles_again_on_resume() {
-    for stele in ingesting_steles() {
-        let (ops, control) = stele.uninterrupted();
+    for snapshot in ingesting_snapshots() {
+        let (ops, control) = snapshot.uninterrupted();
 
         let settle = ops.iter().position(|op| *op == Op::ArchiveSettle).unwrap() + 1;
         let cursor_commit = ops.iter().rposition(|op| *op == Op::StateCommit).unwrap() + 1;
@@ -399,11 +399,11 @@ fn a_restore_stopped_at_or_after_the_settle_settles_again_on_resume() {
             let storage = tempfile::tempdir().unwrap();
             let blank = Blank::<FjallStores>::open();
 
-            let error = stele.stopped_at(storage.path(), &blank, stop);
+            let error = snapshot.stopped_at(storage.path(), &blank, stop);
             assert!(error.to_string().contains("stopped at call"), "{error}");
 
             let journal = Journal::new(progress_path_in(storage.path()));
-            stele
+            snapshot
                 .restore_recorded(storage.path(), &blank, true, &journal)
                 .unwrap();
 
@@ -427,14 +427,14 @@ fn a_restore_stopped_at_or_after_the_settle_settles_again_on_resume() {
 /// before its cursor: the node stays unfinished and a resume completes it.
 #[test]
 fn a_settle_that_fails_fails_the_restore_before_the_cursor() {
-    for stele in ingesting_steles() {
-        let (_, control) = stele.uninterrupted();
+    for snapshot in ingesting_snapshots() {
+        let (_, control) = snapshot.uninterrupted();
 
         let storage = tempfile::tempdir().unwrap();
         let blank = Blank::<FjallStores>::open();
         let journal = Journal::failing_settle(progress_path_in(storage.path()));
 
-        let error = stele
+        let error = snapshot
             .restore_recorded(storage.path(), &blank, false, &journal)
             .unwrap_err();
 
@@ -442,15 +442,15 @@ fn a_settle_that_fails_fails_the_restore_before_the_cursor() {
         assert_eq!(blank.state().read_cursor().unwrap(), None);
         assert!(progress(storage.path()).is_some());
 
-        stele.restore(storage.path(), &blank, true).unwrap();
+        snapshot.restore(storage.path(), &blank, true).unwrap();
         assert_eq!(contents_digest(&blank.archive, blank.state()), control);
     }
 }
 
-/// A single stele, and a paired one whose closed epochs' blocks come from the
-/// blocks repository: both ingest their blocks and logs.
-fn ingesting_steles() -> [Stele; 2] {
-    [Stele::export(), Stele::paired()]
+/// A single snapshot, and a paired one whose closed epochs' blocks come from
+/// the blocks repository: both ingest their blocks and logs.
+fn ingesting_snapshots() -> [Snapshot; 2] {
+    [Snapshot::export(), Snapshot::paired()]
 }
 
 fn assert_settled_once(ops: &[Op]) {
@@ -470,16 +470,16 @@ fn assert_settled_once(ops: &[Op]) {
     }
 }
 
-/// A head that links to an earlier stele resumes the same way: the record
+/// A head that links to an earlier snapshot resumes the same way: the record
 /// names the head, not the inscription its chain starts at.
 #[test]
 fn a_stopped_restore_of_a_chained_head_resumes_from_its_records() {
-    let stele = Stele::chained();
-    let (ops, control) = stele.uninterrupted();
+    let snapshot = Snapshot::chained();
+    let (ops, control) = snapshot.uninterrupted();
 
     let head = {
         use stelae::SnapshotReader as _;
-        node::resolved(stele.root()).read_inscription().unwrap()
+        node::resolved(snapshot.root()).read_inscription().unwrap()
     };
     assert_eq!(head.sequence, 2);
     assert!(head.previous.is_some());
@@ -489,7 +489,7 @@ fn a_stopped_restore_of_a_chained_head_resumes_from_its_records() {
 
     let storage = tempfile::tempdir().unwrap();
     let blank = Blank::<FjallStores>::open();
-    stele.stopped_at(storage.path(), &blank, stop);
+    snapshot.stopped_at(storage.path(), &blank, stop);
 
     let record = recorded(storage.path()).expect("a stopped restore left no source record");
     assert_eq!(record.sequence, head.sequence);
@@ -498,7 +498,7 @@ fn a_stopped_restore_of_a_chained_head_resumes_from_its_records() {
     let skipped = progress(storage.path()).map_or(0, |progress| progress.completed.len());
     assert!(skipped > 0, "the stop recorded no layer to skip");
 
-    let resumed = stele.restore(storage.path(), &blank, true).unwrap();
+    let resumed = snapshot.restore(storage.path(), &blank, true).unwrap();
 
     assert_eq!(resumed.summary.layers_skipped, skipped);
     assert_eq!(recorded(storage.path()), None);
@@ -506,34 +506,34 @@ fn a_stopped_restore_of_a_chained_head_resumes_from_its_records() {
 }
 
 /// The record's fields are the published contract: the network root's URL,
-/// the two repositories under it, the stele's sequence and its inscription
+/// the two repositories under it, the snapshot's sequence and its inscription
 /// digest, and nothing else.
 #[test]
 fn the_source_record_names_the_source_the_sequence_and_the_digest() {
-    let stele = Stele::export();
-    let (ops, _) = stele.uninterrupted();
+    let snapshot = Snapshot::export();
+    let (ops, _) = snapshot.uninterrupted();
     let first_state_commit = ops.iter().position(|op| *op == Op::StateCommit).unwrap() + 1;
 
     let storage = tempfile::tempdir().unwrap();
     let blank = Blank::<FjallStores>::open();
-    stele.stopped_at(storage.path(), &blank, first_state_commit);
+    snapshot.stopped_at(storage.path(), &blank, first_state_commit);
 
     let raw: serde_json::Value =
         serde_json::from_slice(&std::fs::read(source_path_in(storage.path())).unwrap()).unwrap();
 
     let inscription = {
         use stelae::SnapshotReader as _;
-        node::resolved(stele.root()).read_inscription().unwrap()
+        node::resolved(snapshot.root()).read_inscription().unwrap()
     };
 
     assert_eq!(
         raw,
         serde_json::json!({
-            "source": format!("file://{}", stele.path().display()),
-            "dolos": format!("file://{}", stele.path().join("dolos").display()),
-            "blocks": format!("file://{}", stele.path().join("blocks").display()),
+            "source": format!("file://{}", snapshot.path().display()),
+            "dolos": format!("file://{}", snapshot.path().join("dolos").display()),
+            "blocks": format!("file://{}", snapshot.path().join("blocks").display()),
             "sequence": inscription.sequence,
-            "inscriptionDigest": stele.digest().to_string(),
+            "inscriptionDigest": snapshot.digest().to_string(),
         })
     );
 }
@@ -542,13 +542,13 @@ fn the_source_record_names_the_source_the_sequence_and_the_digest() {
 /// fetched and the same node.
 #[test]
 fn a_resume_with_nothing_recorded_restores_from_the_top() {
-    let stele = Stele::export();
-    let (_, control) = stele.uninterrupted();
+    let snapshot = Snapshot::export();
+    let (_, control) = snapshot.uninterrupted();
 
     let storage = tempfile::tempdir().unwrap();
     let blank = Blank::<FjallStores>::open();
 
-    let outcome = stele.restore(storage.path(), &blank, true).unwrap();
+    let outcome = snapshot.restore(storage.path(), &blank, true).unwrap();
 
     assert_eq!(outcome.summary.layers_skipped, 0);
     assert_eq!(contents_digest(&blank.archive, blank.state()), control);
@@ -557,13 +557,13 @@ fn a_resume_with_nothing_recorded_restores_from_the_top() {
 
 /// Stop a recorded restore at its first tip commit, leaving the epoch layers
 /// recorded.
-fn interrupted(stele: &Stele) -> (tempfile::TempDir, Blank<FjallStores>) {
-    let (ops, _) = stele.uninterrupted();
+fn interrupted(snapshot: &Snapshot) -> (tempfile::TempDir, Blank<FjallStores>) {
+    let (ops, _) = snapshot.uninterrupted();
     let first_state_commit = ops.iter().position(|op| *op == Op::StateCommit).unwrap() + 1;
 
     let storage = tempfile::tempdir().unwrap();
     let blank = Blank::<FjallStores>::open();
-    stele.stopped_at(storage.path(), &blank, first_state_commit);
+    snapshot.stopped_at(storage.path(), &blank, first_state_commit);
 
     assert!(recorded(storage.path()).is_some());
     assert!(progress(storage.path()).is_some_and(|progress| !progress.completed.is_empty()));
@@ -591,7 +591,7 @@ fn assert_refused_untouched(
     refusal
 }
 
-fn snapshot(
+fn store_state(
     storage: &Path,
     blank: &Blank<FjallStores>,
 ) -> (Option<SourceRecord>, Option<RestoreProgress>, Digest) {
@@ -606,13 +606,13 @@ fn snapshot(
 /// leaves, is refused.
 #[test]
 fn a_progress_file_without_a_record_is_refused() {
-    let stele = Stele::export();
-    let (storage, blank) = interrupted(&stele);
+    let snapshot = Snapshot::export();
+    let (storage, blank) = interrupted(&snapshot);
 
     SourceRecord::remove(&source_path_in(storage.path())).unwrap();
-    let before = snapshot(storage.path(), &blank);
+    let before = store_state(storage.path(), &blank);
 
-    let error = stele.restore(storage.path(), &blank, true).unwrap_err();
+    let error = snapshot.restore(storage.path(), &blank, true).unwrap_err();
     let refusal = assert_refused_untouched(error, storage.path(), &blank, before);
 
     assert!(
@@ -621,23 +621,23 @@ fn a_progress_file_without_a_record_is_refused() {
     );
 }
 
-/// The recorded directory gone, or holding another stele, is the stele the
-/// restore started from no longer being there.
+/// The recorded directory gone, or holding another snapshot, is the snapshot
+/// the restore started from no longer being there.
 #[test]
-fn a_directory_that_no_longer_holds_the_recorded_stele_is_refused() {
-    let stele = Stele::export();
-    let (storage, blank) = interrupted(&stele);
-    let before = snapshot(storage.path(), &blank);
+fn a_directory_that_no_longer_holds_the_recorded_snapshot_is_refused() {
+    let snapshot = Snapshot::export();
+    let (storage, blank) = interrupted(&snapshot);
+    let before = store_state(storage.path(), &blank);
 
-    // Another stele under the same path: a later epoch of the same ledger.
+    // Another snapshot under the same path: a later epoch of the same ledger.
     let moved = tempfile::tempdir().unwrap();
-    std::fs::rename(stele.path(), moved.path().join("original")).unwrap();
+    std::fs::rename(snapshot.path(), moved.path().join("original")).unwrap();
 
     let later = harness::<FjallStores>();
     node::stand_at_boundary(&later, 2);
-    node::export_layout(&stele.path(), &later, &node::plan_for(&later));
+    node::export_layout(&snapshot.path(), &later, &node::plan_for(&later));
 
-    let error = stele.restore(storage.path(), &blank, true).unwrap_err();
+    let error = snapshot.restore(storage.path(), &blank, true).unwrap_err();
     let refusal = assert_refused_untouched(error, storage.path(), &blank, before.clone());
 
     let ResumeRefusal::Gone(record) = &refusal else {
@@ -660,32 +660,32 @@ fn a_directory_that_no_longer_holds_the_recorded_stele_is_refused() {
     );
 
     // And the directory gone altogether.
-    std::fs::remove_dir_all(stele.path()).unwrap();
+    std::fs::remove_dir_all(snapshot.path()).unwrap();
 
-    let error = stele.restore(storage.path(), &blank, true).unwrap_err();
+    let error = snapshot.restore(storage.path(), &blank, true).unwrap_err();
     let refusal = assert_refused_untouched(error, storage.path(), &blank, before);
 
     assert!(matches!(refusal, ResumeRefusal::Gone(_)), "{refusal:?}");
 }
 
 /// A resume given another source than the record's is refused, though it
-/// holds the same stele.
+/// holds the same snapshot.
 #[test]
 fn a_resume_from_another_source_is_refused() {
-    let stele = Stele::export();
-    let (storage, blank) = interrupted(&stele);
-    let before = snapshot(storage.path(), &blank);
+    let snapshot = Snapshot::export();
+    let (storage, blank) = interrupted(&snapshot);
+    let before = store_state(storage.path(), &blank);
 
     let copy = tempfile::tempdir().unwrap();
-    copy_dir(&stele.path(), copy.path());
+    copy_dir(&snapshot.path(), copy.path());
     let elsewhere = Source::Dir(copy.path().to_path_buf());
 
     let error = restore::execute(
         Input::Directory {
             path: copy.path(),
-            blocks: stele.blocks_path().as_deref(),
+            blocks: snapshot.blocks_path().as_deref(),
         },
-        restoring(storage.path(), stele.magic, true, Some(&elsewhere)),
+        restoring(storage.path(), snapshot.magic, true, Some(&elsewhere)),
         Target::new(&blank.archive, blank.state()),
         None,
     )
@@ -694,24 +694,24 @@ fn a_resume_from_another_source_is_refused() {
     let refusal = assert_refused_untouched(error, storage.path(), &blank, before);
 
     assert!(
-        matches!(&refusal, ResumeRefusal::OtherSource { recorded, .. } if *recorded == stele.source.to_string()),
+        matches!(&refusal, ResumeRefusal::OtherSource { recorded, .. } if *recorded == snapshot.source.to_string()),
         "{refusal:?}"
     );
 }
 
-/// A progress file for another stele than its record names is refused.
+/// A progress file for another snapshot than its record names is refused.
 #[test]
 fn a_progress_file_the_record_disagrees_with_is_refused() {
-    let stele = Stele::export();
-    let (storage, blank) = interrupted(&stele);
+    let snapshot = Snapshot::export();
+    let (storage, blank) = interrupted(&snapshot);
 
     let mut progress = progress(storage.path()).unwrap();
     progress.inscription_digest = Digest::from_bytes([7; 32]);
     progress.save(&progress_path_in(storage.path())).unwrap();
 
-    let before = snapshot(storage.path(), &blank);
+    let before = store_state(storage.path(), &blank);
 
-    let error = stele.restore(storage.path(), &blank, true).unwrap_err();
+    let error = snapshot.restore(storage.path(), &blank, true).unwrap_err();
     let refusal = assert_refused_untouched(error, storage.path(), &blank, before);
 
     assert!(
@@ -723,12 +723,12 @@ fn a_progress_file_the_record_disagrees_with_is_refused() {
 /// A record that does not parse is refused rather than read as absent.
 #[test]
 fn a_record_that_does_not_parse_is_refused() {
-    let stele = Stele::export();
-    let (storage, blank) = interrupted(&stele);
+    let snapshot = Snapshot::export();
+    let (storage, blank) = interrupted(&snapshot);
 
     std::fs::write(source_path_in(storage.path()), b"{\"source\":").unwrap();
 
-    let error = stele.restore(storage.path(), &blank, true).unwrap_err();
+    let error = snapshot.restore(storage.path(), &blank, true).unwrap_err();
 
     assert!(
         matches!(error, Error::Resume(ResumeRefusal::Unreadable { .. })),
@@ -743,51 +743,51 @@ fn a_record_that_does_not_parse_is_refused() {
 /// storage holding no data.
 #[test]
 fn a_restore_that_does_not_resume_starts_its_progress_over() {
-    let stele = Stele::export();
-    let (ops, control) = stele.uninterrupted();
+    let snapshot = Snapshot::export();
+    let (ops, control) = snapshot.uninterrupted();
     let first_archive_commit = ops
         .iter()
         .position(|op| matches!(op, Op::ArchiveCommit | Op::ArchiveIngest))
         .unwrap()
         + 1;
 
-    let (storage, _) = interrupted(&stele);
+    let (storage, _) = interrupted(&snapshot);
 
     let blank = Blank::<FjallStores>::open();
-    stele.stopped_at(storage.path(), &blank, first_archive_commit);
+    snapshot.stopped_at(storage.path(), &blank, first_archive_commit);
 
     assert_eq!(progress(storage.path()), None);
     assert!(recorded(storage.path()).is_some());
 
-    let resumed = stele.restore(storage.path(), &blank, true).unwrap();
+    let resumed = snapshot.restore(storage.path(), &blank, true).unwrap();
 
     assert_eq!(resumed.summary.layers_skipped, 0);
     assert_eq!(contents_digest(&blank.archive, blank.state()), control);
 }
 
-/// A state cursor other than the stele's, as a daemon that synced over the
+/// A state cursor other than the snapshot's, as a daemon that synced over the
 /// interrupted restore commits, is refused before anything is written,
 /// whatever its shape: genesis alone leaves `Origin`.
 #[test]
 fn a_cursor_another_writer_committed_is_refused() {
     use dolos_core::{ChainPoint, StateWriter as _};
 
-    let stele = Stele::export();
+    let snapshot = Snapshot::export();
 
     for theirs in [
         ChainPoint::Origin,
         ChainPoint::Slot(1),
         ChainPoint::Specific(1, [7; 32].into()),
     ] {
-        let (storage, blank) = interrupted(&stele);
+        let (storage, blank) = interrupted(&snapshot);
 
         let writer = blank.state().start_writer().unwrap();
         writer.set_cursor(theirs.clone()).unwrap();
         writer.commit().unwrap();
 
-        let before = snapshot(storage.path(), &blank);
+        let before = store_state(storage.path(), &blank);
 
-        let error = stele.restore(storage.path(), &blank, true).unwrap_err();
+        let error = snapshot.restore(storage.path(), &blank, true).unwrap_err();
 
         let Error::Resume(ResumeRefusal::Written { cursor, point }) = &error else {
             panic!("{theirs:?} not refused as another writer's cursor: {error:?}");
@@ -795,25 +795,25 @@ fn a_cursor_another_writer_committed_is_refused() {
         assert_eq!(*cursor, theirs);
         assert_ne!(*point, theirs);
 
-        assert_eq!(snapshot(storage.path(), &blank), before);
+        assert_eq!(store_state(storage.path(), &blank), before);
         assert_eq!(blank.state().read_cursor().unwrap(), Some(theirs));
     }
 }
 
 /// A restore that records nothing still resumes as it did before records:
-/// the progress file alone, whatever stele it was written for.
+/// the progress file alone, whatever snapshot it was written for.
 #[test]
 fn a_restore_given_no_source_records_nothing() {
-    let stele = Stele::export();
+    let snapshot = Snapshot::export();
     let storage = tempfile::tempdir().unwrap();
     let blank = Blank::<FjallStores>::open();
 
     restore::execute(
         Input::Directory {
-            path: &stele.path(),
-            blocks: stele.blocks_path().as_deref(),
+            path: &snapshot.path(),
+            blocks: snapshot.blocks_path().as_deref(),
         },
-        restoring(storage.path(), stele.magic, false, None),
+        restoring(storage.path(), snapshot.magic, false, None),
         Target::new(&blank.archive, blank.state()),
         None,
     )
@@ -822,7 +822,7 @@ fn a_restore_given_no_source_records_nothing() {
     assert_eq!(recorded(storage.path()), None);
     assert_eq!(
         blank.state().read_cursor().unwrap(),
-        dolos_core::Domain::state(&stele.domain)
+        dolos_core::Domain::state(&snapshot.domain)
             .read_cursor()
             .unwrap()
     );
@@ -844,12 +844,12 @@ fn copy_dir(from: &Path, to: &Path) {
 
 /// A paired restore stopped while it writes a layer of either repository
 /// resumes from its records into the node an uninterrupted one builds. The
-/// one progress file, keyed by the stele, records the blocks repository's
-/// layers beside the stele's own.
+/// one progress file, keyed by the snapshot, records the blocks repository's
+/// layers beside the snapshot's own.
 #[test]
 fn a_paired_restore_stopped_in_either_stream_resumes_into_the_same_node() {
-    let stele = Stele::paired();
-    let (entries, control, plan) = stele.recorded_run();
+    let snapshot = Snapshot::paired();
+    let (entries, control, plan) = snapshot.recorded_run();
 
     let from_blocks: BTreeSet<Digest> = plan
         .remaining_in(Repo::Blocks, &Resume::none())
@@ -870,9 +870,9 @@ fn a_paired_restore_stopped_in_either_stream_resumes_into_the_same_node() {
     };
 
     // The second closed epoch's blocks, with the first's recorded ahead of
-    // them; then the stele's first layer with records after those blocks.
+    // them; then the snapshot's first layer with records after those blocks.
     let in_blocks = first_of(Repo::Blocks, first_of(Repo::Blocks, 0) + 1);
-    let in_stele = first_of(Repo::Dolos, in_blocks + 1);
+    let in_snapshot = first_of(Repo::Dolos, in_blocks + 1);
 
     // The call that writes layer `k` first: the first archive commit, or an
     // ingest's finish, while the progress file records exactly the layers
@@ -896,18 +896,18 @@ fn a_paired_restore_stopped_in_either_stream_resumes_into_the_same_node() {
             + 1
     };
 
-    // A closed epoch's blocks are ingested, as the stele's own are.
+    // A closed epoch's blocks are ingested, as the snapshot's own are.
     assert_eq!(entries[first_commit(in_blocks) - 1].op, Op::ArchiveIngest);
 
-    for k in [in_blocks, in_stele] {
+    for k in [in_blocks, in_snapshot] {
         let storage = tempfile::tempdir().unwrap();
         let blank = Blank::<FjallStores>::open();
 
-        let error = stele.stopped_at(storage.path(), &blank, first_commit(k));
+        let error = snapshot.stopped_at(storage.path(), &blank, first_commit(k));
         assert!(error.to_string().contains("stopped at call"), "{error}");
 
         let done = progress(storage.path()).expect("a stopped restore left no progress");
-        assert_eq!(done.inscription_digest, stele.digest());
+        assert_eq!(done.inscription_digest, snapshot.digest());
         assert_eq!(
             done.completed,
             layers[..k].iter().map(|layer| layer.diff_id).collect()
@@ -917,7 +917,7 @@ fn a_paired_restore_stopped_in_either_stream_resumes_into_the_same_node() {
             "no layer of the blocks repository was recorded"
         );
 
-        let resumed = stele.restore(storage.path(), &blank, true).unwrap();
+        let resumed = snapshot.restore(storage.path(), &blank, true).unwrap();
 
         assert_eq!(resumed.summary.layers_skipped, k, "stopped in layer {k}");
         assert_eq!(recorded(storage.path()), None);

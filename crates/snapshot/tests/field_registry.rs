@@ -2,7 +2,7 @@
 //!
 //! `goldens.rs` pins what a *layer* looks like — digests over framed record
 //! streams. This suite pins what a *record* looks like: the numbered field
-//! table of every type a stele can carry, one namespace at a time. The two
+//! table of every type a snapshot can carry, one namespace at a time. The two
 //! are complementary. A renumbered field inside an entity value moves a
 //! golden digest too, but it moves it without saying why; here it fails with
 //! the namespace, the revision and the byte position of the drift.
@@ -11,7 +11,7 @@
 //!
 //! - **A field was renumbered, removed, or retyped.** Breaking. The namespace's
 //!   `state-{ns}` / `log-{ns}` kind needs a media-type version bump; editing
-//!   the golden hides a break that every published stele already carries.
+//!   the golden hides a break that every published snapshot already carries.
 //! - **A field was appended and `SCHEMA_REVS` was not bumped** (or the
 //!   reverse). Additive, and the fix is the bump plus a new retained canary
 //!   beside the old one — never an edit to the old one.
