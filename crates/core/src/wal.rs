@@ -231,9 +231,23 @@ where
     }
 }
 
+/// The points `wal` holds at `slot`, in chain order: one for an ordinary
+/// slot, and at a Byron boundary block's slot, the main block chained onto it
+/// after it.
+pub fn chain_at_slot<W: WalStore>(wal: &W, slot: BlockSlot) -> Result<Vec<ChainPoint>, WalError> {
+    let entries = wal
+        .iter_blocks(Some(ChainPoint::Slot(slot)), None)?
+        .take_while(|(point, _)| point.slot() == slot);
+
+    Ok(ChainOrdered::forward(entries)
+        .map(|(point, _)| point)
+        .filter(|point| *point != ChainPoint::Origin)
+        .collect())
+}
+
 /// The hash a block names as its parent; none for a synthetic entry or bytes
 /// that don't decode.
-fn parent_hash(block: &[u8]) -> Option<BlockHash> {
+pub(crate) fn parent_hash(block: &[u8]) -> Option<BlockHash> {
     pallas::ledger::traverse::MultiEraBlock::decode(block)
         .ok()
         .and_then(|block| block.header().previous_hash())

@@ -67,9 +67,10 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use dolos_core::{
-    key_hash, ArchiveError, ArchiveIndexDelta, ArchiveIngest, ArchiveStore as CoreArchiveStore,
-    ArchiveWriter as CoreArchiveWriter, BlockBody, BlockSlot, ChainPoint, EntityValue, ExactKind,
-    IndexRecord, KeyRange, LogKey, Namespace, RawBlock, Settling, StateSchema, TagDimension,
+    blocks_through, key_hash, ArchiveError, ArchiveIndexDelta, ArchiveIngest,
+    ArchiveStore as CoreArchiveStore, ArchiveWriter as CoreArchiveWriter, BlockBody, BlockSlot,
+    ChainPoint, EntityValue, ExactKind, IndexRecord, KeyRange, LogKey, Namespace, RawBlock,
+    Settling, StateSchema, TagDimension,
 };
 use fjall::{Database, Keyspace, OwnedWriteBatch, PersistMode, Readable, Snapshot};
 use pallas::ledger::traverse::MultiEraBlock;
@@ -1393,10 +1394,10 @@ impl CoreArchiveStore for ArchiveStore {
 
     /// Drop everything the archive holds after `after`.
     ///
-    /// The cut is by slot: the block at `after`'s slot survives (including a
-    /// second block sharing that slot), while log rows *at* the slot go with
-    /// the cut — the exact boundary redb's `remove_after` draws by comparing
-    /// full log keys against the bare 8-byte temporal prefix.
+    /// Blocks are cut at `after` itself: at a slot holding more than one, the
+    /// ones the chain puts after it go. Log rows *at* the slot go with the
+    /// cut — the exact boundary redb's `remove_after` draws by comparing full
+    /// log keys against the bare 8-byte temporal prefix.
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError> {
         self.writable()?;
 
@@ -1405,11 +1406,35 @@ impl CoreArchiveStore for ArchiveStore {
 
         let mut batch = self.db.batch();
 
-        // Find the earliest location after `slot` to know where to truncate
-        // the segment file: a slot holding more than one block contributes
-        // all of them, so the cut lands before the earliest body it has to
+        // Find the earliest location dropped to know where to truncate the
+        // segment file: a slot holding more than one block contributes every
+        // one it drops, so the cut lands before the earliest body it has to
         // drop and none survives.
         let mut earliest_after: Option<BlockLocation> = None;
+        let mut drop_location = |loc: BlockLocation| match &earliest_after {
+            Some(prev)
+                if prev.segment_id < loc.segment_id
+                    || (prev.segment_id == loc.segment_id && prev.offset <= loc.offset) => {}
+            _ => earliest_after = Some(loc),
+        };
+
+        // Stored newest first, so the blocks the chain puts after `after`
+        // lead.
+        let mut at_slot = self.stored_locations(&snapshot, slot)?;
+        if at_slot.len() > 1 {
+            let bodies = at_slot
+                .iter()
+                .rev()
+                .map(|loc| self.flatfiles.read(loc).map_err(io_err))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let dropped = at_slot.len() - blocks_through(&bodies, after);
+
+            if dropped > 0 {
+                at_slot.drain(..dropped).for_each(&mut drop_location);
+                batch.insert(&self.blocks, slot.to_be_bytes(), encode_locations(&at_slot));
+            }
+        }
 
         if let Some(from) = slot.checked_add(1) {
             let range = snapshot.range(&self.blocks, from.to_be_bytes().to_vec()..);
@@ -1417,18 +1442,7 @@ impl CoreArchiveStore for ArchiveStore {
             for guard in range {
                 let (key, value) = guard.into_inner().map_err(fjall_err)?;
 
-                for loc in decode_locations(&value) {
-                    match &earliest_after {
-                        None => earliest_after = Some(loc),
-                        Some(prev) => {
-                            if loc.segment_id < prev.segment_id
-                                || (loc.segment_id == prev.segment_id && loc.offset < prev.offset)
-                            {
-                                earliest_after = Some(loc);
-                            }
-                        }
-                    }
-                }
+                decode_locations(&value).for_each(&mut drop_location);
 
                 batch.remove(&self.blocks, key);
             }
