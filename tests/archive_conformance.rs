@@ -799,6 +799,77 @@ fn truncate_front_drops_an_ebb_past_the_cut<B: Backend>() {
     );
 }
 
+fn truncate_front_to_an_ebb_drops_the_block_sharing_its_slot<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let earlier = make_conway_block_with_prev(byron_ebb_slot(1) - 10, None, 0);
+    let (ebb, main) = boundary(1);
+    let later = make_conway_block_with_prev(byron_ebb_slot(1) + 20, main.0.hash(), 2);
+
+    let writer = store.start_writer().unwrap();
+    for (point, body) in [&earlier, &ebb, &main, &later] {
+        writer.apply(point, body).unwrap();
+    }
+    writer.commit().unwrap();
+
+    store.truncate_front(&ebb.0).unwrap();
+
+    assert_eq!(
+        bodies(store.get_range(None, None).unwrap().collect()),
+        vec![earlier.1.as_ref().clone(), ebb.1.as_ref().clone()]
+    );
+    assert_eq!(
+        store.get_tip().unwrap(),
+        Some((ebb.0.slot(), ebb.1.as_ref().clone()))
+    );
+
+    // The segment was truncated at the main block's offset, so the archive
+    // can be written forward again from there.
+    let writer = store.start_writer().unwrap();
+    for (point, body) in [&main, &later] {
+        writer.apply(point, body).unwrap();
+    }
+    writer.commit().unwrap();
+
+    assert_eq!(
+        bodies(store.get_range(None, None).unwrap().collect()),
+        vec![
+            earlier.1.as_ref().clone(),
+            ebb.1.as_ref().clone(),
+            main.1.as_ref().clone(),
+            later.1.as_ref().clone()
+        ]
+    );
+}
+
+fn truncate_front_to_the_block_sharing_an_ebbs_slot_keeps_both<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let (ebb, main) = write_boundary(&store, 1);
+    let later = make_conway_block_with_prev(byron_ebb_slot(1) + 20, main.0.hash(), 2);
+
+    let writer = store.start_writer().unwrap();
+    writer.apply(&later.0, &later.1).unwrap();
+    writer.commit().unwrap();
+
+    store.truncate_front(&main.0).unwrap();
+
+    assert_eq!(
+        bodies(store.get_range(None, None).unwrap().collect()),
+        vec![ebb.1.as_ref().clone(), main.1.as_ref().clone()]
+    );
+
+    // A point holding only the slot names neither block, so both stay.
+    store
+        .truncate_front(&ChainPoint::Slot(ebb.0.slot()))
+        .unwrap();
+
+    assert_eq!(
+        bodies(store.get_range(None, None).unwrap().collect()),
+        vec![ebb.1.as_ref().clone(), main.1.as_ref().clone()]
+    );
+}
+
 fn remove_before_prunes_every_block_at_a_slot<B: Backend>() {
     let (store, _guard) = B::open();
 
@@ -1859,6 +1930,8 @@ macro_rules! full_suite {
                 the_tip_is_the_ebb_until_its_epochs_first_block_arrives,
                 undo_unwinds_a_boundary_slot_in_reverse_arrival_order,
                 truncate_front_drops_an_ebb_past_the_cut,
+                truncate_front_to_an_ebb_drops_the_block_sharing_its_slot,
+                truncate_front_to_the_block_sharing_an_ebbs_slot_keeps_both,
                 remove_before_prunes_every_block_at_a_slot,
                 find_intersect_resolves_an_ebb_by_its_own_hash,
                 log_roundtrip,

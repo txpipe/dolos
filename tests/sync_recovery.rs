@@ -855,6 +855,116 @@ fn a_state_at_a_slot_without_its_block_replays_it() {
     assert_eq!(code(&status), Some(0), "{}", stdout(&status));
 }
 
+/// The disagreements `sync status` reports, with its exit code.
+fn disagreements(node: &Node) -> (Option<i32>, Vec<String>) {
+    let status = node.run(&["sync", "status", "--format", "json"]);
+    let found = json(&status)["disagreements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|found| found.as_str().unwrap().to_string())
+        .collect();
+
+    (code(&status), found)
+}
+
+/// A Byron boundary block opening epoch 1 after the block at `tip`, and the
+/// main block numbered `number` chained onto it at the same slot.
+fn boundary_pair(tip: &ChainPoint, number: u64) -> [(ChainPoint, RawBlock); 2] {
+    use dolos_testing::blocks::{make_byron_ebb, make_conway_block_with_prev};
+
+    let ebb = make_byron_ebb(1, tip.hash().unwrap());
+    let main = make_conway_block_with_prev(ebb.0.slot(), ebb.0.hash(), number);
+
+    [ebb, main]
+}
+
+/// A Byron boundary block and the main block sharing its slot, past the
+/// synced blocks, both in the WAL and the archive. A state at the boundary
+/// block, as a crash between the main block's WAL and state commits leaves
+/// it, is behind the WAL; so is an archive holding only the boundary block.
+/// Either of the pair can sort last in the WAL.
+#[test]
+fn a_store_at_a_boundary_block_is_behind_the_block_sharing_its_slot() {
+    let tip = point(synced().1.last().unwrap());
+    let main_sorts_last = |number: &u64| {
+        let [(ebb, _), (main, _)] = boundary_pair(&tip, *number);
+        ebb.into_bytes() < main.into_bytes()
+    };
+
+    let main_last = (0..).find(main_sorts_last).unwrap();
+    let ebb_last = (0..).find(|number| !main_sorts_last(number)).unwrap();
+
+    for number in [main_last, ebb_last] {
+        a_store_at_a_boundary_block_is_behind(number);
+    }
+}
+
+fn a_store_at_a_boundary_block_is_behind(number: u64) {
+    let (node, blocks) = synced();
+    let tip = point(blocks.last().unwrap());
+    let [(ebb, ebb_block), (main, main_block)] = boundary_pair(&tip, number);
+    assert!(tip.slot() < ebb.slot());
+
+    let entry = |block: &RawBlock| LogValue::<CardanoDelta> {
+        block: block.to_vec(),
+        delta: vec![],
+        inputs: Default::default(),
+    };
+
+    let stores = dolos::storage::open_data_stores::<CardanoDelta>(&node.config).unwrap();
+    stores
+        .wal
+        .append_entries(vec![
+            (ebb.clone(), entry(&ebb_block)),
+            (main.clone(), entry(&main_block)),
+        ])
+        .unwrap();
+
+    let writer = stores.archive.start_writer().unwrap();
+    writer.apply(&ebb, &ebb_block).unwrap();
+    writer.apply(&main, &main_block).unwrap();
+    writer.commit().unwrap();
+
+    let writer = stores.state.start_writer().unwrap();
+    writer.set_cursor(ebb.clone()).unwrap();
+    writer.commit().unwrap();
+
+    stores.state.shutdown().unwrap();
+    stores.archive.shutdown().unwrap();
+    stores.wal.shutdown().unwrap();
+    drop(stores);
+
+    let slot = ebb.slot();
+    let behind = |store: &str| {
+        format!(
+            "the {store}, at slot {slot}, is behind the WAL tip at slot {slot} (its first 2 blocks applied)"
+        )
+    };
+
+    let case = format!("main block numbered {number}");
+
+    let (code, found) = disagreements(&node);
+    assert_eq!(code, Some(3), "{case}: {found:?}");
+    assert_eq!(found, vec![behind("state")], "{case}");
+
+    set_state_cursor(&node, main.clone());
+    assert_eq!(disagreements(&node), (Some(0), vec![]), "{case}");
+
+    let stores = dolos::storage::open_data_stores::<CardanoDelta>(&node.config).unwrap();
+    let writer = stores.archive.start_writer().unwrap();
+    writer.undo(&main).unwrap();
+    writer.commit().unwrap();
+    stores.state.shutdown().unwrap();
+    stores.archive.shutdown().unwrap();
+    stores.wal.shutdown().unwrap();
+    drop(stores);
+
+    let (code, found) = disagreements(&node);
+    assert_eq!(code, Some(3), "{case}: {found:?}");
+    assert_eq!(found, vec![behind("archive")], "{case}");
+}
+
 /// The state and the archive two blocks back, and a WAL reset to the tip, so
 /// it holds none of the blocks between.
 #[test]

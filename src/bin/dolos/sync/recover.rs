@@ -415,7 +415,9 @@ mod tests {
                 is_block: true,
             }),
             state: Some(point(state)),
+            stacked: vec![],
             archive,
+            archive_blocks: usize::from(archive.is_some()),
             archive_kept: true,
             archive_rolling: false,
         }
@@ -508,7 +510,9 @@ mod tests {
             wal_history: None,
             rollback_floor: None,
             state: Some(state),
+            stacked: vec![],
             archive,
+            archive_blocks: usize::from(archive.is_some()),
             archive_kept: true,
             archive_rolling: false,
         };
@@ -786,7 +790,9 @@ mod tests {
             wal_history: None,
             rollback_floor: None,
             state: None,
+            stacked: vec![],
             archive: None,
+            archive_blocks: 0,
             archive_kept: true,
             archive_rolling: false,
         };

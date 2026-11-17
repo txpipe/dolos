@@ -10,7 +10,10 @@ use std::sync::Arc;
 
 use dolos_cardano::indexes::utxo_index_delta_from_utxo_delta;
 use dolos_core::{
-    bootstrap::{catch_up_stores, recovery_plan, RecoveredStore, RecoveryPlan, RecoveryStep},
+    bootstrap::{
+        catch_up_state_only, catch_up_stores, recovery_plan, RecoveredStore, RecoveryPlan,
+        RecoveryStep,
+    },
     sync::SyncExt as _,
     ArchiveStore as _, BootstrapExt, ChainLogic, ChainPoint, Domain, StateStore, StateWriter,
     TagDimension, TxoRef, UtxoSetDelta, WalStore, WorkUnit,
@@ -1226,4 +1229,166 @@ fn test_catchup_repairs_the_index_of_an_archived_block_sharing_the_cursor_slot()
         assert_eq!(datum_refs(&domain, EBB_DATUM), Some(1), "{case}");
         assert_eq!(exact_records(&domain), expected, "{case}");
     }
+}
+
+/// A crash after the main block's state commit and before its archive
+/// commit, at the slot its boundary block shares: the archive holds the
+/// boundary block alone, and catch-up archives the main block after it, with
+/// its index entries, whichever of the two sorts first.
+#[test]
+fn test_catchup_archives_the_block_sharing_the_archive_tip_slot() {
+    for number in both_key_orders() {
+        let case = format!("main block numbered {number}");
+
+        let synced = ToyDomain::new(None, None);
+        WalStore::append_entries(synced.wal(), Vec::from(same_slot_pair(number))).unwrap();
+        catch_up_stores(&synced).unwrap();
+        let expected = exact_records(&synced);
+
+        let domain = ToyDomain::new(None, None);
+        let [ebb, main] = same_slot_pair(number);
+        let main_point = main.0.clone();
+        let chain = vec![ebb.1.block.clone(), main.1.block.clone()];
+
+        WalStore::append_entries(domain.wal(), vec![ebb]).unwrap();
+        catch_up_stores(&domain).unwrap();
+
+        WalStore::append_entries(domain.wal(), vec![main]).unwrap();
+        catch_up_state_only(&domain).unwrap();
+        assert_eq!(
+            domain.state().read_cursor().unwrap(),
+            Some(main_point.clone()),
+            "{case}"
+        );
+
+        let plan = plan_for(&domain);
+        let archive = step(&plan, RecoveredStore::Archive);
+        assert_eq!(
+            archive.map(|step| step.entries),
+            Some(1),
+            "{case}: {plan:?}"
+        );
+
+        catch_up_stores(&domain).unwrap();
+
+        let archived = |domain: &ToyDomain| {
+            domain
+                .archive()
+                .get_blocks_by_slot(&main_point.slot())
+                .unwrap()
+        };
+        assert_eq!(archived(&domain), chain, "{case}");
+        assert_eq!(exact_records(&domain), expected, "{case}");
+
+        // Nothing left to replay, and a second catch-up archives nothing twice.
+        let plan = plan_for(&domain);
+        assert!(
+            step(&plan, RecoveredStore::Archive).is_none(),
+            "{case}: {plan:?}"
+        );
+        catch_up_stores(&domain).unwrap();
+        assert_eq!(archived(&domain), chain, "{case}");
+    }
+}
+
+/// An archive whose tip slot holds a block the WAL's block there does not
+/// chain onto lacks nothing at that slot: the archive replay skips it, as it
+/// skips every block at or before its tip slot.
+#[test]
+fn test_archive_replay_skips_a_block_not_chained_onto_its_tip() {
+    use dolos_core::ArchiveWriter as _;
+
+    for number in both_key_orders() {
+        let domain = ToyDomain::new(None, None);
+        let [ebb, main] = same_slot_pair(number);
+        let ebb_point = ebb.0.clone();
+
+        WalStore::append_entries(domain.wal(), vec![ebb]).unwrap();
+        catch_up_stores(&domain).unwrap();
+
+        let (foreign, body) = dolos_testing::blocks::make_conway_block(ebb_point.slot());
+        let writer = domain.archive().start_writer().unwrap();
+        writer.undo(&ebb_point).unwrap();
+        writer.apply(&foreign, &body).unwrap();
+        writer.commit().unwrap();
+
+        WalStore::append_entries(domain.wal(), vec![main]).unwrap();
+
+        let plan = plan_for(&domain);
+        assert!(
+            step(&plan, RecoveredStore::Archive).is_none(),
+            "main block numbered {number}: {plan:?}"
+        );
+    }
+}
+
+/// Both blocks of a same-slot pair applied: a rollback to the boundary block
+/// takes the main block's body out of the archive and keeps the boundary
+/// block's, and a rollback to the main block keeps both, whichever of the two
+/// sorts first.
+fn rollback_cuts_the_archive_at_the_point<B: dolos_testing::toy_domain::ToyStores>() {
+    for number in both_key_orders() {
+        for to_ebb in [true, false] {
+            let domain = ToyDomain::<B>::with_backend(
+                Arc::new(dolos_cardano::include::devnet::load()),
+                Default::default(),
+                None,
+                None,
+            );
+            let [ebb, main] = same_slot_pair(number);
+            let (ebb_point, main_point) = (ebb.0.clone(), main.0.clone());
+            let (ebb_block, main_block) = (ebb.1.block.clone(), main.1.block.clone());
+
+            WalStore::append_entries(domain.wal(), vec![ebb, main]).unwrap();
+            catch_up_stores(&domain).unwrap();
+
+            let to = if to_ebb { &ebb_point } else { &main_point };
+            domain.rollback(to).unwrap();
+
+            let case = format!("main block numbered {number}, rolled back to {to}");
+
+            let kept = match to_ebb {
+                true => vec![ebb_block.clone()],
+                false => vec![ebb_block.clone(), main_block.clone()],
+            };
+            assert_eq!(
+                domain
+                    .archive()
+                    .get_blocks_by_slot(&ebb_point.slot())
+                    .unwrap(),
+                kept,
+                "{case}"
+            );
+
+            let (tip_slot, tip) = domain.archive().get_tip().unwrap().unwrap();
+            assert_eq!(tip_slot, ebb_point.slot(), "{case}");
+            assert_eq!(&tip, kept.last().unwrap(), "{case}");
+
+            // The main block archives again after the boundary block.
+            if to_ebb {
+                WalStore::append_entries(domain.wal(), vec![same_slot_pair(number)[1].clone()])
+                    .unwrap();
+                catch_up_stores(&domain).unwrap();
+
+                assert_eq!(
+                    domain
+                        .archive()
+                        .get_blocks_by_slot(&ebb_point.slot())
+                        .unwrap(),
+                    vec![ebb_block, main_block],
+                    "{case}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_rollback_cuts_the_memory_archive_at_the_point() {
+    rollback_cuts_the_archive_at_the_point::<dolos_testing::toy_domain::MemoryStores>();
+}
+
+#[test]
+fn test_rollback_cuts_the_fjall_archive_at_the_point() {
+    rollback_cuts_the_archive_at_the_point::<dolos_testing::toy_domain::FjallStores>();
 }
