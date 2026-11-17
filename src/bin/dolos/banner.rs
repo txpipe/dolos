@@ -48,6 +48,6 @@ mod tests {
     fn a_missing_or_placeholder_commit_is_unknown() {
         assert_eq!(known_sha(None), "unknown");
         assert_eq!(known_sha(Some("")), "unknown");
-        assert_eq!(known_sha(Some(VERGEN_PLACEHOLDER)), "unknown");
+        assert_eq!(known_sha(Some("VERGEN_IDEMPOTENT_OUTPUT")), "unknown");
     }
 }

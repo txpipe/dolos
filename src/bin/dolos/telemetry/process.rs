@@ -491,7 +491,7 @@ mod tests {
             );
             drop(files);
 
-            after >= before + 64.0
+            after - before >= 64.0
         });
 
         assert!(rose);
