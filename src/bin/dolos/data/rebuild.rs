@@ -478,6 +478,7 @@ fn build_domain(
         chain: Arc::new(std::sync::RwLock::new(chain)),
         wal,
         state,
+        tip_gauges: dolos::adapters::tip_gauges(&archive),
         archive,
         mempool: MempoolBackend::Ephemeral(dolos_core::builtin::EphemeralMempool::new()),
         cache,

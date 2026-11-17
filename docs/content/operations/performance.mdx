@@ -33,11 +33,11 @@ If your goal is to minimize operational cost, start with the smallest storage mo
 
 Each Fjall store, state and archive, reports its compaction backlog as an OpenTelemetry gauge under the `dolos-fjall` meter:
 
-| metric              | kind  | attributes          |
-| ------------------- | ----- | ------------------- |
-| `fjall_l0_runs_max` | gauge | `store`, `keyspace` |
+| metric                      | kind  | attributes          |
+| --------------------------- | ----- | ------------------- |
+| `dolos.storage.l0_runs_max` | gauge | `store`, `keyspace` |
 
-The value is the largest number of L0 runs in any of the store's keyspaces, and `keyspace` names that keyspace. `store` is `state` or `archive`. Fjall halts a keyspace's writes at 30 L0 runs until compaction catches up, so a value climbing toward 30 means compaction is falling behind the writes. The gauge is read when the meter collects, never on a write, and a store opened read-only does not report it. Like the [cache metrics](./cache#metrics), it reaches a collector through the process's OpenTelemetry meter provider, which `dolos daemon` does not export yet.
+The value is the largest number of L0 runs in any of the store's keyspaces, and `keyspace` names that keyspace. `store` is `state` or `archive`. Fjall halts a keyspace's writes at 30 L0 runs until compaction catches up, so a value climbing toward 30 means compaction is falling behind the writes. The gauge is read when the meter collects, never on a write, and a store opened read-only does not report it. Like the [cache metrics](./cache#metrics), it is exported over OTLP by a node with a [`[telemetry]`](../configuration/schema#telemetry) section.
 
 ## Query latency
 
@@ -54,7 +54,7 @@ In practice, you should evaluate latency using the query patterns your applicati
 
 To observe latency and throughput in production:
 
-- use service metrics where available, such as the `/metrics` endpoints documented for [Mini-Blockfrost](../apis/minibf) and [Mini-Kupo](../apis/minikupo)
+- export the node's metrics over OTLP with a [`[telemetry]`](../configuration/schema#telemetry) section
 - enable [logging](../operations/logging) when investigating slow paths or sync stalls
 - enable [tracing](../operations/tracing) when you need deeper visibility into instrumented request flows such as mempool transaction handling
 

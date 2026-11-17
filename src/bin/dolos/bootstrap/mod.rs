@@ -461,7 +461,7 @@ fn setup_tracing(
     verbose: bool,
 ) -> miette::Result<crate::common::TracingGuard> {
     if verbose {
-        crate::common::setup_tracing(&config.logging, config.telemetry.as_ref())
+        crate::common::setup_tracing(config)
     } else {
         crate::common::setup_tracing_error_only()?;
         Ok(crate::common::TracingGuard::default())

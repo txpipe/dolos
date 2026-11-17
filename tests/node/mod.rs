@@ -176,6 +176,7 @@ impl Node {
             chain: Arc::new(std::sync::RwLock::new(chain)),
             wal: stores.wal,
             state: stores.state,
+            tip_gauges: dolos::adapters::tip_gauges(&stores.archive),
             archive: stores.archive,
             mempool: stores.mempool,
             cache,

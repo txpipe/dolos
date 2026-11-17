@@ -8,12 +8,13 @@ Dolos can export per-transaction OpenTelemetry traces that track the full mempoo
 
 ## Configuration
 
-The `[telemetry]` section in your `dolos.toml` controls trace export. Export is on when the section is present, and off when it is absent:
+The `[telemetry]` section in your `dolos.toml` controls trace export, and the metric export beside it. Export is on when the section is present, and off when it is absent. The [configuration reference](../configuration/schema#telemetry) lists every field:
 
-| property        | type   | default                   | description                              |
-| --------------- | ------ | ------------------------- | ---------------------------------------- |
-| `otlp_endpoint` | string | `"http://localhost:4317"` | gRPC endpoint of the OTLP collector      |
-| `service_name`  | string | `"dolos"`                 | Service name reported in exported traces |
+| property        | type   | default                   | description                                 |
+| --------------- | ------ | ------------------------- | ------------------------------------------- |
+| `otlp_endpoint` | string | `"http://localhost:4317"` | endpoint of the OTLP collector              |
+| `otlp_protocol` | string | `"grpc"`                  | `grpc` or `http-protobuf`                   |
+| `service_name`  | string | `"dolos"`                 | service name reported in traces and metrics |
 
 Example:
 

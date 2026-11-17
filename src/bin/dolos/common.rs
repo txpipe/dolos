@@ -5,7 +5,6 @@ use dolos_core::config::{
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use miette::{Context as _, IntoDiagnostic};
 use opentelemetry::trace::TracerProvider as _;
-use opentelemetry_otlp::WithExportConfig as _;
 use std::sync::Arc;
 use std::{
     path::{Path, PathBuf},
@@ -200,21 +199,28 @@ fn render_domain_build_error(error: DomainBuildError) -> miette::Report {
     }
 }
 
-/// Keeps the OTLP tracer provider for the life of a command and flushes it on
-/// drop.
+/// Keeps the OTLP tracer and meter providers for the life of a command and
+/// flushes them on drop.
 ///
-/// `setup_tracing` also registers the provider globally, and that copy is never
-/// dropped, so without the guard the batch exporter's last spans are lost when
-/// the process exits. Hold it until the command returns, inside the command's
-/// tokio runtime, while the exporter can still deliver.
+/// `setup_tracing` also registers the providers globally, and those copies are
+/// never dropped, so without the guard the last spans and metrics are lost
+/// when the process exits. Hold it until the command returns, inside the
+/// command's tokio runtime, while the exporters can still deliver.
 #[must_use = "dropping the guard shuts tracing down immediately"]
 #[derive(Default)]
 pub struct TracingGuard {
     provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
+    meters: Option<opentelemetry_sdk::metrics::SdkMeterProvider>,
 }
 
 impl Drop for TracingGuard {
     fn drop(&mut self) {
+        if let Some(meters) = self.meters.take() {
+            if let Err(err) = meters.shutdown() {
+                warn!(%err, "failed to flush metrics on exit");
+            }
+        }
+
         if let Some(provider) = self.provider.take() {
             if let Err(err) = provider.shutdown() {
                 warn!(%err, "failed to flush telemetry on exit");
@@ -227,18 +233,14 @@ impl Drop for TracingGuard {
 /// returns the guard that flushes it, with the tracer for the tracing layer.
 fn telemetry_pipeline<E>(
     exporter: E,
-    service_name: String,
+    resource: opentelemetry_sdk::Resource,
 ) -> (TracingGuard, opentelemetry_sdk::trace::SdkTracer)
 where
     E: opentelemetry_sdk::trace::SpanExporter + 'static,
 {
     let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
         .with_batch_exporter(exporter)
-        .with_resource(
-            opentelemetry_sdk::Resource::builder()
-                .with_service_name(service_name)
-                .build(),
-        )
+        .with_resource(resource)
         .build();
 
     opentelemetry::global::set_tracer_provider(provider.clone());
@@ -247,6 +249,7 @@ where
 
     let guard = TracingGuard {
         provider: Some(provider),
+        meters: None,
     };
 
     (guard, tracer)
@@ -312,23 +315,63 @@ fn log_filter(config: &LoggingConfig) -> Result<Targets, ConfigError> {
     Ok(filter)
 }
 
-/// Logs go to stderr, which leaves stdout to a command's result.
-pub fn setup_tracing(
-    config: &LoggingConfig,
-    telemetry: Option<&TelemetryConfig>,
-) -> miette::Result<TracingGuard> {
-    let filter = log_filter(config).into_diagnostic()?;
+/// Builds the tracer and, unless `metrics = false`, the meter provider of
+/// `[telemetry]`, both registered globally, and the guard that flushes them.
+fn telemetry_providers(
+    config: &RootConfig,
+) -> miette::Result<Option<(TracingGuard, opentelemetry_sdk::trace::SdkTracer)>> {
+    let (Some(telemetry), Some(exporters)) = (
+        &config.telemetry,
+        crate::telemetry::exporters(config.telemetry.as_ref())?,
+    ) else {
+        return Ok(None);
+    };
 
-    let (otel_layer, guard) = if let Some(telemetry) = telemetry {
-        let exporter = opentelemetry_otlp::SpanExporter::builder()
-            .with_tonic()
-            .with_endpoint(&telemetry.otlp_endpoint)
-            .build()
-            .into_diagnostic()
-            .context("building OTLP span exporter")?;
+    telemetry_providers_over(config, telemetry, exporters.spans, exporters.metrics).map(Some)
+}
 
-        let (guard, tracer) = telemetry_pipeline(exporter, telemetry.service_name.clone());
+/// [`telemetry_providers`] over the given exporters.
+pub(crate) fn telemetry_providers_over<S, M>(
+    config: &RootConfig,
+    telemetry: &TelemetryConfig,
+    spans: S,
+    metrics: Option<M>,
+) -> miette::Result<(TracingGuard, opentelemetry_sdk::trace::SdkTracer)>
+where
+    S: opentelemetry_sdk::trace::SpanExporter + 'static,
+    M: opentelemetry_sdk::metrics::exporter::PushMetricExporter,
+{
+    let resource = crate::telemetry::resource(telemetry, network_label(config)?);
+    let (mut guard, tracer) = telemetry_pipeline(spans, resource.clone());
 
+    guard.meters = metrics.map(|exporter| {
+        crate::telemetry::install_meter_provider(exporter, telemetry.metrics_interval(), resource)
+    });
+
+    Ok((guard, tracer))
+}
+
+/// The `dolos.network` resource attribute: a known network's name, else the
+/// magic.
+fn network_label(config: &RootConfig) -> miette::Result<String> {
+    let network = resolve_network(config)?;
+
+    Ok(match network.known() {
+        Some(known) => known.name.to_string(),
+        None => network.magic().to_string(),
+    })
+}
+
+/// Logs go to stderr, which leaves stdout to a command's result. With
+/// `[telemetry]`, spans and metrics are exported over OTLP.
+///
+/// Instruments bind to the meter provider that is global when they are
+/// created, so every command calls this before it opens the domain; an
+/// instrument created earlier records nothing.
+pub fn setup_tracing(config: &RootConfig) -> miette::Result<TracingGuard> {
+    let filter = log_filter(&config.logging).into_diagnostic()?;
+
+    let (otel_layer, guard) = if let Some((guard, tracer)) = telemetry_providers(config)? {
         (
             Some(tracing_opentelemetry::layer().with_tracer(tracer)),
             guard,
@@ -709,7 +752,8 @@ mod tests {
         use opentelemetry::trace::{Span as _, Tracer as _};
 
         let exporter = CountingExporter::default();
-        let (guard, tracer) = telemetry_pipeline(exporter.clone(), "dolos-test".into());
+        let resource = opentelemetry_sdk::Resource::builder_empty().build();
+        let (guard, tracer) = telemetry_pipeline(exporter.clone(), resource);
 
         tracer.start("work").end();
 
@@ -736,6 +780,7 @@ mod tests {
             .build();
         let guard = TracingGuard {
             provider: Some(provider.clone()),
+            meters: None,
         };
 
         // `provider` stands in for the copy `setup_tracing` registers globally,
@@ -750,5 +795,33 @@ mod tests {
 
         assert_eq!(exported(), 1, "dropping the guard should flush the span");
         drop(provider);
+    }
+
+    /// The periodic reader holds metrics until its next interval, so dropping
+    /// the guard has to export them, as it does buffered spans.
+    #[test]
+    fn dropping_the_tracing_guard_exports_pending_metrics() {
+        use opentelemetry::metrics::MeterProvider as _;
+
+        let exporter = opentelemetry_sdk::metrics::InMemoryMetricExporter::default();
+        let meters = crate::telemetry::meter_provider(
+            exporter.clone(),
+            std::time::Duration::from_secs(3600),
+            opentelemetry_sdk::Resource::builder_empty().build(),
+        );
+        let guard = TracingGuard {
+            provider: None,
+            meters: Some(meters.clone()),
+        };
+
+        // `meters` stands in for the globally registered copy, as above.
+        meters.meter("test").u64_counter("work").build().add(1, &[]);
+        let exported = || exporter.get_finished_metrics().unwrap().len();
+        assert_eq!(exported(), 0, "the sample should wait for the interval");
+
+        drop(guard);
+
+        assert_eq!(exported(), 1, "dropping the guard should export the sample");
+        drop(meters);
     }
 }

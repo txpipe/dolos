@@ -378,7 +378,6 @@ where
     let routes = Router::new()
         .route("/", get(routes::root::<D>))
         .route("/health", get(routes::health::naked))
-        .route("/metrics", get(routes::metrics::naked::<D>))
         .route("/health/clock", get(routes::health::clock))
         .route("/genesis", get(routes::genesis::naked::<D>))
         .route("/network", get(routes::network::naked::<D>))
@@ -867,7 +866,6 @@ mod route_prefix_tests {
             "/api/v0/network",
             "/api/v0/network/",
             "/api/v0/health",
-            "/api/v0/metrics",
         ] {
             let (status, _) = app.get_bytes(path).await;
             assert_eq!(status, StatusCode::OK, "{path}");
@@ -895,6 +893,7 @@ mod route_prefix_tests {
 
         for path in [
             "/api/v0/nonexistent",
+            "/api/v0/metrics",
             "/api/v0/blocks/latest/nope",
             "/api/v0/txs",
         ] {
@@ -910,12 +909,14 @@ mod tests {
 
     use crate::test_support::TestApp;
 
-    /// These paths match no route. The first five paths are from issue #1323:
-    /// unknown endpoints and paths with too few segments. The sixth path
+    /// These paths match no route. `/metrics` was a route until the chain tip
+    /// moved to the exported metrics. The next five paths are from issue
+    /// #1323: unknown endpoints and paths with too few segments. The last path
     /// contains an empty segment in the middle. `NormalizePathLayer` removes
     /// only the slashes at the start and at the end of a path. As a result,
     /// the router receives `/blocks//latest` unchanged.
     const UNMATCHED_PATHS: &[&str] = &[
+        "/metrics",
         "/nonexistent",
         "/foo/bar/baz",
         "/txs",

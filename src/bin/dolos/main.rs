@@ -23,6 +23,7 @@ mod registry;
 mod serve;
 mod service;
 mod sync;
+mod telemetry;
 
 #[cfg(feature = "utils")]
 mod init;

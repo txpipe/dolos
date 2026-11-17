@@ -11,6 +11,7 @@ use std::{
     collections::BTreeMap,
     fmt::Display,
     net::SocketAddr,
+    num::NonZeroU64,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -1228,20 +1229,45 @@ impl LoggingConfig {
     }
 }
 
-/// OTLP trace export, on when the section is present.
+/// The OTLP transport both exporters use.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum OtlpProtocol {
+    #[default]
+    Grpc,
+    /// Protobuf over HTTP, posted under the endpoint's `/v1/traces` and
+    /// `/v1/metrics`.
+    HttpProtobuf,
+}
+
+/// OTLP trace and metric export, on when the section is present.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct TelemetryConfig {
     pub otlp_endpoint: String,
+    pub otlp_protocol: OtlpProtocol,
     pub service_name: String,
+    /// Metrics can be turned off while traces stay on.
+    pub metrics: bool,
+    pub metrics_interval_seconds: NonZeroU64,
 }
 
 impl Default for TelemetryConfig {
     fn default() -> Self {
         Self {
             otlp_endpoint: "http://localhost:4317".to_string(),
+            otlp_protocol: OtlpProtocol::Grpc,
             service_name: "dolos".to_string(),
+            metrics: true,
+            metrics_interval_seconds: NonZeroU64::new(60).unwrap(),
         }
+    }
+}
+
+impl TelemetryConfig {
+    /// How often the metrics are exported.
+    pub fn metrics_interval(&self) -> Duration {
+        Duration::from_secs(self.metrics_interval_seconds.get())
     }
 }
 

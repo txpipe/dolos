@@ -109,8 +109,8 @@ fn the_gauge_reports_each_open_stores_most_l0_runs_with_its_keyspace() {
     assert_eq!(
         collect(&provider, &exporter),
         [
-            "fjall_l0_runs_max{keyspace=archive-blocks,store=archive} 0".to_string(),
-            format!("fjall_l0_runs_max{{keyspace=state-tags,store=state}} {RUNS}"),
+            "dolos.storage.l0_runs_max{keyspace=archive-blocks,store=archive} 0".to_string(),
+            format!("dolos.storage.l0_runs_max{{keyspace=state-tags,store=state}} {RUNS}"),
         ]
     );
 
@@ -125,9 +125,9 @@ fn the_gauge_reports_each_open_stores_most_l0_runs_with_its_keyspace() {
     assert_eq!(
         collect(&provider, &exporter),
         [
-            "fjall_l0_runs_max{keyspace=archive-blocks,store=archive} 0".to_string(),
+            "dolos.storage.l0_runs_max{keyspace=archive-blocks,store=archive} 0".to_string(),
             format!(
-                "fjall_l0_runs_max{{keyspace=state-tags,store=state}} {}",
+                "dolos.storage.l0_runs_max{{keyspace=state-tags,store=state}} {}",
                 RUNS + 1
             ),
         ]
@@ -140,7 +140,7 @@ fn the_gauge_reports_each_open_stores_most_l0_runs_with_its_keyspace() {
 
     assert_eq!(
         collect(&provider, &exporter),
-        ["fjall_l0_runs_max{keyspace=archive-blocks,store=archive} 0"]
+        ["dolos.storage.l0_runs_max{keyspace=archive-blocks,store=archive} 0"]
     );
 
     drop(view);

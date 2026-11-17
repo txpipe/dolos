@@ -513,7 +513,7 @@ The Blockfrost-compatible [MiniBF](../apis/minibf) endpoint.
 - `public_url` is the URL clients reach the API at, reported by `/`.
 - `token_registry_url` is the token registry read for off-chain asset metadata.
 - `max_scan_items` caps the items a page-based scan reads on the heavy endpoints.
-- `route_prefix` is a URL path every endpoint is served under, `/health` and `/metrics` included; set `"/api/v0"` to match the Blockfrost server URL. It starts with `/` and names at least one segment, none of them empty; its segments use only letters, digits, `-`, `.`, `_` and `~`, and `.` and `..` segments are refused; a trailing `/` is dropped. A path outside the prefix answers like any unknown path. Unset, the endpoints are served at the root.
+- `route_prefix` is a URL path every endpoint is served under, `/health` included; set `"/api/v0"` to match the Blockfrost server URL. It starts with `/` and names at least one segment, none of them empty; its segments use only letters, digits, `-`, `.`, `_` and `~`, and `.` and `..` segments are refused; a trailing `/` is dropped. A path outside the prefix answers like any unknown path. Unset, the endpoints are served at the root.
 - `ipfs_gateways` resolve `ipfs://` governance-anchor URLs, tried in order until one serves the content. An empty list turns IPFS resolution off.
 - `request_timeout_seconds` is the deadline of every request, the wait for a [heavy-scan](#serve) slot included; a request still running when it passes is answered `504 Gateway Timeout`.
 
@@ -587,15 +587,27 @@ filter = "pallas=info,tonic=warn"
 
 ## `telemetry`
 
-OpenTelemetry trace export, on when the table is present. See [Tracing](../operations/tracing).
+OpenTelemetry trace and metric export over OTLP, on when the table is present. See [Tracing](../operations/tracing).
 
 | field | type | default |
 | ----- | ---- | ------- |
 | `otlp_endpoint` | string (URL) | `http://localhost:4317` |
+| `otlp_protocol` | `grpc` or `http-protobuf` | `grpc` |
 | `service_name` | string | `dolos` |
+| `metrics` | bool | `true` |
+| `metrics_interval_seconds` | integer, at least 1 | `60` |
+
+- `otlp_endpoint` is where both signals go. With `grpc` it is the collector's gRPC address. With `http-protobuf` it is the collector's base URL: traces are posted to `/v1/traces` and metrics to `/v1/metrics` under it, and an OTLP/HTTP collector usually listens on port 4318. An `https://` endpoint is reached over TLS on either protocol.
+- `otlp_protocol` applies to both exporters.
+- `metrics = false` turns the metric export off and keeps traces on.
+- `metrics_interval_seconds` is how often the metrics are pushed.
+- Credentials are not part of the configuration: the exporters send the headers of the `OTEL_EXPORTER_OTLP_HEADERS` environment variable, such as `authorization=Basic%20…`.
+- Both signals carry the resource attributes `service.name` (from `service_name`), `service.instance.id` (the hostname), `service.version` (the Dolos version) and `dolos.network` (`mainnet`, `preprod`, `preview`, or a custom network's magic). `OTEL_RESOURCE_ATTRIBUTES` overrides any of them, for example `service.instance.id=dolos-0`.
 
 ```toml
 [telemetry]
+otlp_endpoint = "https://otlp.example.com"
+otlp_protocol = "http-protobuf"
 ```
 
 ## Rules across fields
