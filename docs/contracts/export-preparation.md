@@ -85,11 +85,14 @@ when the boundary is prepared:
 | `entity-*` | sealed at `P` | The staged run, if it holds an entry. |
 | `entity-*` | not sealed at `P` | None, whatever a later view shows. |
 
-A bundle captures every layer its snapshot could list, in `diff` or `tip`, as
-though its lineage started at `P`, so it serves the boundary whichever
-predecessor finalization finds. Finalization lists from it only what the
-snapshot at `P` lists under decision 0080: its `tip`, and in its `diff` the
-layers final at `P` alone, so a captured payload may go unused. The layers an
+For the rows above whose source is the bundle, a bundle captures every layer
+its snapshot could list, in `diff` or `tip`, as though its lineage started at
+`P`, so it serves the boundary whichever predecessor finalization finds. The
+other rows' layers come from the staged run and the final archive.
+Finalization lists only what the snapshot at `P` lists under decision 0080:
+its `tip`, and in its `diff` the layers final at `P` alone, or, when the
+snapshot at `P` starts its lineage, every layer final by its cut; so a
+captured payload may go unused. The layers an
 earlier snapshot of the lineage listed stay in that snapshot's inscription.
 
 **Why the log windows.** `capture_from` is the lower of `P - 1` and the oldest
