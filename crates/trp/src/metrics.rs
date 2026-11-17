@@ -266,12 +266,13 @@ mod tests {
         );
     }
 
-    /// The result, or the error code and message, of one call. The message
-    /// tells apart handlers that reject the same params with the same code.
+    /// The result, or the error code, message and data, of one call. Handlers
+    /// that reject the same params share a code; the data of a params error
+    /// names the field that failed, which tells them apart.
     fn outcome_of<T: serde::Serialize>(response: Result<T, Error>) -> Value {
         match response {
             Ok(result) => json!({ "result": result }),
-            Err(err) => json!({ "error": [err.code(), err.to_string()] }),
+            Err(err) => json!({ "error": [err.code(), err.to_string(), err.data()] }),
         }
     }
 
@@ -279,7 +280,10 @@ mod tests {
     fn outcome(response: &Value) -> Value {
         match response.get("result") {
             Some(result) => json!({ "result": result }),
-            None => json!({ "error": [response["error"]["code"], response["error"]["message"]] }),
+            None => {
+                let error = &response["error"];
+                json!({ "error": [error["code"], error["message"], error["data"]] })
+            }
         }
     }
 
