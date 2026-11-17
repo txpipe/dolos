@@ -31,7 +31,7 @@ impl ProcessMetrics {
     pub fn register(meter: &Meter) -> Self {
         let build = [
             KeyValue::new(VERSION, env!("CARGO_PKG_VERSION")),
-            KeyValue::new(GIT_SHA, option_env!("VERGEN_GIT_SHA").unwrap_or("unknown")),
+            KeyValue::new(GIT_SHA, crate::banner::git_sha()),
         ];
 
         let build_info = meter
@@ -172,7 +172,7 @@ mod proc {
 #[cfg(target_os = "linux")]
 mod linux {
     use opentelemetry::{
-        metrics::{Meter, ObservableCounter, ObservableGauge},
+        metrics::{Meter, ObservableCounter, ObservableUpDownCounter},
         KeyValue,
     };
 
@@ -197,21 +197,27 @@ mod linux {
         Ok(count)
     }
 
-    /// A u64 gauge observing one field of `/proc/self/status`.
-    fn status_gauge(
+    /// The semantic conventions make these series up-down counters, which
+    /// the SDK builds only for i64; a read past `i64::MAX` saturates.
+    fn signed(value: u64) -> i64 {
+        i64::try_from(value).unwrap_or(i64::MAX)
+    }
+
+    /// An up-down counter observing one field of `/proc/self/status`.
+    fn status_series(
         meter: &Meter,
         name: &'static str,
         unit: &'static str,
         pick: fn(&proc::Status) -> u64,
-    ) -> ObservableGauge<u64> {
+    ) -> ObservableUpDownCounter<i64> {
         let warn = WarnOnce::new(name);
 
         meter
-            .u64_observable_gauge(name)
+            .i64_observable_up_down_counter(name)
             .with_unit(unit)
             .with_callback(move |observer| {
                 if let Some(status) = warn.check(status()) {
-                    observer.observe(pick(&status), &[]);
+                    observer.observe(signed(pick(&status)), &[]);
                 }
             })
             .build()
@@ -219,10 +225,10 @@ mod linux {
 
     pub struct Instruments {
         _cpu_time: ObservableCounter<f64>,
-        _resident: ObservableGauge<u64>,
-        _virtual: ObservableGauge<u64>,
-        _descriptors: ObservableGauge<u64>,
-        _threads: ObservableGauge<u64>,
+        _resident: ObservableUpDownCounter<i64>,
+        _virtual: ObservableUpDownCounter<i64>,
+        _descriptors: ObservableUpDownCounter<i64>,
+        _threads: ObservableUpDownCounter<i64>,
     }
 
     impl Instruments {
@@ -241,27 +247,27 @@ mod linux {
                 })
                 .build();
 
-            let warn = WarnOnce::new("process.open_file_descriptor.count");
+            let warn = WarnOnce::new("process.unix.file_descriptor.count");
             let descriptors = meter
-                .u64_observable_gauge("process.open_file_descriptor.count")
+                .i64_observable_up_down_counter("process.unix.file_descriptor.count")
                 .with_unit("{file_descriptor}")
                 .with_callback(move |observer| {
                     if let Some(count) = warn.check(open_descriptors()) {
-                        observer.observe(count, &[]);
+                        observer.observe(signed(count), &[]);
                     }
                 })
                 .build();
 
             Self {
                 _cpu_time: cpu_time,
-                _resident: status_gauge(meter, "process.memory.usage", "By", |status| {
+                _resident: status_series(meter, "process.memory.usage", "By", |status| {
                     status.resident_bytes
                 }),
-                _virtual: status_gauge(meter, "process.memory.virtual", "By", |status| {
+                _virtual: status_series(meter, "process.memory.virtual", "By", |status| {
                     status.virtual_bytes
                 }),
                 _descriptors: descriptors,
-                _threads: status_gauge(meter, "process.thread.count", "{thread}", |status| {
+                _threads: status_series(meter, "process.thread.count", "{thread}", |status| {
                     status.threads
                 }),
             }
@@ -293,11 +299,11 @@ mod tests {
     /// One collection: each series' points, as their attributes and value.
     type Points = Vec<(Vec<(String, String)>, f64)>;
 
-    /// One collection of every series, by name, with its unit.
-    fn collect(
-        provider: &SdkMeterProvider,
-        exporter: &InMemoryMetricExporter,
-    ) -> std::collections::BTreeMap<String, (String, Points)> {
+    /// One collection of every series, by name: its unit, points and kind.
+    type Series = std::collections::BTreeMap<String, (String, Points, &'static str)>;
+
+    /// One collection of every series.
+    fn collect(provider: &SdkMeterProvider, exporter: &InMemoryMetricExporter) -> Series {
         exporter.reset();
         provider.force_flush().unwrap();
 
@@ -316,30 +322,38 @@ mod tests {
                         points.push((attributes, value));
                     };
 
-                    match metric.data() {
+                    let kind = match metric.data() {
                         AggregatedMetrics::U64(MetricData::Gauge(gauge)) => {
                             for point in gauge.data_points() {
                                 push(&mut point.attributes(), point.value() as f64);
                             }
+                            "gauge"
                         }
                         AggregatedMetrics::F64(MetricData::Gauge(gauge)) => {
                             for point in gauge.data_points() {
                                 push(&mut point.attributes(), point.value());
                             }
+                            "gauge"
                         }
-                        AggregatedMetrics::F64(MetricData::Sum(sum)) => {
-                            assert!(sum.is_monotonic(), "{}", metric.name());
+                        AggregatedMetrics::F64(MetricData::Sum(sum)) if sum.is_monotonic() => {
                             for point in sum.data_points() {
                                 push(&mut point.attributes(), point.value());
                             }
+                            "counter"
+                        }
+                        AggregatedMetrics::I64(MetricData::Sum(sum)) if !sum.is_monotonic() => {
+                            for point in sum.data_points() {
+                                push(&mut point.attributes(), point.value() as f64);
+                            }
+                            "updowncounter"
                         }
                         _ => panic!("unexpected instrument {}", metric.name()),
-                    }
+                    };
 
                     points.sort_by(|a, b| a.0.cmp(&b.0));
                     series.insert(
                         metric.name().to_string(),
-                        (metric.unit().to_string(), points),
+                        (metric.unit().to_string(), points, kind),
                     );
                 }
             }
@@ -349,8 +363,8 @@ mod tests {
     }
 
     /// The value of a series with one point.
-    fn value(series: &std::collections::BTreeMap<String, (String, Points)>, name: &str) -> f64 {
-        let (_, points) = series.get(name).unwrap_or_else(|| panic!("{name} missing"));
+    fn value(series: &Series, name: &str) -> f64 {
+        let (_, points, _) = series.get(name).unwrap_or_else(|| panic!("{name} missing"));
         assert_eq!(points.len(), 1, "{name}: {points:?}");
         points[0].1
     }
@@ -360,20 +374,16 @@ mod tests {
         let (provider, exporter, _metrics) = setup();
 
         let series = collect(&provider, &exporter);
-        let (_, points) = &series["dolos.build.info"];
+        let (_, points, kind) = &series["dolos.build.info"];
 
+        assert_eq!(*kind, "gauge");
         assert_eq!(points.len(), 1);
         let (attributes, value) = &points[0];
         assert_eq!(*value, 1.0);
         assert_eq!(
             attributes,
             &[
-                (
-                    GIT_SHA.to_string(),
-                    option_env!("VERGEN_GIT_SHA")
-                        .unwrap_or("unknown")
-                        .to_string()
-                ),
+                (GIT_SHA.to_string(), crate::banner::git_sha().to_string()),
                 (VERSION.to_string(), env!("CARGO_PKG_VERSION").to_string()),
             ]
         );
@@ -388,6 +398,7 @@ mod tests {
         let second = collect(&provider, &exporter);
 
         assert_eq!(first["process.uptime"].0, "s");
+        assert_eq!(first["process.uptime"].2, "gauge");
         assert!(value(&first, "process.uptime") > 0.0);
         assert!(value(&second, "process.uptime") > value(&first, "process.uptime"));
     }
@@ -409,14 +420,21 @@ mod tests {
 
         let first = collect(&provider, &exporter);
 
-        for (name, unit) in [
-            ("process.cpu.time", "s"),
-            ("process.memory.usage", "By"),
-            ("process.memory.virtual", "By"),
-            ("process.open_file_descriptor.count", "{file_descriptor}"),
-            ("process.thread.count", "{thread}"),
+        // Names, units and kinds as the OpenTelemetry semantic conventions
+        // define them.
+        for (name, unit, kind) in [
+            ("process.cpu.time", "s", "counter"),
+            ("process.memory.usage", "By", "updowncounter"),
+            ("process.memory.virtual", "By", "updowncounter"),
+            (
+                "process.unix.file_descriptor.count",
+                "{file_descriptor}",
+                "updowncounter",
+            ),
+            ("process.thread.count", "{thread}", "updowncounter"),
         ] {
             assert_eq!(first[name].0, unit, "{name}");
+            assert_eq!(first[name].2, kind, "{name}");
         }
         assert!(value(&first, "process.memory.usage") > 0.0);
         assert!(value(&first, "process.memory.virtual") >= value(&first, "process.memory.usage"));
@@ -431,7 +449,7 @@ mod tests {
         std::hint::black_box(sum);
 
         let second = collect(&provider, &exporter);
-        let modes = |series: &std::collections::BTreeMap<String, (String, Points)>| {
+        let modes = |series: &Series| {
             series["process.cpu.time"]
                 .1
                 .iter()
@@ -462,14 +480,14 @@ mod tests {
         let rose = (0..5).any(|round| {
             let before = value(
                 &collect(&provider, &exporter),
-                "process.open_file_descriptor.count",
+                "process.unix.file_descriptor.count",
             );
             let files: Vec<_> = (0..64)
                 .map(|n| std::fs::File::create(dir.path().join(format!("{round}-{n}"))).unwrap())
                 .collect();
             let after = value(
                 &collect(&provider, &exporter),
-                "process.open_file_descriptor.count",
+                "process.unix.file_descriptor.count",
             );
             drop(files);
 
