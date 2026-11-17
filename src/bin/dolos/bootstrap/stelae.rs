@@ -197,10 +197,24 @@ enum Reader {
         blocks: PathBuf,
     },
     Repo {
-        dolos: Repository,
-        blocks: Repository,
+        repositories: Repositories,
         auth: Auth,
     },
+}
+
+/// A registry root's two repositories: the stele's and the blocks
+/// repository beside it.
+struct Repositories {
+    dolos: Repository,
+    blocks: Repository,
+}
+
+impl Repositories {
+    /// Both repositories, opened by `open`: the stele's first, then the
+    /// blocks repository.
+    fn open<T>(&self, open: impl Fn(&Repository) -> miette::Result<T>) -> miette::Result<(T, T)> {
+        Ok((open(&self.dolos)?, open(&self.blocks)?))
+    }
 }
 
 /// A restore's resolved inputs.
@@ -270,8 +284,10 @@ pub(super) fn resolve(
             };
 
             let reader = Reader::Repo {
-                dolos: repository(DOLOS_REPOSITORY)?,
-                blocks: repository(BLOCKS_REPOSITORY)?,
+                repositories: Repositories {
+                    dolos: repository(DOLOS_REPOSITORY)?,
+                    blocks: repository(BLOCKS_REPOSITORY)?,
+                },
                 auth,
             };
 
@@ -653,11 +669,7 @@ fn restore(
             },
             dolos.display().to_string(),
         ),
-        Reader::Repo {
-            dolos,
-            blocks,
-            auth,
-        } => {
+        Reader::Repo { repositories, auth } => {
             // Staging resolution remains node policy. The profile facade
             // receives the resolved inputs and never reads configuration or
             // environment on its own. Both repositories stage in the same
@@ -675,12 +687,15 @@ fn restore(
                 .with_context(|| format!("opening the repository {repo}"))
             };
 
-            let opened = opened.insert(open_both(dolos, blocks, open)?);
+            let opened = opened.insert(repositories.open(open)?);
 
-            println!("source:   {dolos} ({})", inputs.point);
-            println!("blocks:   {blocks}");
+            println!("source:   {} ({})", repositories.dolos, inputs.point);
+            println!("blocks:   {}", repositories.blocks);
 
-            (repository_input(opened, inputs.point), dolos.to_string())
+            (
+                repository_input(opened, inputs.point),
+                repositories.dolos.to_string(),
+            )
         }
     };
 
@@ -700,16 +715,6 @@ fn restore(
     report(&outcome.plan, &outcome.outlook, &outcome.summary);
 
     Ok(())
-}
-
-/// The stele's repository and the blocks repository beside it, opened by
-/// `open` in that order.
-fn open_both<T>(
-    dolos: &Repository,
-    blocks: &Repository,
-    open: impl Fn(&Repository) -> miette::Result<T>,
-) -> miette::Result<(T, T)> {
-    Ok((open(dolos)?, open(blocks)?))
 }
 
 /// A registry restore's input: the stele at `point` in the first repository
@@ -992,12 +997,12 @@ mod tests {
         ] {
             let inputs = resolve(&config, &args(given), Some(&networks::PREVIEW), false).unwrap();
 
-            let Reader::Repo { dolos, blocks, .. } = &inputs.reader else {
+            let Reader::Repo { repositories, .. } = &inputs.reader else {
                 panic!("{root} did not resolve to repositories");
             };
 
-            assert_eq!(dolos.to_string(), format!("{root}/dolos"));
-            assert_eq!(blocks.to_string(), format!("{root}/blocks"));
+            assert_eq!(repositories.dolos.to_string(), format!("{root}/dolos"));
+            assert_eq!(repositories.blocks.to_string(), format!("{root}/blocks"));
             assert_eq!(inputs.source.to_string(), root);
         }
     }
@@ -1051,6 +1056,22 @@ mod tests {
         assert_eq!(message, format!("{} is not a directory", dolos.display()));
     }
 
+    /// A root that is a file holds neither directory: reading under it is
+    /// refused as the missing `dolos`, not as a fault.
+    #[test]
+    fn a_root_that_is_a_file_is_refused_as_holding_no_directory() {
+        let (dir, config) = root_without(None);
+        let root = dir.path().join("root");
+        std::fs::write(&root, b"").unwrap();
+
+        let message = check_dir(&config, &root, false).unwrap_err().to_string();
+
+        assert_eq!(
+            message,
+            format!("{} holds no `{DOLOS_REPOSITORY}` directory", root.display())
+        );
+    }
+
     /// A fault reading a root's directory other than its absence, here a
     /// symlink loop, is refused with the OS cause, not as a missing directory.
     #[cfg(unix)]
@@ -1085,11 +1106,11 @@ mod tests {
 
         let root = "oci://127.0.0.1:5000/mirror/preview";
         let inputs = resolve(&config, &args(Some(root)), None, false).unwrap();
-        let Reader::Repo { dolos, blocks, .. } = &inputs.reader else {
+        let Reader::Repo { repositories, .. } = &inputs.reader else {
             panic!("{root} did not resolve to repositories");
         };
 
-        let opened = open_both(dolos, blocks, |repo| Ok(repo.to_string())).unwrap();
+        let opened = repositories.open(|repo| Ok(repo.to_string())).unwrap();
 
         assert_eq!(opened, (format!("{root}/dolos"), format!("{root}/blocks")));
     }

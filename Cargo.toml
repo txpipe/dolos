@@ -122,7 +122,8 @@ dolos-redb3 = { path = "crates/redb3" }
 memmap2 = "0.9"
 tower = { workspace = true, features = ["util"] }
 # `tests/stelae_restore.rs` pairs a stele with a blocks repository through
-# `crates/snapshot/tests/paired`, at dolos-snapshot's pin.
+# `crates/snapshot/tests/paired`. These repeat dolos-snapshot's stelae pin
+# (crates/snapshot/Cargo.toml) and move with it.
 stelae = { git = "https://github.com/txpipe/stelae", rev = "b2735ed829cbafdc57273a42871510aa564b00b3" }
 stelae-driver = { git = "https://github.com/txpipe/stelae", rev = "b2735ed829cbafdc57273a42871510aa564b00b3" }
 stelae-blocks = { git = "https://github.com/txpipe/stelae", rev = "b2735ed829cbafdc57273a42871510aa564b00b3" }
