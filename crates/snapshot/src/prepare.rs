@@ -602,7 +602,7 @@ impl<W: SnapshotWriter> SnapshotWriter for Capturing<'_, W> {
         })
     }
 
-    /// A capture is never a stele, so there is no document to seal.
+    /// A capture is never a snapshot, so there is no document to seal.
     fn seal(
         &self,
         _profile: &dyn Profile,
@@ -924,7 +924,7 @@ fn check_delta(delta: &ArchiveIndexDelta, plan: &Plan) -> Result<(), Error> {
 /// The boundary's own `indexes` layer: the one block the boundary check proved
 /// is all its window holds.
 fn write_tail<W: SnapshotWriter, A: ArchiveStore>(
-    stele: &W,
+    snapshot: &W,
     plan: &Plan,
     archive: &A,
     window: &EpochWindow,
@@ -934,7 +934,7 @@ fn write_tail<W: SnapshotWriter, A: ArchiveStore>(
     let spec = window.scope(plan.network.magic()).layer_spec(INDEXES)?;
     let at = cursor.open(INDEXES, &spec.scope);
 
-    let mut sink = stele.layer_sink(&DolosProfile, &spec, COMPRESSION_LEVEL)?;
+    let mut sink = snapshot.layer_sink(&DolosProfile, &spec, COMPRESSION_LEVEL)?;
     let mut order = indexes::OrderCheck::default();
     let mut records = cursor.records();
 
@@ -1054,12 +1054,12 @@ impl Prepared<'_> {
         }
     }
 
-    /// Stream a payload into `spec`'s layer of `stele`. The payload is held to
-    /// its descriptor before the sink is finished, so a damaged one produces no
-    /// layer.
+    /// Stream a payload into `spec`'s layer of `snapshot`. The payload is held
+    /// to its descriptor before the sink is finished, so a damaged one
+    /// produces no layer.
     pub(crate) fn replay<W: SnapshotWriter>(
         &self,
-        stele: &W,
+        snapshot: &W,
         spec: &LayerSpec,
         written: &WrittenLayer,
         tick: &mut dyn FnMut(),
@@ -1089,7 +1089,7 @@ impl Prepared<'_> {
         let mut reader = LayerReader::new(file, &DolosProfile, &written.descriptor, limits)
             .map_err(|e| self.read_failure(written, e))?;
 
-        let mut sink = stele.layer_sink(&DolosProfile, spec, COMPRESSION_LEVEL)?;
+        let mut sink = snapshot.layer_sink(&DolosProfile, spec, COMPRESSION_LEVEL)?;
 
         while let Some(record) = reader.next_record() {
             let record = record.map_err(|e| self.read_failure(written, e))?;
@@ -1131,14 +1131,14 @@ fn staged_windows(bundle: &Bundle, family: Family) -> impl Iterator<Item = &Epoc
 
 /// Stage the closed windows `bundles` need from the frozen stores, once.
 ///
-/// Only the windows each bundle's stele lists in its `diff` are staged: the
+/// Only the windows each bundle's snapshot lists in its `diff` are staged: the
 /// one each boundary closes, and for the entity kinds the ones it seals.
-/// `previous` is what the first bundle follows; with none, its stele starts a
-/// lineage and lists every closed window. Each later bundle follows the one
+/// `previous` is what the first bundle follows; with none, its snapshot starts
+/// a lineage and lists every closed window. Each later bundle follows the one
 /// before it.
 ///
 /// A batch restarted on the same `root` reuses its runs while they cover what
-/// it wants, which shrinks as layers are recorded and steles commit. Wanting
+/// it wants, which shrinks as layers are recorded and snapshots commit. Wanting
 /// more than they hold is [`staging::Refusal::Uncovered`], and a bundle they
 /// were not staged for, such as a boundary captured again after a rebuild, is
 /// [`staging::Refusal::SourceMismatch`].
@@ -1246,14 +1246,14 @@ pub struct Finalizing<'a> {
     pub producers: Producers,
 }
 
-/// Assemble a prepared boundary's publication into `stele`, once `previous`,
-/// the stele it really follows, is committed, and seal its diff and its tip.
+/// Assemble a prepared boundary's publication into `snapshot`, once `previous`,
+/// the snapshot it really follows, is committed, and seal its diff and its tip.
 ///
 /// Only here does the inscription take its link, and with it the layers its
 /// `diff` lists. Nothing the boundary captured is read from `archive`, and a
 /// window it could still have changed never is.
 pub fn finalize<W, A>(
-    stele: &W,
+    snapshot: &W,
     finalizing: &Finalizing<'_>,
     archive: &A,
     previous: &dyn Predecessor,
@@ -1272,7 +1272,7 @@ where
 
     check_source(bundle, staged, archive)?;
 
-    stele.observe(observer.clone());
+    snapshot.observe(observer.clone());
 
     let plan = bundle.plan().with_producers(producers);
     let listing = plan.listing(staged.summary(), previous);
@@ -1280,7 +1280,7 @@ where
     let prepared = Prepared { store, bundle };
 
     export::assemble(
-        stele,
+        snapshot,
         &plan,
         &listing,
         archive,
@@ -1342,9 +1342,9 @@ fn check_source<A: ArchiveStore>(
 }
 
 /// The archive still has to start at the chain's first block. Finalization
-/// reads the closed windows its stele lists from the archive, and pruned, they
-/// and their logs read as empty rather than failing. Block #1 can start a chain
-/// at slot 0, after a Byron genesis boundary block, and anywhere when its
+/// reads the closed windows its snapshot lists from the archive, and pruned,
+/// they and their logs read as empty rather than failing. Block #1 can start a
+/// chain at slot 0, after a Byron genesis boundary block, and anywhere when its
 /// header names no previous block. Otherwise it means block #0 has been pruned.
 fn check_unpruned<A: ArchiveStore>(bundle: &Bundle, archive: &A) -> Result<(), Error> {
     match crate::boundary::first_block(archive)? {

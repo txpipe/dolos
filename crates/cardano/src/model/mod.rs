@@ -329,7 +329,7 @@ fn register_log<E: LogEntity>(schema: &mut StateSchema) {
 /// The state store's namespaces: every entity declared with a state key.
 ///
 /// An archive-only log has no state key, so it has no namespace here and a
-/// stele carries no state layer for it.
+/// snapshot carries no state layer for it.
 pub fn build_schema() -> StateSchema {
     let mut schema = StateSchema::default();
     register_state::<EraState>(&mut schema);

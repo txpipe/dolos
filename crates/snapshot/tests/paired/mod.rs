@@ -1,14 +1,14 @@
-//! A stele paired with a blocks repository, as decision 0080 lays the two
+//! A snapshot paired with a blocks repository, as decision 0080 lays the two
 //! out, copied from an export into a network root.
 //!
 //! An export writes the closed epochs' blocks into the root's `blocks`
-//! lineage and the stele, naming it, into its `dolos` one. [`pair`] copies the
-//! two into other writers, a registry above all: the blocks into a lineage of
-//! the `io.txpipe.cardano.blocks` profile, written with its plain writer from
-//! any sequence, and the stele's chain re-pointed at it, each inscription
-//! naming the blocks snapshot at its sequence in `position.blocks`. Every
-//! stele layer is copied record for record, so its `diffId` does not move,
-//! and the tip's boundary block stays in the stele.
+//! lineage and the snapshot, naming it, into its `dolos` one. [`pair`] copies
+//! the two into other writers, a registry above all: the blocks into a lineage
+//! of the `io.txpipe.cardano.blocks` profile, written with its plain writer
+//! from any sequence, and the snapshot's chain re-pointed at it, each
+//! inscription naming the blocks snapshot at its sequence in `position.blocks`.
+//! Every snapshot layer is copied record for record, so its `diffId` does not
+//! move, and the tip's boundary block stays in the snapshot.
 
 // Each integration test binary compiles this module in full, so the parts one
 // binary does not reach look dead to it.
@@ -39,7 +39,7 @@ pub struct Paired {
 }
 
 impl Paired {
-    /// The paired stele's head: its sequence and digest.
+    /// The paired snapshot's head: its sequence and digest.
     pub fn head(&self) -> (u64, Digest) {
         let (sequence, digest) = self.dolos.last_key_value().unwrap();
 
@@ -70,7 +70,7 @@ pub fn digests(source: &Path) -> Paired {
 }
 
 /// Pair the network root at `source`: the closed epochs' blocks of its
-/// `latest` into `blocks` as a lineage from sequence 1, and its stele chain,
+/// `latest` into `blocks` as a lineage from sequence 1, and its snapshot chain,
 /// naming them, into `dolos`.
 pub fn pair<D: SnapshotWriter, B: SnapshotWriter>(source: &Path, dolos: &D, blocks: &B) -> Paired {
     pair_tampered(source, dolos, blocks, None)
@@ -196,7 +196,7 @@ fn lineage<W: SnapshotWriter>(
     heads
 }
 
-/// The stele chain of the network root at `source`'s `latest`, sealed into
+/// The snapshot chain of the network root at `source`'s `latest`, sealed into
 /// `writer`. Each inscription names `blocks` at its own sequence in
 /// `position.blocks` and links to the copy of its predecessor.
 pub fn without_blocks<W: SnapshotWriter>(
@@ -208,7 +208,7 @@ pub fn without_blocks<W: SnapshotWriter>(
 }
 
 /// [`without_blocks`], with the inscription at `epoch + 1` also listing a
-/// `blocks` layer of this profile for the epoch it closes, as the stele did
+/// `blocks` layer of this profile for the epoch it closes, as the snapshot did
 /// before decision 0080.
 pub fn listing_closed_blocks<W: SnapshotWriter>(
     source: &Path,
@@ -225,12 +225,12 @@ fn relinked<W: SnapshotWriter>(
     closed: Option<u64>,
 ) -> BTreeMap<u64, Digest> {
     let layout = SnapshotDir::open(source.join(DOLOS_REPOSITORY)).unwrap();
-    let stele = layout.resolve_latest(&DolosProfile).unwrap();
+    let snapshot = layout.resolve_latest(&DolosProfile).unwrap();
 
     let mut heads = BTreeMap::new();
     let mut previous = None;
 
-    for original in stele.chain().unwrap().inscriptions() {
+    for original in snapshot.chain().unwrap().inscriptions() {
         let own = layout
             .pull_sequence(&DolosProfile, original.sequence)
             .unwrap();

@@ -12,12 +12,12 @@ Options:
           and `PATH/blocks` repositories are read. Defaults to the configured network's official
           root, and is required for a custom network
       --point <POINT>
-          which stele to restore: `latest`, or `epoch-N` for the stele cut at the boundary that
-          opens epoch N. Registry sources only [default: latest]
+          which snapshot to restore: `latest`, or `epoch-N` for the snapshot cut at the boundary
+          that opens epoch N. Registry sources only [default: latest]
       --skip-if-data
           Exit 0 without bootstrapping when storage already holds a node, as an interrupted replay
           that has committed leaves one for `--continue` to resume; data without one, as an
-          interrupted stele restore or a bootstrap interrupted before it commits a cursor leaves,
+          interrupted snapshot restore or a bootstrap interrupted before it commits a cursor leaves,
           and a store this release refuses are errors instead
       --insecure
           talk to the repository over plaintext HTTP rather than HTTPS; for a registry on a loopback
@@ -34,7 +34,7 @@ Options:
           how many layers to read ahead of the one being written; a registry restore stages each in
           the scratch directory until its turn. 0 or 1 reads one layer at a time [default: 8]
       --continue
-          Resume an interrupted restore from the layers it recorded, reading the stele it started
+          Resume an interrupted restore from the layers it recorded, reading the snapshot it started
           from again; with nothing to resume, restore as without the flag into storage that holds no
           data
       --registry-user <USER>

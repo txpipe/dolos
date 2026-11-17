@@ -2,8 +2,8 @@
 //!
 //! `publish`, `digest` and `verify --reproduce` all build a plan from the same
 //! stores and report it in the same numbers. A publisher comparing a `digest`
-//! run against the `publish` that produced a stele has to be reading the same
-//! arithmetic, so the knob and the report live here, once, and a command
+//! run against the `publish` that produced a snapshot has to be reading the
+//! same arithmetic, so the knob and the report live here, once, and a command
 //! spells neither of them again.
 
 use dolos_core::BlockSlot;
@@ -40,7 +40,7 @@ pub struct EpochSpan {
 /// Where the node stands and what the plan covers, as numbers.
 ///
 /// Derived here rather than in each command so that a publisher comparing a
-/// `digest` run against the `publish` that produced a stele is comparing the
+/// `digest` run against the `publish` that produced a snapshot is comparing the
 /// same arithmetic — the dump count above all, which is easy to spell two ways
 /// and impossible to notice when two commands disagree.
 /// Composing the sentences is the command's.

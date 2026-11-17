@@ -12,9 +12,9 @@ Options:
                                  data it left in storage
       --skip-if-data             Exit 0 without bootstrapping when storage already holds a node, as
                                  an interrupted replay that has committed leaves one for
-                                 `--continue` to resume; data without one, as an interrupted stele
-                                 restore or a bootstrap interrupted before it commits a cursor
-                                 leaves, and a store this release refuses are errors instead
+                                 `--continue` to resume; data without one, as an interrupted
+                                 snapshot restore or a bootstrap interrupted before it commits a
+                                 cursor leaves, and a store this release refuses are errors instead
       --stop-epoch <N>           Stop once the ledger reaches this epoch
       --verbose                  Enable verbose logging output
       --chunk-size <CHUNK_SIZE>  Number of blocks to process in each chunk, more is faster but uses

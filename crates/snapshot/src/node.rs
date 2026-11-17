@@ -14,7 +14,7 @@ use dolos_core::config::StorageConfig;
 /// A child of `storage.path` rather than a sibling of it: on a host where the
 /// data lives on a dedicated mount, a sibling is on the *parent* filesystem —
 /// the small root volume this default exists to keep bytes off.
-pub const STELE_SCRATCH_DIR: &str = "scratch";
+pub const SNAPSHOT_SCRATCH_DIR: &str = "scratch";
 
 /// Where this node stages the layers of a registry transfer.
 ///
@@ -24,7 +24,7 @@ pub const STELE_SCRATCH_DIR: &str = "scratch";
 pub fn scratch_dir(config: &StorageConfig, chosen: Option<&Path>) -> PathBuf {
     match chosen {
         Some(dir) => dir.to_path_buf(),
-        None => config.path.join(STELE_SCRATCH_DIR),
+        None => config.path.join(SNAPSHOT_SCRATCH_DIR),
     }
 }
 

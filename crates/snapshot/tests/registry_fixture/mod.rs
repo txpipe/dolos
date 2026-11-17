@@ -1,6 +1,6 @@
 //! A registry the tests spawn.
 //!
-//! Shared by the publish and restore-over-a-registry suites, because a stele
+//! Shared by the publish and restore-over-a-registry suites, because a snapshot
 //! published by one is what the other reads and a second copy would be a second
 //! answer to "what is a registry, for a test".
 //!
@@ -63,9 +63,9 @@ fn install_crypto_provider() {
 /// dropped.
 ///
 /// It demands Basic credentials, because the registry these suites exist to
-/// stand in for does: access to a stele repository is free and identity-less,
-/// and still authenticated. An anonymous fixture would leave the credential
-/// plumbing in `registry::open` exercised by unit tests alone.
+/// stand in for does: access to a snapshot repository is free and
+/// identity-less, and still authenticated. An anonymous fixture would leave the
+/// credential plumbing in `registry::open` exercised by unit tests alone.
 pub struct Fixture {
     container: String,
     port: u16,
@@ -94,7 +94,7 @@ impl Fixture {
 
         args.extend(auth_args(auth.path()));
 
-        // So a test can take a stele out of a repository, as a registry's
+        // So a test can take a snapshot out of a repository, as a registry's
         // retention does. zot allows it without being told.
         args.extend(["--env", "REGISTRY_STORAGE_DELETE_ENABLED=true"].map(str::to_owned));
 

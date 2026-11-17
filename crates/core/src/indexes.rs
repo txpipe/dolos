@@ -13,12 +13,12 @@
 //! - the archive tags and the exact lookups project the block history and live
 //!   in the archive store (`ArchiveStore::slots_by_tag`,
 //!   `ArchiveStore::slot_by_*`, written through `ArchiveWriter::apply_index`),
-//!   where the `indexes` stele layer is produced from and restored into;
+//!   where the `indexes` snapshot layer is produced from and restored into;
 //! - the entity index maps an entity's id to the slot it was first seen at, for
 //!   the kinds the chain declares ([`EntityKind`]). It lives in the archive
 //!   store too (`ArchiveStore::entity_slots`, written through
 //!   `ArchiveWriter::write_entity` by the seal of an immutable epoch) and
-//!   travels in one `entity-{kind}` stele layer per kind and epoch.
+//!   travels in one `entity-{kind}` snapshot layer per kind and epoch.
 
 use std::borrow::Cow;
 
@@ -307,7 +307,7 @@ impl EntityKind {
     }
 
     /// The stored kind name. It is hashed into on-disk keys and names the
-    /// kind's stele layer, so renaming one is a storage migration.
+    /// kind's snapshot layer, so renaming one is a storage migration.
     pub const fn name(&self) -> &'static str {
         self.name
     }
@@ -326,7 +326,7 @@ impl std::fmt::Display for EntityKind {
 
 /// One entity index entry: an id and the slot its entity was first seen at.
 ///
-/// The key is held inline, as [`ExactRecord`]'s is, because a stele export
+/// The key is held inline, as [`ExactRecord`]'s is, because a snapshot export
 /// makes one record per entry in the store.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EntityRecord {

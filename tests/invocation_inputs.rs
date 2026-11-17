@@ -276,7 +276,7 @@ fn bootstrap_stelae_defaults_to_the_network_official_repository() {
 
     let output = proxy.run(&node, &["bootstrap", "stelae", "--insecure"], None);
 
-    assert!(!output.status.success(), "the proxy has no stele");
+    assert!(!output.status.success(), "the proxy has no snapshot");
     assert!(
         proxy
             .authorizations("/v2/cardano/preview/")
@@ -313,7 +313,7 @@ fn force_restores_with_the_credentials_it_resolved() {
         Some("token = \"one-shot\"\n"),
     );
 
-    assert!(!output.status.success(), "the proxy has no stele");
+    assert!(!output.status.success(), "the proxy has no snapshot");
     assert!(
         proxy
             .authorizations("/stelae/preview/")
@@ -341,7 +341,7 @@ fn a_custom_network_reads_the_official_registry_anonymously() {
         None,
     );
 
-    assert!(!output.status.success(), "the proxy has no stele");
+    assert!(!output.status.success(), "the proxy has no snapshot");
     assert!(proxy.requests() > 0, "the registry was never read");
     assert!(
         proxy
@@ -384,7 +384,7 @@ fn a_registry_resume_pulls_the_recorded_epoch_tag() {
         None,
     );
 
-    assert!(!output.status.success(), "the proxy has no stele");
+    assert!(!output.status.success(), "the proxy has no snapshot");
 
     let targets: Vec<String> = proxy
         .seen

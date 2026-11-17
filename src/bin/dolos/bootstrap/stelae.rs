@@ -8,21 +8,21 @@
 //!
 //! ## A source names a network root
 //!
-//! The stele is in the root's `dolos` repository and the blocks of its closed
-//! epochs in its `blocks` repository: `oci://HOST/PATH` reads `PATH/dolos` and
-//! `PATH/blocks`, and `file://DIR` reads `DIR/dolos` and `DIR/blocks`, each an
+//! The snapshot is in the root's `dolos` repository and the blocks of its
+//! closed epochs in its `blocks` repository: `oci://HOST/PATH` reads
+//! `PATH/dolos` and `PATH/blocks`, and `file://DIR` reads `DIR/dolos` and `DIR/blocks`, each an
 //! OCI image layout. `file://DIR` and `oci://HOST/PATH` differ in where the
 //! bytes come from and in nothing else: the same plan, the same refusals, the
 //! same store writes, the same checkpoints. Only two things are the registry's
-//! alone — `--point`, which names which stele in a repository to read, and
+//! alone — `--point`, which names which snapshot in a repository to read, and
 //! `--insecure`, which is for a registry on a loopback address.
 //!
-//! ## `--continue` resumes the stele a restore started from
+//! ## `--continue` resumes the snapshot a restore started from
 //!
 //! A restore records, beside its progress file, the source it reads and the
-//! stele's sequence and digest. `--continue` reads that stele again, by its
-//! epoch tag in a registry and never `latest`, and skips the layers the
-//! progress file names, refusing when the stele is gone or the records can't
+//! snapshot's sequence and digest. `--continue` reads that snapshot again, by
+//! its epoch tag in a registry and never `latest`, and skips the layers the
+//! progress file names, refusing when the snapshot is gone or the records can't
 //! be trusted. With no records it restores as without the flag, over storage
 //! that holds no data. Without the flag a restore refuses partial data until
 //! `--force` clears it, and overwrites any progress file rather than obey it:
@@ -60,8 +60,8 @@ pub struct Args {
     #[arg(long)]
     pub source: Option<Source>,
 
-    /// which stele to restore: `latest`, or `epoch-N` for the stele cut at the
-    /// boundary that opens epoch N. Registry sources only.
+    /// which snapshot to restore: `latest`, or `epoch-N` for the snapshot cut
+    /// at the boundary that opens epoch N. Registry sources only.
     #[arg(long, value_name = "POINT", default_value = "latest")]
     pub point: Point,
 
@@ -89,7 +89,7 @@ pub struct Args {
     pub read_ahead: usize,
 
     /// Resume an interrupted restore from the layers it recorded, reading the
-    /// stele it started from again; with nothing to resume, restore as
+    /// snapshot it started from again; with nothing to resume, restore as
     /// without the flag into storage that holds no data
     #[arg(long = "continue")]
     pub resume: bool,
@@ -98,7 +98,7 @@ pub struct Args {
     pub credentials: CredentialArgs,
 }
 
-/// What the prompt offers as the stele's source.
+/// What the prompt offers as the snapshot's source.
 #[cfg(feature = "utils")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceChoice {
@@ -142,14 +142,14 @@ impl Args {
     pub fn inquire(network: Option<&KnownNetwork>) -> miette::Result<Self> {
         let choice = match source_choices(network).as_slice() {
             [only] => *only,
-            choices => inquire::Select::new("where is the stele?", choices.to_vec())
+            choices => inquire::Select::new("where is the snapshot?", choices.to_vec())
                 .prompt()
                 .into_diagnostic()?,
         };
 
         let source = match choice {
             SourceChoice::Official(url) => url.to_string(),
-            SourceChoice::Custom => inquire::Text::new("where is the stele?")
+            SourceChoice::Custom => inquire::Text::new("where is the snapshot?")
                 .with_help_message(
                     "oci://HOST/PATH for a network root in a registry, or file://DIR for a directory holding dolos/ and blocks/",
                 )
@@ -171,7 +171,7 @@ impl Args {
     }
 }
 
-/// The stele to restore: what the invocation names, else the known network's
+/// The snapshot to restore: what the invocation names, else the known network's
 /// official repository.
 pub(super) fn source(args: &Args, network: Option<&KnownNetwork>) -> miette::Result<Source> {
     if let Some(source) = &args.source {
@@ -179,7 +179,7 @@ pub(super) fn source(args: &Args, network: Option<&KnownNetwork>) -> miette::Res
     }
 
     let network = network.ok_or_else(|| {
-        miette::miette!("a custom network has no default stele repository; pass --source")
+        miette::miette!("a custom network has no default snapshot repository; pass --source")
     })?;
 
     network
@@ -189,7 +189,7 @@ pub(super) fn source(args: &Args, network: Option<&KnownNetwork>) -> miette::Res
         .map_err(|e: String| miette::miette!("{e}"))
 }
 
-/// Where a restore reads the stele and its blocks from, with the credentials
+/// Where a restore reads the snapshot and its blocks from, with the credentials
 /// both repositories are read with.
 enum Reader {
     Dir {
@@ -202,7 +202,7 @@ enum Reader {
     },
 }
 
-/// A registry root's two repositories: the stele's and the blocks
+/// A registry root's two repositories: the snapshot's and the blocks
 /// repository beside it.
 struct Repositories {
     dolos: Repository,
@@ -210,7 +210,7 @@ struct Repositories {
 }
 
 impl Repositories {
-    /// Both repositories, opened by `open`: the stele's first, then the
+    /// Both repositories, opened by `open`: the snapshot's first, then the
     /// blocks repository.
     fn open<T>(&self, open: impl Fn(&Repository) -> miette::Result<T>) -> miette::Result<(T, T)> {
         Ok((open(&self.dolos)?, open(&self.blocks)?))
@@ -223,7 +223,7 @@ pub(super) struct Inputs {
     /// The network root as read, a directory by its resolved path, for the
     /// record.
     source: Source,
-    /// The stele to read in a repository.
+    /// The snapshot to read in a repository.
     point: Point,
     resuming: Option<Resuming>,
 }
@@ -241,7 +241,7 @@ struct Resuming {
 /// `--force`, which `clears` says is to clear storage, clears nothing for a
 /// restore that would refuse them, and the restore reads with the credentials
 /// that were checked. A `--continue` with records takes the recorded source
-/// and stele.
+/// and snapshot.
 pub(super) fn resolve(
     config: &RootConfig,
     args: &Args,
@@ -353,7 +353,7 @@ fn unfinished(config: &RootConfig, args: &Args) -> miette::Result<Option<Resumin
             let held: Vec<_> = held.iter().map(|path| path.display().to_string()).collect();
 
             miette::bail!(
-                "nothing to resume: no stele restore left its records in {}, and storage holds \
+                "nothing to resume: no snapshot restore left its records in {}, and storage holds \
                  data ({}). Use --force to replace it",
                 root.display(),
                 held.join(", "),
@@ -370,13 +370,13 @@ fn unfinished(config: &RootConfig, args: &Args) -> miette::Result<Option<Resumin
 /// locates. Recorded layers wrote index rows, save empty leading epochs, so a
 /// stop after only those is refused too. Older segments lost beside the
 /// newest aren't caught. The library refuses a state cursor other than the
-/// stele's.
+/// snapshot's.
 fn still_holds(config: &RootConfig, layers: usize) -> miette::Result<()> {
     let index = dolos::storage::archive_index(config).into_diagnostic()?;
 
     if dolos::storage::wal_holds_entries(config) {
         miette::bail!(
-            "the WAL at {} has entries, which a stele restore never writes, so something else \
+            "the WAL at {} has entries, which a snapshot restore never writes, so something else \
              wrote this node after the restore was interrupted. Use --force to start over",
             config.wal_path().unwrap_or_default().display(),
         );
@@ -411,7 +411,7 @@ fn still_holds(config: &RootConfig, layers: usize) -> miette::Result<()> {
 
 /// Refuse, as a usage error naming the recorded value, a `--source` or an
 /// `--point epoch-N` other than the record's. `--point latest`, the default,
-/// always agrees: the record pins the stele, and the moving tag isn't read.
+/// always agrees: the record pins the snapshot, and the moving tag isn't read.
 fn agrees(args: &Args, record: &SourceRecord) -> miette::Result<()> {
     if let Some(given) = &args.source {
         let given = match given {
@@ -441,7 +441,7 @@ fn agrees(args: &Args, record: &SourceRecord) -> miette::Result<()> {
         if epoch != record.sequence {
             Err(Usage::new(
                 format!(
-                    "--point epoch-{epoch} is not the stele the restore --continue resumes, \
+                    "--point epoch-{epoch} is not the snapshot the restore --continue resumes, \
                      epoch-{}",
                     record.sequence
                 ),
@@ -457,7 +457,7 @@ fn agrees(args: &Args, record: &SourceRecord) -> miette::Result<()> {
 }
 
 /// The recorded network root, refused as gone when its `dolos` directory
-/// holds no stele.
+/// holds no snapshot.
 fn reopen_dir(root: &Path, record: &SourceRecord) -> miette::Result<PathBuf> {
     match dolos_snapshot::dir::SnapshotDir::open(root.join(DOLOS_REPOSITORY)) {
         Ok(_) => Ok(root.to_path_buf()),
@@ -471,10 +471,10 @@ fn refused(refusal: ResumeRefusal) -> miette::Report {
 }
 
 /// The network root `root`, once it holds a `dolos` and a `blocks` image
-/// layout, the first's latest stele resolves, chain and all, and the second
-/// holds the blocks snapshot that stele reads, when it reads one; and, when
-/// `clears`, once both lie out of the reach of the clear with their own
-/// files, the ones the restore reads. An image layout alone is not a stele:
+/// layout, the first's latest snapshot resolves, chain and all, and the second
+/// holds the blocks snapshot that Dolos snapshot reads, when it reads one; and,
+/// when `clears`, once both lie out of the reach of the clear with their own
+/// files, the ones the restore reads. An image layout alone is not a snapshot:
 /// a refused publish leaves one with no tags. The restore reads the root by
 /// the path checked, with any `..` in it resolved.
 fn check_dir(config: &RootConfig, root: &Path, clears: bool) -> miette::Result<PathBuf> {
@@ -490,16 +490,16 @@ fn check_dir(config: &RootConfig, root: &Path, clears: bool) -> miette::Result<P
         check_root_dir(&root, dir, name)?;
     }
 
-    let stele = SnapshotDir::open(&dolos)
+    let snapshot = SnapshotDir::open(&dolos)
         .and_then(|layout| layout.resolve_latest(&dolos_snapshot::DolosProfile))
         .map_err(dolos_snapshot::Error::from)
         .into_diagnostic()
-        .with_context(|| format!("{} holds no stele", dolos.display()))?;
+        .with_context(|| format!("{} holds no snapshot", dolos.display()))?;
 
-    let wanted = match stele.chain() {
+    let wanted = match snapshot.chain() {
         Some(chain) => blocks_wanted(chain, config.history.max_slots())
             .into_diagnostic()
-            .with_context(|| format!("reading the stele in {}", dolos.display()))?
+            .with_context(|| format!("reading the snapshot in {}", dolos.display()))?
             .map(|reference| (reference, chain.head().sequence)),
         None => None,
     };
@@ -707,7 +707,7 @@ fn restore(
         Err(dolos_snapshot::Error::Resume(refusal)) => return Err(refused(refusal)),
         outcome => outcome
             .into_diagnostic()
-            .with_context(|| format!("restoring the stele from {reading}"))?,
+            .with_context(|| format!("restoring the snapshot from {reading}"))?,
     };
 
     progress.finish();
@@ -717,7 +717,7 @@ fn restore(
     Ok(())
 }
 
-/// A registry restore's input: the stele at `point` in the first repository
+/// A registry restore's input: the snapshot at `point` in the first repository
 /// of `opened`, its closed epochs' blocks in the second.
 fn repository_input(
     (repository, blocks): &(SnapshotRepository, SnapshotRepository),
@@ -770,7 +770,7 @@ fn report(
 
     // Printed only when it happened, and never folded into the epoch line: an
     // epoch dropped by the history window is this node's own configuration, and
-    // a layer dropped for a kind this build does not implement is a stele from
+    // a layer dropped for a kind this build does not implement is a snapshot from
     // a publisher ahead of it. An operator acts on the second by upgrading.
     if !plan.skipped_unknown.is_empty() {
         println!(
@@ -815,7 +815,7 @@ pub(super) fn run(
 mod progress_tests {
     use dolos_snapshot::progress::{Event, Outcome, Progress as _};
 
-    use crate::feedback::{Feedback, SteleProgress};
+    use crate::feedback::{Feedback, SnapshotProgress};
 
     const PER_RESTORE: usize = 3 + 16;
 
@@ -827,7 +827,7 @@ mod progress_tests {
     /// bytes would stall on exactly the layers a resumed run gets for free.
     #[test]
     fn the_restore_renderer_tracks_a_resumed_fixture_scale_run() {
-        let progress = SteleProgress::restoring(&Feedback::hidden());
+        let progress = SnapshotProgress::restoring(&Feedback::hidden());
 
         let epoch = serde_json::json!({"networkMagic": 2, "epoch": 0});
         let shard = serde_json::json!({"networkMagic": 2, "epoch": 0, "shard": 0});
@@ -891,7 +891,7 @@ mod progress_tests {
         assert_eq!(progress.layers_length(), Some(PER_RESTORE as u64));
 
         // A running total over every blob the restore pulled, rather than the
-        // last one's size — see `SteleProgress`.
+        // last one's size — see `SnapshotProgress`.
         let pulled = (PER_RESTORE as u64 - 1) * 8_192;
 
         assert_eq!(progress.blob_position(), pulled);
@@ -947,8 +947,8 @@ mod tests {
 
     #[test]
     fn an_explicit_source_wins() {
-        let resolved = source(&args(Some("file://stele")), Some(&networks::PREVIEW)).unwrap();
-        assert!(matches!(resolved, Source::Dir(dir) if dir == Path::new("stele")));
+        let resolved = source(&args(Some("file://snapshot")), Some(&networks::PREVIEW)).unwrap();
+        assert!(matches!(resolved, Source::Dir(dir) if dir == Path::new("snapshot")));
 
         let resolved = source(
             &args(Some("oci://ghcr.io/txpipe/dolos-snapshots/preview")),
@@ -1095,7 +1095,7 @@ mod tests {
         );
     }
 
-    /// A registry restore opens the root's `dolos` repository for the stele
+    /// A registry restore opens the root's `dolos` repository for the snapshot
     /// and its `blocks` repository for the blocks, in that order.
     #[test]
     fn a_registry_restore_opens_the_dolos_then_the_blocks_repository() {
@@ -1115,7 +1115,7 @@ mod tests {
         assert_eq!(opened, (format!("{root}/dolos"), format!("{root}/blocks")));
     }
 
-    /// The registry input reads the stele from the first opened repository
+    /// The registry input reads the snapshot from the first opened repository
     /// and hands the second over as the blocks repository.
     #[test]
     fn a_registry_input_hands_over_the_blocks_repository() {
@@ -1155,17 +1155,17 @@ mod tests {
         assert_eq!(point, Point::Epoch(7));
     }
 
-    /// A root with both directories is read for its stele: an empty `dolos`
+    /// A root with both directories is read for its snapshot: an empty `dolos`
     /// layout is refused as holding none.
     #[test]
-    fn a_root_with_both_directories_is_read_for_its_stele() {
+    fn a_root_with_both_directories_is_read_for_its_snapshot() {
         let (root, config) = root_without(None);
 
         let message = check_dir(&config, root.path(), false)
             .unwrap_err()
             .to_string();
 
-        assert!(message.contains("holds no stele"), "{message}");
+        assert!(message.contains("holds no snapshot"), "{message}");
         assert!(
             message.contains(&root.path().join(DOLOS_REPOSITORY).display().to_string()),
             "{message}"

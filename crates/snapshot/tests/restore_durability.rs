@@ -56,8 +56,8 @@ fn journaled_restore(
         journal: journal.clone(),
     };
 
-    let stele = node::resolved(root);
-    let chain = stele.chain().unwrap();
+    let snapshot = node::resolved(root);
+    let chain = snapshot.chain().unwrap();
     let identity = chain.identity();
     let blocks = node::resolved_blocks(root);
     let blocks_index = blocks.as_ref().map(|blocks| blocks.blob_index().unwrap());
@@ -68,7 +68,7 @@ fn journaled_restore(
         None,
     )
     .unwrap();
-    let index = stele.blob_index().unwrap();
+    let index = snapshot.blob_index().unwrap();
     let mut checkpoint = Checkpoint::open(progress_path_in(storage), identity, false).unwrap();
 
     let epoch_layers: Vec<Digest> = plan
@@ -78,7 +78,7 @@ fn journaled_restore(
         .collect();
 
     let result = restore::restore(
-        &stele,
+        &snapshot,
         &index,
         blocks
             .as_ref()
@@ -96,7 +96,7 @@ fn journaled_restore(
 }
 
 /// Entries as a seal writes them, straight into `domain`'s archive, so the
-/// stele carries entity layers beside the blocks, logs and indexes.
+/// snapshot carries entity layers beside the blocks, logs and indexes.
 fn seed_entities(domain: &ToyDomain<FjallStores>) {
     let writer = dolos_core::Domain::archive(domain).start_writer().unwrap();
 
@@ -123,8 +123,8 @@ fn a_layer_is_recorded_only_after_its_writes_are_persisted() {
     let mut plan = plan_for(&domain);
     plan.mutable_slots = 0;
 
-    let stele = tempfile::tempdir().unwrap();
-    let inscription = export_plan(stele.path(), &domain, &plan);
+    let snapshot = tempfile::tempdir().unwrap();
+    let inscription = export_plan(snapshot.path(), &domain, &plan);
     let storage = tempfile::tempdir().unwrap();
 
     assert!(
@@ -134,7 +134,7 @@ fn a_layer_is_recorded_only_after_its_writes_are_persisted() {
         "the fixture needs an entity layer, or one layer family goes unchecked"
     );
 
-    let (entries, epoch_layers) = recorded_restore(stele.path(), storage.path(), magic);
+    let (entries, epoch_layers) = recorded_restore(snapshot.path(), storage.path(), magic);
 
     assert!(
         epoch_layers.len() >= 2,
@@ -195,12 +195,13 @@ fn restore_failing_persist(op: Op, nth: usize) -> (Error, Option<Vec<Digest>>, V
     let domain: ToyDomain<FjallStores> = harness();
     let magic = u64::from(dolos_core::Domain::genesis(&domain).network_magic());
 
-    let stele = tempfile::tempdir().unwrap();
-    export_to(stele.path(), &domain);
+    let snapshot = tempfile::tempdir().unwrap();
+    export_to(snapshot.path(), &domain);
     let storage = tempfile::tempdir().unwrap();
 
     let journal = Journal::failing_persist(progress_path_in(storage.path()), op, nth);
-    let (result, epoch_layers) = journaled_restore(stele.path(), storage.path(), magic, &journal);
+    let (result, epoch_layers) =
+        journaled_restore(snapshot.path(), storage.path(), magic, &journal);
     let err = result.expect_err("a restore whose persist failed reported success");
 
     let recorded = RestoreProgress::load(&progress_path_in(storage.path()))
@@ -215,11 +216,11 @@ fn persists_of_a_clean_restore(op: Op) -> usize {
     let domain: ToyDomain<FjallStores> = harness();
     let magic = u64::from(dolos_core::Domain::genesis(&domain).network_magic());
 
-    let stele = tempfile::tempdir().unwrap();
-    export_to(stele.path(), &domain);
+    let snapshot = tempfile::tempdir().unwrap();
+    export_to(snapshot.path(), &domain);
     let storage = tempfile::tempdir().unwrap();
 
-    let (entries, _) = recorded_restore(stele.path(), storage.path(), magic);
+    let (entries, _) = recorded_restore(snapshot.path(), storage.path(), magic);
     entries.iter().filter(|entry| entry.op == op).count()
 }
 

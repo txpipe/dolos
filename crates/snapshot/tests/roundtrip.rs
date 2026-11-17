@@ -33,10 +33,10 @@ where
     T: std::fmt::Debug + PartialEq,
 {
     let temp = tempfile::tempdir().unwrap();
-    let stele = SnapshotDir::create(temp.path()).unwrap();
+    let snapshot = SnapshotDir::create(temp.path()).unwrap();
 
     let encoded = encode_all(records, encode);
-    let written = write_layer(&stele, kind, scope, &encoded);
+    let written = write_layer(&snapshot, kind, scope, &encoded);
 
     assert_eq!(written.descriptor.kind, kind);
     assert_eq!(
@@ -45,9 +45,9 @@ where
         "{kind}: the header record counts too"
     );
 
-    let stele = common::seal_alone(&stele, vec![written.descriptor.clone()]);
-    let index = stele.blob_index().unwrap();
-    let raw = read_both_ways(&stele, &index, &written.descriptor);
+    let snapshot = common::seal_alone(&snapshot, vec![written.descriptor.clone()]);
+    let index = snapshot.blob_index().unwrap();
+    let raw = read_both_ways(&snapshot, &index, &written.descriptor);
 
     // The bytes that came back are the bytes that went in, before anything is
     // decoded — so a decode bug cannot hide a framing bug.
@@ -179,7 +179,7 @@ fn state_round_trips_through_a_layer_per_kind_and_shard() {
 #[test]
 fn an_over_wide_exact_key_survives_the_layer_and_is_refused_by_the_codec() {
     let temp = tempfile::tempdir().unwrap();
-    let stele = SnapshotDir::create(temp.path()).unwrap();
+    let snapshot = SnapshotDir::create(temp.path()).unwrap();
 
     let forged = frame::encode(|e| {
         e.array(4)?
@@ -192,14 +192,14 @@ fn an_over_wide_exact_key_survives_the_layer_and_is_refused_by_the_codec() {
     .unwrap();
 
     let written = write_layer(
-        &stele,
+        &snapshot,
         INDEXES,
         &epoch_scope(),
         std::slice::from_ref(&forged),
     );
-    let stele = common::seal_alone(&stele, vec![written.descriptor.clone()]);
-    let index = stele.blob_index().unwrap();
-    let raw = read_both_ways(&stele, &index, &written.descriptor);
+    let snapshot = common::seal_alone(&snapshot, vec![written.descriptor.clone()]);
+    let index = snapshot.blob_index().unwrap();
+    let raw = read_both_ways(&snapshot, &index, &written.descriptor);
 
     assert_eq!(raw, vec![forged.as_bytes().to_vec()]);
 
@@ -219,17 +219,17 @@ fn an_over_wide_exact_key_survives_the_layer_and_is_refused_by_the_codec() {
 #[test]
 fn a_layer_read_under_the_wrong_kind_is_refused() {
     let temp = tempfile::tempdir().unwrap();
-    let stele = SnapshotDir::create(temp.path()).unwrap();
+    let snapshot = SnapshotDir::create(temp.path()).unwrap();
 
     let written = write_layer(
-        &stele,
+        &snapshot,
         BLOCKS,
         &epoch_scope(),
         &encode_all(&common::blocks(), blocks::encode),
     );
 
-    let stele = common::seal_alone(&stele, vec![written.descriptor.clone()]);
-    let index = stele.blob_index().unwrap();
+    let snapshot = common::seal_alone(&snapshot, vec![written.descriptor.clone()]);
+    let index = snapshot.blob_index().unwrap();
 
     let mut mislabelled = written.descriptor.clone();
     mislabelled.kind = INDEXES.to_owned();
@@ -237,7 +237,7 @@ fn a_layer_read_under_the_wrong_kind_is_refused() {
         .layer_media_type(INDEXES)
         .expect("a kind this profile defines");
 
-    let err = stele
+    let err = snapshot
         .read_layer(&index, &DolosProfile, &mislabelled)
         .unwrap_err();
     assert!(
@@ -286,10 +286,10 @@ fn a_layer_of_another_profile_is_refused() {
     }
 
     let temp = tempfile::tempdir().unwrap();
-    let stele = SnapshotDir::create(temp.path()).unwrap();
+    let snapshot = SnapshotDir::create(temp.path()).unwrap();
 
     let scope = epoch_scope();
-    let written = stele
+    let written = snapshot
         .write_layer(
             &Other,
             &stelae::dir::LayerSpec::new(BLOCKS, scope.header().unwrap(), scope.descriptor()),
@@ -307,12 +307,12 @@ fn a_layer_of_another_profile_is_refused() {
         dolos_snapshot::compression(),
     );
     inscription.tip = vec![written.descriptor.clone()];
-    stele.seal(&Other, &inscription).unwrap();
+    snapshot.seal(&Other, &inscription).unwrap();
 
-    let stele = stele.pull_sequence(&Other, EPOCH).unwrap();
-    let index = stele.blob_index().unwrap();
+    let snapshot = snapshot.pull_sequence(&Other, EPOCH).unwrap();
+    let index = snapshot.blob_index().unwrap();
 
-    let buffered = stele
+    let buffered = snapshot
         .read_layer(&index, &DolosProfile, &written.descriptor)
         .unwrap_err();
     assert!(
@@ -321,7 +321,7 @@ fn a_layer_of_another_profile_is_refused() {
     );
 
     // And on the streaming path, which is the one a restore uses.
-    let streamed = stele
+    let streamed = snapshot
         .stream_layer(
             &index,
             &DolosProfile,

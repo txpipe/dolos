@@ -227,7 +227,7 @@ pub trait ArchiveWriter: Send + Sync + 'static {
     /// Record in the entity index the slot an entity was first seen at.
     ///
     /// The seal of an immutable epoch calls this, in the same commit as the
-    /// epoch's sealed logs, and a restore writes a stele's entity layers
+    /// epoch's sealed logs, and a restore writes a snapshot's entity layers
     /// through it. Nothing undoes an entry: a rollback cannot reach a sealed
     /// epoch, so neither [`ArchiveWriter::undo`] nor
     /// [`ArchiveWriter::undo_index`] touches the index. Writing an entry again

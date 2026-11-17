@@ -3,7 +3,7 @@
 //! [`stelae`] is the protocol: framing, canonicalization, digests and the
 //! naming rules that let vendors coexist in one registry. It knows nothing
 //! about Cardano. This crate is the other half — the *profile* — and it says
-//! what a Dolos stele actually contains: its layer kinds, their media types,
+//! what a Dolos snapshot actually contains: its layer kinds, their media types,
 //! the tag a sequence renders as, what goes in `position`, `parameters` and
 //! each layer's `scope`, and the byte-exact codec for every record shape.
 //!
@@ -46,7 +46,7 @@
 //! - [`namespaces`] — the closed set of state namespaces.
 //! - [`export`] — the driver that walks a live store set and hands its records
 //!   to the protocol in the order above.
-//! - [`restore`] — its inverse: the driver that reads a stele back into an
+//! - [`restore`] — its inverse: the driver that reads a snapshot back into an
 //!   empty store set, in the order ADR-004 specifies.
 //! - [`facade`] — supported headless assembly for planning, encoding,
 //!   inspection, verification and directory/OCI restoration.
@@ -106,8 +106,8 @@ pub use stelae::progress;
 /// The protocol surface a host reaches through this crate rather than by
 /// naming `stelae` itself: only this crate depends on the stelae crates, so
 /// there is one pin point and one place to absorb upstream churn. These cover
-/// what a test or a binary opens a stele with; anything else a consumer needs
-/// joins the list rather than justifying a second dependency edge.
+/// what a test or a binary opens a snapshot with; anything else a consumer
+/// needs joins the list rather than justifying a second dependency edge.
 pub use stelae::{dir, inscription, transport, SnapshotReader};
 
 use dolos_cardano::indexes::entities;
@@ -203,7 +203,7 @@ pub const LOG_KINDS: [(&str, Namespace); 15] = [
 /// in `tests/coverage.rs`.
 ///
 /// Epoch `e`'s entries are written by the seal at the boundary opening
-/// `e + 2`, so the first stele whose `e` window carries one is cut there,
+/// `e + 2`, so the first snapshot whose `e` window carries one is cut there,
 /// exactly as for `log-first-script-chunks`.
 pub const ENTITY_KINDS: [(&str, EntityKind); 3] = [
     ("entity-asset", entities::ASSET),
@@ -458,7 +458,7 @@ pub fn log_ns_for(kind: &str) -> Option<Namespace> {
 }
 
 /// Scope field by which a layer declares that a reader who cannot restore it
-/// must refuse the stele rather than skip it.
+/// must refuse the snapshot rather than skip it.
 ///
 /// Absent means skippable, which is what every kind this profile publishes
 /// today leaves it at — so no scope shape writes this field and no golden
@@ -482,7 +482,7 @@ pub const MEDIA_TYPE_VENDOR: &str = "dolos";
 pub const MEDIA_TYPE_VERSION: u64 = 1;
 
 /// Payload media-type codec token. Compression is transport, so this is not
-/// part of a stele's identity — see [`stelae::inscription`].
+/// part of a snapshot's identity — see [`stelae::inscription`].
 pub const MEDIA_TYPE_CODEC: &str = "zstd";
 
 /// The payload media type this profile names `kind` with, whether or not it
@@ -511,7 +511,7 @@ pub(crate) fn payload_media_type(kind: &str) -> String {
 /// Cardano permits. So it is set with headroom over the largest record the
 /// chain has actually produced, and a proposal that one day exceeds *this* is a
 /// publish-time refusal naming the record — which is the outcome worth having,
-/// because the alternative is a stele that publishes and never restores.
+/// because the alternative is a snapshot that publishes and never restores.
 pub const MAX_RECORD: usize = 64 * 1024 * 1024;
 
 /// The key-hashing scheme index layers ship under, as reported in
@@ -600,8 +600,8 @@ pub enum Error {
     #[error("{0:?} is not an exact-record kind this profile defines")]
     UnknownExactKind(String),
 
-    /// An entity kind this build registers that the stele does not declare in
-    /// `parameters.entities`.
+    /// An entity kind this build registers that the snapshot does not declare
+    /// in `parameters.entities`.
     ///
     /// The first-seen witness reads the kind's entries, and a node restored
     /// without them would take every repeat for a first sighting with nothing
@@ -609,15 +609,15 @@ pub enum Error {
     /// when it holds a record — so the declaration does, and a restore refuses
     /// before a store is opened.
     #[error(
-        "this stele does not declare entity kind {kind:?}, which this build indexes; restoring \
+        "this snapshot does not declare entity kind {kind:?}, which this build indexes; restoring \
          it would leave that kind's first sightings silently empty"
     )]
     UndeclaredEntityKind { kind: &'static str },
 
-    /// An entity kind the stele declares at a different id width than this
+    /// An entity kind the snapshot declares at a different id width than this
     /// build registers: its ids could not be the ids this build looks up.
     #[error(
-        "this stele declares entity kind {kind:?} with {declared}-byte ids, and this build \
+        "this snapshot declares entity kind {kind:?} with {declared}-byte ids, and this build \
          registers {registered}-byte ids"
     )]
     EntityWidthMismatch {
@@ -642,9 +642,9 @@ pub enum Error {
         sequence: u64,
     },
 
-    /// A stele stands at a specific block, so its `position` needs that block's
-    /// hash. A cursor that has only a slot cannot anchor one.
-    #[error("a stele's position needs a block hash, but the chain point is {0}")]
+    /// A snapshot stands at a specific block, so its `position` needs that
+    /// block's hash. A cursor that has only a slot cannot anchor one.
+    #[error("a snapshot's position needs a block hash, but the chain point is {0}")]
     UnanchoredPoint(String),
 
     /// Stores that do not stand on the first block of the plan's sequence
@@ -658,22 +658,24 @@ pub enum Error {
 
     /// A field of the inscription this profile owns — `position` or a layer's
     /// `scope` — is not the shape this profile writes. Raised while reading a
-    /// stele, never while writing one.
+    /// snapshot, never while writing one.
     #[error("the inscription's {field} is not the shape this profile writes: {reason}")]
     MalformedInscription { field: String, reason: String },
 
-    /// The stele describes a different chain than the node reading it. The
+    /// The snapshot describes a different chain than the node reading it. The
     /// first thing a restore checks, and the one refusal that has to happen
     /// before any store is touched.
-    #[error("this stele is for network magic {found}, but this node is configured for {expected}")]
+    #[error(
+        "this snapshot is for network magic {found}, but this node is configured for {expected}"
+    )]
     NetworkMismatch { expected: u64, found: u64 },
 
-    /// The stele is well-formed but does not carry enough to rebuild a node.
-    #[error("this stele cannot restore a node: {0}")]
-    IncompleteStele(String),
+    /// The snapshot is well-formed but does not carry enough to rebuild a node.
+    #[error("this snapshot cannot restore a node: {0}")]
+    IncompleteSnapshot(String),
 
-    /// A namespace this build models that the stele declares retired, or does
-    /// not declare at all.
+    /// A namespace this build models that the snapshot declares retired, or
+    /// does not declare at all.
     ///
     /// The removed-kind rule (ADR-0027). Unlike an unknown kind, a retired one
     /// leaves nothing in the inscription to skip and report: its layers are
@@ -683,7 +685,7 @@ pub enum Error {
     /// a store is opened and names the namespace an operator has to go and
     /// read about.
     #[error(
-        "this stele's publisher no longer carries namespace {namespace:?}, which this build \
+        "this snapshot's publisher no longer carries namespace {namespace:?}, which this build \
          still models; restoring it would leave that namespace silently empty"
     )]
     RetiredNamespace { namespace: Namespace },
@@ -696,7 +698,7 @@ pub enum Error {
     /// an operator what is missing: the kind names what to upgrade to, and the
     /// scope says which slice of the chain would have been silently absent.
     #[error(
-        "this stele carries layer kind {kind:?}, which this build does not implement and its \
+        "this snapshot carries layer kind {kind:?}, which this build does not implement and its \
          publisher marked required; its scope is {scope}"
     )]
     RequiredUnknownLayer {
@@ -716,7 +718,7 @@ pub enum Error {
     #[error("not enough space: {0}")]
     NotEnoughSpace(String),
 
-    /// A restore asked to resume whose records do not name the stele it
+    /// A restore asked to resume whose records do not name the snapshot it
     /// would read, refused before anything is written.
     #[error(transparent)]
     Resume(#[from] restore::ResumeRefusal),
@@ -735,7 +737,7 @@ pub enum Error {
     /// from being one epoch out, and an operator reading the message should not
     /// have to subtract.
     #[error(
-        "this repository's latest stele is sequence {latest} and this publish is sequence \
+        "this repository's latest snapshot is sequence {latest} and this publish is sequence \
          {publishing}: {reason}"
     )]
     LinkBreak {
@@ -750,21 +752,22 @@ pub enum Error {
     /// repository still holds it. What is gone is the state only this
     /// sequence carried, so it cannot be restored as a node.
     #[error(
-        "the tip of the stele at epoch-{sequence} is gone ({tag:?} is not in the repository), so \
+        "the tip of the snapshot at epoch-{sequence} is gone ({tag:?} is not in the repository), so \
          that epoch cannot be restored as a node; restore a later epoch, or one whose tip the \
          repository keeps"
     )]
     TipGone { sequence: u64, tag: String },
 
-    /// A stele whose closed epochs' blocks are in a blocks snapshot this
-    /// restore has no repository for, or whose repository does not hold it.
-    #[error("this stele's blocks are in blocks snapshot {reference}, and {reason}")]
+    /// A Dolos snapshot whose closed epochs' blocks are in a blocks snapshot
+    /// this restore has no repository for, or whose repository does not
+    /// hold it.
+    #[error("this Dolos snapshot's blocks are in blocks snapshot {reference}, and {reason}")]
     BlocksMissing { reference: Digest, reason: String },
 
-    /// A blocks repository whose snapshot at the stele's sequence is not the
-    /// one the stele's `position.blocks` names.
+    /// A blocks repository whose snapshot at the Dolos snapshot's sequence is
+    /// not the one the Dolos snapshot's `position.blocks` names.
     #[error(
-        "this stele names blocks snapshot {expected}, and the blocks repository holds {found} at \
+        "this Dolos snapshot names blocks snapshot {expected}, and the blocks repository holds {found} at \
          its sequence"
     )]
     BlocksMismatch { expected: Digest, found: Digest },
@@ -774,7 +777,7 @@ pub enum Error {
     Blocks(stelae_blocks::Error),
 
     /// A reproduction that arrived at a different answer than the published
-    /// stele it recomputed.
+    /// snapshot it recomputed.
     ///
     /// A finding, not a routine failure: same stores, same epochs and the same
     /// link reproduce the same document, so a divergence means either the
@@ -783,14 +786,14 @@ pub enum Error {
     /// determinism claim has a hole, which is ADR-004's residual risk with a
     /// name on it. `subject` names the layer (or the generic field) so the two
     /// can be told apart.
-    #[error("the reproduction does not match the published stele — {subject}: {reason}")]
+    #[error("the reproduction does not match the published snapshot — {subject}: {reason}")]
     ReproductionMismatch { subject: String, reason: String },
 
     /// A restore reached a layer that is not the next one its layer stream
     /// holds.
     ///
     /// The stream is opened over the layers the restore will drain, in plan
-    /// order, so this is a defect in the restore and never in the stele: the
+    /// order, so this is a defect in the restore and never in the snapshot: the
     /// layer it would have read is another layer's, and is refused before a
     /// record of it is written.
     #[error("the restore reached the {kind} layer at {scope} out of turn: {reason}")]
@@ -1027,7 +1030,7 @@ impl stelae_driver::DriverProfile for DolosProfile {
         }
     }
 
-    /// Two steles stand on the same dataset when their `position` names the
+    /// Two snapshots stand on the same dataset when their `position` names the
     /// same network magic. The check a publish and a reproduction share, and
     /// the refusal an operator reads is still [`Error::NetworkMismatch`] — the
     /// driver carries the two numbers and this crate spells the sentence.
@@ -1072,15 +1075,15 @@ pub const PREPROD_MAGIC: u64 = 1;
 /// Network magic of the preview testnet.
 pub const PREVIEW_MAGIC: u64 = 2;
 
-/// The network a stele belongs to, as `position.network` records it.
+/// The network a snapshot belongs to, as `position.network` records it.
 ///
 /// The magic is the identity a restoring node checks against its own
 /// configuration; the name is for humans reading the inscription.
 ///
 /// ## Why the name is not an input
 ///
-/// It rides inside the canonical JSON, so it is inside the stele's identity. A
-/// name read from configuration would let two publishers on one chain produce
+/// It rides inside the canonical JSON, so it is inside the snapshot's identity.
+/// A name read from configuration would let two publishers on one chain produce
 /// two different digests over a spelling — which is precisely the divergence
 /// the protocol exists to make impossible. [`Network::for_magic`] is therefore
 /// the only way to build one, the table below is the only place the strings are
@@ -1117,12 +1120,12 @@ impl Network {
     }
 }
 
-/// Build the profile's `position`: where in the Cardano chain this stele
+/// Build the profile's `position`: where in the Cardano chain this snapshot
 /// stands.
 ///
-/// `point` is the boundary the stele was cut at — in practice the state store's
-/// cursor after a `stop_epoch` sync. It must carry a hash: a stele that names
-/// only a slot cannot be verified against a chain.
+/// `point` is the boundary the snapshot was cut at — in practice the state
+/// store's cursor after a `stop_epoch` sync. It must carry a hash: a snapshot
+/// that names only a slot cannot be verified against a chain.
 ///
 /// `blocks` is the inscription digest of the blocks snapshot at the same
 /// sequence. Without it the field is left out, so the position's bytes are the
@@ -1150,30 +1153,30 @@ pub fn position(
     Ok(position)
 }
 
-/// Where a stele stands, as [`position`] records it.
+/// Where a snapshot stands, as [`position`] records it.
 ///
 /// The read side of the same shape, kept beside the write side so the two
 /// cannot drift: `position_round_trips` holds them against each other.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Position {
     pub network: Network,
-    /// The chain point the stele was cut at. Always anchored — a `position`
+    /// The chain point the snapshot was cut at. Always anchored — a `position`
     /// that names only a slot is refused on both sides.
     pub point: ChainPoint,
     /// The epoch the point stands in, which is the last one the layers cover.
     pub epoch: u64,
     /// The inscription digest of the blocks snapshot at the same sequence,
-    /// when the stele names one.
+    /// when the snapshot names one.
     pub blocks: Option<Digest>,
 }
 
 /// Read a `position` back.
 ///
 /// Fails closed on every field, including on a `network.name` that is not the
-/// one [`Network::for_magic`] derives: the name rides inside the stele's
-/// identity, so a stele naming its own network differently was built against a
-/// table this implementation does not share, and nothing downstream would ever
-/// notice.
+/// one [`Network::for_magic`] derives: the name rides inside the snapshot's
+/// identity, so a snapshot naming its own network differently was built against
+/// a table this implementation does not share, and nothing downstream would
+/// ever notice.
 pub fn read_position(value: &serde_json::Value) -> Result<Position, Error> {
     let field = |path: &str, at: &serde_json::Value| -> Result<serde_json::Value, Error> {
         at.get(path)
@@ -1202,7 +1205,7 @@ pub fn read_position(value: &serde_json::Value) -> Result<Position, Error> {
         return Err(Error::malformed_inscription(
             "position.network.name",
             format!(
-                "magic {} names {:?} here, but the stele says {name:?}",
+                "magic {} names {:?} here, but the snapshot says {name:?}",
                 network.magic(),
                 network.name(),
             ),
@@ -1257,7 +1260,7 @@ pub fn read_position(value: &serde_json::Value) -> Result<Position, Error> {
 /// `entities` declares every entity index kind the publisher writes, with its
 /// id width ([`ENTITY_KINDS`]). An entity layer exists only when it holds a
 /// record, so its absence cannot tell a reader that the publisher does not
-/// carry the kind; the declaration does, and a restore refuses a stele that
+/// carry the kind; the declaration does, and a restore refuses a snapshot that
 /// does not declare a kind the reader registers.
 pub fn parameters() -> serde_json::Value {
     let shards: serde_json::Map<String, serde_json::Value> = STATE_KINDS
@@ -1316,18 +1319,18 @@ pub struct EpochScope {
 /// Uniform across every state kind, single-blob namespaces included — their
 /// one layer is shard 0 — so the header and descriptor shapes stay one shape
 /// and a reader never dispatches on the kind to parse a scope. The state is
-/// always the tip: the ledger as of the stele's `sequence`, republished whole
-/// by every publish.
+/// always the tip: the ledger as of the snapshot's `sequence`, republished
+/// whole by every publish.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StateScope {
     pub network_magic: u64,
-    /// The epoch the records are the state as of: the stele's `sequence`.
+    /// The epoch the records are the state as of: the snapshot's `sequence`.
     pub epoch: u64,
     pub shard: u8,
 }
 
 impl StateScope {
-    /// One shard of the tip of a stele at `epoch`.
+    /// One shard of the tip of a snapshot at `epoch`.
     pub fn tip(network_magic: u64, epoch: u64, shard: u8) -> Self {
         Self {
             network_magic,
@@ -1479,8 +1482,8 @@ mod tests {
         stelae::profile::validate_profile_name(PROFILE_NAME).unwrap();
     }
 
-    /// The table is inside the stele's identity, so the strings are pinned as
-    /// literals here and again in the export golden.
+    /// The table is inside the snapshot's identity, so the strings are pinned
+    /// as literals here and again in the export golden.
     #[test]
     fn a_network_is_named_by_its_magic_alone() {
         for (magic, name) in [
@@ -1544,9 +1547,9 @@ mod tests {
         }
     }
 
-    /// The name is inside the stele's identity, so a stele that spells its own
-    /// network differently was built against a table this implementation does
-    /// not share.
+    /// The name is inside the snapshot's identity, so a snapshot that spells
+    /// its own network differently was built against a table this
+    /// implementation does not share.
     #[test]
     fn a_position_naming_its_network_differently_is_refused() {
         let mut written = position(

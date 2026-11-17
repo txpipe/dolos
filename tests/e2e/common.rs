@@ -88,7 +88,7 @@ static NEXT_PORT_PREFIX: AtomicU16 = AtomicU16::new(WORKSPACE_PORT_BASE);
 /// therefore put two nodes in one directory, and the second one to open the
 /// state store dies on `FjallError: Locked` — which is what
 /// `snapshot_roundtrip_for_preview_full_explicit` and
-/// `stele_roundtrip_for_preview_full_explicit` did to each other once both
+/// `snapshot_roundtrip_for_preview_full_explicit` did to each other once both
 /// existed, since libtest runs the tests in a binary in parallel.
 ///
 /// A workspace is that fixture copied per test: its own `dolos.toml` under

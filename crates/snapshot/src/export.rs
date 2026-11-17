@@ -1,4 +1,4 @@
-//! Walking a live Dolos store set into a stele.
+//! Walking a live Dolos store set into a snapshot.
 //!
 //! Everything the byte shapes need is already frozen: the codecs in
 //! [`crate::layers`], the scopes and `position`/`parameters` builders in
@@ -8,8 +8,8 @@
 //!
 //! ## The two facts only an exporter can know
 //!
-//! **Epoch geometry.** A stele's `sequence` is the epoch its cursor stands in,
-//! and its chain's layers cover every epoch up to and including that one —
+//! **Epoch geometry.** A snapshot's `sequence` is the epoch its cursor stands
+//! in, and its chain's layers cover every epoch up to and including that one —
 //! decision 0025: `stop_epoch`, the tag, `sequence` and `position.epoch` all
 //! name the same epoch. [`Plan`] derives both from a [`ChainSummary`] and a
 //! cursor, so two publishers standing at the same chain point compute the same
@@ -22,9 +22,9 @@
 //! [`crate::boundary`].
 //!
 //! **The network name.** It rides inside the canonical JSON, so it is inside
-//! the stele's identity. [`crate::Network::for_magic`] is the only way to build
-//! one, which is what keeps two publishers on one chain from producing two
-//! digests over a spelling.
+//! the snapshot's identity. [`crate::Network::for_magic`] is the only way to
+//! build one, which is what keeps two publishers on one chain from producing
+//! two digests over a spelling.
 //!
 //! ## Memory
 //!
@@ -33,11 +33,11 @@
 //! single walk of its namespace rather than sorting a mainnet-sized set into
 //! buckets first.
 //!
-//! ## Where the stele ends up is not this module's business
+//! ## Where the snapshot ends up is not this module's business
 //!
 //! [`export`] takes any [`SnapshotWriter`] — a directory, a registry, whatever
 //! comes next — because nothing in the walk of a store depends on it. The two
-//! calls it makes are "open a sink for this layer" and "seal the stele with
+//! calls it makes are "open a sink for this layer" and "seal the snapshot with
 //! this inscription", and both are the same code whether the bytes land in
 //! `blobs/sha256/` or in a repository.
 //!
@@ -49,7 +49,7 @@
 //! exactly them; the layers of earlier sequences stay in their own
 //! inscriptions, and nothing is carried forward.
 //!
-//! [`export`] takes a [`Predecessor`]: the stele this one follows, wherever it
+//! [`export`] takes a [`Predecessor`]: the snapshot this one follows, wherever it
 //! was published. It supplies the `previous` link, and the layers an
 //! interrupted attempt of this same publish already uploaded. A publish with no
 //! predecessor passes [`First`], which starts a lineage: its `diff` lists every
@@ -193,10 +193,11 @@ impl Default for Producers {
 #[derive(Debug, Clone)]
 pub struct Plan {
     pub network: Network,
-    /// The chain point the stele stands at — the state store's cursor.
+    /// The chain point the snapshot stands at — the state store's cursor.
     pub cursor: ChainPoint,
     /// The protocol's `sequence`: the epoch the cursor stands in, which is
-    /// also the last epoch the layers cover and this stele's `position.epoch`.
+    /// also the last epoch the layers cover and this snapshot's
+    /// `position.epoch`.
     pub sequence: u64,
     /// The epochs whose layers this export writes, ascending.
     pub epochs: Vec<EpochWindow>,
@@ -230,12 +231,12 @@ pub struct Plan {
 impl Plan {
     /// Derive the geometry of a publish standing at `cursor`.
     ///
-    /// The stele's `sequence` is `epoch_of(cursor)` — ADR-004's E, the newly
+    /// The snapshot's `sequence` is `epoch_of(cursor)` — ADR-004's E, the newly
     /// entered epoch — and its layers cover `0..=epoch_of(cursor)`: epochs
     /// `0..E-1` complete, plus epoch E's boundary sliver. The last window's
-    /// `end_slot` is clamped to the cursor, so a stele cut on the first block
-    /// of E is still byte-identical between two publishers standing at the
-    /// same point. `mutable_slots` is the genesis's `3k/f`.
+    /// `end_slot` is clamped to the cursor, so a snapshot cut on the first
+    /// block of E is still byte-identical between two publishers standing
+    /// at the same point. `mutable_slots` is the genesis's `3k/f`.
     pub fn new(
         summary: &ChainSummary,
         network: Network,
@@ -255,7 +256,7 @@ impl Plan {
             .map(|epoch| EpochWindow {
                 epoch,
                 start_slot: summary.epoch_start(epoch),
-                // The epoch's own last slot, or the cursor if the stele was cut
+                // The epoch's own last slot, or the cursor if the snapshot was cut
                 // before the boundary.
                 end_slot: (summary.epoch_start(epoch + 1) - 1).min(tip_slot),
             })
@@ -309,7 +310,7 @@ impl Plan {
         )
     }
 
-    /// What the stele of this plan lists when it follows `previous`, on the
+    /// What the snapshot of this plan lists when it follows `previous`, on the
     /// chain `summary` describes.
     pub fn listing<'s>(
         &self,
@@ -323,7 +324,7 @@ impl Plan {
         )
     }
 
-    /// The immutable tag this stele would publish under.
+    /// The immutable tag this snapshot would publish under.
     pub fn tag(&self) -> Result<String, Error> {
         Ok(stelae::profile::checked_tag_for_sequence(
             &DolosProfile,
@@ -392,12 +393,13 @@ pub fn plan<S: StateStore>(
 /// owns.
 pub use stelae_driver::{First, Predecessor};
 
-/// The stele this one follows, held as a document rather than as a repository.
+/// The snapshot this one follows, held as a document rather than as a
+/// repository.
 ///
-/// What a publisher into a directory gets from the layout's latest stele, and
-/// what a *verifier* has instead of a repository: the predecessor's canonical
-/// inscription, off disk or out of a pull, and nothing else. It answers the
-/// link and resumes nothing.
+/// What a publisher into a directory gets from the layout's latest snapshot,
+/// and what a *verifier* has instead of a repository: the predecessor's
+/// canonical inscription, off disk or out of a pull, and nothing else. It
+/// answers the link and resumes nothing.
 ///
 /// It exists so that `dolos snapshot digest --chain-from` extends a lineage by
 /// the same rule a publish does. Two implementations of contiguity is two
@@ -416,9 +418,10 @@ impl Following {
     /// naming the protocol crate, the same property [`publish`] and
     /// [`crate::registry::open`] hold.
     ///
-    /// The bytes must *be* the canonical encoding: a stele is chained to by
-    /// the digest of its own bytes, so a re-encoded copy names a stele nobody
-    /// published, and the link would attest a document that does not exist.
+    /// The bytes must *be* the canonical encoding: a snapshot is chained to by
+    /// the digest of its own bytes, so a re-encoded copy names a snapshot
+    /// nobody published, and the link would attest a document that does not
+    /// exist.
     pub fn read(raw: &[u8], plan: &Plan) -> Result<Self, Error> {
         let previous = Inscription::parse(raw)?;
 
@@ -426,7 +429,7 @@ impl Following {
             return Err(Error::malformed_inscription(
                 "the document",
                 "it is not in canonical form; a predecessor is chained to by the digest of its \
-                 own bytes, so a re-encoded copy names a stele nobody published",
+                 own bytes, so a re-encoded copy names a snapshot nobody published",
             ));
         }
 
@@ -435,12 +438,13 @@ impl Following {
         Self::new(&previous, plan)
     }
 
-    /// The link a stele at `plan.sequence` carries when it follows `previous`.
+    /// The link a snapshot at `plan.sequence` carries when it follows
+    /// `previous`.
     ///
     /// Refuses a predecessor from another network for the same reason a publish
     /// does, and refuses one this plan does not follow — a reproduction chained
-    /// onto the wrong stele would report a digest that is *correct* for a stele
-    /// nobody published, which is worse than an error.
+    /// onto the wrong snapshot would report a digest that is *correct* for a
+    /// snapshot nobody published, which is worse than an error.
     pub fn new(previous: &Inscription, plan: &Plan) -> Result<Self, Error> {
         same_network(previous, plan)?;
 
@@ -456,7 +460,7 @@ impl Predecessor for Following {
     }
 }
 
-/// The link a published stele carries, taken verbatim.
+/// The link a published snapshot carries, taken verbatim.
 ///
 /// What `verify --reproduce` chains with. [`Following`] makes a link to a
 /// predecessor by the contiguity rule, because a *publisher* is adding one; a
@@ -491,8 +495,8 @@ pub use stelae::inscription::link_for;
 
 /// Refuse a predecessor from another chain.
 ///
-/// A repository holding two networks' steles is an operator fault, and the
-/// check costs nothing: the previous stele's `position` already names its
+/// A repository holding two networks' snapshots is an operator fault, and the
+/// check costs nothing: the previous snapshot's `position` already names its
 /// network, and reading it is the same function a restore uses.
 pub fn same_network(previous: &Inscription, plan: &Plan) -> Result<(), Error> {
     let found = crate::read_position(&previous.position)?.network;
@@ -507,11 +511,11 @@ pub fn same_network(previous: &Inscription, plan: &Plan) -> Result<(), Error> {
     Ok(())
 }
 
-/// Where a node stands against the repository's newest stele, which is
+/// Where a node stands against the repository's newest snapshot, which is
 /// [`stelae_driver::Standing`]: a comparison over two sequence numbers.
 pub use stelae_driver::Standing;
 
-/// Export the stele at `plan.sequence` into `stele`: the layers it lists,
+/// Export the snapshot at `plan.sequence` into `snapshot`: the layers it lists,
 /// then the inscription.
 ///
 /// The layers are this sequence's own ([`Listing`]): its `diff` and its `tip`,
@@ -523,20 +527,20 @@ pub use stelae_driver::Standing;
 /// position its layers hold in the document, whatever order the jobs finish
 /// in. See [`Producers`] for what the pool changes and what it must not.
 ///
-/// `previous` is the stele this one follows; pass [`First`] when there is none,
-/// and the stele starts a lineage. A layer it resumes is *attested without
-/// being reproduced*: this function never opens a sink for it and never
+/// `previous` is the snapshot this one follows; pass [`First`] when there is
+/// none, and the snapshot starts a lineage. A layer it resumes is *attested
+/// without being reproduced*: this function never opens a sink for it and never
 /// touches a store on its behalf. See [`Predecessor::resume`].
 ///
 /// `observer` is who hears about it while it happens, and
 /// [`Observer::silent`] is what every caller that does not care passes: a
 /// silent run does exactly what this function did before the seam existed,
-/// byte for byte. The observer is forwarded to `stele` as well as reported
+/// byte for byte. The observer is forwarded to `snapshot` as well as reported
 /// through here, because the two halves of what an operator wants to see live
 /// in two places — this loop knows which layer of how many, and only the
 /// transport knows how much of it has moved.
 pub fn export<W, A, S>(
-    stele: &W,
+    snapshot: &W,
     plan: &Plan,
     archive: &A,
     state: &S,
@@ -552,7 +556,7 @@ where
     // from has no layer written for it, whatever transport is in hand.
     crate::boundary::check(plan, archive, state)?;
 
-    stele.observe(observer.clone());
+    snapshot.observe(observer.clone());
 
     // Ahead of the count as well as of the build: see `refuse_uncovered_logs`.
     for window in &plan.epochs {
@@ -579,7 +583,7 @@ where
     )?;
 
     assemble(
-        stele,
+        snapshot,
         plan,
         &listing,
         archive,
@@ -647,7 +651,7 @@ impl Resumed {
         self.0.get(&(kind, epoch))
     }
 
-    /// The staging a batch of one needs: every window this stele lists and
+    /// The staging a batch of one needs: every window this snapshot lists and
     /// does not resume.
     fn live_request(&self, plan: &Plan, listing: &Listing<'_>) -> Result<staging::Request, Error> {
         let building = |kind| -> Result<BTreeSet<u64>, Error> {
@@ -687,7 +691,7 @@ impl Resumed {
 /// run these however it likes without the document noticing.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn assemble<W, A, S>(
-    stele: &W,
+    snapshot: &W,
     plan: &Plan,
     listing: &Listing<'_>,
     archive: &A,
@@ -719,7 +723,7 @@ where
     for window in listed(plan, listing, BLOCKS)? {
         jobs.push(Box::new(move || {
             let descriptor =
-                write_blocks(stele, plan, archive, prepared, window, previous, cursor)?;
+                write_blocks(snapshot, plan, archive, prepared, window, previous, cursor)?;
             previous.landed(&descriptor)?;
 
             Ok(vec![descriptor])
@@ -729,7 +733,7 @@ where
     for window in listed(plan, listing, INDEXES)? {
         jobs.push(Box::new(move || {
             let descriptor =
-                write_index_layer(stele, plan, prepared, staged, resumed, window, cursor)?;
+                write_index_layer(snapshot, plan, prepared, staged, resumed, window, cursor)?;
             previous.landed(&descriptor)?;
 
             Ok(vec![descriptor])
@@ -742,7 +746,7 @@ where
         for window in listed(plan, listing, kind)? {
             jobs.push(Box::new(move || {
                 let layer = write_logs(
-                    stele, plan, archive, prepared, window, kind, ns, previous, cursor,
+                    snapshot, plan, archive, prepared, window, kind, ns, previous, cursor,
                 )?;
 
                 landed(layer, previous)
@@ -754,7 +758,7 @@ where
         for window in listed(plan, listing, kind)? {
             jobs.push(Box::new(move || {
                 let layer = write_entity_layer(
-                    stele, plan, prepared, staged, resumed, window, kind, entity, cursor,
+                    snapshot, plan, prepared, staged, resumed, window, kind, entity, cursor,
                 )?;
 
                 landed(layer, previous)
@@ -767,7 +771,7 @@ where
     // predecessor is never asked about it.
     for (kind, ns, shards, shard_byte) in STATE_KINDS {
         jobs.push(Box::new(move || {
-            write_state_kind(stele, plan, source, kind, ns, shards, shard_byte, cursor)
+            write_state_kind(snapshot, plan, source, kind, ns, shards, shard_byte, cursor)
         }));
     }
 
@@ -790,14 +794,14 @@ where
     inscription.previous = previous.previous();
     stelae_driver::place_layers(&DolosProfile, &mut inscription, layers)?;
 
-    // Validated before it is written, so a stele is never sealed over a
+    // Validated before it is written, so a snapshot is never sealed over a
     // document that has no digest.
-    stele.seal(&DolosProfile, &inscription)?;
+    snapshot.seal(&DolosProfile, &inscription)?;
 
     Ok(inscription)
 }
 
-/// The windows of `plan` this stele lists a layer of `kind` for.
+/// The windows of `plan` this snapshot lists a layer of `kind` for.
 fn listed<'p>(
     plan: &'p Plan,
     listing: &Listing<'_>,
@@ -814,8 +818,8 @@ fn listed<'p>(
     Ok(windows)
 }
 
-/// How many `blocks` and `indexes` layers this stele lists: one per window of
-/// each it lists, since both kinds are dense.
+/// How many `blocks` and `indexes` layers this snapshot lists: one per window
+/// of each it lists, since both kinds are dense.
 fn dense_layers(plan: &Plan, listing: &Listing<'_>) -> Result<usize, Error> {
     let mut total = 0;
 
@@ -842,7 +846,7 @@ fn landed(
 pub use crate::restore::{BLOCKS_REPOSITORY, DOLOS_REPOSITORY};
 
 /// Export into the network root at `root`: the blocks snapshot at
-/// `plan.sequence` into `root/blocks`, then the stele naming it into
+/// `plan.sequence` into `root/blocks`, then the snapshot naming it into
 /// `root/dolos`, each an image layout chained to the latest snapshot it holds.
 /// Both lineages' links and networks are checked before either is written.
 ///
@@ -852,8 +856,8 @@ pub use crate::restore::{BLOCKS_REPOSITORY, DOLOS_REPOSITORY};
 /// `plan.sequence - 1` is appended to, and anything else is refused by the
 /// link rule, as a registry publish is.
 ///
-/// The front door for a caller that has no stele in hand, so the profile stays
-/// the only thing in the binary that names the protocol crate.
+/// The front door for a caller that has no snapshot in hand, so the profile
+/// stays the only thing in the binary that names the protocol crate.
 pub fn publish<A, S>(
     root: impl Into<std::path::PathBuf>,
     plan: &Plan,
@@ -871,8 +875,9 @@ where
     // from has nothing written for it.
     crate::boundary::check(plan, archive, state)?;
 
-    // The stele's link and network are settled before the blocks snapshot is
-    // sealed, so a stele this export would refuse leaves no blocks behind.
+    // The Dolos snapshot's link and network are settled before the blocks snapshot
+    // is sealed, so a snapshot this export would refuse leaves no blocks
+    // behind.
     let dolos = root.join(DOLOS_REPOSITORY);
     let layout = dolos.join(stelae::dir::LAYOUT_FILE);
     let following = match layout.try_exists().map_err(stelae::Error::from)? {
@@ -893,11 +898,11 @@ where
     };
     let plan = &plan;
 
-    let stele = stelae::dir::SnapshotDir::create(dolos)?;
+    let snapshot = stelae::dir::SnapshotDir::create(dolos)?;
 
     match &following {
-        Some(following) => export(&stele, plan, archive, state, following, observer),
-        None => export(&stele, plan, archive, state, &First, observer),
+        Some(following) => export(&snapshot, plan, archive, state, following, observer),
+        None => export(&snapshot, plan, archive, state, &First, observer),
     }
 }
 
@@ -988,7 +993,7 @@ fn publish_blocks<A: ArchiveStore>(
     Ok(Some(layout.seal(&BlocksProfile, &inscription)?))
 }
 
-/// Reproduce a stele from `plan` and keep nothing.
+/// Reproduce a snapshot from `plan` and keep nothing.
 ///
 /// Its index runs spool under [`Plan::scratch`] on the way, like any export's,
 /// and are removed afterwards.
@@ -1005,8 +1010,8 @@ fn publish_blocks<A: ArchiveStore>(
 /// `previous` is what the reproduction chains onto. It is an input and not
 /// something this can work out — `previous` is inside the canonical document,
 /// and it decides which layers this sequence lists, so the same stores chained
-/// differently are different digests. Pass [`First`] for a stele that starts a
-/// lineage and [`Following`] for one that extends a predecessor's.
+/// differently are different digests. Pass [`First`] for a snapshot that starts
+/// a lineage and [`Following`] for one that extends a predecessor's.
 pub fn reproduce<A, S>(
     plan: &Plan,
     archive: &A,
@@ -1032,7 +1037,7 @@ where
     )
 }
 
-/// A reproduced stele's document: the bytes a verifier hashes, and what they
+/// A reproduced snapshot's document: the bytes a verifier hashes, and what they
 /// hash to.
 ///
 /// The canonical encoding rather than the [`Inscription`], because that is what
@@ -1042,14 +1047,14 @@ where
 pub struct Document {
     /// The canonical inscription, byte for byte.
     pub canonical: Vec<u8>,
-    /// Its sha256, which is the stele's identity.
+    /// Its sha256, which is the snapshot's identity.
     pub identity: stelae::Digest,
     pub layers: usize,
     pub uncompressed_size: u64,
 }
 
-/// Reproduce a stele from local stores and canonicalize it, keeping nothing but
-/// the spool [`reproduce`] removes afterwards.
+/// Reproduce a snapshot from local stores and canonicalize it, keeping nothing
+/// but the spool [`reproduce`] removes afterwards.
 ///
 /// What a publish costs, minus the I/O and the upload: every layer is
 /// compressed, because a reproduction that skipped compression would not be
@@ -1099,14 +1104,14 @@ impl Document {
 /// `position.blocks` when `plan` names no blocks snapshot of its own.
 ///
 /// The sequence is checked before a single record is walked. A plan standing
-/// at a different epoch than the published stele cannot match it, and finding
-/// that out should not cost the hours of compression a full walk does. The
-/// network is checked on the same terms, and it is not implied by the sequence:
-/// epoch numbers collide across chains, so a preprod stele and a mainnet store
-/// can stand at the same sequence and still have nothing to say to each other.
-/// [`Attested`] takes the published link verbatim and so — unlike
-/// [`Following::new`] — checks nothing about it; this is where that check
-/// lands.
+/// at a different epoch than the published snapshot cannot match it, and
+/// finding that out should not cost the hours of compression a full walk does.
+/// The network is checked on the same terms, and it is not implied by the
+/// sequence: epoch numbers collide across chains, so a preprod snapshot and a
+/// mainnet store can stand at the same sequence and still have nothing to say
+/// to each other. [`Attested`] takes the published link verbatim and so —
+/// unlike [`Following::new`] — checks nothing about it; this is where that
+/// check lands.
 pub fn verify_reproduction<A, S>(
     published: &Inscription,
     plan: &Plan,
@@ -1121,15 +1126,15 @@ where
         return Err(Error::ReproductionMismatch {
             subject: "sequence".to_owned(),
             reason: format!(
-                "the published stele is sequence {} and these stores stand at sequence {}; a \
-                 reproduction runs over stores at the epoch the stele was published from",
+                "the published snapshot is sequence {} and these stores stand at sequence {}; a \
+                 reproduction runs over stores at the epoch the snapshot was published from",
                 published.sequence, plan.sequence,
             ),
         });
     }
 
     // Same reasoning as the sequence check, and not covered by it: a store on
-    // another chain cannot reproduce this stele, and epoch numbers collide
+    // another chain cannot reproduce this snapshot, and epoch numbers collide
     // across networks, so same-sequence-different-chain is reachable.
     same_network(published, plan)?;
 
@@ -1178,11 +1183,11 @@ fn compare(published: &Inscription, reproduced: &Inscription) -> Result<(), Erro
             return Err(Error::ReproductionMismatch {
                 subject,
                 reason: match ours.len() {
-                    0 => "the published stele describes it and the reproduction built no such \
-                          layer; the stores may cover different epochs than the stele"
+                    0 => "the published snapshot describes it and the reproduction built no such \
+                          layer; the stores may cover different epochs than the snapshot"
                         .to_owned(),
                     built => format!(
-                        "the published stele describes it {} time(s) and the reproduction built \
+                        "the published snapshot describes it {} time(s) and the reproduction built \
                          it {built}",
                         theirs.len(),
                     ),
@@ -1227,7 +1232,7 @@ fn compare(published: &Inscription, reproduced: &Inscription) -> Result<(), Erro
     if let Some(((kind, scope), _)) = reproduced_layers.into_iter().next() {
         return Err(Error::ReproductionMismatch {
             subject: format!("the {kind} layer at {scope}"),
-            reason: "the reproduction built it and the published stele does not describe it"
+            reason: "the reproduction built it and the published snapshot does not describe it"
                 .to_owned(),
         });
     }
@@ -1250,7 +1255,7 @@ fn compare(published: &Inscription, reproduced: &Inscription) -> Result<(), Erro
     Ok(())
 }
 
-/// A stele's layers under [`crate::scope_key`], for holding two documents
+/// A snapshot's layers under [`crate::scope_key`], for holding two documents
 /// against each other.
 ///
 /// A `Vec` per key rather than a refusal of duplicates: the comparison's job is
@@ -1271,8 +1276,8 @@ fn layers_by_scope(
     Ok(layers)
 }
 
-fn sink<W: SnapshotWriter>(stele: &W, spec: &LayerSpec) -> Result<W::Sink, Error> {
-    Ok(stele.layer_sink(&DolosProfile, spec, COMPRESSION_LEVEL)?)
+fn sink<W: SnapshotWriter>(snapshot: &W, spec: &LayerSpec) -> Result<W::Sink, Error> {
+    Ok(snapshot.layer_sink(&DolosProfile, spec, COMPRESSION_LEVEL)?)
 }
 
 /// One independent slice of a publish's production: a traversal, the sinks it
@@ -1378,7 +1383,7 @@ pub(crate) fn produce(
 
         for worker in 0..producers.workers() {
             std::thread::Builder::new()
-                .name(format!("stele-produce-{worker}"))
+                .name(format!("snapshot-produce-{worker}"))
                 .spawn_scoped(scope, move || pool.drain())
                 .expect("spawning a layer producer");
         }
@@ -1396,7 +1401,7 @@ pub(crate) fn produce(
         .collect())
 }
 
-/// The layer spec for one epoch window of the stele at `sequence`, and the
+/// The layer spec for one epoch window of the snapshot at `sequence`, and the
 /// layer an interrupted attempt of this publish already uploaded for it.
 ///
 /// The lookup happens **before the store is touched**, which is the entire
@@ -1444,9 +1449,9 @@ fn archive_blocks<'a, A: ArchiveStore>(
 }
 
 /// One epoch's blocks, ascending slot: the boundary window's, which is the
-/// only `blocks` layer a stele lists.
+/// only `blocks` layer a snapshot lists.
 pub(crate) fn write_blocks<W: SnapshotWriter, A: ArchiveStore>(
-    stele: &W,
+    snapshot: &W,
     plan: &Plan,
     archive: &A,
     prepared: Option<&Prepared<'_>>,
@@ -1466,13 +1471,13 @@ pub(crate) fn write_blocks<W: SnapshotWriter, A: ArchiveStore>(
     }
 
     if let Some(written) = captured_layer(prepared, BLOCKS, window, &spec)? {
-        let descriptor = replay_layer(stele, prepared, &spec, written, cursor)?.descriptor;
+        let descriptor = replay_layer(snapshot, prepared, &spec, written, cursor)?.descriptor;
         cursor.close(at, BLOCKS, Outcome::Transferred);
 
         return Ok(descriptor);
     }
 
-    let mut sink = sink(stele, &spec)?;
+    let mut sink = sink(snapshot, &spec)?;
     let mut order = blocks::OrderCheck::default();
     let mut records = cursor.records();
 
@@ -1506,7 +1511,7 @@ pub(crate) fn write_blocks<W: SnapshotWriter, A: ArchiveStore>(
 /// as normal.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_logs<W: SnapshotWriter, A: ArchiveStore>(
-    stele: &W,
+    snapshot: &W,
     plan: &Plan,
     archive: &A,
     prepared: Option<&Prepared<'_>>,
@@ -1533,7 +1538,7 @@ pub(crate) fn write_logs<W: SnapshotWriter, A: ArchiveStore>(
     match captured {
         Some(Captured::Layer(written)) => {
             let at = cursor.open(kind, &spec.scope);
-            let descriptor = replay_layer(stele, prepared, &spec, written, cursor)?.descriptor;
+            let descriptor = replay_layer(snapshot, prepared, &spec, written, cursor)?.descriptor;
             cursor.close(at, kind, Outcome::Transferred);
 
             return Ok(Some(descriptor));
@@ -1555,7 +1560,7 @@ pub(crate) fn write_logs<W: SnapshotWriter, A: ArchiveStore>(
 
         if open.is_none() {
             let at = cursor.open(kind, &spec.scope);
-            open = Some((at, sink(stele, &spec)?, cursor.records()));
+            open = Some((at, sink(snapshot, &spec)?, cursor.records()));
         }
 
         let (_, sink, records) = open
@@ -1581,7 +1586,7 @@ pub(crate) fn write_logs<W: SnapshotWriter, A: ArchiveStore>(
 /// What a publish of `plan` would write, counted without writing it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Forecast {
-    /// The layers the stele lists, its `diff` and its `tip`.
+    /// The layers the snapshot lists, its `diff` and its `tip`.
     pub layers_built: usize,
 }
 
@@ -1768,7 +1773,7 @@ fn entity_built(
 /// entity layer exists if and only if it holds a record.
 #[allow(clippy::too_many_arguments)]
 fn write_entity_layer<W: SnapshotWriter>(
-    stele: &W,
+    snapshot: &W,
     plan: &Plan,
     prepared: Option<&Prepared<'_>>,
     staged: Runs<'_>,
@@ -1795,7 +1800,7 @@ fn write_entity_layer<W: SnapshotWriter>(
     let mut records = cursor.records();
 
     let descriptor = staged.write_layer_ticking(
-        stele,
+        snapshot,
         Family::Entity(entity),
         window.epoch,
         plan.sequence,
@@ -1811,7 +1816,7 @@ fn write_entity_layer<W: SnapshotWriter>(
 /// One window's `indexes` layer: resumed, the tail captured at the boundary,
 /// or a staged window.
 fn write_index_layer<W: SnapshotWriter>(
-    stele: &W,
+    snapshot: &W,
     plan: &Plan,
     prepared: Option<&Prepared<'_>>,
     staged: Runs<'_>,
@@ -1829,12 +1834,12 @@ fn write_index_layer<W: SnapshotWriter>(
     }
 
     let descriptor = match captured_layer(prepared, INDEXES, window, &spec)? {
-        Some(written) => replay_layer(stele, prepared, &spec, written, cursor)?.descriptor,
+        Some(written) => replay_layer(snapshot, prepared, &spec, written, cursor)?.descriptor,
         None => {
             let mut records = cursor.records();
 
             let layer = staged.write_layer_ticking(
-                stele,
+                snapshot,
                 Family::Indexes,
                 window.epoch,
                 plan.sequence,
@@ -1871,7 +1876,7 @@ fn captured_layer<'p>(
 
 /// Stream a captured payload into `spec`'s layer, reporting its records.
 fn replay_layer<W: SnapshotWriter>(
-    stele: &W,
+    snapshot: &W,
     prepared: Option<&Prepared<'_>>,
     spec: &LayerSpec,
     written: &WrittenLayer,
@@ -1879,7 +1884,7 @@ fn replay_layer<W: SnapshotWriter>(
 ) -> Result<WrittenLayer, Error> {
     let prepared = prepared.expect("a captured layer has a bundle to come from");
     let mut records = cursor.records();
-    let replayed = prepared.replay(stele, spec, written, &mut || records.tick())?;
+    let replayed = prepared.replay(snapshot, spec, written, &mut || records.tick())?;
 
     records.flush();
 
@@ -1948,11 +1953,11 @@ fn log_key_range(slots: &Range<BlockSlot>) -> KeyRange {
 /// set a reader sees is fixed by [`STATE_KINDS`] and never a function of what
 /// the data happened to contain — tip completeness stays structural.
 ///
-/// The state is the tip: it changes every publish, so every stele lists all of
-/// it, and its descriptor scope, `{"shard": n}`, names no epoch.
+/// The state is the tip: it changes every publish, so every snapshot lists all
+/// of it, and its descriptor scope, `{"shard": n}`, names no epoch.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_state_kind<W: SnapshotWriter, S: StateStore>(
-    stele: &W,
+    snapshot: &W,
     plan: &Plan,
     source: &Source<'_, S>,
     kind: &'static str,
@@ -1963,7 +1968,7 @@ pub(crate) fn write_state_kind<W: SnapshotWriter, S: StateStore>(
 ) -> Result<Vec<LayerDescriptor>, Error> {
     let tip = match source {
         Source::Stores(store) => {
-            walk_state_kind(stele, plan, *store, kind, ns, shards, shard_byte, cursor)?
+            walk_state_kind(snapshot, plan, *store, kind, ns, shards, shard_byte, cursor)?
         }
         Source::Prepared(prepared) => {
             let mut tip = Vec::with_capacity(shards as usize);
@@ -1973,7 +1978,13 @@ pub(crate) fn write_state_kind<W: SnapshotWriter, S: StateStore>(
                 let at = cursor.open(kind, &spec.scope);
                 let written = prepared.state_layer(kind, &spec.scope)?;
 
-                tip.push(replay_layer(stele, Some(prepared), &spec, written, cursor)?);
+                tip.push(replay_layer(
+                    snapshot,
+                    Some(prepared),
+                    &spec,
+                    written,
+                    cursor,
+                )?);
                 cursor.close(at, kind, Outcome::Transferred);
             }
 
@@ -1987,7 +1998,7 @@ pub(crate) fn write_state_kind<W: SnapshotWriter, S: StateStore>(
 /// Walk one state kind's namespace once, routing each record to its shard.
 #[allow(clippy::too_many_arguments)]
 fn walk_state_kind<W: SnapshotWriter, S: StateStore>(
-    stele: &W,
+    snapshot: &W,
     plan: &Plan,
     store: &S,
     kind: &'static str,
@@ -2004,7 +2015,7 @@ fn walk_state_kind<W: SnapshotWriter, S: StateStore>(
         let spec = plan.state_scope(shard).layer_spec(kind)?;
 
         positions.push(cursor.open(kind, &spec.scope));
-        sinks.push(sink(stele, &spec)?);
+        sinks.push(sink(snapshot, &spec)?);
         orders.push(state::OrderCheck::for_shard(shard, shards, shard_byte));
     }
 
@@ -2281,11 +2292,11 @@ mod chain_tests {
     }
 
     /// The only thing standing between a publisher and a link to another
-    /// chain's stele.
+    /// chain's snapshot.
     ///
     /// A publish reads its own magic from genesis and the predecessor's from
     /// the predecessor. If they were allowed to differ, the new inscription
-    /// would attest a chain of steles from a network it has never seen — and
+    /// would attest a chain of snapshots from a network it has never seen — and
     /// nothing downstream re-checks it, because a link carries a sequence and
     /// a digest and no position at all.
     #[test]
@@ -2298,7 +2309,7 @@ mod chain_tests {
         // Built by `crate::position`, not by the `inscription` helper's shape:
         // `same_network` reads it back through `crate::read_position`, which
         // the helper's bare `{"epoch": n}` would not survive.
-        let stele = |network: &Network| {
+        let snapshot = |network: &Network| {
             let mut previous = inscription(3, None);
 
             previous.position = crate::position(
@@ -2312,9 +2323,9 @@ mod chain_tests {
             previous
         };
 
-        same_network(&stele(&preview), &plan).unwrap();
+        same_network(&snapshot(&preview), &plan).unwrap();
 
-        let err = same_network(&stele(&preprod), &plan).unwrap_err();
+        let err = same_network(&snapshot(&preprod), &plan).unwrap_err();
 
         assert!(
             matches!(
@@ -2355,8 +2366,8 @@ mod chain_tests {
         );
 
         // And a predecessor this plan does not follow is refused here too: a
-        // reproduction chained onto the wrong stele would report a digest that
-        // is correct for a stele nobody published.
+        // reproduction chained onto the wrong snapshot would report a digest that
+        // is correct for a snapshot nobody published.
         let mut skipped = previous.clone();
         skipped.sequence = 7;
 
@@ -2373,9 +2384,9 @@ mod chain_tests {
     /// so the only thing that ever exercises this refusal is an operator's
     /// pipeline: a predecessor that went through a pretty-printer, an editor,
     /// or a shell that put a newline on the end parses cleanly and
-    /// describes the very same stele. Chaining onto it anyway would produce
+    /// describes the very same snapshot. Chaining onto it anyway would produce
     /// a link naming the digest of bytes nobody published — a
-    /// reproduction that reports a digest correct for a stele that does not
+    /// reproduction that reports a digest correct for a snapshot that does not
     /// exist, which is the failure [`Following::read`] exists to prevent.
     #[test]
     fn a_predecessor_that_is_not_in_canonical_form_is_refused() {
@@ -2400,7 +2411,7 @@ mod chain_tests {
             "the canonical bytes chain exactly as the document does"
         );
 
-        // Both parse, both describe this same stele, and neither is it: one
+        // Both parse, both describe this same snapshot, and neither is it: one
         // re-serialized in the struct's declaration order rather than JCS's
         // sorted one, one the canonical bytes with a newline appended.
         let reordered = serde_json::to_vec(&previous).unwrap();
@@ -2476,12 +2487,13 @@ mod chain_tests {
         );
     }
 
-    /// A verifier chains with the link the stele carries, exactly as written.
+    /// A verifier chains with the link the snapshot carries, exactly as
+    /// written.
     ///
     /// `Following` is a publisher's rule and refuses what a publisher must
     /// refuse; `Attested` is a verifier's input and refuses nothing, because
     /// the document it comes from was already validated on the way in — and a
-    /// reproduction that "fixed" the link would compute a digest for a stele
+    /// reproduction that "fixed" the link would compute a digest for a snapshot
     /// nobody published.
     #[test]
     fn an_attested_link_is_taken_verbatim() {
@@ -2545,7 +2557,7 @@ mod chain_tests {
         assert!(message.contains("blocks"), "{message}");
         assert!(message.contains("built no such layer"), "{message}");
 
-        // And one it built that the published stele does not describe.
+        // And one it built that the published snapshot does not describe.
         let message = compare(&missing, &published).unwrap_err().to_string();
 
         assert!(message.contains("blocks"), "{message}");
@@ -2554,7 +2566,7 @@ mod chain_tests {
 
     /// When every layer agrees the digest still has the last word: `previous`
     /// is inside the canonical document, and two documents over identical
-    /// layers chained differently are different steles, deliberately. So is
+    /// layers chained differently are different snapshots, deliberately. So is
     /// one layer listed in the other array.
     #[test]
     fn identical_layers_chained_or_placed_differently_still_diverge() {

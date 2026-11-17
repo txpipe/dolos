@@ -305,7 +305,7 @@ fn a_stop_epoch_cut_publishes_and_a_later_cursor_is_refused() {
     session.finish().unwrap();
 
     let silent = dolos_snapshot::progress::Observer::silent();
-    let steles = tempfile::tempdir().unwrap();
+    let snapshots = tempfile::tempdir().unwrap();
 
     let workspace = ReplayWorkspace::open(&node.config, genesis.clone()).unwrap();
     let snapshot = workspace.snapshot();
@@ -315,7 +315,7 @@ fn a_stop_epoch_cut_publishes_and_a_later_cursor_is_refused() {
     assert_eq!(evidence.first, boundary);
     assert_eq!(evidence.parent, before);
     snapshot
-        .publish_directory(&steles.path().join("cut"), &plan, &silent)
+        .publish_directory(&snapshots.path().join("cut"), &plan, &silent)
         .unwrap();
     drop(snapshot);
     workspace.finish().unwrap();
@@ -345,7 +345,7 @@ fn a_stop_epoch_cut_publishes_and_a_later_cursor_is_refused() {
         "{refused:?}"
     );
 
-    let late = steles.path().join("late");
+    let late = snapshots.path().join("late");
     let err = snapshot
         .publish_directory(&late, &plan, &silent)
         .unwrap_err();

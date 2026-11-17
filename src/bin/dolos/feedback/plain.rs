@@ -1,4 +1,4 @@
-//! A stele restore reported as plain lines, for a stderr that is not a
+//! A snapshot restore reported as plain lines, for a stderr that is not a
 //! terminal.
 //!
 //! Bars draw nothing without a terminal, so a restore run from a container's
@@ -19,7 +19,7 @@ use indicatif::BinaryBytes;
 
 use dolos_snapshot::progress::{Event, Observer, Outcome, Progress};
 
-use super::SteleProgress;
+use super::SnapshotProgress;
 
 /// How often a periodic line is written once the first layer has started.
 pub const PERIOD: Duration = Duration::from_secs(30);
@@ -80,7 +80,7 @@ impl Report {
             } => {
                 self.total = total;
                 self.open
-                    .push((index, SteleProgress::describe(kind, scope)));
+                    .push((index, SnapshotProgress::describe(kind, scope)));
 
                 if self.started.is_none() {
                     self.started = Some(at);

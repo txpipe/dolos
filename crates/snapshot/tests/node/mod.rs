@@ -4,9 +4,9 @@
 //! ledger: a driver pair whose tests disagreed about what a node contains would
 //! prove nothing about the pair.
 //!
-//! Distinct from `tests/common`, which is a hand-pinned stele of literals for
-//! the goldens. This module is the opposite kind of fixture — everything in it
-//! comes out of `dolos-testing`'s seeder and a real ledger computation.
+//! Distinct from `tests/common`, which is a hand-pinned snapshot of literals
+//! for the goldens. This module is the opposite kind of fixture — everything in
+//! it comes out of `dolos-testing`'s seeder and a real ledger computation.
 
 // Each integration test binary compiles this module in full, so the parts one
 // binary does not reach look dead to it. They are not.
@@ -45,7 +45,7 @@ use stelae::{dir::SnapshotDir, inscription::Inscription, progress::Observer};
 /// epoch holds all of those.
 ///
 /// The stores then stand on the epoch-1 boundary — see [`stand_at_boundary`] —
-/// because a stele is only ever cut there.
+/// because a snapshot is only ever cut there.
 ///
 /// Deterministic: two calls build byte-identical ledgers, which is what lets
 /// the restore suite cross-check against an independently built node.
@@ -88,8 +88,8 @@ pub fn harness<B: ToyStores>() -> ToyDomain<B> {
 /// the epoch before, on its last slot, and the epoch's first block, on its
 /// first — and moves the state cursor onto the second. That is the evidence the
 /// boundary check reads. The ledger is not run over them: the ledger state the
-/// fixture computes stays the one a stele carries, and the blocks are what the
-/// archive shows about where the state stands.
+/// fixture computes stays the one a snapshot carries, and the blocks are what
+/// the archive shows about where the state stands.
 pub fn stand_at_boundary<B: ToyStores>(domain: &ToyDomain<B>, epoch: u64) {
     let summary = dolos_cardano::eras::load_chain_summary_from_state(domain.state()).unwrap();
     let start = summary.epoch_start(epoch);
@@ -147,7 +147,7 @@ pub use registry_node::Node;
 /// publishes from.
 ///
 /// Shared by `tests/publish.rs` and `tests/snapshot_verify.rs`, because a
-/// stele the one suite publishes is what the other verifies, and a second
+/// snapshot the one suite publishes is what the other verifies, and a second
 /// copy of the fixture would be a second answer to "where do the two plans
 /// stand".
 mod registry_node {
@@ -166,11 +166,11 @@ mod registry_node {
     /// on the first block of epoch 1, and sequence 2 on the first block of
     /// epoch 2 (decision 0025: `sequence` is the epoch the cursor stands in).
     ///
-    /// A stele is only cut from stores standing on its boundary, so each plan
-    /// has its own: `earlier` stands at epoch 1, `domain` has gone on to
-    /// epoch 2. Epoch 0's window is complete in both, so the second publish
-    /// inherits it; epoch 1's is the first's boundary sliver and the second's
-    /// whole epoch, so it is rebuilt.
+    /// A snapshot is only cut from stores standing on its boundary, so each
+    /// plan has its own: `earlier` stands at epoch 1, `domain` has gone on
+    /// to epoch 2. Epoch 0's window is complete in both, so the second
+    /// publish inherits it; epoch 1's is the first's boundary sliver and
+    /// the second's whole epoch, so it is rebuilt.
     pub struct Node {
         pub earlier: ToyDomain<MemoryStores>,
         pub domain: ToyDomain<MemoryStores>,
@@ -245,14 +245,14 @@ mod registry_node {
         /// transport the resume suite kills at a layer it chose.
         pub fn publish_through<W: stelae::SnapshotWriter + Sync>(
             &self,
-            stele: &W,
+            snapshot: &W,
             publishing: Publishing<'_>,
             plan: &Plan,
         ) -> Result<Published, Error> {
             let stores = self.stores(plan);
 
             registry::publish_into(
-                stele,
+                snapshot,
                 publishing,
                 plan,
                 stores.archive(),
@@ -341,16 +341,17 @@ pub fn export_plan<B: ToyStores>(
 }
 
 /// [`export_plan`] into a bare image layout at `layout`, starting a lineage
-/// and writing no blocks snapshot: the stele alone, as a host writes it.
+/// and writing no blocks snapshot: the Dolos snapshot alone, as a host writes
+/// it.
 pub fn export_layout<B: ToyStores>(
     layout: &std::path::Path,
     domain: &ToyDomain<B>,
     plan: &Plan,
 ) -> Inscription {
-    let stele = SnapshotDir::create(layout).unwrap();
+    let snapshot = SnapshotDir::create(layout).unwrap();
 
     export::export(
-        &stele,
+        &snapshot,
         plan,
         domain.archive(),
         domain.state(),
@@ -371,12 +372,12 @@ pub fn plan_for<B: ToyStores>(domain: &ToyDomain<B>) -> Plan {
 }
 
 /// Export `domain` into the network root at `root`: its blocks snapshot,
-/// where it closed an epoch, and the stele naming it.
+/// where it closed an epoch, and the snapshot naming it.
 pub fn export_to<B: ToyStores>(root: &std::path::Path, domain: &ToyDomain<B>) -> Inscription {
     export_plan(root, domain, &plan_for(domain))
 }
 
-/// The stele layout of the network root at `root`.
+/// The snapshot layout of the network root at `root`.
 pub fn dolos(root: &std::path::Path) -> std::path::PathBuf {
     root.join(export::DOLOS_REPOSITORY)
 }
@@ -389,7 +390,7 @@ pub fn blocks(root: &std::path::Path) -> Option<std::path::PathBuf> {
     blocks.exists().then_some(blocks)
 }
 
-/// The latest stele of the network root at `root`, resolved through its
+/// The latest snapshot of the network root at `root`, resolved through its
 /// chain.
 pub fn resolved(root: &std::path::Path) -> stelae::dir::Snapshot {
     SnapshotDir::open(dolos(root))

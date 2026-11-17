@@ -57,7 +57,7 @@ pub trait SnapshotSource {
     fn boundary(&self, plan: &Plan) -> Result<Boundary, Error>;
 
     /// Export into the network root at `destination`: the closed epochs'
-    /// blocks into its `blocks` layout, then the stele naming them into its
+    /// blocks into its `blocks` layout, then the snapshot naming them into its
     /// `dolos` layout, each chained onto the latest snapshot it holds, through
     /// the same profile encoder registry publication uses.
     fn publish_directory(

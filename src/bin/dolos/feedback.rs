@@ -71,7 +71,7 @@ impl Default for Feedback {
 /// How `bootstrap stelae` reports a restore: bars on a terminal, plain
 /// timestamped lines anywhere else, such as a container's init log.
 pub enum RestoreProgress {
-    Bars(Arc<SteleProgress>),
+    Bars(Arc<SnapshotProgress>),
     Plain(Arc<PlainProgress>),
 }
 
@@ -79,7 +79,7 @@ impl RestoreProgress {
     /// The renderer for wherever stderr goes.
     pub fn for_stderr(feedback: &Feedback) -> Self {
         match std::io::stderr().is_terminal() {
-            true => Self::Bars(SteleProgress::restoring(feedback)),
+            true => Self::Bars(SnapshotProgress::restoring(feedback)),
             false => Self::Plain(PlainProgress::start()),
         }
     }
@@ -99,20 +99,20 @@ impl RestoreProgress {
     }
 }
 
-/// A stele restore, drawn while it happens.
+/// A snapshot restore, drawn while it happens.
 ///
 /// Three bars rather than one because the three move on entirely different
 /// clocks: a layer boundary can be a minute apart on mainnet, a blob's bytes
 /// tick continuously, and the record counter is the only thing that moves at
 /// all during a layer's record scan.
-pub struct SteleProgress {
+pub struct SnapshotProgress {
     verb: &'static str,
     layers: ProgressBar,
     blob: ProgressBar,
     records: ProgressBar,
 }
 
-impl SteleProgress {
+impl SnapshotProgress {
     /// The renderer `dolos bootstrap stelae` reports through.
     pub fn restoring(feedback: &Feedback) -> Arc<Self> {
         Self::new(feedback, "restoring")
@@ -215,7 +215,7 @@ impl SteleProgress {
     }
 }
 
-impl Progress for SteleProgress {
+impl Progress for SnapshotProgress {
     fn on(&self, event: Event<'_>) {
         match event {
             Event::LayerStarted {
@@ -258,7 +258,7 @@ impl Progress for SteleProgress {
             // each other; what an operator is watching is the link. The total
             // grows as the transfer takes blobs on, which is what makes the
             // rate and the estimate honest without the transport having to know
-            // the whole stele's weight up front.
+            // the whole snapshot's weight up front.
             Event::Blob { moved, bytes } => {
                 self.blob.inc_length(bytes);
 
@@ -437,8 +437,8 @@ impl mithril_client::feedback::FeedbackReceiver for MithrilFeedback {
 mod tests {
     use super::*;
 
-    fn hidden(verb: &'static str) -> Arc<SteleProgress> {
-        SteleProgress::new(&Feedback::hidden(), verb)
+    fn hidden(verb: &'static str) -> Arc<SnapshotProgress> {
+        SnapshotProgress::new(&Feedback::hidden(), verb)
     }
 
     #[test]
@@ -448,15 +448,15 @@ mod tests {
         let neither = serde_json::json!({"lastImmutable": 9});
 
         assert_eq!(
-            SteleProgress::describe("blocks", &epoch),
+            SnapshotProgress::describe("blocks", &epoch),
             "blocks epoch 512"
         );
         assert_eq!(
-            SteleProgress::describe("state", &shard),
+            SnapshotProgress::describe("state", &shard),
             "state epoch 512 shard 3"
         );
         assert_eq!(
-            SteleProgress::describe("digests", &neither),
+            SnapshotProgress::describe("digests", &neither),
             "digests {\"lastImmutable\":9}"
         );
     }

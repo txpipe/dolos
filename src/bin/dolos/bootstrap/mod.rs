@@ -97,7 +97,7 @@ enum Method {
 impl std::fmt::Display for Method {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Method::Stelae => "Stelae snapshot (a few mins, from a stele you can verify)",
+            Method::Stelae => "Stelae snapshot (a few mins, and you can verify it)",
             #[cfg(feature = "mithril")]
             Method::Mithril => "Mithril snapshot (a few hours, trust Mithril SPOs)",
             Method::Immutabledb => {
@@ -131,7 +131,7 @@ pub struct Args {
 
     /// Exit 0 without bootstrapping when storage already holds a node, as an
     /// interrupted replay that has committed leaves one for `--continue` to
-    /// resume; data without one, as an interrupted stele restore or a
+    /// resume; data without one, as an interrupted snapshot restore or a
     /// bootstrap interrupted before it commits a cursor leaves, and a store
     /// this release refuses are errors instead
     #[arg(long, global = true)]
