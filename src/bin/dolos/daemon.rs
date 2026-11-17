@@ -13,6 +13,8 @@ pub async fn run(config: RootConfig, _args: &Args) -> miette::Result<()> {
 
     let domain = crate::common::setup_domain(&config)?;
 
+    let _mempool_metrics = crate::common::mempool_metrics(&domain);
+
     let exit = crate::common::hook_exit_token();
 
     let sync = dolos::sync::pipeline(&config, SyncLimit::Follow, domain.clone())

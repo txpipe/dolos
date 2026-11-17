@@ -10,6 +10,7 @@ use std::sync::{Arc, Weak};
 
 use opentelemetry::{global, metrics::ObservableGauge};
 
+pub mod mempool;
 pub mod requests;
 
 /// The meter of the instruments this crate records.
@@ -40,6 +41,10 @@ pub const TIER: &str = "tier";
 
 /// The result of an operation.
 pub const OUTCOME: &str = "outcome";
+
+/// The state of a mempool transaction: a lifecycle stage, or `pending` and
+/// `inflight` for the mempool's size.
+pub const STATE: &str = "state";
 
 /// The slot and block number of the chain tip, when there is one.
 type ReadTip = dyn Fn() -> Option<(u64, u64)> + Send + Sync;

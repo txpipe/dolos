@@ -92,6 +92,26 @@ A healthy trace shows a root span with child spans nested underneath, representi
 
 Dolos logs an error at startup if the OTLP exporter cannot reach the configured endpoint, which is the quickest way to confirm connectivity.
 
+## Mempool metrics
+
+`dolos daemon` and `dolos serve` also record metrics on what the mempool holds and what becomes of each submitted transaction:
+
+| metric                                | kind      | attributes                         | meter        |
+| ------------------------------------- | --------- | ---------------------------------- | ------------ |
+| `dolos.mempool.txs`                   | gauge     | `state`: `pending` or `inflight`   | `dolos-core` |
+| `dolos.mempool.transitions`           | counter   | `state`: the stage reached         | `dolos-core` |
+| `dolos.mempool.confirmation.duration` | histogram | none, in seconds                   | `dolos-core` |
+| `dolos.submit.duration`               | histogram | `outcome`, in seconds              | `dolos-core` |
+| `dolos.submit.upstream.stale`         | counter   | none                               | `dolos`      |
+
+- `inflight` covers the propagated, acknowledged and confirmed stages.
+- A transition's `state` is `pending`, `propagated`, `acknowledged`, `confirmed`, `finalized`, `dropped`, `rolled_back` or `unknown`. Each new confirmation of a transaction already confirmed is not counted again. Events the node missed under load are counted as `unknown`.
+- The confirmation time runs from when the node first saw a transaction pending to its first confirmation, with buckets from 5 seconds to an hour. It is kept in memory only, so a transaction received before a restart is not timed, and one confirmed again after a rollback is not timed twice.
+- A submission's `outcome` is `accepted`, `invalid` (phase-1 validation), `script_failed` (phase-2 validation), `duplicate` or `error`. Every submit API records it: gRPC, TRP and MiniBF.
+- A stale transaction is one the node stops offering upstream after three offers no peer acknowledged. It counts once.
+
+A node with a [`[telemetry]`](../configuration/schema#telemetry) section exports these metrics over OTLP.
+
 ## Relation to Logging
 
 Tracing is independent of the [`[logging]`](../operations/logging) configuration. Both can be active simultaneously. Without a `[telemetry]` section (the default), there is zero runtime overhead — no spans are exported and no collector connection is attempted.
