@@ -26,6 +26,7 @@ pub mod cip151;
 pub mod era_fixtures;
 pub mod faults;
 pub mod measured;
+pub mod metrics;
 pub mod peer;
 pub mod performance;
 pub mod synthetic;

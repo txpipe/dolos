@@ -9,6 +9,7 @@ All notable changes to this project will be documented in this file.
 - *(minibf)* Add `/governance/dreps` endpoint
 - *(telemetry)* A configuration with `[telemetry]` now exports metrics over OTLP as well as traces, unless `metrics = false`
 - *(minibf)* [**breaking**] Remove the `/metrics` route: the chain tip is exported as the `dolos.sync.tip.slot` and `dolos.sync.tip.block_number` metrics
+- *(core)* Export how full the query limiter and heavy-scan admission are, how long callers wait for them, and the blocking query closures in flight, including those that outlived their request
 
 ## [2.0.0-alpha.0] - 2026-09-11
 
