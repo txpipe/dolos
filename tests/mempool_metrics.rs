@@ -389,6 +389,77 @@ async fn assert_a_lagged_subscriber_times_confirmed_txs<S: MempoolStore>(store: 
     );
 }
 
+/// The number of confirmation samples recorded so far.
+fn samples(meters: &Meters) -> u64 {
+    confirmations(meters)
+        .iter()
+        .map(|point| point.rsplit(' ').next().unwrap().parse::<u64>().unwrap())
+        .sum()
+}
+
+/// A drop threshold no test reaches, so that a confirm leaves in-flight
+/// transactions in place.
+const KEEP: u32 = 100;
+
+/// Transactions still pending, propagated or acknowledged when a lag is
+/// noticed are kept through reconciliation, and each is timed once when it
+/// later confirms.
+async fn assert_a_lagged_subscriber_keeps_inflight_txs<S: MempoolStore>(store: S) {
+    let meters = Meters::new();
+    let mut subscriber = lagging(&store, &meters);
+
+    let pending = hash(LAGGING);
+    store.receive(make_test_mempool_tx(pending)).unwrap();
+    let propagated = hash(LAGGING + 1);
+    store.receive(make_test_mempool_tx(propagated)).unwrap();
+    store.mark_inflight(&[propagated]).unwrap();
+    let acknowledged = acknowledged(&store, LAGGING + 2);
+    subscriber.drain();
+
+    let inflight = [pending, propagated, acknowledged];
+    assert_eq!(
+        subscriber.lifecycle.remembered(),
+        LAGGING as usize + inflight.len()
+    );
+
+    // The other transactions finalize at once, enough events to lag.
+    store.confirm(&point(1), &hashes(), &[], 1, KEEP).unwrap();
+    let stages: Vec<_> = inflight
+        .iter()
+        .map(|tx| store.check_status(tx).stage)
+        .collect();
+    assert_eq!(
+        stages,
+        [
+            MempoolTxStage::Pending,
+            MempoolTxStage::Propagated,
+            MempoolTxStage::Acknowledged
+        ]
+    );
+
+    let before = samples(&meters);
+    let items = backlog(&mut subscriber);
+    subscriber.lifecycle.follow(&store, items).await;
+
+    assert_eq!(subscriber.lifecycle.remembered(), inflight.len());
+
+    store
+        .confirm(&point(2), &inflight, &[], FINALIZE, KEEP)
+        .unwrap();
+    subscriber.drain();
+
+    assert_eq!(subscriber.lifecycle.remembered(), inflight.len());
+    assert_eq!(samples(&meters) - before, inflight.len() as u64);
+
+    store
+        .confirm(&point(3), &inflight, &[], FINALIZE, KEEP)
+        .unwrap();
+    subscriber.drain();
+
+    assert_eq!(subscriber.lifecycle.remembered(), 0);
+    assert_eq!(samples(&meters) - before, inflight.len() as u64);
+}
+
 /// With a finalize threshold of one there is no `confirmed` event: the
 /// transaction is timed at `finalized`.
 fn assert_a_tx_finalized_at_once_is_timed<S: MempoolStore>(store: S) {
@@ -458,6 +529,14 @@ async fn ephemeral_lagged_subscriber_times_confirmed_txs() {
     .await;
 }
 
+#[tokio::test]
+async fn ephemeral_lagged_subscriber_keeps_inflight_txs() {
+    tokio::task::unconstrained(assert_a_lagged_subscriber_keeps_inflight_txs(
+        EphemeralMempool::new(),
+    ))
+    .await;
+}
+
 #[test]
 fn ephemeral_tx_finalized_at_once_is_timed() {
     assert_a_tx_finalized_at_once_is_timed(EphemeralMempool::new());
@@ -504,6 +583,11 @@ async fn redb_lagged_subscriber_forgets_settled_txs() {
 #[tokio::test]
 async fn redb_lagged_subscriber_times_confirmed_txs() {
     tokio::task::unconstrained(assert_a_lagged_subscriber_times_confirmed_txs(redb())).await;
+}
+
+#[tokio::test]
+async fn redb_lagged_subscriber_keeps_inflight_txs() {
+    tokio::task::unconstrained(assert_a_lagged_subscriber_keeps_inflight_txs(redb())).await;
 }
 
 #[test]
