@@ -55,7 +55,7 @@ The binary lives in `src/bin/dolos/` and dispatches a set of top-level subcomman
 | `config` | Check the configuration; write a known network's genesis files. |
 | `daemon` | Full node — runs the sync pipeline and all enabled API servers together. |
 | `serve` | Serve only — expose the APIs over already-synced data. |
-| `bootstrap` | Fill the stores from a stele, Mithril or a local ImmutableDB. |
+| `bootstrap` | Fill the stores from a Stelae snapshot, Mithril or a local ImmutableDB. |
 | `sync` | Catch up with the upstream peer (or follow it); inspect, recover, dump and roll back the WAL. |
 | `data` | Observe and maintain the stores: stats, inspect, dumps, checks, housekeeping, reset, rebuild. |
 | `cache` | Warm, clear, report on and verify the cache. |

@@ -5,11 +5,11 @@ A publication at sequence `P` used to be built whole from stores standing at
 before the replay advances. This contract separates the work:
 
 1. **Prepare** at each boundary: capture what a later store cannot reproduce
-   (`dolos_snapshot::prepare`). No index traversal, no predecessor, no history.
+   (`dolos_snapshot::prepare`). No index traversal and no predecessor.
 2. **Stage** once for a batch: `dolos_snapshot::staging` partitions the closed
    windows of every prepared publication from one frozen archive view.
 3. **Finalize** in sequence: assemble each publication from its bundle, the
-   staged runs and the closed windows of the final store, when the stele it
+   staged runs and the closed windows of the final store, when the snapshot it
    really follows is committed.
 
 `export::export`, and every path through it (directory and registry publication,
@@ -77,7 +77,7 @@ when the boundary is prepared:
 | Layer | Window | Source |
 |---|---|---|
 | `state-*` tip shards | | The bundle. |
-| `blocks` | `P` | The bundle. Closed windows' blocks are not in the stele; they are the blocks profile's, named through `position.blocks`. |
+| `blocks` | `P` | The bundle. Closed windows' blocks are not in the Dolos snapshot; they are the blocks profile's, named through `position.blocks`. |
 | `indexes` | `P`, the live-boundary tail | The bundle. |
 | `indexes` | closed | The staged run. |
 | `log-*` | `capture_from..=P` | The bundle. A layer it does not hold did not exist at `P`. |
@@ -85,9 +85,12 @@ when the boundary is prepared:
 | `entity-*` | sealed at `P` | The staged run, if it holds an entry. |
 | `entity-*` | not sealed at `P` | None, whatever a later view shows. |
 
-The predecessor is asked first for every inheritable layer, exactly as an export
-asks it, so a captured payload may go unused. `is_settled` still holds a publish
-to the predecessor's own sequence for `log-account-epochs`.
+A bundle captures every layer its snapshot could list, in `diff` or `tip`, as
+though its lineage started at `P`, so it serves the boundary whichever
+predecessor finalization finds. Finalization lists from it only what the
+snapshot at `P` lists under decision 0080: its `tip`, and in its `diff` the
+layers final at `P` alone, so a captured payload may go unused. The layers an
+earlier snapshot of the lineage listed stay in that snapshot's inscription.
 
 **Why the log windows.** `capture_from` is the lower of `P - 1` and the oldest
 epoch the boundary could not seal. Below it nothing writes again. `P`'s window
@@ -115,7 +118,7 @@ A `prepare::Store` under `root`, private to the publisher and written by one
 writer at a time:
 
 - `blobs/sha256/{digest}`: payloads, named by the digest of their compressed
-  bytes, in a stele directory's layout. Two boundaries that captured the same
+  bytes, in an OCI image layout's blob layout. Two boundaries that captured the same
   layer hold one file. They are compressed at level 3, and finalization
   recompresses at the profile's pinned level, so identity is never in question.
 - `bundles/{sequence}.json`: the manifest, which is also the completion marker.
@@ -185,7 +188,7 @@ and media type version), and that every payload is present at its recorded size.
 A later build can read an old bundle's bytes and label them as its own, and no
 layer header would stop it, so that is `ForeignBuild`. Contents are checked as
 they are read: a replay holds each payload to its `diffId`, size and record count
-before the sink finishes, so a damaged payload produces no layer and no stele.
+before the sink finishes, so a damaged payload produces no layer and no snapshot.
 
 **Staging a batch** first holds each bundle to these stores: its store contract
 against this build's current one, its network and `mutable_slots` against the
@@ -196,17 +199,17 @@ which is the safe direction.
 **Finalization** first holds the sources to the bundle: the staged runs' network,
 store contract and frontier, the boundary block in the archive and the archive's
 first block.
-It reads nothing boundary-sensitive from the final store. A closed window neither
-staged nor forecast by the predecessor fails with `NotStaged` rather than dropping
-a layer.
+It reads nothing boundary-sensitive from the final store. A closed window the
+snapshot's `diff` lists that was not staged fails with `NotStaged` rather than
+dropping a layer.
 
-**A window the predecessor declines.** Staging leaves a window out when
-`Predecessor::carried_forward` says the predecessor carries it, because that is
-the only question it can ask without arranging anything: `adopt` puts the blob in
-the transport. `carried_forward` can say yes where `adopt` later says no, for a
-recorded layer whose blob the repository has since dropped. Finalization finds that
-out, stages those windows for itself from the same frozen view under the staging
-root, and removes them afterwards. It costs a traversal per family that needs one.
+**A resumed layer.** A publish takes nothing from its predecessor but the
+`previous` link. The one layer it may take instead of building is one an
+interrupted attempt of the same publish already uploaded: finalization asks
+`Predecessor::resume` once, before it writes, for each staged layer its `diff`
+lists, and an answer means the blob is already in the transport. Staging stages
+every window the batch's diffs list whatever a resume would answer, so a recorded
+layer whose blob the repository has since dropped is built from its run.
 
 **Release.** `Store::release` removes the marker first, then every payload no
 remaining manifest refers to, so a crash leaves unreferenced payloads for
@@ -311,8 +314,9 @@ epochs they cover.
   (`dolos_core::compat`). `request.network_magic` names the chain. `stage_batch`
   fills it from this build's current contract, never from a bundle.
 - `request.epochs` lists, per family (`Family::Indexes` or
-  `Family::Entity(kind)`), the epochs to stage. Leave out inherited epochs, and
-  every epoch no prepared publication will build.
+  `Family::Entity(kind)`), the epochs to stage. Leave out every window an
+  earlier snapshot of the lineage already listed, and every epoch no prepared
+  publication will build.
 - `summary` gives every window's slots. Byron and Shelley epochs differ in
   length, so windows always come from the chain summary and never from fixed
   geometry.
@@ -329,9 +333,9 @@ view does not reproduce an earlier boundary on its own.
 
 **Closed windows only.** A window `e` can be staged when
 `epoch_start(e + 1) <= frontier.slot`. A publication at sequence `S` can use a
-staged window only when `e < S`. Its own window `S` is the boundary sliver from
-`epoch_start(S)` to its cursor. That sliver is the **live-boundary tail**, and
-staging never produces it:
+staged window only when `e < S`. Its own window `S` is the boundary window from
+`epoch_start(S)` to its cursor, which the snapshot lists in its `tip`. That
+window is the **live-boundary tail**, and staging never produces it:
 
 - The cursor's epoch keeps growing in every later view.
 - Filtering a later view by slot takes in rows that are past the cursor at the
@@ -373,8 +377,8 @@ even an empty one.
 
 ### Outputs
 
-`Staged::write_layer(stele, family, epoch, sequence)` finishes one layer
-through the existing `SteleWriter` sinks, codecs and order checks. It returns
+`Staged::write_layer(snapshot, family, epoch, sequence)` finishes one layer
+through the existing `SnapshotWriter` sinks, codecs and order checks. It returns
 `None` where that publication has no such layer. `Staged::write_layers` does
 the same for a list of layers, with at most `budget.workers` sinks open at
 once, and returns the results in input order. The descriptors are byte-equal
@@ -445,11 +449,11 @@ Consumption checks every frame's length and canonical form while it streams.
 At the end it checks the record count, the byte count and the checksum, before
 the sink is finished. A damaged run therefore produces no descriptor.
 
-**Restarting a batch.** `stage_batch` wants fewer windows as layers are recorded
-and steles commit, and has fewer bundles as they are released. Where a family's
+**Restarting a batch.** `stage_batch` wants fewer windows as snapshots commit and
+their bundles are released. Where a family's
 marker is of the same source, holds every window it wants and was staged for every
 one of its bundles, the runs are reused whole; the extra windows go unused, because
-a publication asks its predecessor first. Where the marker leaves out a wanted window
+a publication writes only the layers its own `diff` lists. Where the marker leaves out a wanted window
 the refusal is `Uncovered`, so a host can tell a batch that wants more from runs of
 another source, frontier or capture, which stay `SourceMismatch`. A boundary captured
 again, under a rebuild for example, is another capture even where it holds the same
