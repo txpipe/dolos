@@ -13,9 +13,9 @@ use std::sync::Arc;
 use tracing::{debug, info, instrument, warn};
 
 use crate::{
-    wal::ChainOrdered, ArchiveStore as _, ArchiveWriter as _, BlockSlot, ChainLogic, ChainPoint,
-    Domain, DomainError, EntityMap, MempoolStore, RawBlock, StateStore, StateWriter as _, TipEvent,
-    WalStore, WorkUnit,
+    telemetry::storage::time_commit, wal::ChainOrdered, ArchiveStore as _, ArchiveWriter as _,
+    BlockSlot, ChainLogic, ChainPoint, Domain, DomainError, EntityMap, MempoolStore, RawBlock,
+    StateStore, StateWriter as _, TipEvent, WalStore, WorkUnit,
 };
 
 const MEMPOOL_DROP_THRESHOLD: u32 = 2;
@@ -258,12 +258,12 @@ pub(crate) fn run_lifecycle<D: Domain>(
         work.compute(shard)?;
         if include_wal {
             debug!(phase = "commit_wal", "running phase");
-            work.commit_wal(domain, shard)?;
+            time_commit("wal", || work.commit_wal(domain, shard))?;
         }
         debug!(phase = "commit_state", "running phase");
-        work.commit_state(domain, shard)?;
+        time_commit("state", || work.commit_state(domain, shard))?;
         debug!(phase = "commit_archive", "running phase");
-        work.commit_archive(domain, shard)?;
+        time_commit("archive", || work.commit_archive(domain, shard))?;
     }
 
     debug!(phase = "finalize", "running phase");

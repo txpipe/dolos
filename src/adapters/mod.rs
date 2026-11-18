@@ -1,3 +1,4 @@
+pub mod metrics;
 pub mod storage;
 
 use std::collections::HashMap;
@@ -52,6 +53,9 @@ pub struct DomainAdapter {
     pub query_limiter: QueryLimiter,
     /// The chain tip gauges over `archive`, reporting while the domain lives.
     pub tip_gauges: Arc<dolos_core::telemetry::TipGauges>,
+    /// The storage gauges over `wal` and `archive`, reporting while the
+    /// domain lives.
+    pub storage_gauges: Arc<metrics::StorageGauges>,
 }
 
 /// Registers the `dolos.sync.tip.*` gauges over the archive's tip block.
@@ -64,6 +68,16 @@ pub fn tip_gauges(archive: &ArchiveStoreBackend) -> Arc<dolos_core::telemetry::T
 
         Some((block.slot(), block.number()))
     }))
+}
+
+/// Registers the `dolos` meter's storage gauges over `wal`, whose file is at
+/// `wal_path` when it has one, and `archive`.
+pub fn storage_gauges(
+    wal: &WalAdapter,
+    wal_path: Option<std::path::PathBuf>,
+    archive: &ArchiveStoreBackend,
+) -> Arc<metrics::StorageGauges> {
+    Arc::new(metrics::StorageGauges::register(wal, wal_path, archive))
 }
 
 impl DomainAdapter {

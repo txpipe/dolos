@@ -45,7 +45,7 @@ pub mod entity_keys;
 pub mod tags;
 pub mod utxos;
 
-use crate::metrics::L0Runs;
+use crate::metrics::StoreMetrics;
 use crate::preset::{Preset, Tuning};
 use crate::view::{View, Viewed};
 use crate::Error;
@@ -87,8 +87,8 @@ pub struct StateStore {
     /// Live-UTxO tags keyspace
     tags: Keyspace,
     preset: Preset,
-    /// The L0 gauge of a writable store.
-    l0_runs: Option<Arc<L0Runs>>,
+    /// The metrics of a writable store.
+    metrics: Option<Arc<StoreMetrics>>,
     /// The mirror a read-only store opened over, dropped after the database
     /// and every iterator over it.
     view: Option<Arc<View>>,
@@ -131,12 +131,13 @@ impl StateStore {
             tags: db.keyspace(keyspace_names::TAGS, || tuning.tags.options())?,
             db,
             preset,
-            l0_runs: None,
+            metrics: None,
             view,
         };
 
         if store.view.is_none() {
-            store.l0_runs = Some(Arc::new(L0Runs::report("state", store.keyspaces())));
+            let metrics = StoreMetrics::report("state", store.db.clone(), store.keyspaces());
+            store.metrics = Some(Arc::new(metrics));
         }
 
         tracing::info!(tuning = %store.tuning(), "state store opened");

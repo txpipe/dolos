@@ -476,6 +476,7 @@ fn build_domain(
         mempool_config: config.mempool.clone(),
         genesis,
         chain: Arc::new(std::sync::RwLock::new(chain)),
+        storage_gauges: dolos::adapters::storage_gauges(&wal, None, &archive),
         wal,
         state,
         tip_gauges: dolos::adapters::tip_gauges(&archive),
