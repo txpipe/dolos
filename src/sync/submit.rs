@@ -1,11 +1,15 @@
 use std::cell::RefCell;
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use dolos_core::config::RetryConfig;
 use gasket::framework::*;
 use itertools::Itertools as _;
+use opentelemetry::{
+    global,
+    metrics::{Counter, Meter},
+};
 use pallas::crypto::hash::Hash;
 use pallas::ledger::traverse::MultiEraTx;
 use pallas::network::facades::PeerClient;
@@ -49,6 +53,17 @@ fn to_n2n_body(mempool_tx: MempoolTx) -> EraTxBody {
 /// but one that keeps ending at the same offer may be, and must not retry
 /// forever.
 const MAX_UNACKNOWLEDGED_OFFERS: u32 = 3;
+
+/// The meter of the instruments this crate records.
+const METER: &str = "dolos";
+
+/// `dolos.submit.upstream.stale`: transactions no longer re-queued.
+fn stale_counter(meter: &Meter) -> Counter<u64> {
+    meter
+        .u64_counter("dolos.submit.upstream.stale")
+        .with_unit("{tx}")
+        .build()
+}
 
 /// Offers after which a transaction is a suspect: at least one earlier session
 /// ended without acknowledging it.
@@ -384,6 +399,11 @@ pub struct Stage {
     /// How many times each transaction was offered with no acknowledgement
     /// yet, across sessions.
     unacknowledged_offers: RefCell<HashMap<TxHash, u32>>,
+
+    /// The offered transactions already counted as stale.
+    counted_stale: RefCell<HashSet<TxHash>>,
+
+    stale: Counter<u64>,
 }
 
 impl Stage {
@@ -400,6 +420,8 @@ impl Stage {
             network_magic,
             mempool,
             unacknowledged_offers: RefCell::default(),
+            counted_stale: RefCell::default(),
+            stale: stale_counter(&global::meter(METER)),
         }
     }
 
@@ -418,6 +440,14 @@ impl Stage {
             .filter(|(_, offers)| **offers >= MAX_UNACKNOWLEDGED_OFFERS)
             .map(|(hash, _)| *hash)
             .collect_vec();
+
+        let mut counted = self.counted_stale.borrow_mut();
+        counted.retain(|hash| offers.contains_key(hash));
+        let newly_stale = exhausted
+            .iter()
+            .filter(|hash| counted.insert(**hash))
+            .count();
+        self.stale.add(newly_stale as u64, &[]);
 
         if !exhausted.is_empty() {
             warn!(
@@ -572,6 +602,64 @@ mod tests {
         stage.mempool.receive(parent).unwrap();
 
         assert_eq!(hashes(&stage.next_offer(1)), [parent_hash]);
+    }
+
+    /// The value of `dolos.submit.upstream.stale` on `provider`.
+    fn stale_count(
+        provider: &opentelemetry_sdk::metrics::SdkMeterProvider,
+        exporter: &opentelemetry_sdk::metrics::InMemoryMetricExporter,
+    ) -> u64 {
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+
+        exporter.reset();
+        provider.force_flush().unwrap();
+
+        let metrics = exporter.get_finished_metrics().unwrap();
+        let metric = metrics[0]
+            .scope_metrics()
+            .next()
+            .unwrap()
+            .metrics()
+            .next()
+            .unwrap();
+        assert_eq!(metric.name(), "dolos.submit.upstream.stale");
+        assert_eq!(metric.unit(), "{tx}");
+
+        let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data() else {
+            panic!("{} is not a u64 counter", metric.name());
+        };
+
+        sum.data_points().map(|point| point.value()).sum()
+    }
+
+    #[test]
+    fn a_tx_offered_too_many_times_counts_once_as_stale() {
+        use opentelemetry::metrics::MeterProvider as _;
+
+        let exporter = opentelemetry_sdk::metrics::InMemoryMetricExporter::default();
+        let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+            .with_periodic_exporter(exporter.clone())
+            .build();
+
+        let mut stage = stage();
+        stage.stale = stale_counter(&provider.meter("test"));
+
+        let (stale, fresh) = (receive_new(&stage, 1), receive_new(&stage, 2));
+        stage.mempool.mark_inflight(&[stale, fresh]).unwrap();
+        stage.count_offers(&[fresh, fresh]);
+
+        for _ in 0..MAX_UNACKNOWLEDGED_OFFERS {
+            stage.count_offers(&[stale]);
+        }
+
+        stage.requeue_unacknowledged().unwrap();
+        stage.requeue_unacknowledged().unwrap();
+
+        assert_eq!(stale_count(&provider, &exporter), 1);
+        assert_eq!(
+            stage.mempool.check_status(&stale).stage,
+            MempoolTxStage::Propagated
+        );
     }
 
     fn worker_with_offers(hashes: &[TxHash]) -> Worker {

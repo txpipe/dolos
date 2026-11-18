@@ -2642,6 +2642,13 @@ impl MempoolStore for MempoolBackend {
         }
     }
 
+    fn count(&self) -> dolos_core::MempoolCount {
+        match self {
+            Self::Ephemeral(s) => s.count(),
+            Self::Redb(s) => s.count(),
+        }
+    }
+
     fn mark_inflight(&self, hashes: &[TxHash]) -> Result<(), MempoolError> {
         match self {
             Self::Ephemeral(s) => s.mark_inflight(hashes),
