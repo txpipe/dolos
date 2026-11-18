@@ -13,7 +13,10 @@ use dolos_testing::{
 use http_body_util::BodyExt;
 use tower::util::ServiceExt;
 
-use crate::{build_router_with_facade, Facade};
+use dolos_core::telemetry::requests::{Family, RequestMetrics};
+use dolos_testing::metrics::MetricsRecorder;
+
+use crate::{build_router_with_metrics, metrics, Facade};
 
 pub use dolos_testing::faults::TestFault;
 
@@ -59,6 +62,21 @@ pub struct TestApp {
     router: Router,
     domain: dolos_testing::faults::FaultyToyDomain,
     vectors: SyntheticVectors,
+    metrics: MetricsRecorder,
+}
+
+/// The router over `facade`, recording its requests on `recorder`.
+fn router(
+    facade: Facade<dolos_testing::faults::FaultyToyDomain>,
+    recorder: &MetricsRecorder,
+) -> Router {
+    let requests = RequestMetrics::with_meter(
+        Family::Http,
+        &recorder.meter(metrics::METER),
+        metrics::SURFACE,
+    );
+
+    build_router_with_metrics(facade, requests)
 }
 
 impl TestApp {
@@ -81,51 +99,6 @@ impl TestApp {
         Self::new_with_cfg_and_fault(cfg, None)
     }
 
-    pub fn new_empty() -> Self {
-        let genesis = Arc::new(dolos_cardano::include::preview::load());
-        let domain = ToyDomain::new_with_genesis_and_config(
-            genesis,
-            dolos_cardano::CardanoLogicConfig::default(),
-            None,
-            None,
-        );
-
-        let domain = dolos_testing::faults::FaultyToyDomain::new(domain, TestFault::None);
-        let router = build_router_with_facade(Facade {
-            inner: domain.clone(),
-            config: test_config(),
-        });
-
-        Self {
-            router,
-            domain,
-            vectors: SyntheticVectors {
-                address: String::new(),
-                stake_address: String::new(),
-                asset_unit: String::new(),
-                policy_id: String::new(),
-                asset_name_hex: String::new(),
-                metadata_label: String::new(),
-                block_hash: String::new(),
-                tx_hash: String::new(),
-                datum_hash: String::new(),
-                datum_cbor_hex: String::new(),
-                script_hash: String::new(),
-                script_cbor_hex: String::new(),
-                plutus_script_hash: String::new(),
-                blocks: vec![],
-                account_addresses: vec![],
-                account_address_blocks: vec![],
-                account_address_bounds: vec![],
-                pool_id: String::new(),
-                drep_id: String::new(),
-                tx_cbor: vec![],
-                account_withdrawals: vec![],
-                redeemers: None,
-            },
-        }
-    }
-
     pub fn new_with_cfg_and_fault(cfg: SyntheticBlockConfig, fault: Option<TestFault>) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
 
@@ -134,12 +107,17 @@ impl TestApp {
             None => dolos_testing::faults::FaultyToyDomain::new(domain, TestFault::None),
         };
 
-        let router = build_router_with_facade(Facade {
-            inner: domain.clone(),
-            config: test_config(),
-        });
+        let metrics = MetricsRecorder::default();
+        let router = router(
+            Facade {
+                inner: domain.clone(),
+                config: test_config(),
+            },
+            &metrics,
+        );
 
         Self {
+            metrics,
             router,
             domain,
             vectors,
@@ -164,12 +142,17 @@ impl TestApp {
             fault.unwrap_or_default(),
         );
 
-        let router = build_router_with_facade(Facade {
-            inner: domain.clone(),
-            config: test_config().with_request_timeout_seconds(request_timeout_seconds),
-        });
+        let metrics = MetricsRecorder::default();
+        let router = router(
+            Facade {
+                inner: domain.clone(),
+                config: test_config().with_request_timeout_seconds(request_timeout_seconds),
+            },
+            &metrics,
+        );
 
         Self {
+            metrics,
             router,
             domain,
             vectors,
@@ -214,6 +197,29 @@ impl TestApp {
     pub async fn get_bytes(&self, path: &str) -> (StatusCode, Vec<u8>) {
         let (status, _, bytes) = self.get_response(path).await;
         (status, bytes)
+    }
+
+    /// The status of `request`, its body read to the end.
+    pub async fn send(&self, request: Request<Body>) -> StatusCode {
+        let res = self
+            .router
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("request failed");
+
+        let status = res.status();
+        res.into_body()
+            .collect()
+            .await
+            .expect("failed to read response body");
+        status
+    }
+
+    /// The exported points of the request instrument `name`; see
+    /// [`MetricsRecorder::points_of`].
+    pub fn metric_points(&self, name: &str) -> Vec<String> {
+        self.metrics.points_of(name)
     }
 
     pub fn vectors(&self) -> &SyntheticVectors {
