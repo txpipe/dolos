@@ -168,7 +168,7 @@ sum by (service_instance_id, surface) (
   rate({__name__=~"http_server_request_duration_seconds_count|rpc_server_call_duration_seconds_count"}[5m]))
 ```
 
-The first is zero and the second low on an idle node; `dolos_query_limiter_in_use` is zero too. A gRPC server stream counts in the first until it sends its first message, so a client that holds a `WatchTx`, `WaitForTx` or `WatchMempool` stream nothing has matched yet keeps it above zero on a node that is otherwise idle.
+The first is zero and the second low on an idle node; `dolos_query_limiter_in_use` is zero too. A gRPC server stream counts in the first until it sends its first message, so a client that holds a `WatchMempool` stream keeps it above zero until the mempool's first event, which on an idle node may not come.
 
 ### Saturated
 
