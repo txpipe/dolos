@@ -47,7 +47,7 @@ The failures in the first class, by endpoint group. A number is the count of fai
 
 | Endpoint group | Gap | Mainnet | Preprod | Preview | Issue |
 | -------------- | --- | ------: | ------: | ------: | ----- |
-| `/blocks/{hash_or_number}` and its `/next` and `/previous` walks | Byron epoch boundary blocks: `height` and `slot` served as `null`, the boundary block skipped in `next_block`, and the `fees` of blocks next to a boundary block | 12 | – | – | – |
+| `/blocks/{hash_or_number}` and its `/next` and `/previous` walks | Byron epoch boundary blocks: `height` and `slot` served as `null`, and the boundary block skipped in `next_block` | 12 | – | – | – |
 | `/blocks/{hash_or_number}` and its walks | `slot_leader` of the early Shelley blocks made by the genesis delegates | 8 | – | – | – |
 | `/blocks/{hash_or_number}` | A slot of 0 served as `null` | 1 | – | – | – |
 | `/blocks/{hash_or_number}/addresses` | Order of Byron addresses in the list | 4 | – | – | – |

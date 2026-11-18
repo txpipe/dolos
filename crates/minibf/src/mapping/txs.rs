@@ -52,7 +52,7 @@ use super::{
     redeemer_script_hash, stake_cred_to_address, try_into_or_500, vkey_to_stake_address, IntoModel,
     PoolOffchainMetadata, UtxoOutputModelBuilder,
 };
-use crate::Facade;
+use crate::{inputs::InputResolver, Facade};
 
 pub struct UtxoInputModelBuilder<'a> {
     input: MultiEraInput<'a>,
@@ -112,6 +112,7 @@ pub struct TxModelBuilder<'a> {
     consumed_deps: HashMap<TxoRef, TxHash>,
     pool_metadata: HashMap<PoolHash, PoolOffchainMetadata>,
     deposit: Option<i64>,
+    fee: Option<u64>,
     /// Whether each pool registration certificate of the tx, by index, takes
     /// a fresh registration; see [`TxModelBuilder::is_pool_registration`].
     pool_registrations: HashMap<usize, bool>,
@@ -135,7 +136,16 @@ impl<'a> TxModelBuilder<'a> {
             consumed_deps: HashMap::new(),
             pool_metadata: HashMap::new(),
             deposit: None,
+            fee: None,
         })
+    }
+
+    pub fn with_resolved_fee(
+        mut self,
+        resolver: &mut InputResolver<'_>,
+    ) -> Result<Self, StatusCode> {
+        self.fee = Some(resolver.fee(&self.tx()?)?);
+        Ok(self)
     }
 
     pub fn with_chain(self, chain: ChainSummary) -> Self {
@@ -652,11 +662,16 @@ impl IntoModel<TxContent> for TxModelBuilder<'_> {
             slot: try_into_or_500!(block.slot()),
             index: try_into_or_500!(order),
             output_amount: list_assets(txouts.iter().map(|(_, x)| x)),
-            fees: if tx.is_valid() {
-                tx.fee_or_compute().to_string()
-            } else {
-                tx.total_collateral().unwrap_or_default().to_string()
-            },
+            fees: self
+                .fee
+                .unwrap_or_else(|| {
+                    if tx.is_valid() {
+                        tx.fee_or_compute()
+                    } else {
+                        tx.total_collateral().unwrap_or_default()
+                    }
+                })
+                .to_string(),
             size: try_into_or_500!(tx.size()),
             invalid_before: tx.validity_start().map(|v| v.to_string()),
             invalid_hereafter: tx.ttl().map(|v| v.to_string()),

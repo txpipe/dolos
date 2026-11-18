@@ -170,6 +170,36 @@ impl<'a> InputResolver<'a> {
         }
     }
 
+    pub fn fee(&mut self, tx: &MultiEraTx<'_>) -> Result<u64, StatusCode> {
+        if !tx.is_valid() {
+            return Ok(tx.total_collateral().unwrap_or_default());
+        }
+
+        if tx.as_byron().is_none() {
+            return Ok(tx.fee_or_compute());
+        }
+
+        let mut inputs = 0u64;
+        for input in tx.inputs() {
+            let Some(output) = self.resolve(&input)? else {
+                return Ok(tx.fee_or_compute());
+            };
+            inputs = inputs
+                .checked_add(output.value().coin())
+                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+        }
+
+        let outputs = tx.outputs().iter().try_fold(0u64, |total, output| {
+            total
+                .checked_add(output.value().coin())
+                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+        })?;
+
+        inputs
+            .checked_sub(outputs)
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+    }
+
     /// Number of dependency txs decoded so far — one per distinct hash
     /// actually resolved, however many inputs point at it.
     pub fn decodes(&self) -> usize {
@@ -399,6 +429,61 @@ mod tests {
 
     fn dep_cbor(vectors: &SyntheticVectors) -> EraCbor {
         EraCbor(Era::Conway.into(), vectors.tx_cbor.clone())
+    }
+
+    #[test]
+    fn later_era_fees_need_no_dependencies() {
+        use dolos_core::TxoRef;
+        use dolos_testing::{synthetic::build_phase2_invalid_tx_cbor, TestAddress};
+        use pallas::{codec::minicbor, ledger::primitives::conway};
+
+        let store = TxMap::new();
+        let mut resolver = InputResolver::new(&store);
+        let vectors = vectors();
+        let tx = MultiEraTx::decode_for_era(Era::Conway, &vectors.tx_cbor).unwrap();
+        assert_eq!(resolver.fee(&tx).unwrap(), tx.fee().unwrap());
+
+        let raw = build_phase2_invalid_tx_cbor(
+            TxoRef([1; 32].into(), 0),
+            TxoRef([2; 32].into(), 0),
+            TestAddress::Alice,
+            1_500_000,
+        );
+        let tx = MultiEraTx::decode_for_era(Era::Conway, &raw).unwrap();
+        assert_ne!(tx.fee_or_compute(), 500_000);
+        assert_eq!(resolver.fee(&tx).unwrap(), 500_000);
+
+        let mut tx: conway::Tx<'_> = minicbor::decode(&raw).unwrap();
+        tx.transaction_body.total_collateral = None;
+        let raw = minicbor::to_vec(tx).unwrap();
+        let tx = MultiEraTx::decode_for_era(Era::Conway, &raw).unwrap();
+        assert_eq!(resolver.fee(&tx).unwrap(), 0);
+        assert_eq!(resolver.decodes(), 0);
+    }
+
+    #[tokio::test]
+    async fn byron_fees_share_dependency_fetches_and_decodes() {
+        use crate::test_support::{byron_block, byron_facade, byron_funding, byron_tx};
+        use dolos_core::TxoRef;
+
+        let (funding, hash) = byron_funding(&[300_000, 400_000]);
+        let domain = byron_facade(vec![funding]);
+        let raw = byron_block(
+            11,
+            vec![
+                byron_tx(&[TxoRef(hash, 0)], &[129_193]),
+                byron_tx(&[TxoRef(hash, 1)], &[200_000]),
+            ],
+        );
+        let block = MultiEraBlock::decode(&raw).unwrap();
+        let txs = block.txs();
+        let mut deps = InputDeps::default();
+        let mut resolver = deps.prepare(&domain, &txs).await.unwrap();
+        assert_ne!(txs[0].fee_or_compute(), 170_807);
+        assert_eq!(resolver.fee(&txs[0]).unwrap(), 170_807);
+        assert_eq!(resolver.fee(&txs[1]).unwrap(), 200_000);
+        assert_eq!(resolver.decodes(), 1);
+        assert_eq!(deps.fetches(), 1);
     }
 
     #[test]

@@ -15,7 +15,7 @@ use pallas::{
 };
 
 use super::{bech32_pool, IntoModel};
-use crate::log_and_500;
+use crate::{inputs::InputResolver, log_and_500};
 
 pub struct BlockModelBuilder<'a> {
     block: MultiEraBlock<'a>,
@@ -24,6 +24,7 @@ pub struct BlockModelBuilder<'a> {
     next: Option<MultiEraBlock<'a>>,
     tip: Option<MultiEraBlock<'a>>,
     touched_addresses: Option<Vec<(String, BTreeSet<String>)>>,
+    fees: Option<u64>,
 }
 
 impl<'a> BlockModelBuilder<'a> {
@@ -37,11 +38,24 @@ impl<'a> BlockModelBuilder<'a> {
             tip: None,
             chain: None,
             touched_addresses: None,
+            fees: None,
         })
     }
 
     pub fn txs(&self) -> Vec<MultiEraTx<'_>> {
         self.block.txs()
+    }
+
+    pub fn with_resolved_fees(
+        mut self,
+        resolver: &mut InputResolver<'_>,
+    ) -> Result<Self, StatusCode> {
+        self.fees = Some(self.block.txs().iter().try_fold(0u64, |total, tx| {
+            total
+                .checked_add(resolver.fee(tx)?)
+                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+        })?);
+        Ok(self)
     }
 
     /// Calls `collect` for every tx in block order.
@@ -188,6 +202,10 @@ impl<'a> BlockModelBuilder<'a> {
     }
 
     fn compute_total_fees(&self) -> String {
+        if let Some(fees) = self.fees {
+            return fees.to_string();
+        }
+
         let txs = self.block.txs();
 
         txs.iter()
