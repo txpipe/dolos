@@ -1,5 +1,9 @@
-use jsonrpsee::server::{RpcModule, Server};
-use std::sync::Arc;
+use jsonrpsee::{
+    server::{RpcModule, Server},
+    types::Params,
+    IntoResponse,
+};
+use std::{future::Future, sync::Arc};
 use tokio::select;
 use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
@@ -23,6 +27,49 @@ pub struct Context<D: Domain> {
     pub metrics: metrics::Metrics,
 }
 
+/// Registers `handler` as `method`, recording each call's metrics.
+fn register<D, T, F, Fut>(
+    module: &mut RpcModule<Context<D>>,
+    method: &'static str,
+    handler: F,
+) -> Result<(), ServeError>
+where
+    D: Domain,
+    F: Fn(Params<'static>, Arc<Context<D>>) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = Result<T, Error>> + Send,
+    Result<T, Error>: IntoResponse + 'static,
+{
+    module
+        .register_async_method(method, move |params, context, _| {
+            context
+                .metrics
+                .track(method, handler(params, context.clone()))
+        })
+        .map_err(|_| ServeError::Internal(format!("failed to register {method}").into()))?;
+
+    Ok(())
+}
+
+/// The TRP methods, served over `context`.
+fn rpc_module<D: Domain + SubmitExt>(
+    context: Context<D>,
+) -> Result<RpcModule<Context<D>>, ServeError> {
+    let mut module = RpcModule::new(context);
+
+    register(&mut module, "trp.resolve", methods::trp_resolve)?;
+    register(&mut module, "trp.submit", methods::trp_submit)?;
+    register(&mut module, "trp.checkStatus", methods::trp_check_status)?;
+    register(&mut module, "trp.dumpLogs", methods::trp_dump_logs)?;
+    register(&mut module, "trp.peekPending", methods::trp_peek_pending)?;
+    register(&mut module, "trp.peekInflight", methods::trp_peek_inflight)?;
+
+    module
+        .register_method("health", |_, context, _| methods::health(context))
+        .map_err(|_| ServeError::Internal("failed to register health".into()))?;
+
+    Ok(module)
+}
+
 pub struct Driver;
 
 impl<D: Domain + SubmitExt, C: CancelToken> dolos_core::Driver<D, C> for Driver {
@@ -42,111 +89,11 @@ impl<D: Domain + SubmitExt, C: CancelToken> dolos_core::Driver<D, C> for Driver 
             .await
             .map_err(ServeError::BindError)?;
 
-        let mut module = RpcModule::new(Context {
+        let module = rpc_module(Context {
             domain,
             config: Arc::new(cfg.clone()),
             metrics: metrics::Metrics::new(),
-        });
-
-        module
-            .register_async_method("trp.resolve", |params, context, _| async move {
-                let response = methods::trp_resolve(params, context.clone()).await;
-
-                context.metrics.track_request(
-                    "trp-resolve",
-                    match response.as_ref() {
-                        Ok(_) => 200,
-                        Err(err) => err.code(),
-                    },
-                );
-
-                response
-            })
-            .map_err(|_| ServeError::Internal("failed to register trp.resolve".into()))?;
-
-        module
-            .register_async_method("trp.submit", |params, context, _| async move {
-                let response = methods::trp_submit(params, context.clone()).await;
-
-                context.metrics.track_request(
-                    "trp-submit",
-                    match response.as_ref() {
-                        Ok(_) => 200,
-                        Err(err) => err.code(),
-                    },
-                );
-
-                response
-            })
-            .map_err(|_| ServeError::Internal("failed to register trp.submit".into()))?;
-
-        module
-            .register_async_method("trp.checkStatus", |params, context, _| async move {
-                let response = methods::trp_check_status(params, context.clone()).await;
-
-                context.metrics.track_request(
-                    "trp-check-status",
-                    match response.as_ref() {
-                        Ok(_) => 200,
-                        Err(err) => err.code(),
-                    },
-                );
-
-                response
-            })
-            .map_err(|_| ServeError::Internal("failed to register trp.checkStatus".into()))?;
-
-        module
-            .register_async_method("trp.dumpLogs", |params, context, _| async move {
-                let response = methods::trp_dump_logs(params, context.clone()).await;
-
-                context.metrics.track_request(
-                    "trp-dump-logs",
-                    match response.as_ref() {
-                        Ok(_) => 200,
-                        Err(err) => err.code(),
-                    },
-                );
-
-                response
-            })
-            .map_err(|_| ServeError::Internal("failed to register trp.dumpLogs".into()))?;
-
-        module
-            .register_async_method("trp.peekPending", |params, context, _| async move {
-                let response = methods::trp_peek_pending(params, context.clone()).await;
-
-                context.metrics.track_request(
-                    "trp-peek-pending",
-                    match response.as_ref() {
-                        Ok(_) => 200,
-                        Err(err) => err.code(),
-                    },
-                );
-
-                response
-            })
-            .map_err(|_| ServeError::Internal("failed to register trp.peekPending".into()))?;
-
-        module
-            .register_async_method("trp.peekInflight", |params, context, _| async move {
-                let response = methods::trp_peek_inflight(params, context.clone()).await;
-
-                context.metrics.track_request(
-                    "trp-peek-inflight",
-                    match response.as_ref() {
-                        Ok(_) => 200,
-                        Err(err) => err.code(),
-                    },
-                );
-
-                response
-            })
-            .map_err(|_| ServeError::Internal("failed to register trp.peekInflight".into()))?;
-
-        module
-            .register_method("health", |_, context, _| methods::health(context))
-            .map_err(|_| ServeError::Internal("failed to register health".into()))?;
+        })?;
 
         let handle = server.start(module);
 
