@@ -42,6 +42,13 @@ pub const TIER: &str = "tier";
 /// The result of an operation.
 pub const OUTCOME: &str = "outcome";
 
+/// The crate version of the running build.
+pub const VERSION: &str = "version";
+
+/// The commit of the running build, or `unknown` when it was built without
+/// one.
+pub const GIT_SHA: &str = "git_sha";
+
 /// The slot and block number of the chain tip, when there is one.
 type ReadTip = dyn Fn() -> Option<(u64, u64)> + Send + Sync;
 
