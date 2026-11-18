@@ -14,6 +14,7 @@ All notable changes to this project will be documented in this file.
 - *(minibf, minikupo)* Export metrics for every request (duration by route template, method and status, active requests, and requests the client abandoned)
 - *(minikupo)* [**breaking**] Remove the `/health` route: the exported request and chain tip metrics replace it
 - *(mempool)* Export the mempool's size, each transaction's lifecycle, its confirmation time, submission time by outcome and stale upstream offers as metrics
+- *(core)* Export how full the query limiter and heavy-scan admission are, how long callers wait for them, and the blocking query closures in flight, including those that outlived their caller
 
 ## [2.0.0-alpha.0] - 2026-09-11
 

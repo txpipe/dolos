@@ -11,6 +11,8 @@ pub async fn run(config: RootConfig, _args: &Args) -> miette::Result<()> {
     let _tracing = crate::common::setup_tracing(&config)?;
 
     let domain = crate::common::setup_domain(&config)?;
+    let _limiter_gauges =
+        dolos_core::telemetry::queries::LimiterGauges::register(&domain.query_limiter);
 
     let _mempool_metrics = crate::common::mempool_metrics(&domain);
 
