@@ -20,6 +20,8 @@ use std::{
 };
 use tracing::{info, warn};
 
+pub mod process;
+
 /// The resource attribute naming the network: its name when it is known,
 /// else its magic.
 const NETWORK: &str = "dolos.network";
@@ -427,6 +429,17 @@ mod tests {
         for metric in &metrics {
             assert!(metric.name().starts_with("dolos."), "{}", metric.name());
         }
+
+        // The setup registers the process series on their own meter.
+        let process: Vec<&str> = resources
+            .iter()
+            .flat_map(|resource| resource.scope_metrics())
+            .filter(|scope| scope.scope().name() == process::METER)
+            .flat_map(|scope| scope.metrics())
+            .map(|metric| metric.name())
+            .collect();
+        assert!(process.contains(&"dolos.build.info"), "{process:?}");
+        assert!(process.contains(&"process.uptime"), "{process:?}");
 
         for name in [
             "dolos.cache.hits",
