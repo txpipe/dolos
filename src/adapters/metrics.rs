@@ -10,7 +10,7 @@ use opentelemetry::{global, metrics::ObservableGauge, KeyValue};
 
 use super::{ArchiveStoreBackend, WalAdapter};
 
-/// The meter of the instruments this crate records.
+/// The meter of this crate's storage gauges.
 pub const METER: &str = "dolos";
 
 /// The gauge of the bytes a store takes on disk.
