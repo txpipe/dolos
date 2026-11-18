@@ -124,6 +124,8 @@ No other route is refused by this limit. Every route, heavy or not, answers `504
 
 Dolos provides many, but not all of the Blockfrost endpoints. The following list represent the endpoints currently supported by Dolos. How far their responses match Blockfrost's is measured in [Blockfrost Conformance](./blockfrost-conformance).
 
+MiniBF no longer serves a `/metrics` route. Its `dolos_slot` and `dolos_block_number` series are now `dolos.sync.tip.slot` and `dolos.sync.tip.block_number`, exported over OTLP with every other series once [`telemetry`](../configuration/schema#telemetry) is configured; the [metric reference](../reference/metrics) lists them.
+
 | Endpoint                                                   | Description                                              |
 | ---------------------------------------------------------- | -------------------------------------------------------- |
 | `/`                                                        | Service info (version, revision)                         |

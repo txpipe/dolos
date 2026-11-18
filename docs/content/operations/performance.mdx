@@ -37,7 +37,7 @@ Each Fjall store, state and archive, reports its compaction backlog as an OpenTe
 | --------------------------- | ----- | ------------------- |
 | `dolos.storage.l0_runs_max` | gauge | `store`, `keyspace` |
 
-The value is the largest number of L0 runs in any of the store's keyspaces, and `keyspace` names that keyspace. `store` is `state` or `archive`. Fjall halts a keyspace's writes at 30 L0 runs until compaction catches up, so a value climbing toward 30 means compaction is falling behind the writes. The gauge is read when the meter collects, never on a write, and a store opened read-only does not report it. Like the [cache metrics](./cache#metrics), it is exported over OTLP by a node with a [`[telemetry]`](../configuration/schema#telemetry) section.
+The value is the largest number of L0 runs in any of the store's keyspaces, and `keyspace` names that keyspace. `store` is `state` or `archive`. Fjall halts a keyspace's writes at 30 L0 runs until compaction catches up, so a value climbing toward 30 means compaction is falling behind the writes. The gauge is read when the meter collects, never on a write, and a store opened read-only does not report it. Like the [cache metrics](./cache#metrics), it is exported over OTLP by a node with a [`[telemetry]`](../configuration/schema#telemetry) section, and the [metric reference](../reference/metrics#storage) lists it with the other series.
 
 ## Query latency
 
@@ -54,7 +54,7 @@ In practice, you should evaluate latency using the query patterns your applicati
 
 To observe latency and throughput in production:
 
-- export the node's metrics over OTLP with a [`[telemetry]`](../configuration/schema#telemetry) section
+- export the node's metrics over OTLP with a [`[telemetry]`](../configuration/schema#telemetry) section; the [metric reference](../reference/metrics) lists every series and has queries that tell an idle node from a saturated one
 - enable [logging](../operations/logging) when investigating slow paths or sync stalls
 - enable [tracing](../operations/tracing) when you need deeper visibility into instrumented request flows such as mempool transaction handling
 

@@ -24,7 +24,16 @@ Not supported (read-only limitation and subset):
 - `GET /matches` (without a pattern)
 - `GET /patterns`
 - `GET /checkpoints`
-- `GET /health` and `GET /metrics`: request metrics and the chain tip are exported over OTLP when [`telemetry`](../configuration/schema#telemetry) is configured
+- `GET /health`; see [Health and metrics](#health-and-metrics)
+
+### Health and metrics
+
+MiniKupo does not serve Kupo's `/health` route, in either its JSON or its Prometheus form, and serves no `/metrics` route. What they reported is exported over OTLP once [`telemetry`](../configuration/schema#telemetry) is configured:
+
+- the chain tip is `dolos.sync.tip.slot` (and `dolos.sync.tip.block_number`);
+- request health is the request series with `surface="minikupo"`: `http.server.request.duration` by route and status, `http.server.active_requests` and `dolos.http.server.request.dropped`.
+
+The [metric reference](../reference/metrics) lists them. A deployment whose clients need Kupo's `/health` puts a proxy in front of MiniKupo that answers it with the mappings those clients expect.
 
 ## Usage
 
