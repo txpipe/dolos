@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeSet, HashMap},
-    sync::Arc,
-};
+use std::{collections::BTreeSet, sync::Arc};
 
 use axum::{
     extract::{Path, Query, State},
@@ -10,15 +7,11 @@ use axum::{
 };
 use blockfrost_openapi::models::block_content_addresses_inner::BlockContentAddressesInner;
 use dolos_core::Domain;
-use pallas::crypto::hash::Hash;
 
 use crate::{
     error::Error,
     inputs::{for_each_touched_output, InputDeps},
-    mapping::{
-        blocks::{touched_addresses_model, BlockModelBuilder},
-        IntoModel as _,
-    },
+    mapping::{blocks::BlockModelBuilder, IntoModel as _},
     pagination::{Pagination, PaginationParameters},
     Facade,
 };
@@ -37,15 +30,15 @@ where
     let hash_or_number = parse_hash_or_number(&hash_or_number)?;
 
     if names_genesis(&domain, &hash_or_number)? {
-        let touched = genesis::genesis_txs(&domain.genesis())?
-            .into_iter()
-            .map(|tx| (tx.hash.to_string(), BTreeSet::from([tx.address])));
+        let listing = genesis::genesis_listing(&domain.genesis())?;
 
         return Ok(Json(
-            touched_addresses_model(touched)
-                .into_iter()
+            listing
+                .addresses
+                .iter()
                 .skip(pagination.skip())
                 .take(pagination.count)
+                .cloned()
                 .collect(),
         ));
     }
@@ -61,8 +54,8 @@ where
         deps.prepare(&domain, txs.iter()).await?
     };
 
-    // genesis outputs, by tx hash, the first time an input misses the archive
-    let mut genesis_outputs: Option<Arc<HashMap<Hash<32>, String>>> = None;
+    // the genesis listing, the first time an input misses the archive
+    let mut genesis_listing: Option<Arc<genesis::GenesisListing>> = None;
 
     // Addresses of each tx's outputs plus the outputs it spends. A spent
     // genesis output is not in the archive, so it is read off the genesis
@@ -86,11 +79,13 @@ where
                 continue;
             }
 
-            if genesis_outputs.is_none() {
-                genesis_outputs = Some(genesis::genesis_outputs(&domain.genesis())?);
+            if genesis_listing.is_none() {
+                genesis_listing = Some(genesis::genesis_listing(&domain.genesis())?);
             }
 
-            let spent = genesis_outputs.as_ref().and_then(|x| x.get(input.hash()));
+            let spent = genesis_listing
+                .as_ref()
+                .and_then(|x| x.outputs.get(input.hash()));
 
             if let Some(address) = spent {
                 addresses.insert(address.clone());

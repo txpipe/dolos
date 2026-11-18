@@ -27,12 +27,12 @@ where
     let hash_or_number = parse_hash_or_number(&hash_or_number)?;
 
     if names_genesis(&domain, &hash_or_number)? {
-        let txs = genesis::genesis_txs(&domain.genesis())?
-            .into_iter()
-            .map(|tx| tx.hash.to_string())
-            .collect();
+        let listing = genesis::genesis_listing(&domain.genesis())?;
 
-        return Ok(Json(paged(txs, &pagination)));
+        return Ok(Json(paged(
+            listing.txs.iter().map(|tx| tx.hash.to_string()),
+            &pagination,
+        )));
     }
 
     let block = load_block_by_hash_or_number(&domain, &hash_or_number).await?;

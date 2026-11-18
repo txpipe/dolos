@@ -21,6 +21,12 @@ pub async fn by_hash_or_number_txs_cbor<D>(
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
+    // Blockfrost reads an empty segment as a malformed hash on the other
+    // block routes and as an invalid path here
+    if hash_or_number.is_empty() {
+        return Err(Error::InvalidPath);
+    }
+
     let pagination = Pagination::try_from(params)?;
     let hash_or_number = parse_hash_or_number(&hash_or_number)?;
 

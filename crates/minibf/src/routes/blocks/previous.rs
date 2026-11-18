@@ -39,26 +39,25 @@ where
     // and the genesis block closes the chain
     let (bodies, reaches_genesis) = {
         let block = MultiEraBlock::decode(&curr).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let mut iter = blocks_before(&domain, &block)?;
-
         let from = pagination.from();
 
-        // an impossible page is empty without a walk
-        let possible = from < blocks_before_bound(&block, &chain);
+        // an impossible page is empty before the archive range is opened
+        if from >= blocks_before_bound(&block, &chain) {
+            (Vec::new(), false)
+        } else {
+            let mut iter = blocks_before(&domain, &block)?;
 
-        // key-only skip; the block before the page tells whether it starts at all
-        let skipped = match from {
-            _ if !possible => None,
-            0 => None,
-            _ => {
-                iter.skip_backward(from - 1);
-                iter.next_back().map(|(_, body)| body)
-            }
-        };
-        let starts = possible && (from == 0 || skipped.is_some());
+            // key-only skip; the block before the page tells whether it starts at all
+            let skipped = match from {
+                0 => None,
+                _ => {
+                    iter.skip_backward(from - 1);
+                    iter.next_back().map(|(_, body)| body)
+                }
+            };
+            let starts = from == 0 || skipped.is_some();
 
-        match starts {
-            true => {
+            if starts {
                 let bodies: Vec<_> = iter
                     .rev()
                     .take(pagination.count)
@@ -77,8 +76,9 @@ where
                 };
 
                 (bodies, reaches_genesis)
+            } else {
+                (Vec::new(), false)
             }
-            false => (Vec::new(), false),
         }
     };
 

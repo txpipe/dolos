@@ -178,4 +178,32 @@ mod tests {
         let block = get_block(&chain.app, &format!("/blocks/{}", last.number + 1)).await;
         assert_eq!(block.hash, chain.main[&21600].hash);
     }
+
+    /// The next block is looked for a window of slots at a time. These two
+    /// sit 86,436 slots apart, far past the first window, and nothing follows
+    /// the second.
+    #[tokio::test]
+    async fn blocks_by_hash_or_number_finds_the_next_block_across_a_gap() {
+        let blocks: Vec<dolos_core::RawBlock> =
+            include_str!("../../../testdata/preview-shelley-blocks.txt")
+                .lines()
+                .filter(|line| !line.starts_with('#'))
+                .map(|line| {
+                    let (_, cbor) = line.split_once(' ').unwrap();
+                    std::sync::Arc::new(hex::decode(cbor).unwrap())
+                })
+                .collect();
+
+        let app =
+            TestApp::new_with_archived_blocks(dolos_cardano::include::preview::load(), &blocks);
+
+        let first = get_block(&app, "/blocks/slot/86400").await;
+        let second = get_block(&app, "/blocks/slot/172836").await;
+
+        let by_hash = get_block(&app, &format!("/blocks/{}", first.hash)).await;
+        assert_eq!(by_hash.next_block.as_deref(), Some(second.hash.as_str()));
+
+        let by_hash = get_block(&app, &format!("/blocks/{}", second.hash)).await;
+        assert_eq!(by_hash.next_block, None);
+    }
 }

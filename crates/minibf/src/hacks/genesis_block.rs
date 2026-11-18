@@ -2,13 +2,15 @@
 //! so it is built here from the genesis config.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     sync::{Arc, Mutex, OnceLock, PoisonError},
 };
 
 use axum::http::StatusCode;
 use base64::Engine as _;
-use blockfrost_openapi::models::block_content::BlockContent;
+use blockfrost_openapi::models::{
+    block_content::BlockContent, block_content_addresses_inner::BlockContentAddressesInner,
+};
 use dolos_core::{ArchiveStore as _, Domain, Genesis};
 use pallas::{
     crypto::{
@@ -22,7 +24,7 @@ use pallas::{
     },
 };
 
-use crate::{log_and_500, Facade};
+use crate::{log_and_500, mapping::blocks::touched_addresses_model, Facade};
 
 use super::{GENESIS_HASH_MAINNET, GENESIS_HASH_PREPROD, GENESIS_HASH_PREVIEW};
 
@@ -203,51 +205,77 @@ pub fn genesis_txs(genesis: &Genesis) -> Result<Vec<GenesisTx>, StatusCode> {
     let shelley = funds
         .into_iter()
         .map(|(_, hash, address)| -> Result<GenesisTx, StatusCode> {
-            Ok(GenesisTx {
-                hash,
-                address: address
+            // the Shelley genesis takes a bootstrap address too
+            let address = match address {
+                Address::Byron(address) => address.to_base58(),
+                address => address
                     .to_bech32()
                     .map_err(log_and_500("malformed genesis entry"))?,
-            })
+            };
+
+            Ok(GenesisTx { hash, address })
         });
 
     byron.map(Ok).chain(shelley).collect()
 }
 
-/// The genesis outputs by transaction hash, built once per network: a block
-/// spending one is read against them on every `/blocks/{hash}/addresses`
-/// request with an input the archive no longer holds, and mainnet has 14,505
-/// of them to decode, hash and sort.
-pub fn genesis_outputs(genesis: &Genesis) -> Result<Arc<HashMap<Hash<32>, String>>, StatusCode> {
-    type Outputs = Arc<HashMap<Hash<32>, String>>;
+/// What the routes read of the genesis block's transactions, built once per
+/// genesis: mainnet has 14,505 of them to decode, hash and sort.
+pub struct GenesisListing {
+    /// The transactions, in Blockfrost's order.
+    pub txs: Vec<GenesisTx>,
+    /// The address of each output, by transaction hash: what a block that
+    /// spends one is read against once the archive no longer holds its input.
+    pub outputs: HashMap<Hash<32>, String>,
+    /// The `/blocks/{genesis}/addresses` listing.
+    pub addresses: Vec<BlockContentAddressesInner>,
+}
 
-    static BUILT: OnceLock<Mutex<HashMap<(u32, Hash<32>), Outputs>>> = OnceLock::new();
+/// The listing of `genesis`, kept for as long as the process runs.
+///
+/// A listing belongs to the genesis it was built from, not to a network: two
+/// domains can share a magic and a Shelley file and still differ in their
+/// Byron funds.
+pub fn genesis_listing(genesis: &Arc<Genesis>) -> Result<Arc<GenesisListing>, StatusCode> {
+    type Built = Vec<(Arc<Genesis>, Arc<GenesisListing>)>;
 
-    // the magic and the Shelley genesis hash name the network's funds
-    let key = (genesis.network_magic(), genesis.shelley_hash);
+    static BUILT: OnceLock<Mutex<Built>> = OnceLock::new();
+
+    // an entry holds its genesis, so no other can take its place in memory
+    let find = |built: &Built| {
+        built
+            .iter()
+            .find(|(of, _)| Arc::ptr_eq(of, genesis))
+            .map(|(_, listing)| listing.clone())
+    };
+
     let built = BUILT.get_or_init(Default::default);
 
-    if let Some(outputs) = built
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&key)
-    {
-        return Ok(outputs.clone());
+    if let Some(listing) = find(&built.lock().unwrap_or_else(PoisonError::into_inner)) {
+        return Ok(listing);
     }
 
-    let outputs: Outputs = Arc::new(
-        genesis_txs(genesis)?
-            .into_iter()
-            .map(|tx| (tx.hash, tx.address))
-            .collect(),
-    );
+    let txs = genesis_txs(genesis)?;
 
-    built
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(key, outputs.clone());
+    let listing = Arc::new(GenesisListing {
+        outputs: txs.iter().map(|tx| (tx.hash, tx.address.clone())).collect(),
+        addresses: touched_addresses_model(
+            txs.iter()
+                .map(|tx| (tx.hash.to_string(), BTreeSet::from([tx.address.clone()]))),
+        ),
+        txs,
+    });
 
-    Ok(outputs)
+    let mut built = built.lock().unwrap_or_else(PoisonError::into_inner);
+
+    // two cold requests can both build; the first one in is kept
+    if let Some(listing) = find(&built) {
+        return Ok(listing);
+    }
+
+    built.push((genesis.clone(), listing.clone()));
+
+    Ok(listing)
 }
 
 #[cfg(test)]
@@ -256,17 +284,66 @@ mod tests {
     use crate::mapping::blocks::touched_addresses_model;
 
     #[test]
-    fn genesis_outputs_are_built_once_per_network() {
-        let genesis = dolos_cardano::include::preview::load();
+    fn genesis_listing_is_built_once_per_genesis() {
+        let genesis = Arc::new(dolos_cardano::include::preview::load());
 
-        let first = genesis_outputs(&genesis).unwrap();
-        let again = genesis_outputs(&genesis).unwrap();
+        let first = genesis_listing(&genesis).unwrap();
+        let again = genesis_listing(&genesis).unwrap();
 
         assert!(Arc::ptr_eq(&first, &again));
 
         let txs = genesis_txs(&genesis).unwrap();
-        assert_eq!(first.len(), txs.len());
-        assert_eq!(first.get(&txs[0].hash), Some(&txs[0].address));
+        assert_eq!(first.txs.len(), txs.len());
+        assert_eq!(first.outputs.len(), txs.len());
+        assert_eq!(first.outputs.get(&txs[0].hash), Some(&txs[0].address));
+        assert_eq!(first.addresses.len(), txs.len());
+    }
+
+    /// Two domains on one magic and one Shelley genesis, with different Byron
+    /// funds: each gets the listing of its own.
+    #[test]
+    fn genesis_listing_follows_the_byron_funds() {
+        let full = Arc::new(dolos_cardano::include::preview::load());
+
+        let mut emptied = dolos_cardano::include::preview::load();
+        emptied.byron.non_avvm_balances.clear();
+        let emptied = Arc::new(emptied);
+
+        assert_eq!(full.shelley_hash, emptied.shelley_hash);
+        assert_eq!(full.network_magic(), emptied.network_magic());
+
+        let full = genesis_listing(&full).unwrap();
+        let emptied = genesis_listing(&emptied).unwrap();
+
+        assert_eq!(full.txs.len(), 8);
+        assert!(emptied.txs.len() < full.txs.len());
+        assert!(emptied.outputs.len() < full.outputs.len());
+    }
+
+    /// The Shelley genesis of a custom network can fund a bootstrap address,
+    /// which has no bech32 form: it is listed in base58, as a Byron fund is.
+    #[test]
+    fn genesis_txs_list_a_bootstrap_address_in_the_shelley_funds() {
+        let mut genesis = dolos_cardano::include::preview::load();
+
+        let bootstrap = genesis.byron.non_avvm_balances.keys().next().unwrap();
+        let bootstrap = ByronAddress::from_base58(bootstrap).unwrap();
+        let hex = hex::encode(Address::Byron(bootstrap.clone()).to_vec());
+
+        genesis
+            .shelley
+            .initial_funds
+            .get_or_insert_with(Default::default)
+            .insert(hex, 1_000_000);
+
+        let txs = genesis_txs(&genesis).unwrap();
+        let funded = txs.last().unwrap();
+
+        assert_eq!(funded.address, bootstrap.to_base58());
+        assert_eq!(
+            funded.hash,
+            Hasher::<256>::hash(&Address::Byron(bootstrap).to_vec())
+        );
     }
 
     /// Blake2b-256 of the lines, to compare whole listings with Blockfrost's.

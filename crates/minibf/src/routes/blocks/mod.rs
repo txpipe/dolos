@@ -126,20 +126,26 @@ where
         return Ok(None);
     };
 
-    let candidates = domain
-        .archive()
-        .get_blocks_by_slot(&slot)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // the bodies are read and decoded under the query limiter
+    domain
+        .blocking(move |domain| {
+            let candidates = domain
+                .archive()
+                .get_blocks_by_slot(&slot)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    for body in candidates {
-        let block = MultiEraBlock::decode(&body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            for body in candidates {
+                let block =
+                    MultiEraBlock::decode(&body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        if block.number() == number && !matches!(block, MultiEraBlock::EpochBoundary(_)) {
-            return Ok(Some(body));
-        }
-    }
+                if block.number() == number && !matches!(block, MultiEraBlock::EpochBoundary(_)) {
+                    return Ok(Some(body));
+                }
+            }
 
-    Ok(None)
+            Ok(None)
+        })
+        .await
 }
 
 /// The main block at `slot`, which a boundary block can share.
@@ -228,6 +234,67 @@ fn blocks_before<'a, D: Domain>(
     found.then_some(iter).ok_or(StatusCode::NOT_FOUND)
 }
 
+/// The first window [`next_block`] looks for a block in, in slots. Each next
+/// one is eight times as wide.
+const NEXT_BLOCK_WINDOW: u64 = 128;
+
+/// The block that follows the one with `hash` at `slot`, up to `tip_slot`.
+///
+/// The successor of the last main block of a Byron epoch is the boundary
+/// block, which the index files under no number, so the archive is read by
+/// slot: the rest of the block's own slot first, where a main block sits
+/// behind its boundary sibling, then the slots after it, a window at a time.
+/// A range read asks a store for no more than a window, whichever way the
+/// store serves its ranges. A block the archive no longer holds at its slot
+/// is not found, as in [`blocks_after`].
+fn next_block<D: Domain>(
+    domain: &Facade<D>,
+    slot: u64,
+    hash: Hash<32>,
+    tip_slot: u64,
+) -> Result<Option<BlockBody>, StatusCode> {
+    let range = |start: u64, end: u64| {
+        domain
+            .archive()
+            .get_range(Some(start), Some(end))
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
+    };
+
+    let mut siblings = range(slot, slot.saturating_add(1))?;
+    let mut found = false;
+
+    for (_, body) in siblings.by_ref() {
+        if block_hash(&body)? == hash {
+            found = true;
+            break;
+        }
+    }
+
+    if !found {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    if let Some((_, body)) = siblings.next() {
+        return Ok(Some(body));
+    }
+
+    let mut start = slot.saturating_add(1);
+    let mut width = NEXT_BLOCK_WINDOW;
+
+    while start <= tip_slot {
+        let end = start.saturating_add(width);
+
+        if let Some((_, body)) = range(start, end)?.next() {
+            return Ok(Some(body));
+        }
+
+        start = end;
+        width = width.saturating_mul(8);
+    }
+
+    Ok(None)
+}
+
 /// An upper bound on the archive's blocks after `block`, or on all of them
 /// for `None`: the heights up to the tip, plus one boundary block per epoch,
 /// which carries no height of its own. A page offset past it is empty, so
@@ -311,8 +378,18 @@ where
         builder = builder.with_previous(previous)?;
     }
 
-    // the last block of a Byron epoch is followed by a boundary block
-    let maybe_next = blocks_after(domain, &block)?.next().map(|(_, body)| body);
+    // the last block of a Byron epoch is followed by a boundary block; the
+    // seek and the read run under the query limiter
+    let maybe_next = {
+        let (slot, hash) = (block.slot(), block.hash());
+        let tip_slot = MultiEraBlock::decode(tip)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .slot();
+
+        domain
+            .blocking(move |domain| next_block(&domain, slot, hash, tip_slot))
+            .await?
+    };
 
     if let Some(next) = maybe_next.as_ref() {
         builder = builder.with_next(next)?;
@@ -340,14 +417,19 @@ where
     Ok(paged(txs, pagination))
 }
 
-fn paged<T>(items: Vec<T>, pagination: &Pagination) -> Vec<T> {
+/// One page of `items`, which only the page's own are taken from.
+fn paged<T>(
+    items: impl IntoIterator<Item = T, IntoIter: DoubleEndedIterator>,
+    pagination: &Pagination,
+) -> Vec<T> {
+    let items = items.into_iter();
+
     let items = match pagination.order {
-        Order::Asc => items,
-        Order::Desc => items.into_iter().rev().collect(),
+        Order::Asc => Either::Left(items),
+        Order::Desc => Either::Right(items.rev()),
     };
 
     items
-        .into_iter()
         .skip(pagination.skip())
         .take(pagination.count)
         .collect()
