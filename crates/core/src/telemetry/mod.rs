@@ -10,8 +10,10 @@ use std::sync::{Arc, Weak};
 
 use opentelemetry::{global, metrics::ObservableGauge};
 
+pub mod mempool;
 pub mod queries;
 pub mod requests;
+pub mod storage;
 
 /// The meter of the instruments this crate records.
 pub const METER: &str = "dolos-core";
@@ -41,6 +43,10 @@ pub const TIER: &str = "tier";
 
 /// The result of an operation.
 pub const OUTCOME: &str = "outcome";
+
+/// The state of a mempool transaction: a lifecycle stage, or `pending` and
+/// `inflight` for the mempool's size.
+pub const STATE: &str = "state";
 
 /// The crate version of the running build.
 pub const VERSION: &str = "version";

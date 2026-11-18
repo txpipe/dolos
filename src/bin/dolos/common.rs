@@ -449,6 +449,33 @@ pub fn hook_exit_token() -> CancellationToken {
     cancel
 }
 
+/// The mempool's size gauge and its lifecycle subscriber, which stops when
+/// this value is dropped.
+pub struct MempoolMetrics {
+    _gauge: dolos_core::telemetry::mempool::MempoolGauge,
+    subscriber: JoinHandle<()>,
+}
+
+impl Drop for MempoolMetrics {
+    fn drop(&mut self) {
+        self.subscriber.abort();
+    }
+}
+
+/// Starts the mempool metrics over `domain`'s mempool. Call it before
+/// serving, so the subscriber sees every submission.
+pub fn mempool_metrics(domain: &DomainAdapter) -> MempoolMetrics {
+    use dolos_core::telemetry::mempool::{Lifecycle, MempoolGauge};
+
+    let mempool = domain.mempool().clone();
+    let events = mempool.subscribe();
+
+    MempoolMetrics {
+        _gauge: MempoolGauge::register(mempool.clone()),
+        subscriber: tokio::spawn(async move { Lifecycle::new().follow(&mempool, events).await }),
+    }
+}
+
 /// Run the pipeline until it ends or `exit` is cancelled, then tear it down.
 /// Returns the stages that ended on their own when one did, which is a
 /// failure: `exit` is then cancelled, so the rest of the process winds down.

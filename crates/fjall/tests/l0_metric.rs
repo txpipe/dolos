@@ -33,7 +33,9 @@ fn collect(provider: &SdkMeterProvider, exporter: &InMemoryMetricExporter) -> Ve
             }
 
             for metric in scope.metrics() {
-                assert_eq!(metric.name(), metrics::L0_RUNS_MAX);
+                if metric.name() != metrics::L0_RUNS_MAX {
+                    continue;
+                }
 
                 let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = metric.data() else {
                     panic!("{} is not a u64 gauge", metric.name());

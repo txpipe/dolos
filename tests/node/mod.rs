@@ -174,6 +174,11 @@ impl Node {
             mempool_config: self.config.mempool.clone(),
             genesis,
             chain: Arc::new(std::sync::RwLock::new(chain)),
+            storage_gauges: dolos::adapters::storage_gauges(
+                &stores.wal,
+                self.config.wal_path(),
+                &stores.archive,
+            ),
             wal: stores.wal,
             state: stores.state,
             tip_gauges: dolos::adapters::tip_gauges(&stores.archive),

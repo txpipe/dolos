@@ -1000,27 +1000,31 @@ pub trait Domain: Send + Sync + Clone + 'static {
     const MAX_PRUNE_SLOTS_PER_HOUSEKEEPING: u64 = 10_000;
     const MAX_PRUNE_INDEX_ROWS_PER_HOUSEKEEPING: u64 = 100_000;
 
+    /// One bounded round of pruning the archive and the WAL to their
+    /// windows; whether both are done.
     fn housekeeping(&self) -> Result<bool, DomainError> {
-        let mut archive_pruned = true;
+        telemetry::storage::time_housekeeping(|| {
+            let mut archive_pruned = true;
 
-        if let Some(max_slots) = self.history_config().max_slots() {
-            info!(max_slots, "pruning archive for excess history");
+            if let Some(max_slots) = self.history_config().max_slots() {
+                info!(max_slots, "pruning archive for excess history");
 
-            archive_pruned = self.archive().prune_history(
-                max_slots,
-                Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING),
-                Some(Self::MAX_PRUNE_INDEX_ROWS_PER_HOUSEKEEPING),
-            )?;
-        }
+                archive_pruned = self.archive().prune_history(
+                    max_slots,
+                    Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING),
+                    Some(Self::MAX_PRUNE_INDEX_ROWS_PER_HOUSEKEEPING),
+                )?;
+            }
 
-        let max_slots = Self::Chain::mutable_slots(self);
-        info!(max_slots, "pruning wal for excess history");
+            let max_slots = Self::Chain::mutable_slots(self);
+            info!(max_slots, "pruning wal for excess history");
 
-        let wal_pruned = self
-            .wal()
-            .prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;
+            let wal_pruned = self
+                .wal()
+                .prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;
 
-        Ok(archive_pruned && wal_pruned)
+            Ok(archive_pruned && wal_pruned)
+        })
     }
 
     /// Run bounded housekeeping rounds until no active or currently due work

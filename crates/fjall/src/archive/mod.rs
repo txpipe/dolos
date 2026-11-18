@@ -78,7 +78,7 @@ use pallas::ledger::traverse::MultiEraBlock;
 use dolos_flatfiles::{decode_locations, encode_locations, BlockLocation, FlatFileStore};
 
 use crate::keys::{dim_prefix, hash_dimension, DIM_HASH_SIZE};
-use crate::metrics::L0Runs;
+use crate::metrics::StoreMetrics;
 use crate::preset::{Preset, Tuning};
 use crate::view::{View, Viewed};
 use crate::Error;
@@ -163,6 +163,14 @@ fn fjall_err(e: fjall::Error) -> ArchiveError {
     ArchiveError::from(Error::Fjall(e))
 }
 
+/// The slot a `blocks` key starts with.
+fn block_key_slot(key: &[u8]) -> Result<BlockSlot, ArchiveError> {
+    key.get(..8)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u64::from_be_bytes)
+        .ok_or_else(|| ArchiveError::InternalError("malformed blocks key".to_string()))
+}
+
 /// Fjall-based archive store.
 ///
 /// Block bodies live in flat segment files; the location table, the log
@@ -183,9 +191,9 @@ pub struct ArchiveStore {
     /// ponytail: reopen rescans; persist cursors only if restart rescans prove
     /// material.
     index_sweep: Arc<Mutex<IndexSweepState>>,
+    /// The metrics of a writable store, dropped before the tempdir.
+    metrics: Option<Arc<StoreMetrics>>,
     _tempdir: Option<Arc<tempfile::TempDir>>,
-    /// The L0 gauge of a writable store.
-    l0_runs: Option<Arc<L0Runs>>,
     /// The mirror a read-only store opened over, dropped after the database
     /// and every iterator over it.
     view: Option<Arc<View>>,
@@ -307,13 +315,14 @@ impl ArchiveStore {
             schema: Arc::new(schema),
             preset,
             index_sweep: Arc::new(Mutex::new(IndexSweepState::default())),
+            metrics: None,
             _tempdir: tempdir,
-            l0_runs: None,
             view,
         };
 
         if store.view.is_none() {
-            store.l0_runs = Some(Arc::new(L0Runs::report("archive", store.keyspaces())));
+            let metrics = StoreMetrics::report("archive", store.db.clone(), store.keyspaces());
+            store.metrics = Some(Arc::new(metrics));
         }
 
         Ok(store)
@@ -375,16 +384,31 @@ impl ArchiveStore {
 
         let (key, value) = guard.into_inner().map_err(fjall_err)?;
 
-        let slot_bytes: [u8; 8] = key
-            .as_ref()
-            .get(..8)
-            .and_then(|b| b.try_into().ok())
-            .ok_or_else(|| ArchiveError::InternalError("malformed blocks key".to_string()))?;
-
         Ok(Some((
-            u64::from_be_bytes(slot_bytes),
+            block_key_slot(key.as_ref())?,
             BlockLocation::from_bytes(&value),
         )))
+    }
+
+    /// The slot of the oldest block the index locates.
+    pub fn oldest_block_slot(&self) -> Result<Option<BlockSlot>, ArchiveError> {
+        self.oldest_slot_in(&self.db.snapshot())
+    }
+
+    /// [`Self::oldest_block_slot`] as `snapshot` sees it.
+    fn oldest_slot_in(&self, snapshot: &Snapshot) -> Result<Option<BlockSlot>, ArchiveError> {
+        let Some(guard) = snapshot.first_key_value(&self.blocks) else {
+            return Ok(None);
+        };
+
+        let key = guard.key().map_err(fjall_err)?;
+
+        Ok(Some(block_key_slot(key.as_ref())?))
+    }
+
+    /// The directory holding the block segment files.
+    pub fn segments_dir(&self) -> &Path {
+        self.flatfiles.segments_dir()
     }
 
     /// Whether the index holds any block location, log row or index entry.
@@ -1277,13 +1301,7 @@ impl CoreArchiveStore for ArchiveStore {
         let max_entries =
             max_prune_index_rows.map(|rows| usize::try_from(rows).unwrap_or(usize::MAX));
 
-        let first = snapshot
-            .first_key_value(&self.blocks)
-            .map(|guard| guard.key())
-            .transpose()
-            .map_err(fjall_err)?;
-
-        let Some(first) = first else {
+        let Some(start) = self.oldest_slot_in(&snapshot)? else {
             *self.index_sweep.lock().map_err(|_| Error::LockPoisoned)? = IndexSweepState::default();
             tracing::debug!("no start point found on chain, skipping housekeeping");
             return Ok(true);
@@ -1300,7 +1318,6 @@ impl CoreArchiveStore for ArchiveStore {
             return Ok(true);
         };
 
-        let start = u64::from_be_bytes(first.as_ref()[..8].try_into().unwrap());
         let last = u64::from_be_bytes(last.as_ref()[..8].try_into().unwrap());
 
         let delta = last.saturating_sub(start);

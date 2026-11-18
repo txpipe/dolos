@@ -2007,6 +2007,36 @@ impl ArchiveStoreBackend {
         }
     }
 
+    /// The slot of the oldest block the index holds; `None` for the stores
+    /// that keep no segment files.
+    pub fn oldest_block_slot(&self) -> Result<Option<BlockSlot>, ArchiveError> {
+        match self {
+            Self::Fjall(s) => s.oldest_block_slot(),
+            Self::LogsOnly(inner) => inner.oldest_block_slot(),
+            Self::Memory(_) | Self::EntityReads(_) | Self::NoOp(_) => Ok(None),
+        }
+    }
+
+    /// The slot of the newest block the index holds; `None` for the stores
+    /// that keep no segment files.
+    pub fn newest_block_slot(&self) -> Result<Option<BlockSlot>, ArchiveError> {
+        match self {
+            Self::Fjall(s) => Ok(s.newest_block()?.map(|(slot, _)| slot)),
+            Self::LogsOnly(inner) => inner.newest_block_slot(),
+            Self::Memory(_) | Self::EntityReads(_) | Self::NoOp(_) => Ok(None),
+        }
+    }
+
+    /// The directory of the block segment files; `None` for the stores that
+    /// keep none.
+    pub fn segments_dir(&self) -> Option<PathBuf> {
+        match self {
+            Self::Fjall(s) => Some(s.segments_dir().to_path_buf()),
+            Self::LogsOnly(inner) => inner.segments_dir(),
+            Self::Memory(_) | Self::EntityReads(_) | Self::NoOp(_) => None,
+        }
+    }
+
     pub fn shutdown(&self) -> Result<(), ArchiveError> {
         match self {
             Self::Memory(s) => s.shutdown(),
@@ -2639,6 +2669,13 @@ impl MempoolStore for MempoolBackend {
         match self {
             Self::Ephemeral(s) => s.peek_pending(),
             Self::Redb(s) => s.peek_pending(),
+        }
+    }
+
+    fn count(&self) -> dolos_core::MempoolCount {
+        match self {
+            Self::Ephemeral(s) => s.count(),
+            Self::Redb(s) => s.count(),
         }
     }
 

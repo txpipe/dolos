@@ -162,6 +162,11 @@ impl<'a> DomainBuilder<'a> {
             tip_broadcast,
             query_limiter,
             tip_gauges: crate::adapters::tip_gauges(&stores.archive),
+            storage_gauges: crate::adapters::storage_gauges(
+                &stores.wal,
+                self.config.wal_path(),
+                &stores.archive,
+            ),
         })
     }
 }

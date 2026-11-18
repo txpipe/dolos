@@ -175,6 +175,10 @@ name = "mempool"
 path = "tests/mempool.rs"
 
 [[test]]
+name = "mempool_metrics"
+path = "tests/mempool_metrics.rs"
+
+[[test]]
 name = "bootstrap"
 path = "tests/bootstrap.rs"
 
