@@ -6,6 +6,7 @@ use axum::{
 use blockfrost_openapi::models::tx_content::TxContent;
 use dolos_cardano::{AccountState, DRepState, PoolState};
 use dolos_core::Domain;
+use pallas::ledger::traverse::Era;
 
 use crate::{
     hacks::genesis_tx,
@@ -42,7 +43,7 @@ where
         .with_chain(chain)
         .with_historical_pparams::<D>(&domain)?;
 
-    if builder.tx()?.as_byron().is_some() {
+    if builder.era() == Era::Byron {
         let mut deps = InputDeps::default();
         let mut resolver = {
             let tx = builder.tx()?;

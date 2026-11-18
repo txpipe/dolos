@@ -3,6 +3,7 @@ use blockfrost_openapi::models::block_content::BlockContent;
 use dolos_cardano::ChainSummary;
 use dolos_core::{ArchiveStore as _, BlockBody, Domain};
 use itertools::Either;
+use pallas::ledger::traverse::Era;
 
 use crate::{
     error::Error,
@@ -117,7 +118,11 @@ where
 
     let mut deps = InputDeps::default();
     let mut resolver = {
-        let txs = builder.txs();
+        let txs = if builder.era() == Era::Byron {
+            builder.txs()
+        } else {
+            vec![]
+        };
         deps.prepare(domain, txs.iter().filter(|tx| tx.as_byron().is_some()))
             .await?
     };

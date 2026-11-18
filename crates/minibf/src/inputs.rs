@@ -180,7 +180,7 @@ impl<'a> InputResolver<'a> {
         }
 
         let mut inputs = 0u64;
-        for input in tx.inputs() {
+        for input in tx.consumes() {
             let Some(output) = self.resolve(&input)? else {
                 return Ok(tx.fee_or_compute());
             };
@@ -484,6 +484,34 @@ mod tests {
         assert_eq!(resolver.fee(&txs[1]).unwrap(), 200_000);
         assert_eq!(resolver.decodes(), 1);
         assert_eq!(deps.fetches(), 1);
+    }
+
+    #[tokio::test]
+    async fn byron_fees_count_each_consumed_output_once() {
+        use crate::test_support::{byron_block, byron_facade, byron_funding, byron_tx};
+        use dolos_core::TxoRef;
+
+        let (funding, hash) = byron_funding(&[300_000, 400_000]);
+        let domain = byron_facade(vec![funding]);
+        for (inputs, output) in [
+            (vec![TxoRef(hash, 0), TxoRef(hash, 0)], 129_193),
+            (
+                vec![TxoRef(hash, 0), TxoRef(hash, 1), TxoRef(hash, 0)],
+                529_193,
+            ),
+        ] {
+            let raw = byron_block(11, vec![byron_tx(&inputs, &[output])]);
+            let block = MultiEraBlock::decode(&raw).unwrap();
+            let txs = block.txs();
+            let mut deps = InputDeps::default();
+            let mut resolver = deps.prepare(&domain, &txs).await.unwrap();
+
+            assert_eq!(txs[0].inputs().len(), inputs.len());
+            assert_ne!(txs[0].fee_or_compute(), 170_807);
+            assert_eq!(resolver.fee(&txs[0]).unwrap(), 170_807);
+            assert_eq!(resolver.decodes(), 1);
+            assert_eq!(deps.fetches(), 1);
+        }
     }
 
     #[test]

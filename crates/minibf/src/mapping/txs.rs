@@ -12,7 +12,7 @@ use pallas::{
             Epoch, ExUnitPrices, StakeCredential,
         },
         traverse::{
-            ComputeHash, MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraOutput,
+            ComputeHash, Era, MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraOutput,
             MultiEraRedeemer, MultiEraTx, OriginalHash,
         },
     },
@@ -138,6 +138,10 @@ impl<'a> TxModelBuilder<'a> {
             deposit: None,
             fee: None,
         })
+    }
+
+    pub fn era(&self) -> Era {
+        self.block.era()
     }
 
     pub fn with_resolved_fee(

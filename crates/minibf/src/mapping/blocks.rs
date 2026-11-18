@@ -11,7 +11,7 @@ use itertools::Itertools as _;
 use pallas::{
     codec::minicbor,
     crypto::hash::{Hash, Hasher},
-    ledger::traverse::{MultiEraBlock, MultiEraHeader, MultiEraTx},
+    ledger::traverse::{Era, MultiEraBlock, MultiEraHeader, MultiEraTx},
 };
 
 use super::{bech32_pool, IntoModel};
@@ -40,6 +40,10 @@ impl<'a> BlockModelBuilder<'a> {
             touched_addresses: None,
             fees: None,
         })
+    }
+
+    pub fn era(&self) -> Era {
+        self.block.era()
     }
 
     pub fn txs(&self) -> Vec<MultiEraTx<'_>> {
