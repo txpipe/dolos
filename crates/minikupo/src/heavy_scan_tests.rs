@@ -18,6 +18,12 @@ fn limiter(app: &TestApp) -> QueryLimiter {
     dolos_core::Domain::query_limiter(app.domain()).clone()
 }
 
+/// A route that reads no UTxOs: the metadata of the tip block.
+fn light_path(app: &TestApp) -> String {
+    let block = app.vectors().blocks.last().expect("missing block vectors");
+    format!("/metadata/{}", block.slot)
+}
+
 fn heavy_patterns(app: &TestApp) -> Vec<String> {
     let v = app.vectors();
 
@@ -78,13 +84,10 @@ async fn heavy_matches_wait_out_the_queue_then_get_503() {
         }
     }
 
-    for path in ["/health", "/metadata/0"] {
-        assert_ne!(
-            app.get_bytes(path).await.0,
-            StatusCode::SERVICE_UNAVAILABLE,
-            "{path}"
-        );
-    }
+    assert_ne!(
+        app.get_bytes("/metadata/0").await.0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
 
     drop(held);
 
@@ -158,7 +161,7 @@ async fn a_match_past_its_deadline_keeps_its_slot_until_its_read_ends() {
         app.get_bytes(&address).await.0,
         StatusCode::SERVICE_UNAVAILABLE
     );
-    assert_eq!(app.get_bytes("/health").await.0, StatusCode::OK);
+    assert_eq!(app.get_bytes(&light_path(&app)).await.0, StatusCode::OK);
 
     wait_until_free(&limiter).await;
     assert!(started.elapsed() >= SLOW_READ);
