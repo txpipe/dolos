@@ -11,10 +11,10 @@ Every metric series Dolos exports, by area. Dolos pushes its metrics over OTLP t
 
 ## Naming
 
-- A name the OpenTelemetry semantic conventions define is used as they define it: `http.server.request.duration`, `http.server.active_requests` and `rpc.server.call.duration`. The request count is the count of the duration histogram; there is no separate request counter.
+- A name the OpenTelemetry semantic conventions define is used as they define it: `http.server.request.duration`, `http.server.active_requests`, `rpc.server.call.duration` and the `process.*` series of the [process](#process) section. The request count is the count of the duration histogram; there is no separate request counter.
 - Every other name sits under `dolos.`, dotted by area and then by subject: `dolos.query.*`, `dolos.cache.*`, `dolos.storage.*`, `dolos.sync.*`, `dolos.build.*`. Dolos's own additions to a standard family mirror its path, as in `dolos.http.server.request.dropped`.
 - The attributes Dolos defines are bare lowercase keys from one vocabulary: `surface`, `store`, `keyspace`, `namespace`, `tier`, `outcome` for any result, and `version` and `git_sha` for the build. Request series also carry the semantic-convention attributes of their family (`http.route`, `rpc.method`, …), and the process CPU time its `cpu.mode`. The resource attributes Dolos defines sit under `dolos.`.
-- Durations are histograms in seconds, sizes are in bytes, and counts carry a unit annotation such as `{request}` or `{entry}`. `dolos.build.info` is the one series without a unit.
+- Latencies are histograms in seconds, sizes are in bytes, and counts carry a unit annotation such as `{request}` or `{entry}`. `dolos.build.info` is the one series without a unit.
 - The meter is the crate that records: `dolos-core`, `dolos-fjall`, `dolos-minibf`, `dolos-minikupo`, `dolos-grpc` and `dolos-trp`, plus `dolos`, the binary's own, for the [process](#process) series. Queries need not name it: the `surface` attribute tells the serving surfaces apart.
 
 ### Prometheus names
@@ -166,8 +166,8 @@ Under the `dolos` meter, reported whenever metric export is on.
 | `process.unix.file_descriptor.count`<br />`process_unix_file_descriptor_count` | `dolos` | up-down counter, `{file_descriptor}` | none | Open file descriptors, Linux only |
 | `process.thread.count`<br />`process_thread_count` | `dolos` | up-down counter, `{thread}` | none | Threads of the process, Linux only |
 
-- `version` is the Dolos version and `git_sha` the commit it was built from, or `unknown` for a build without one, such as one from a source tarball. Join it to another series to label it with the build: `… * on (service_instance_id) group_left (version, git_sha) dolos_build_info`.
-- `process.uptime` counts from when metric export is set up, at startup. A drop to near zero is a restart.
+- `version` is the Dolos version and `git_sha` the commit it was built from, or `unknown` for a build without one, such as one from a source tarball. Join it to another series to label it with the build: `… * on (service_instance_id) group_left (version, git_sha) topk by (service_instance_id) (1, dolos_build_info)`. Right after an upgrade a node shows two builds until the collector expires the old series (`metric_expiration`, 5 minutes by default); `topk` keeps the join to one of them, where a plain join on `dolos_build_info` fails on the duplicate, and `count by (service_instance_id) (dolos_build_info) > 1` shows the overlap. Several nodes on one host need distinct `service.instance.id` values, set through `OTEL_RESOURCE_ATTRIBUTES`.
+- `process.uptime` counts from when metric export is set up, at startup. The first value is exported one export interval later, so after a restart it drops back to about one interval rather than to zero; `resets(process_uptime_seconds[15m]) > 0` finds a restart.
 - The names, units and types follow the OpenTelemetry process semantic conventions. Only build info and uptime are reported on every platform; the others read `/proc/self` and are reported on Linux only.
 - `cpu.mode` is `user` or `system`. Take the `rate()` of the CPU time for the cores in use.
 - `process.memory.usage` is the resident set (`VmRSS`), `process.memory.virtual` the virtual size (`VmSize`) and `process.thread.count` the `Threads` of `/proc/self/status`. The descriptor count is the number of entries in `/proc/self/fd`.
@@ -184,12 +184,14 @@ No request in flight and few arriving:
 ```text
 sum by (service_instance_id) (
   {__name__=~"http_server_active_requests|dolos_rpc_server_active_requests"})
+  or vector(0)
 
 sum by (service_instance_id, surface) (
   rate({__name__=~"http_server_request_duration_seconds_count|rpc_server_call_duration_seconds_count"}[5m]))
+  or vector(0)
 ```
 
-The first is zero and the second low on an idle node; `dolos_query_limiter_in_use` is zero too. A gRPC server stream counts in the first until it sends its first message, so a client that holds a `WatchMempool` stream keeps it above zero until the mempool's first event, which on an idle node may not come.
+A surface's request series appear with its first request after the node starts, so a node that has served nothing yet has none of them; `or vector(0)` turns that empty result into a zero. The first is zero and the second low on an idle node; `dolos_query_limiter_in_use` is zero too. A gRPC server stream counts in the first until it sends its first message, so a client that holds a `WatchMempool` stream keeps it above zero until the mempool's first event, which on an idle node may not come.
 
 ### Saturated
 
@@ -224,7 +226,7 @@ A server stream its client leaves after the stream's first message is not a drop
 
 ### With resource attributes on `target_info`
 
-When the collector keeps the resource attributes on `target_info` only, every series carries `job` (from `service.name`) and `instance` (from `service.instance.id`), and the other attributes, `dolos.network` and `service.version` among them, are labels of `target_info` alone. Group by `job, instance` in place of `service_instance_id`, and join an attribute in where a query needs it:
+When the collector keeps the resource attributes on `target_info` only, every series carries `job` (from `service.name`) and `instance` (from `service.instance.id`), and the other attributes, `dolos.network` and `service.version` among them, are labels of `target_info` alone. This needs `honor_labels: true` on the Prometheus scrape job, as in the [Telemetry](../operations/tracing#a-minimal-collector) example: without it the exported labels become `exported_job` and `exported_instance`, every node behind one collector shares the scrape target's `job` and `instance`, and the sums and joins below merge nodes or fail on duplicate `target_info` series. It does not apply to OTLP sent straight into Prometheus. Group by `job, instance` in place of `service_instance_id`, and join an attribute in where a query needs it:
 
 ```text
 sum by (job, instance) (rate(http_server_request_duration_seconds_count[5m]))
