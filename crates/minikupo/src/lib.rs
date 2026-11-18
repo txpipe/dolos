@@ -6,6 +6,7 @@ use axum::{
     Json, Router, ServiceExt,
 };
 use dolos_cardano::indexes::{AsyncCardanoQueryExt, ScriptLanguage as CardanoLanguage};
+use dolos_core::telemetry::requests::RequestMetrics;
 use dolos_core::{config::MinikupoConfig, AsyncQueryFacade, CancelToken, Domain, ServeError};
 use pallas::{codec::minicbor, crypto::hash::Hash};
 use std::ops::Deref;
@@ -18,6 +19,7 @@ use crate::types::BadRequest;
 
 #[cfg(test)]
 mod heavy_scan_tests;
+mod metrics;
 pub mod patterns;
 mod routes;
 #[cfg(test)]
@@ -115,6 +117,14 @@ pub(crate) fn build_router_with_facade<D>(facade: Facade<D>) -> Router
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
+    build_router_with_metrics(facade, metrics::request_metrics())
+}
+
+/// The router, recording its requests on `requests`.
+pub(crate) fn build_router_with_metrics<D>(facade: Facade<D>, requests: RequestMetrics) -> Router
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
     let permissive_cors = facade.config.permissive_cors();
     let request_timeout = facade.config.request_timeout();
     let app = Router::new()
@@ -156,7 +166,13 @@ where
             CorsLayer::permissive()
         } else {
             CorsLayer::new()
-        });
+        })
+        // Outside the deadline, so a cut request is a 504 and a drop is the
+        // client's; outside CORS, so preflights are counted too.
+        .layer(axum::middleware::from_fn_with_state(
+            requests,
+            metrics::record,
+        ));
 
     app.layer(NormalizePathLayer::trim_trailing_slash())
 }
@@ -170,7 +186,6 @@ where
         .route("/datums/{datum-hash}", get(routes::datums::by_hash::<D>))
         .route("/scripts/{script-hash}", get(routes::scripts::by_hash::<D>))
         .route("/metadata/{slot-no}", get(routes::metadata::by_slot::<D>))
-        .route("/health", get(routes::health::health::<D>))
 }
 
 impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver

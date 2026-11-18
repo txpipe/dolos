@@ -16,7 +16,6 @@ Dolos supports a subset of the Kupo endpoints. All write operations are intentio
 | `/datums/{datum-hash}`       | GET    | Resolve datum by hash                       |
 | `/scripts/{script-hash}`     | GET    | Resolve script by hash                      |
 | `/metadata/{slot-no}`        | GET    | Metadata by slot (optional transaction id)  |
-| `/health`                    | GET    | Health and sync status (JSON or Prometheus) |
 
 Not supported (read-only limitation and subset):
 
@@ -25,7 +24,7 @@ Not supported (read-only limitation and subset):
 - `GET /matches` (without a pattern)
 - `GET /patterns`
 - `GET /checkpoints`
-- `GET /metrics`
+- `GET /health` and `GET /metrics`: request metrics and the chain tip are exported over OTLP when [`telemetry`](../configuration/schema#telemetry) is configured
 
 ## Usage
 
@@ -51,14 +50,6 @@ $ curl "http://localhost:1442/matches/addr1vyc29pvl2uyzqt8nwxrcxnf558ffm27u3d9ca
 Every pattern but an output reference (`{index}@{tx}`, `*@{tx}`) scans an index: matches by address, payment or delegation credential, stake address, policy or asset. These share one limit with MiniBF's [heavy scans](./minibf#heavy-scans), `serve.max_concurrent_heavy_scans` requests at once (32 by default). A heavy match that finds every slot taken waits up to `serve.heavy_scan_queue_seconds` (5 by default) and is then answered `503 Service Unavailable`, with `Retry-After: 1` and a `hint`. Output-reference matches and the other routes are never refused by this limit.
 
 Every request answers `504 Gateway Timeout`, with a `hint`, once it runs past `request_timeout_seconds` (120 by default).
-
-### Health and Prometheus output
-
-The `/health` endpoint returns JSON by default. If you send `Accept: text/plain`, it returns Prometheus-formatted output instead:
-
-```shell
-$ curl -H "Accept: text/plain" http://localhost:1442/health
-```
 
 ## Configuration
 
