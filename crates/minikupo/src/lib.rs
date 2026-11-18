@@ -1,19 +1,25 @@
 use axum::{
     extract::Request,
-    http::StatusCode,
+    http::{header, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router, ServiceExt,
 };
 use dolos_cardano::indexes::{AsyncCardanoQueryExt, ScriptLanguage as CardanoLanguage};
+use dolos_core::telemetry::requests::RequestMetrics;
 use dolos_core::{config::MinikupoConfig, AsyncQueryFacade, CancelToken, Domain, ServeError};
 use pallas::{codec::minicbor, crypto::hash::Hash};
 use std::ops::Deref;
-use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer, trace};
+use tower_http::{
+    cors::CorsLayer, normalize_path::NormalizePathLayer, timeout::TimeoutLayer, trace,
+};
 use tracing::Level;
 
 use crate::types::BadRequest;
 
+#[cfg(test)]
+mod heavy_scan_tests;
+mod metrics;
 pub mod patterns;
 mod routes;
 #[cfg(test)]
@@ -111,11 +117,25 @@ pub(crate) fn build_router_with_facade<D>(facade: Facade<D>) -> Router
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
+    build_router_with_metrics(facade, metrics::request_metrics())
+}
+
+/// The router, recording its requests on `requests`.
+pub(crate) fn build_router_with_metrics<D>(facade: Facade<D>, requests: RequestMetrics) -> Router
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
     let permissive_cors = facade.config.permissive_cors();
+    let request_timeout = facade.config.request_timeout();
     let app = Router::new()
         .merge(api_router::<D>())
         .nest("/v1", api_router::<D>())
         .with_state(facade)
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::GATEWAY_TIMEOUT,
+            request_timeout,
+        ))
+        .layer(axum::middleware::map_response(timeout_body))
         .layer(
             trace::TraceLayer::new_for_http()
                 .make_span_with(|request: &Request<_>| {
@@ -146,7 +166,13 @@ where
             CorsLayer::permissive()
         } else {
             CorsLayer::new()
-        });
+        })
+        // Outside the deadline, so a cut request is a 504 and a drop is the
+        // client's; outside CORS, so preflights are counted too.
+        .layer(axum::middleware::from_fn_with_state(
+            requests,
+            metrics::record,
+        ));
 
     app.layer(NormalizePathLayer::trim_trailing_slash())
 }
@@ -160,7 +186,6 @@ where
         .route("/datums/{datum-hash}", get(routes::datums::by_hash::<D>))
         .route("/scripts/{script-hash}", get(routes::scripts::by_hash::<D>))
         .route("/metadata/{slot-no}", get(routes::metadata::by_slot::<D>))
-        .route("/health", get(routes::health::health::<D>))
 }
 
 impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver
@@ -183,6 +208,36 @@ where
 
         Ok(())
     }
+}
+
+/// Gives the deadline's bodiless 504 a `hint`, as Kupo's errors carry.
+async fn timeout_body(response: Response) -> Response {
+    let bodiless = response.status() == StatusCode::GATEWAY_TIMEOUT
+        && !response.headers().contains_key(header::CONTENT_TYPE);
+
+    if !bodiless {
+        return response;
+    }
+
+    (
+        StatusCode::GATEWAY_TIMEOUT,
+        Json(BadRequest {
+            hint: Some("The request took longer than this node's deadline.".into()),
+        }),
+    )
+        .into_response()
+}
+
+/// Every heavy-scan slot stayed taken for the whole admission queue.
+pub(crate) fn heavy_scan_limit() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, "1")],
+        Json(BadRequest {
+            hint: Some("The node is serving its limit of heavy requests. Retry later.".into()),
+        }),
+    )
+        .into_response()
 }
 
 pub(crate) fn bad_request(hint: impl Into<String>) -> Response {

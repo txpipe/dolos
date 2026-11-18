@@ -17,8 +17,9 @@ use dolos_cardano::{
 use dolos_core::config::{ConfigError, RootConfig};
 pub use dolos_core::ReplayProgress;
 use dolos_core::{
-    builtin::NoDiskTier, BootstrapExt as _, ChainLogic as _, ChainPoint, Domain as _, DomainError,
-    Genesis, ImportExt as _, QueryLimiter, RawBlock, StateStore as _, TieredCache,
+    builtin::NoDiskTier, ArchiveIndexDelta, BootstrapExt as _, ChainLogic as _, ChainPoint,
+    Domain as _, DomainError, Genesis, ImportExt as _, QueryLimiter, RawBlock, StateStore as _,
+    TieredCache,
 };
 use dolos_snapshot::source::{SnapshotSource, StoreSnapshot};
 
@@ -143,7 +144,7 @@ impl<'a> DomainBuilder<'a> {
         .map_err(DomainBuildError::Chain)?;
 
         let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
-        let query_limiter = QueryLimiter::new(self.config.serve.max_concurrent_queries);
+        let query_limiter = self.config.serve.query_limiter();
         let cache = cache(query_limiter.clone())?;
 
         Ok(DomainAdapter {
@@ -160,6 +161,12 @@ impl<'a> DomainBuilder<'a> {
             cache,
             tip_broadcast,
             query_limiter,
+            tip_gauges: crate::adapters::tip_gauges(&stores.archive),
+            storage_gauges: crate::adapters::storage_gauges(
+                &stores.wal,
+                self.config.wal_path(),
+                &stores.archive,
+            ),
         })
     }
 }
@@ -255,7 +262,11 @@ impl<'a> ReplayWorkspace<'a> {
 
     /// Borrow read-only Dolos profile operations, not storage handles.
     pub fn snapshot(&self) -> impl SnapshotSource + '_ {
-        StoreSnapshot::new(&self.stores.archive, &self.stores.state)
+        StoreSnapshot::new(
+            &self.stores.archive,
+            &self.stores.state,
+            dolos_cardano::mutable_slots(&self.genesis),
+        )
     }
 
     /// Begin processing, including any pending ledger initialization.
@@ -276,6 +287,7 @@ impl<'a> ReplayWorkspace<'a> {
                 domain,
                 boundary: None,
                 failed: false,
+                last_delta: None,
             }),
             Err(error) => complete(Err(error), self.finish()),
         }
@@ -335,6 +347,7 @@ pub struct BulkReplaySession {
     domain: DomainAdapter,
     boundary: Option<ChainPoint>,
     failed: bool,
+    last_delta: Option<ArchiveIndexDelta>,
 }
 
 impl BulkReplaySession {
@@ -358,7 +371,11 @@ impl BulkReplaySession {
 
     /// Borrow profile operations over the currently committed dataset.
     pub fn snapshot(&self) -> impl SnapshotSource + '_ {
-        StoreSnapshot::new(self.domain.archive(), self.domain.state())
+        StoreSnapshot::new(
+            self.domain.archive(),
+            self.domain.state(),
+            dolos_cardano::mutable_slots(&self.domain.genesis()),
+        )
     }
 
     /// Process a nonempty batch and report its committed position or boundary.
@@ -386,7 +403,12 @@ impl BulkReplaySession {
                 "batch must not be empty",
             ));
         }
-        let boundary = match self.domain.import_blocks(blocks) {
+        let imported = self.domain.import_blocks_observed(blocks, &mut |deltas| {
+            if let Some(last) = deltas.last() {
+                self.last_delta = Some(last.clone());
+            }
+        });
+        let boundary = match imported {
             Ok(_) => false,
             Err(DomainError::StopEpochReached) => true,
             Err(error) => {
@@ -409,6 +431,15 @@ impl BulkReplaySession {
         } else {
             Ok(ReplayProgress::Committed { position })
         }
+    }
+
+    /// The archive index entries of the boundary block this session stopped on.
+    ///
+    /// What a host hands boundary preparation so it captures the boundary's
+    /// index tail without traversing the index. `None` before the boundary, and
+    /// for a session that did not import that block itself.
+    pub fn boundary_index_delta(&self) -> Option<&ArchiveIndexDelta> {
+        self.boundary.as_ref().and(self.last_delta.as_ref())
     }
 
     /// Explicitly apply the configured history retention policy.

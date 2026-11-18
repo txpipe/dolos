@@ -868,6 +868,23 @@ where
 
         Ok(())
     }
+
+    fn remove_points(&self, points: &[ChainPoint]) -> Result<(), RedbWalError> {
+        let mut wx = self.db.begin_write()?;
+        wx.set_quick_repair(true);
+
+        {
+            let mut table = wx.open_table(WAL)?;
+
+            for point in points {
+                table.remove(DbChainPoint::from(point.clone()))?;
+            }
+        }
+
+        wx.commit()?;
+
+        Ok(())
+    }
 }
 
 impl<T> WalStore for RedbWalStore<T>
@@ -884,6 +901,10 @@ where
 
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), WalError> {
         RedbWalStore::truncate_front(self, after).map_err(From::from)
+    }
+
+    fn remove_points(&self, points: &[ChainPoint]) -> Result<(), WalError> {
+        RedbWalStore::remove_points(self, points).map_err(From::from)
     }
 
     fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, WalError> {

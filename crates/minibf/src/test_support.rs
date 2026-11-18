@@ -31,7 +31,10 @@ use http_body_util::BodyExt;
 use pallas::ledger::traverse::MultiEraBlock;
 use tower::util::ServiceExt;
 
-use crate::{build_router_with_facade, Facade};
+use dolos_core::telemetry::requests::{Family, RequestMetrics};
+use dolos_testing::metrics::MetricsRecorder;
+
+use crate::{build_router_with_metrics, metrics, Facade};
 
 pub use dolos_testing::faults::TestFault;
 
@@ -508,10 +511,16 @@ impl<B: ToyStores> TestDomainBuilder<B> {
     }
 }
 
+/// Taken by tests whose submit timing matters. Submission holds a
+/// process-wide lock (`dolos_core::submit`), so a submit held in one test
+/// would otherwise delay or cut a submit in another.
+pub static SUBMIT_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub struct TestApp {
     router: Router,
     facade: Facade<dolos_testing::faults::FaultyToyDomain>,
     vectors: Option<SyntheticVectors>,
+    metrics: MetricsRecorder,
 }
 
 impl TestApp {
@@ -596,6 +605,26 @@ impl TestApp {
         Self::from_domain(adjust(domain), Some(vectors), None, minibf)
     }
 
+    /// The default chain with the archive pruned behind it: the synthetic
+    /// blocks sit in consecutive slots, so keeping a two-slot window drops
+    /// the first two blocks while their UTxOs stay live.
+    pub fn new_pruned() -> Self {
+        use dolos_core::ArchiveStore as _;
+
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+
+        Self::new_with_cfg_and_setup(cfg, |domain, _| {
+            domain
+                .archive()
+                .prune_history(2, None, None)
+                .expect("failed to prune the synthetic archive");
+        })
+    }
+
     /// App whose minibf config caps scans at `max_scan_items`, so scan budgets
     /// can be exercised without building a chain of thousands of blocks.
     pub fn new_with_scan_limit(cfg: SyntheticBlockConfig, max_scan_items: u64) -> Self {
@@ -638,6 +667,24 @@ impl TestApp {
         Self::from_domain(domain, None, None, minibf)
     }
 
+    /// App on a query limiter of `limiter` whose requests time out after
+    /// `request_timeout_seconds`.
+    pub fn new_admitting(
+        fault: Option<TestFault>,
+        limiter: QueryLimiter,
+        request_timeout_seconds: u64,
+    ) -> Self {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+        let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
+        let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"))
+            .with_request_timeout_seconds(request_timeout_seconds);
+        Self::from_domain(domain.with_query_limiter(limiter), vectors, fault, minibf)
+    }
+
     /// App over `domain`, its chain described by `vectors`.
     pub fn from_domain(
         domain: ToyDomain,
@@ -655,12 +702,19 @@ impl TestApp {
             config: minibf,
         };
 
-        let router = build_router_with_facade(facade.clone());
+        let metrics = MetricsRecorder::default();
+        let requests = RequestMetrics::with_meter(
+            Family::Http,
+            &metrics.meter(metrics::METER),
+            metrics::SURFACE,
+        );
+        let router = build_router_with_metrics(facade.clone(), requests);
 
         Self {
             router,
             facade,
             vectors: vectors.into(),
+            metrics,
         }
     }
 
@@ -722,6 +776,29 @@ impl TestApp {
             .expect("failed to read response body")
             .to_bytes();
         (status, bytes.to_vec())
+    }
+
+    /// The status of `request`, its body read to the end.
+    pub async fn send(&self, request: Request<Body>) -> StatusCode {
+        let res = self
+            .router
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("request failed");
+
+        let status = res.status();
+        res.into_body()
+            .collect()
+            .await
+            .expect("failed to read response body");
+        status
+    }
+
+    /// The exported points of the request instrument `name`; see
+    /// [`MetricsRecorder::points_of`].
+    pub fn metric_points(&self, name: &str) -> Vec<String> {
+        self.metrics.points_of(name)
     }
 
     pub fn facade(&self) -> Facade<dolos_testing::faults::FaultyToyDomain> {

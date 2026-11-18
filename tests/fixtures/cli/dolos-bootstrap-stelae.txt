@@ -4,19 +4,21 @@ Usage: dolos bootstrap stelae [OPTIONS]
 
 Options:
       --force
-          Replace any data already in storage
+          Replace any data already in storage, and with it what an interrupted bootstrap left for
+          `--continue`
       --source <SOURCE>
-          Where to restore from, as a URL: `file://DIR` naming a stele directory, or
-          `oci://HOST/PATH` naming a repository in a registry. Defaults to the configured network's
-          official repository, and is required for a custom network
+          Where to restore from, as a URL naming a network root: `file://DIR`, a directory holding
+          `dolos/` and `blocks/`, each an OCI image layout, or `oci://HOST/PATH`, whose `PATH/dolos`
+          and `PATH/blocks` repositories are read. Defaults to the configured network's official
+          root, and is required for a custom network
       --point <POINT>
-          which stele in the repository to restore: `latest`, or `epoch-N` for the stele published
-          at the end of epoch N. Registry sources only [default: latest]
+          which snapshot to restore: `latest`, or `epoch-N` for the snapshot cut at the boundary
+          that opens epoch N. Registry sources only [default: latest]
       --skip-if-data
           Exit 0 without bootstrapping when storage already holds a node, as an interrupted replay
-          that has committed leaves one for `--continue` to resume; data without one, as a bootstrap
-          interrupted before it commits a cursor leaves, and a store this release refuses are errors
-          instead
+          that has committed leaves one for `--continue` to resume; data without one, as an
+          interrupted Dolos snapshot restore or a bootstrap interrupted before it commits a cursor
+          leaves, and a store this release refuses are errors instead
       --insecure
           talk to the repository over plaintext HTTP rather than HTTPS; for a registry on a loopback
           address or a mirror inside a cluster, and for nothing reachable from outside one
@@ -26,8 +28,15 @@ Options:
           directory to stage pulled layers in; defaults to `<storage.path>/scratch`. registry
           sources only — a `file://` restore stages nothing
       --skip-space-check
-          skip the restore disk-space preflight and continue even when the stele's declared sizes
-          exceed the available space
+          skip the restore disk-space preflight and continue even when the estimate of what the
+          restore will occupy exceeds the available space
+      --read-ahead <LAYERS>
+          how many layers to read ahead of the one being written; a registry restore stages each in
+          the scratch directory until its turn. 0 or 1 reads one layer at a time [default: 8]
+      --continue
+          Resume an interrupted restore from the layers it recorded, reading the snapshot it started
+          from again; with nothing to resume, restore as without the flag into storage that holds no
+          data
       --registry-user <USER>
           the user to read the registry as; defaults to the published read-only user when the
           repository is the configured network's official one. The password comes from

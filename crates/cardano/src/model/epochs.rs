@@ -1732,7 +1732,7 @@ mod tests {
 #[cfg(test)]
 #[allow(deprecated)] // prop_compose! macro expansions reference legacy
                      // EpochWrapUp/EpochTransition for back-compat tests
-mod prop_tests {
+pub(super) mod prop_tests {
     use super::testing::{any_end_stats, any_epoch_state, any_nonces};
     use super::*;
     use crate::model::epoch_value::testing::{
@@ -1740,8 +1740,77 @@ mod prop_tests {
     };
     use crate::model::pparams::testing::any_pparams_set;
     use crate::model::testing::{self as root, assert_delta_roundtrip};
+    use crate::model::testing::{replay_case, ReplayCase};
     use crate::pots::testing::{any_epoch_incentives, any_pots};
     use proptest::prelude::*;
+
+    /// One case per delta this module owns, with the fixups of the round
+    /// trips below, for `model::replay_tests`. A transition crosses into
+    /// Shelley half the time, so its `apply` reads the genesis.
+    #[allow(deprecated)]
+    pub(crate) fn replay_cases(genesis: Arc<Genesis>) -> Vec<ReplayCase> {
+        let into_shelley = || {
+            prop::option::of(Just(EraTransition {
+                prev_version: crate::model::EraKey::from(1),
+                new_version: crate::model::EraKey::from(2),
+            }))
+        };
+        let v1_genesis = genesis.clone();
+
+        vec![
+            replay_case(
+                (any_epoch_state_no_rolling_next(), any_epoch_stats_update()).prop_map(
+                    |(entity, mut delta)| {
+                        delta.epoch = entity.rolling.epoch().expect("generated at epoch position");
+                        (Some(entity), delta)
+                    },
+                ),
+            ),
+            replay_case((prop::option::of(any_epoch_state()), any_nonces_update())),
+            replay_case((any_epoch_state().prop_map(Some), any_pparams_update())),
+            replay_case((any_epoch_state().prop_map(Some), any_epoch_wrap_up())),
+            replay_case((any_epoch_state().prop_map(Some), any_epoch_wrap_up_v2())),
+            replay_case((any_epoch_state().prop_map(Some), any_epoch_wrap_up_v3())),
+            replay_case((any_epoch_state().prop_map(Some), any_nonce_transition())),
+            replay_case(
+                (any_epoch_state(), any_epoch_transition(), into_shelley()).prop_map(
+                    move |(entity, mut delta, era_transition)| {
+                        delta.new_pots = entity.initial_pots.clone();
+                        delta.new_epoch =
+                            entity.rolling.epoch().expect("generated at epoch position") + 1;
+                        delta.era_transition = era_transition;
+                        delta.genesis = Some(v1_genesis.clone());
+                        (Some(entity), delta)
+                    },
+                ),
+            ),
+            replay_case(
+                (any_epoch_state(), any_epoch_transition_v2(), into_shelley()).prop_map(
+                    move |(entity, mut delta, era_transition)| {
+                        delta.new_pots = entity.initial_pots.clone();
+                        delta.new_epoch =
+                            entity.rolling.epoch().expect("generated at epoch position") + 1;
+                        delta.era_transition = era_transition;
+                        delta.genesis = Some(genesis.clone());
+                        (Some(entity), delta)
+                    },
+                ),
+            ),
+            replay_case((any_epoch_state().prop_map(Some), any_set_epoch_incentives())),
+            replay_case((
+                any_epoch_state_for_accumulate().prop_map(Some),
+                any_epoch_end_accumulate(),
+            )),
+            replay_case((
+                any_epoch_state_for_estart_accumulate().prop_map(Some),
+                any_estart_accumulate(),
+            )),
+            replay_case((
+                any_epoch_state_for_rupd_accumulate().prop_map(Some),
+                any_rupd_accumulate(),
+            )),
+        ]
+    }
 
     // `EpochStatsUpdate::apply` calls `rolling.live_mut` which asserts `next`
     // is None, so we need a specialized generator that keeps `rolling.next`

@@ -27,7 +27,7 @@ Dolos keeps its data in distinct stores, each serving a specific purpose:
 - **Database**: `<storage.path>/wal`
 
 ### CacheStore
-- **Purpose**: Disposable answers derived from the other stores (decision 0059); it is outside the WAL, steles and restore, and deleting it changes no answer
+- **Purpose**: Disposable answers derived from the other stores (decision 0059); it is outside the WAL, Stelae snapshots and restore, and deleting it changes no answer
 - **Contents**: Byte entries by namespace and key; a namespace carries a format version, a validity model (immutable or tip-scoped) and an admission cost
 - **Traits**: `CacheStore`, implemented by `TieredCache` over the builtin memory tier and a `CacheDiskTier`
 - **Database**: `<storage.path>/cache/cache.redb`, a Redb file of immutable entries within `storage.cache.disk_mb`; writes skip the fsync and the flush at shutdown makes them durable; a file Redb finds corrupt, cut short, or laid out by another release is recreated empty, and any other open failure is an error
@@ -50,7 +50,7 @@ Every on-disk state and archive store records the compatibility identifier it wa
 ├── state    # Ledger state database
 ├── archive  # Archive index plus flat block segment files
 ├── cache    # Disposable cache entries (cache.redb)
-└── scratch  # not a store: stele layers staged in flight by a registry transfer
+└── scratch  # not a store: snapshot layers staged in flight by a registry transfer
 ```
 
 The persistent WAL and the cache's disk tier use Redb, while state and archive use separate Fjall databases with independent cache and durability configuration. Builtin memory stores serve ephemeral nodes, tooling, and tests.
@@ -376,5 +376,14 @@ All agents working on this repository must verify their modifications by running
 - Code should follow existing Rust conventions and patterns established in the codebase
 - New implementations should follow the trait-based architecture patterns
 - Storage implementations that share a trait should maintain the same observable contract across backends
+
+### Changelog
+
+Never edit `CHANGELOG.md` by hand, in any pull request. It is generated at release time by
+[git-cliff](https://git-cliff.org) (`cliff.toml`) from the conventional-commit titles on
+`main`, so a change reaches the changelog through its commit or squash title: a `feat`/`fix`/…
+type, an optional scope, and `!` for a breaking change. Put the release-note wording in that
+title and, if it needs more, in the pull request body. If a branch already edits
+`CHANGELOG.md`, drop that edit rather than resolving a conflict in it.
 
 These verification steps ensure code quality, maintain consistency across storage backends, and prevent introducing technical debt into the codebase.

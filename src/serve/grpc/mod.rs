@@ -7,8 +7,12 @@ use tracing::{info, warn};
 use crate::prelude::*;
 
 pub(crate) mod block_refs;
+#[cfg(all(test, unix, feature = "minibf"))]
+mod era_table_tests;
+
 mod convert;
 mod masking;
+mod metrics;
 mod stream;
 mod v1alpha;
 mod v1beta;
@@ -48,6 +52,29 @@ fn apply_http2_tuning(mut server: Server, cfg: &GrpcConfig) -> Server {
     }
 
     server
+}
+
+/// The file descriptor sets the reflection service serves. Their services
+/// are the ones the server registers, reflection aside.
+const DESCRIPTOR_SETS: &[&[u8]] = &[
+    v1alpha::spec::cardano::FILE_DESCRIPTOR_SET,
+    v1alpha::spec::sync::FILE_DESCRIPTOR_SET,
+    v1alpha::spec::query::FILE_DESCRIPTOR_SET,
+    v1alpha::spec::submit::FILE_DESCRIPTOR_SET,
+    v1alpha::spec::watch::FILE_DESCRIPTOR_SET,
+    v1beta::spec::cardano::FILE_DESCRIPTOR_SET,
+    v1beta::spec::sync::FILE_DESCRIPTOR_SET,
+    v1beta::spec::query::FILE_DESCRIPTOR_SET,
+    v1beta::spec::submit::FILE_DESCRIPTOR_SET,
+    v1beta::spec::watch::FILE_DESCRIPTOR_SET,
+    protoc_wkt::google::protobuf::FILE_DESCRIPTOR_SET,
+];
+
+/// Every method the server registers, reflection's included.
+fn registered_methods() -> metrics::Methods {
+    let reflection = [tonic_reflection::pb::v1::FILE_DESCRIPTOR_SET];
+
+    metrics::Methods::from_descriptor_sets(&[DESCRIPTOR_SETS, &reflection].concat())
 }
 
 #[derive(Clone)]
@@ -93,20 +120,16 @@ where
             v1beta::submit::SubmitServiceImpl::new(domain.clone()),
         );
 
-        let reflection = tonic_reflection::server::Builder::configure()
-            .register_encoded_file_descriptor_set(v1alpha::spec::cardano::FILE_DESCRIPTOR_SET)
-            .register_encoded_file_descriptor_set(v1alpha::spec::sync::FILE_DESCRIPTOR_SET)
-            .register_encoded_file_descriptor_set(v1alpha::spec::query::FILE_DESCRIPTOR_SET)
-            .register_encoded_file_descriptor_set(v1alpha::spec::submit::FILE_DESCRIPTOR_SET)
-            .register_encoded_file_descriptor_set(v1alpha::spec::watch::FILE_DESCRIPTOR_SET)
-            .register_encoded_file_descriptor_set(v1beta::spec::cardano::FILE_DESCRIPTOR_SET)
-            .register_encoded_file_descriptor_set(v1beta::spec::sync::FILE_DESCRIPTOR_SET)
-            .register_encoded_file_descriptor_set(v1beta::spec::query::FILE_DESCRIPTOR_SET)
-            .register_encoded_file_descriptor_set(v1beta::spec::submit::FILE_DESCRIPTOR_SET)
-            .register_encoded_file_descriptor_set(v1beta::spec::watch::FILE_DESCRIPTOR_SET)
-            .register_encoded_file_descriptor_set(protoc_wkt::google::protobuf::FILE_DESCRIPTOR_SET)
+        let reflection = DESCRIPTOR_SETS
+            .iter()
+            .fold(
+                tonic_reflection::server::Builder::configure(),
+                |builder, set| builder.register_encoded_file_descriptor_set(set),
+            )
             .build_v1()
             .unwrap();
+
+        let metrics = metrics::MetricsLayer::new(registered_methods());
 
         let cors_layer = if cfg.permissive_cors() {
             CorsLayer::permissive()
@@ -116,7 +139,8 @@ where
 
         let builder = apply_http2_tuning(Server::builder().accept_http1(true), &cfg);
 
-        let mut server = builder.layer(cors_layer);
+        // The metrics layer is outermost, so it sees preflights and skips them.
+        let mut server = builder.layer(metrics).layer(cors_layer);
 
         info!("serving via gRPC on address: {}", cfg.listen_address);
 

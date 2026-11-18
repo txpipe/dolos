@@ -1,3 +1,7 @@
+// Keeps a `TracingGuard` from being discarded with `let _ =`, which shuts
+// telemetry down at startup; `#[must_use]` alone does not catch that.
+#![warn(clippy::let_underscore_must_use)]
+
 use clap::{Parser, Subcommand};
 use miette::Result;
 
@@ -19,6 +23,7 @@ mod registry;
 mod serve;
 mod service;
 mod sync;
+mod telemetry;
 
 #[cfg(feature = "utils")]
 mod init;
@@ -86,6 +91,7 @@ fn main() -> std::process::ExitCode {
 fn run() -> Result<()> {
     // reqwest 0.13 (via mithril-client) uses `rustls-no-provider`: it reads the
     // process-default provider and panics if none is installed.
+    #[allow(clippy::let_underscore_must_use)]
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let args = Cli::parse();

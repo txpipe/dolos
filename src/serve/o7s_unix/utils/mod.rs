@@ -6,7 +6,7 @@ pub mod stake_snapshots;
 pub mod utxo;
 
 pub use account::build_account_state_response;
-pub use era_history::build_era_history_response;
+pub use era_history::load_era_history_response;
 pub use pools::{
     build_pool_state_response, build_stake_pool_params_response, build_stake_pools_response,
 };

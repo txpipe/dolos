@@ -25,8 +25,9 @@ pub enum TestFault {
     /// succeeds.
     ///
     /// The narrow one, for a caller that has to reach a specific write and
-    /// would never get there if opening the store failed too — a stele restore
-    /// above all, which writes tags alongside each incoming UTxO batch.
+    /// would never get there if opening the store failed too — a snapshot
+    /// restore above all, which writes tags alongside each incoming UTxO
+    /// batch.
     StateTagsApplyError,
     /// Only reads and scans of this namespace fail; every other state call
     /// succeeds.
@@ -355,6 +356,13 @@ impl StateStore for FaultyStateStore {
         }
         self.inner.iter_utxos()
     }
+
+    fn persist(&self) -> Result<(), StateError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.persist()
+    }
 }
 
 pub struct FaultyStateWriter {
@@ -551,6 +559,13 @@ impl ArchiveStore for FaultyArchiveStore {
             return Err(self.fault_err());
         }
         self.inner.truncate_front(after)
+    }
+
+    fn persist(&self) -> Result<(), ArchiveError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.persist()
     }
 
     fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
@@ -760,6 +775,13 @@ impl WalStore for FaultyWalStore {
             return Err(self.fault_err());
         }
         self.inner.truncate_front(after)
+    }
+
+    fn remove_points(&self, points: &[ChainPoint]) -> Result<(), WalError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        WalStore::remove_points(&self.inner, points)
     }
 
     fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, WalError> {

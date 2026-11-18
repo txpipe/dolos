@@ -13,6 +13,7 @@
 //!   flat segment files from `dolos-flatfiles`), hosting the archive tags and
 //!   the exact lookups that project the blocks
 //! - [`keys`]: Shared key encoding utilities
+//! - [`metrics`]: The store metrics, under the `dolos-fjall` meter
 //! - [`preset`]: The named tunings both stores open with
 //! - [`view`]: A read-only open, over a mirror of a database beside it
 
@@ -20,6 +21,7 @@ use dolos_core::{ArchiveError, StateError};
 
 pub mod archive;
 pub mod keys;
+pub mod metrics;
 pub mod preset;
 pub mod state;
 pub mod view;

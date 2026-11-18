@@ -219,6 +219,7 @@ fn make_dir(dir: &Path, made: &mut Vec<PathBuf>) -> miette::Result<()> {
 /// made in.
 fn remove_made(made: &[PathBuf]) {
     for dir in made.iter().rev() {
+        #[allow(clippy::let_underscore_must_use)]
         let _ = std::fs::remove_dir(dir);
     }
 }

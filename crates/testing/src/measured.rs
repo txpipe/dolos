@@ -241,6 +241,10 @@ impl<Inner: ArchiveStore> ArchiveStore for MeasuredArchive<Inner> {
         self.inner.truncate_front(after)
     }
 
+    fn persist(&self) -> Result<(), ArchiveError> {
+        self.inner.persist()
+    }
+
     fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
         self.counters.exact_lookups.fetch_add(1, Ordering::Relaxed);
         self.inner.slot_by_block_hash(hash)
@@ -398,6 +402,10 @@ impl<Inner: StateStore> StateStore for MeasuredState<Inner> {
 
     fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {
         self.inner.iter_utxos()
+    }
+
+    fn persist(&self) -> Result<(), StateError> {
+        self.inner.persist()
     }
 }
 

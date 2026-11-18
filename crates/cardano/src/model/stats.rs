@@ -597,11 +597,58 @@ pub(crate) mod testing {
 }
 
 #[cfg(test)]
-mod prop_tests {
+pub(super) mod prop_tests {
     use super::testing::*;
     use super::*;
     use crate::model::testing::{assert_delta_roundtrip, assert_delta_serde_roundtrip};
+    use crate::model::testing::{replay_case, ReplayCase};
     use proptest::prelude::*;
+
+    /// One case per delta this module owns, for `model::replay_tests`.
+    pub(crate) fn replay_cases() -> Vec<ReplayCase> {
+        let tx_count = || prop::option::of(1u64..1_000_000);
+        vec![
+            replay_case(
+                (
+                    prop::option::of(any_address_stats()),
+                    any_address_key(),
+                    any_address_stats(),
+                )
+                    .prop_map(|(entity, key, stats)| {
+                        (entity, StageAddressStats::new((7, key), stats))
+                    }),
+            ),
+            replay_case(
+                (tx_count(), 1u64..1_000_000).prop_map(|(entity, tx_count)| {
+                    let key = GroupKey {
+                        group: PaymentKey([1; 28].into()),
+                        epoch: 3,
+                        member: (),
+                    };
+                    (
+                        entity.map(|tx_count| PaymentStats { tx_count }),
+                        StagePaymentStats::new(key, PaymentStats { tx_count }),
+                    )
+                }),
+            ),
+            replay_case(
+                (tx_count(), 1u64..1_000_000).prop_map(|(entity, tx_count)| {
+                    let key = (3, AccountKey(StakeCredential::AddrKeyhash([2; 28].into())));
+                    (
+                        entity.map(|tx_count| AccountStats { tx_count }),
+                        StageAccountStats::new(key, AccountStats { tx_count }),
+                    )
+                }),
+            ),
+            replay_case(
+                (
+                    prop::option::of(any_payment_address_set()),
+                    any_payment_address_set(),
+                )
+                    .prop_map(|(entity, row)| (entity, StagePaymentAddress::new(row))),
+            ),
+        ]
+    }
 
     proptest! {
         #[test]

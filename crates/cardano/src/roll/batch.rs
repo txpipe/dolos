@@ -393,13 +393,18 @@ impl WorkBatch {
         self.build_index_deltas();
         let archive_index_deltas = self
             .archive_index_deltas
-            .take()
+            .as_deref()
             .expect("build_index_deltas fills the archive half");
-        writer.apply_index(&archive_index_deltas)?;
+        writer.apply_index(archive_index_deltas)?;
 
         writer.commit()?;
 
         Ok(())
+    }
+
+    /// The archive index entries the batch commits, once they are built.
+    pub fn archive_index_deltas(&self) -> &[ArchiveIndexDelta] {
+        self.archive_index_deltas.as_deref().unwrap_or_default()
     }
 
     /// Build both index halves for this batch, once.

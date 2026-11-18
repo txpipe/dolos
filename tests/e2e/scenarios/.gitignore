@@ -2,7 +2,6 @@ tmp
 data
 snapshot
 snapshot.tar.gz
-stele
 alonzo.json
 byron.json
 shelley.json

@@ -75,9 +75,8 @@ struct Stream {
     trailing: usize,
     /// Layers of each kind open right now, and the most that were ever open at
     /// once. A driver that holds several open across one walk of a store — the
-    /// state pass over its shards, the index pass over a band — is reporting
-    /// exactly that through this seam, and the peak is the only thing in the
-    /// stream that says so.
+    /// state pass over its shards — is reporting exactly that through this
+    /// seam, and the peak is the only thing in the stream that says so.
     live: BTreeMap<String, usize>,
     peak: BTreeMap<String, usize>,
 }

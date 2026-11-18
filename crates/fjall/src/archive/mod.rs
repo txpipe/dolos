@@ -67,9 +67,10 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use dolos_core::{
-    key_hash, ArchiveError, ArchiveIndexDelta, ArchiveStore as CoreArchiveStore,
-    ArchiveWriter as CoreArchiveWriter, BlockBody, BlockSlot, ChainPoint, EntityValue, ExactKind,
-    IndexRecord, KeyRange, LogKey, Namespace, RawBlock, StateSchema, TagDimension,
+    blocks_through, key_hash, ArchiveError, ArchiveIndexDelta, ArchiveIngest,
+    ArchiveStore as CoreArchiveStore, ArchiveWriter as CoreArchiveWriter, BlockBody, BlockSlot,
+    ChainPoint, EntityValue, ExactKind, IndexRecord, KeyRange, LogKey, Namespace, RawBlock,
+    Settling, StateSchema, TagDimension,
 };
 use fjall::{Database, Keyspace, OwnedWriteBatch, PersistMode, Readable, Snapshot};
 use pallas::ledger::traverse::MultiEraBlock;
@@ -77,12 +78,14 @@ use pallas::ledger::traverse::MultiEraBlock;
 use dolos_flatfiles::{decode_locations, encode_locations, BlockLocation, FlatFileStore};
 
 use crate::keys::{dim_prefix, hash_dimension, DIM_HASH_SIZE};
+use crate::metrics::StoreMetrics;
 use crate::preset::{Preset, Tuning};
 use crate::view::{View, Viewed};
 use crate::Error;
 
 pub mod entity;
 pub mod exact;
+pub mod ingest;
 pub mod log_keys;
 pub mod scan;
 pub mod tags;
@@ -160,6 +163,14 @@ fn fjall_err(e: fjall::Error) -> ArchiveError {
     ArchiveError::from(Error::Fjall(e))
 }
 
+/// The slot a `blocks` key starts with.
+fn block_key_slot(key: &[u8]) -> Result<BlockSlot, ArchiveError> {
+    key.get(..8)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u64::from_be_bytes)
+        .ok_or_else(|| ArchiveError::InternalError("malformed blocks key".to_string()))
+}
+
 /// Fjall-based archive store.
 ///
 /// Block bodies live in flat segment files; the location table, the log
@@ -180,6 +191,8 @@ pub struct ArchiveStore {
     /// ponytail: reopen rescans; persist cursors only if restart rescans prove
     /// material.
     index_sweep: Arc<Mutex<IndexSweepState>>,
+    /// The metrics of a writable store, dropped before the tempdir.
+    metrics: Option<Arc<StoreMetrics>>,
     _tempdir: Option<Arc<tempfile::TempDir>>,
     /// The mirror a read-only store opened over, dropped after the database
     /// and every iterator over it.
@@ -281,12 +294,16 @@ impl ArchiveStore {
         view: Option<Arc<View>>,
     ) -> Result<Self, Error> {
         let tuning = preset.archive();
-        let db = crate::open_database(tuning.database.builder(index_path), index_path, || {
+        let builder = match view {
+            Some(_) => tuning.database.view_builder(index_path),
+            None => tuning.database.builder(index_path),
+        };
+        let db = crate::open_database(builder, index_path, || {
             view.as_ref()
                 .map_or(index_path.to_path_buf(), |view| view.source_of(index_path))
         })?;
 
-        Ok(Self {
+        let mut store = Self {
             blocks: db.keyspace(keyspace_names::BLOCKS, || tuning.blocks.options())?,
             logs: db.keyspace(keyspace_names::LOGS, || tuning.logs.options())?,
             tags: db.keyspace(keyspace_names::TAGS, || tuning.tags.options())?,
@@ -298,9 +315,17 @@ impl ArchiveStore {
             schema: Arc::new(schema),
             preset,
             index_sweep: Arc::new(Mutex::new(IndexSweepState::default())),
+            metrics: None,
             _tempdir: tempdir,
             view,
-        })
+        };
+
+        if store.view.is_none() {
+            let metrics = StoreMetrics::report("archive", store.db.clone(), store.keyspaces());
+            store.metrics = Some(Arc::new(metrics));
+        }
+
+        Ok(store)
     }
 
     /// The tuning the store opened with.
@@ -347,6 +372,45 @@ impl ArchiveStore {
         Ok(())
     }
 
+    /// The newest block the index locates, without reading its frame: its
+    /// slot and the location of that slot's canonical block, as the tip read
+    /// takes them.
+    pub fn newest_block(&self) -> Result<Option<(BlockSlot, BlockLocation)>, ArchiveError> {
+        let snapshot = self.db.snapshot();
+
+        let Some(guard) = snapshot.last_key_value(&self.blocks) else {
+            return Ok(None);
+        };
+
+        let (key, value) = guard.into_inner().map_err(fjall_err)?;
+
+        Ok(Some((
+            block_key_slot(key.as_ref())?,
+            BlockLocation::from_bytes(&value),
+        )))
+    }
+
+    /// The slot of the oldest block the index locates.
+    pub fn oldest_block_slot(&self) -> Result<Option<BlockSlot>, ArchiveError> {
+        self.oldest_slot_in(&self.db.snapshot())
+    }
+
+    /// [`Self::oldest_block_slot`] as `snapshot` sees it.
+    fn oldest_slot_in(&self, snapshot: &Snapshot) -> Result<Option<BlockSlot>, ArchiveError> {
+        let Some(guard) = snapshot.first_key_value(&self.blocks) else {
+            return Ok(None);
+        };
+
+        let key = guard.key().map_err(fjall_err)?;
+
+        Ok(Some(block_key_slot(key.as_ref())?))
+    }
+
+    /// The directory holding the block segment files.
+    pub fn segments_dir(&self) -> &Path {
+        self.flatfiles.segments_dir()
+    }
+
     /// Whether the index holds any block location, log row or index entry.
     pub fn holds_data(&self) -> Result<bool, Error> {
         for keyspace in [
@@ -364,19 +428,25 @@ impl ArchiveStore {
         Ok(false)
     }
 
+    /// Every keyspace, with its name.
+    fn keyspaces(&self) -> Vec<(&'static str, Keyspace)> {
+        vec![
+            (keyspace_names::BLOCKS, self.blocks.clone()),
+            (keyspace_names::LOGS, self.logs.clone()),
+            (keyspace_names::TAGS, self.tags.clone()),
+            (keyspace_names::EXACT, self.exact.clone()),
+            (keyspace_names::ENTITY, self.entity.clone()),
+            (keyspace_names::META, self.meta.clone()),
+        ]
+    }
+
     /// Per-keyspace disk footprint: `(name, bytes, path)`, the path in the
     /// store's own folder.
     pub fn disk_usage(&self) -> Vec<(&'static str, u64, std::path::PathBuf)> {
-        [
-            (keyspace_names::BLOCKS, &self.blocks),
-            (keyspace_names::LOGS, &self.logs),
-            (keyspace_names::TAGS, &self.tags),
-            (keyspace_names::EXACT, &self.exact),
-            (keyspace_names::ENTITY, &self.entity),
-            (keyspace_names::META, &self.meta),
-        ]
-        .map(|(name, ks)| (name, ks.disk_space(), self.source_of(ks.path())))
-        .to_vec()
+        self.keyspaces()
+            .into_iter()
+            .map(|(name, ks)| (name, ks.disk_space(), self.source_of(ks.path())))
+            .collect()
     }
 
     /// Where `path` is in the store itself, when it is in a view's mirror.
@@ -1210,22 +1280,10 @@ impl CoreArchiveStore for ArchiveStore {
     }
 
     fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError> {
-        let snapshot = self.db.snapshot();
-
-        let Some(guard) = snapshot.last_key_value(&self.blocks) else {
+        let Some((slot, loc)) = self.newest_block()? else {
             return Ok(None);
         };
 
-        let (key, value) = guard.into_inner().map_err(fjall_err)?;
-
-        let slot_bytes: [u8; 8] = key
-            .as_ref()
-            .get(..8)
-            .and_then(|b| b.try_into().ok())
-            .ok_or_else(|| ArchiveError::InternalError("malformed blocks key".to_string()))?;
-        let slot = u64::from_be_bytes(slot_bytes);
-
-        let loc = BlockLocation::from_bytes(&value);
         let body = self.flatfiles.read(&loc).map_err(io_err)?;
 
         Ok(Some((slot, body)))
@@ -1243,13 +1301,7 @@ impl CoreArchiveStore for ArchiveStore {
         let max_entries =
             max_prune_index_rows.map(|rows| usize::try_from(rows).unwrap_or(usize::MAX));
 
-        let first = snapshot
-            .first_key_value(&self.blocks)
-            .map(|guard| guard.key())
-            .transpose()
-            .map_err(fjall_err)?;
-
-        let Some(first) = first else {
+        let Some(start) = self.oldest_slot_in(&snapshot)? else {
             *self.index_sweep.lock().map_err(|_| Error::LockPoisoned)? = IndexSweepState::default();
             tracing::debug!("no start point found on chain, skipping housekeeping");
             return Ok(true);
@@ -1266,7 +1318,6 @@ impl CoreArchiveStore for ArchiveStore {
             return Ok(true);
         };
 
-        let start = u64::from_be_bytes(first.as_ref()[..8].try_into().unwrap());
         let last = u64::from_be_bytes(last.as_ref()[..8].try_into().unwrap());
 
         let delta = last.saturating_sub(start);
@@ -1331,12 +1382,39 @@ impl CoreArchiveStore for ArchiveStore {
         Ok(blocks_done && indexes_done)
     }
 
+    /// Commits are journaled with [`PersistMode::Buffer`]; this fsyncs the
+    /// journal. Block bodies are synced by the commit that appends them, before
+    /// the index entries pointing at them. A read-only view committed nothing.
+    fn persist(&self) -> Result<(), ArchiveError> {
+        if self.view.is_some() {
+            return Ok(());
+        }
+
+        self.db.persist(PersistMode::SyncAll).map_err(fjall_err)?;
+
+        Ok(())
+    }
+
+    /// Ingested runs for `archive-blocks` and `archive-logs` ([`ingest`]);
+    /// a finished run's tables and version are synced by `finish`.
+    fn start_ingest(&self) -> Result<Box<dyn ArchiveIngest + '_>, ArchiveError> {
+        self.writable()?;
+
+        Ok(Box::new(ingest::Ingest::new(self, ingest::L0_GUARD)))
+    }
+
+    fn settle_ingested(&self) -> Result<Settling, ArchiveError> {
+        self.writable()?;
+
+        Ok(Settling::of(ingest::settle(self)?))
+    }
+
     /// Drop everything the archive holds after `after`.
     ///
-    /// The cut is by slot: the block at `after`'s slot survives (including a
-    /// second block sharing that slot), while log rows *at* the slot go with
-    /// the cut — the exact boundary redb's `remove_after` draws by comparing
-    /// full log keys against the bare 8-byte temporal prefix.
+    /// Blocks are cut at `after` itself: at a slot holding more than one, the
+    /// ones the chain puts after it go. Log rows *at* the slot go with the
+    /// cut — the exact boundary redb's `remove_after` draws by comparing full
+    /// log keys against the bare 8-byte temporal prefix.
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError> {
         self.writable()?;
 
@@ -1345,11 +1423,35 @@ impl CoreArchiveStore for ArchiveStore {
 
         let mut batch = self.db.batch();
 
-        // Find the earliest location after `slot` to know where to truncate
-        // the segment file: a slot holding more than one block contributes
-        // all of them, so the cut lands before the earliest body it has to
+        // Find the earliest location dropped to know where to truncate the
+        // segment file: a slot holding more than one block contributes every
+        // one it drops, so the cut lands before the earliest body it has to
         // drop and none survives.
         let mut earliest_after: Option<BlockLocation> = None;
+        let mut drop_location = |loc: BlockLocation| match &earliest_after {
+            Some(prev)
+                if prev.segment_id < loc.segment_id
+                    || (prev.segment_id == loc.segment_id && prev.offset <= loc.offset) => {}
+            _ => earliest_after = Some(loc),
+        };
+
+        // Stored newest first, so the blocks the chain puts after `after`
+        // lead.
+        let mut at_slot = self.stored_locations(&snapshot, slot)?;
+        if at_slot.len() > 1 {
+            let bodies = at_slot
+                .iter()
+                .rev()
+                .map(|loc| self.flatfiles.read(loc).map_err(io_err))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let dropped = at_slot.len() - blocks_through(&bodies, after);
+
+            if dropped > 0 {
+                at_slot.drain(..dropped).for_each(&mut drop_location);
+                batch.insert(&self.blocks, slot.to_be_bytes(), encode_locations(&at_slot));
+            }
+        }
 
         if let Some(from) = slot.checked_add(1) {
             let range = snapshot.range(&self.blocks, from.to_be_bytes().to_vec()..);
@@ -1357,18 +1459,7 @@ impl CoreArchiveStore for ArchiveStore {
             for guard in range {
                 let (key, value) = guard.into_inner().map_err(fjall_err)?;
 
-                for loc in decode_locations(&value) {
-                    match &earliest_after {
-                        None => earliest_after = Some(loc),
-                        Some(prev) => {
-                            if loc.segment_id < prev.segment_id
-                                || (loc.segment_id == prev.segment_id && loc.offset < prev.offset)
-                            {
-                                earliest_after = Some(loc);
-                            }
-                        }
-                    }
-                }
+                decode_locations(&value).for_each(&mut drop_location);
 
                 batch.remove(&self.blocks, key);
             }
@@ -1823,6 +1914,40 @@ mod tests {
             .collect()
     }
 
+    /// A view over an index keyspace past its L0 threshold leaves its runs as
+    /// they are: fjall queues a compaction for it on open, and a view has no
+    /// workers to run one in its mirror.
+    #[test]
+    fn a_view_leaves_a_compaction_backlog_alone() {
+        use fjall::AbstractTree;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive");
+        let runs = usize::from(Preset::Standard.archive().tags.l0_threshold) + 2;
+
+        {
+            let store = ArchiveStore::open(schema(), &path, None, Preset::Standard).unwrap();
+
+            // Keys at both ends make every table overlap, so each flush is its
+            // own L0 run; a manual flush queues no compaction.
+            for run in 0..runs as u32 {
+                store.tags.insert("a", run.to_be_bytes()).unwrap();
+                store.tags.insert("z", run.to_be_bytes()).unwrap();
+                store.tags.tree.flush_active_memtable(0).unwrap();
+            }
+            assert_eq!(store.tags.tree.l0_run_count(), runs);
+            store.shutdown().unwrap();
+        }
+
+        let view = open_view(&path);
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        assert_eq!(
+            view.tags.tree.l0_run_count(),
+            runs,
+            "the view compacted its mirror"
+        );
+    }
+
     /// A writer, a prune, a truncation, a compaction or an identity on a
     /// read-only archive is refused and changes no file, the segments'
     /// included.
@@ -1847,6 +1972,9 @@ mod tests {
                 assert!(error.to_string().contains("read-only"), "{error:?}");
             }
 
+            // Nothing was committed through the view, so there is nothing to sync.
+            store.persist().unwrap();
+
             for error in [
                 store.compact().unwrap_err(),
                 store.record_identity("other").unwrap_err(),
@@ -1862,6 +1990,28 @@ mod tests {
 
         let store = ArchiveStore::open(schema(), &path, None, Preset::Standard).unwrap();
         assert_eq!(store.get_tip().unwrap().unwrap().0, 102);
+    }
+
+    /// Blocks committed and persisted are there when the archive is reopened
+    /// without a shutdown. The fsync itself shows only after a power loss, so
+    /// this pins that `persist` succeeds on a writable archive.
+    #[test]
+    fn a_persisted_commit_survives_a_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive");
+
+        {
+            let store = ArchiveStore::open(schema(), &path, None, Preset::Standard).unwrap();
+            write(&store, &[(100, body(100, 0)), (101, body(101, 0))]);
+            store.persist().unwrap();
+        }
+
+        let store = ArchiveStore::open(schema(), &path, None, Preset::Standard).unwrap();
+        assert_eq!(store.get_tip().unwrap().unwrap().0, 101);
+        assert_eq!(
+            store.get_block_by_slot(&100).unwrap(),
+            Some(body(100, 0).to_vec())
+        );
     }
 
     /// An archive a stopped removal marked refuses every open, its views'

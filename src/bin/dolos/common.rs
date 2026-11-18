@@ -4,8 +4,7 @@ use dolos_core::config::{
 };
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use miette::{Context as _, IntoDiagnostic};
-use opentelemetry::trace::TracerProvider as _;
-use opentelemetry_otlp::WithExportConfig as _;
+use opentelemetry::{metrics::MeterProvider as _, trace::TracerProvider as _};
 use std::sync::Arc;
 use std::{
     path::{Path, PathBuf},
@@ -168,8 +167,13 @@ fn render_domain_build_error(error: DomainBuildError) -> miette::Report {
             ref state,
         }) => {
             let msg = match (wal, state) {
-                (Some(w), Some(s)) => format!(
+                (Some(w), Some(s)) if s.slot() > w.slot() => format!(
                     "state (slot {}) is ahead of WAL (slot {})",
+                    s.slot(),
+                    w.slot()
+                ),
+                (Some(w), Some(s)) => format!(
+                    "state (slot {}) is behind WAL (slot {}) after catch-up",
                     s.slot(),
                     w.slot()
                 ),
@@ -185,8 +189,72 @@ fn render_domain_build_error(error: DomainBuildError) -> miette::Report {
             };
             miette::miette!(help = help, "{msg}")
         }
+        DomainBuildError::Bootstrap(error @ dolos_core::DomainError::WalGap { .. }) => {
+            miette::miette!(
+                help = "To see the missing blocks, run `dolos sync recover --dry-run`. To reset the WAL to the state cursor, run `dolos sync recover --discard-wal`. This command erases the rollback history of the WAL.",
+                "{error}, so Dolos does not replay it"
+            )
+        }
         other => miette::miette!("{other}"),
     }
+}
+
+/// Keeps the OTLP tracer and meter providers for the life of a command and
+/// flushes them on drop.
+///
+/// `setup_tracing` also registers the providers globally, and those copies are
+/// never dropped, so without the guard the last spans and metrics are lost
+/// when the process exits. Hold it until the command returns, inside the
+/// command's tokio runtime, while the exporters can still deliver.
+#[must_use = "dropping the guard shuts tracing down immediately"]
+#[derive(Default)]
+pub struct TracingGuard {
+    provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
+    meters: Option<opentelemetry_sdk::metrics::SdkMeterProvider>,
+    _process: Option<crate::telemetry::process::ProcessMetrics>,
+}
+
+impl Drop for TracingGuard {
+    fn drop(&mut self) {
+        if let Some(meters) = self.meters.take() {
+            if let Err(err) = meters.shutdown() {
+                warn!(%err, "failed to flush metrics on exit");
+            }
+        }
+
+        if let Some(provider) = self.provider.take() {
+            if let Err(err) = provider.shutdown() {
+                warn!(%err, "failed to flush telemetry on exit");
+            }
+        }
+    }
+}
+
+/// Builds the batch tracer provider over `exporter`, registers it globally and
+/// returns the guard that flushes it, with the tracer for the tracing layer.
+fn telemetry_pipeline<E>(
+    exporter: E,
+    resource: opentelemetry_sdk::Resource,
+) -> (TracingGuard, opentelemetry_sdk::trace::SdkTracer)
+where
+    E: opentelemetry_sdk::trace::SpanExporter + 'static,
+{
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .with_resource(resource)
+        .build();
+
+    opentelemetry::global::set_tracer_provider(provider.clone());
+
+    let tracer = provider.tracer("dolos");
+
+    let guard = TracingGuard {
+        provider: Some(provider),
+        meters: None,
+        _process: None,
+    };
+
+    (guard, tracer)
 }
 
 pub fn setup_tracing_error_only() -> miette::Result<()> {
@@ -216,11 +284,18 @@ pub fn setup_tracing_warnings() -> miette::Result<()> {
     Ok(())
 }
 
-/// Dolos's own targets at `level`, then the `filter` directives over them.
+/// Dolos's own targets at `level`, every other target at `error`, then the
+/// `filter` directives over them.
+///
+/// The `error` floor keeps a library's own account of a failure, such as the
+/// storage engine naming the OS error behind a failed sync. `tower_http` is
+/// off: it reports every HTTP 5xx at `error`, including deliberate 503s.
 fn log_filter(config: &LoggingConfig) -> Result<Targets, ConfigError> {
     let mut filter = Targets::new()
+        .with_default(tracing::Level::ERROR)
         .with_target("dolos", config.level)
-        .with_target("gasket", config.level);
+        .with_target("gasket", config.level)
+        .with_target("tower_http", tracing_subscriber::filter::LevelFilter::OFF);
 
     if let Some(directives) = &config.filter {
         let extra: Targets = directives.parse().map_err(|error| {
@@ -242,36 +317,74 @@ fn log_filter(config: &LoggingConfig) -> Result<Targets, ConfigError> {
     Ok(filter)
 }
 
-/// Logs go to stderr, which leaves stdout to a command's result.
-pub fn setup_tracing(
-    config: &LoggingConfig,
-    telemetry: Option<&TelemetryConfig>,
-) -> miette::Result<()> {
-    let filter = log_filter(config).into_diagnostic()?;
+/// Builds the tracer and, unless `metrics = false`, the meter provider of
+/// `[telemetry]`, both registered globally, and the guard that flushes them.
+fn telemetry_providers(
+    config: &RootConfig,
+) -> miette::Result<Option<(TracingGuard, opentelemetry_sdk::trace::SdkTracer)>> {
+    let (Some(telemetry), Some(exporters)) = (
+        &config.telemetry,
+        crate::telemetry::exporters(config.telemetry.as_ref())?,
+    ) else {
+        return Ok(None);
+    };
 
-    let otel_layer = if let Some(telemetry) = telemetry {
-        let exporter = opentelemetry_otlp::SpanExporter::builder()
-            .with_tonic()
-            .with_endpoint(&telemetry.otlp_endpoint)
-            .build()
-            .into_diagnostic()
-            .context("building OTLP span exporter")?;
+    telemetry_providers_over(config, telemetry, exporters.spans, exporters.metrics).map(Some)
+}
 
-        let tracer = opentelemetry_sdk::trace::SdkTracerProvider::builder()
-            .with_batch_exporter(exporter)
-            .with_resource(
-                opentelemetry_sdk::Resource::builder()
-                    .with_service_name(telemetry.service_name.clone())
-                    .build(),
-            )
-            .build();
+/// [`telemetry_providers`] over the given exporters.
+pub(crate) fn telemetry_providers_over<S, M>(
+    config: &RootConfig,
+    telemetry: &TelemetryConfig,
+    spans: S,
+    metrics: Option<M>,
+) -> miette::Result<(TracingGuard, opentelemetry_sdk::trace::SdkTracer)>
+where
+    S: opentelemetry_sdk::trace::SpanExporter + 'static,
+    M: opentelemetry_sdk::metrics::exporter::PushMetricExporter,
+{
+    let resource = crate::telemetry::resource(telemetry, network_label(config)?);
+    let (mut guard, tracer) = telemetry_pipeline(spans, resource.clone());
 
-        opentelemetry::global::set_tracer_provider(tracer.clone());
+    guard.meters = metrics.map(|exporter| {
+        crate::telemetry::install_meter_provider(exporter, telemetry.metrics_interval(), resource)
+    });
+    guard._process = guard.meters.as_ref().map(|meters| {
+        crate::telemetry::process::ProcessMetrics::register(
+            &meters.meter(crate::telemetry::process::METER),
+        )
+    });
 
-        let layer = tracing_opentelemetry::layer().with_tracer(tracer.tracer("dolos"));
-        Some(layer)
+    Ok((guard, tracer))
+}
+
+/// The `dolos.network` resource attribute: a known network's name, else the
+/// magic.
+fn network_label(config: &RootConfig) -> miette::Result<String> {
+    let network = resolve_network(config)?;
+
+    Ok(match network.known() {
+        Some(known) => known.name.to_string(),
+        None => network.magic().to_string(),
+    })
+}
+
+/// Logs go to stderr, which leaves stdout to a command's result. With
+/// `[telemetry]`, spans and metrics are exported over OTLP.
+///
+/// Instruments bind to the meter provider that is global when they are
+/// created, so every command calls this before it opens the domain; an
+/// instrument created earlier records nothing.
+pub fn setup_tracing(config: &RootConfig) -> miette::Result<TracingGuard> {
+    let filter = log_filter(&config.logging).into_diagnostic()?;
+
+    let (otel_layer, guard) = if let Some((guard, tracer)) = telemetry_providers(config)? {
+        (
+            Some(tracing_opentelemetry::layer().with_tracer(tracer)),
+            guard,
+        )
     } else {
-        None
+        (None, TracingGuard::default())
     };
 
     #[cfg(not(feature = "debug"))]
@@ -298,7 +411,7 @@ pub fn setup_tracing(
     // forwarded to the tracing subscriber.
     tracing_log::LogTracer::init().ok();
 
-    Ok(())
+    Ok(guard)
 }
 
 #[inline]
@@ -334,6 +447,33 @@ pub fn hook_exit_token() -> CancellationToken {
     });
 
     cancel
+}
+
+/// The mempool's size gauge and its lifecycle subscriber, which stops when
+/// this value is dropped.
+pub struct MempoolMetrics {
+    _gauge: dolos_core::telemetry::mempool::MempoolGauge,
+    subscriber: JoinHandle<()>,
+}
+
+impl Drop for MempoolMetrics {
+    fn drop(&mut self) {
+        self.subscriber.abort();
+    }
+}
+
+/// Starts the mempool metrics over `domain`'s mempool. Call it before
+/// serving, so the subscriber sees every submission.
+pub fn mempool_metrics(domain: &DomainAdapter) -> MempoolMetrics {
+    use dolos_core::telemetry::mempool::{Lifecycle, MempoolGauge};
+
+    let mempool = domain.mempool().clone();
+    let events = mempool.subscribe();
+
+    MempoolMetrics {
+        _gauge: MempoolGauge::register(mempool.clone()),
+        subscriber: tokio::spawn(async move { Lifecycle::new().follow(&mempool, events).await }),
+    }
 }
 
 /// Run the pipeline until it ends or `exit` is cancelled, then tear it down.
@@ -479,7 +619,35 @@ mod tests {
         assert!(filter.would_enable("gasket", &tracing::Level::WARN));
         assert!(!filter.would_enable("gasket", &tracing::Level::INFO));
         assert!(filter.would_enable("fjall", &tracing::Level::INFO));
-        assert!(!filter.would_enable("tonic", &tracing::Level::ERROR));
+        assert!(filter.would_enable("fjall::db", &tracing::Level::ERROR));
+        assert!(filter.would_enable("tonic", &tracing::Level::ERROR));
+        assert!(!filter.would_enable("tonic", &tracing::Level::WARN));
+        assert!(!filter.would_enable("tower_http::trace::on_failure", &tracing::Level::ERROR));
+
+        let config = LoggingConfig {
+            filter: Some("tower_http=error".into()),
+            ..Default::default()
+        };
+        assert!(log_filter(&config)
+            .unwrap()
+            .would_enable("tower_http::trace::on_failure", &tracing::Level::ERROR));
+
+        let config = LoggingConfig {
+            filter: Some("warn".into()),
+            ..Default::default()
+        };
+        let filter = log_filter(&config).unwrap();
+        assert!(filter.would_enable("tonic", &tracing::Level::WARN));
+        assert!(filter.would_enable("dolos", &tracing::Level::INFO));
+        assert!(!filter.would_enable("tower_http::trace::on_failure", &tracing::Level::ERROR));
+
+        let config = LoggingConfig {
+            filter: Some("off".into()),
+            ..Default::default()
+        };
+        assert!(!log_filter(&config)
+            .unwrap()
+            .would_enable("tonic", &tracing::Level::ERROR));
 
         let config = LoggingConfig {
             filter: Some("dolos=loud".into()),
@@ -594,5 +762,102 @@ mod tests {
         .expect("cancelled drivers should finish promptly");
 
         assert!(result.is_ok(), "a signalled shutdown is not a failure");
+    }
+
+    /// Counts the spans that actually reach the exporter.
+    #[derive(Debug, Clone, Default)]
+    struct CountingExporter(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl opentelemetry_sdk::trace::SpanExporter for CountingExporter {
+        async fn export(
+            &self,
+            batch: Vec<opentelemetry_sdk::trace::SpanData>,
+        ) -> opentelemetry_sdk::error::OTelSdkResult {
+            self.0
+                .fetch_add(batch.len(), std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// The provider `telemetry_pipeline` builds has to end up in the guard it
+    /// returns, or dropping the guard flushes nothing.
+    #[test]
+    fn the_telemetry_pipeline_guard_flushes_its_provider() {
+        use opentelemetry::trace::{Span as _, Tracer as _};
+
+        let exporter = CountingExporter::default();
+        let resource = opentelemetry_sdk::Resource::builder_empty().build();
+        let (guard, tracer) = telemetry_pipeline(exporter.clone(), resource);
+
+        tracer.start("work").end();
+
+        let exported = || exporter.0.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(exported(), 0, "the span should still be buffered");
+
+        // The tracer and the globally registered copy keep the provider alive,
+        // so only the guard can trigger this flush.
+        drop(guard);
+
+        assert_eq!(exported(), 1, "dropping the guard should flush the span");
+    }
+
+    /// The batch exporter holds finished spans until its next scheduled
+    /// export, so a command that returns before then loses them. Dropping the
+    /// guard has to deliver them.
+    #[test]
+    fn dropping_the_tracing_guard_delivers_buffered_spans() {
+        use opentelemetry::trace::{Span as _, Tracer as _};
+
+        let exporter = CountingExporter::default();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_batch_exporter(exporter.clone())
+            .build();
+        let guard = TracingGuard {
+            provider: Some(provider.clone()),
+            meters: None,
+            _process: None,
+        };
+
+        // `provider` stands in for the copy `setup_tracing` registers globally,
+        // which is never dropped. Were the guard's copy the last one, dropping
+        // it would flush on its own and this test could not fail.
+        provider.tracer("test").start("work").end();
+
+        let exported = || exporter.0.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(exported(), 0, "the span should still be buffered");
+
+        drop(guard);
+
+        assert_eq!(exported(), 1, "dropping the guard should flush the span");
+        drop(provider);
+    }
+
+    /// The periodic reader holds metrics until its next interval, so dropping
+    /// the guard has to export them, as it does buffered spans.
+    #[test]
+    fn dropping_the_tracing_guard_exports_pending_metrics() {
+        use opentelemetry::metrics::MeterProvider as _;
+
+        let exporter = opentelemetry_sdk::metrics::InMemoryMetricExporter::default();
+        let meters = crate::telemetry::meter_provider(
+            exporter.clone(),
+            std::time::Duration::from_secs(3600),
+            opentelemetry_sdk::Resource::builder_empty().build(),
+        );
+        let guard = TracingGuard {
+            provider: None,
+            meters: Some(meters.clone()),
+            _process: None,
+        };
+
+        // `meters` stands in for the globally registered copy, as above.
+        meters.meter("test").u64_counter("work").build().add(1, &[]);
+        let exported = || exporter.get_finished_metrics().unwrap().len();
+        assert_eq!(exported(), 0, "the sample should wait for the interval");
+
+        drop(guard);
+
+        assert_eq!(exported(), 1, "dropping the guard should export the sample");
+        drop(meters);
     }
 }

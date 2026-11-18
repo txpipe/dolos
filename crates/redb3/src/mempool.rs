@@ -11,8 +11,8 @@ use tracing::{debug, warn};
 use crate::handle::Handle;
 
 use dolos_core::{
-    config::RedbMempoolConfig, ChainPoint, EraCbor, MempoolError, MempoolEvent, MempoolPage,
-    MempoolStore, MempoolTx, MempoolTxStage, TxHash, TxStatus,
+    config::RedbMempoolConfig, ChainPoint, EraCbor, MempoolCount, MempoolError, MempoolEvent,
+    MempoolPage, MempoolStore, MempoolTx, MempoolTxStage, TxHash, TxStatus,
 };
 
 // ── Error newtype (mirrors wal/mod.rs pattern) ──────────────────────────
@@ -473,6 +473,10 @@ impl PendingTable {
         Ok(table.len()? > 0)
     }
 
+    fn len(rx: &redb::ReadTransaction) -> Result<u64, RedbMempoolError> {
+        Ok(rx.open_table(Self::DEF)?.len()?)
+    }
+
     fn peek(rx: &redb::ReadTransaction) -> Result<Vec<MempoolTx>, RedbMempoolError> {
         let table = rx.open_table(Self::DEF)?;
         let iter = table.iter()?;
@@ -558,6 +562,10 @@ impl InflightTable {
     fn initialize(wx: &redb::WriteTransaction) -> Result<(), RedbMempoolError> {
         wx.open_table(Self::DEF)?;
         Ok(())
+    }
+
+    fn len(rx: &redb::ReadTransaction) -> Result<u64, RedbMempoolError> {
+        Ok(rx.open_table(Self::DEF)?.len()?)
     }
 
     fn get(
@@ -832,6 +840,19 @@ impl MempoolStore for RedbMempool {
         PendingTable::peek(&rx).unwrap_or_default()
     }
 
+    fn count(&self) -> MempoolCount {
+        let Ok(rx) = self.db.begin_read() else {
+            return MempoolCount::default();
+        };
+
+        let len = |len: Result<u64, RedbMempoolError>| len.unwrap_or(0) as usize;
+
+        MempoolCount {
+            pending: len(PendingTable::len(&rx)),
+            inflight: len(InflightTable::len(&rx)),
+        }
+    }
+
     fn mark_inflight(&self, hashes: &[TxHash]) -> Result<(), MempoolError> {
         let hash_set: HashSet<TxHash> = hashes.iter().copied().collect();
 
@@ -870,6 +891,25 @@ impl MempoolStore for RedbMempool {
         Ok(())
     }
 
+    fn requeue_propagated(&self, except: &[TxHash]) -> Result<(), MempoolError> {
+        self.with_write_tx(|wx| {
+            let mut events = Vec::new();
+            for (hash, record) in InflightTable::collect_all(wx)? {
+                if record.stage == InflightStage::Propagated && !except.contains(&hash) {
+                    InflightTable::remove(wx, &hash)?;
+                    PendingTable::insert(wx, &hash, &record.payload)?;
+                    let mut tx = record.to_mempool_tx(hash);
+                    tx.retry();
+                    debug!(tx.hash = %tx.hash, "tx requeued");
+                    events.push(tx);
+                }
+            }
+            Ok(events)
+        })?;
+
+        Ok(())
+    }
+
     fn find_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx> {
         let rx = self.db.begin_read().ok()?;
         let record = InflightTable::get(&rx, tx_hash).ok()??;
@@ -896,6 +936,12 @@ impl MempoolStore for RedbMempool {
         self.with_write_tx(|wx| {
             let seen_set: HashSet<TxHash> = seen_txs.iter().copied().collect();
             let unseen_set: HashSet<TxHash> = unseen_txs.iter().copied().collect();
+
+            // A re-queued tx can land on chain before it is offered again.
+            for (hash, payload) in PendingTable::drain_by_hashes(wx, &seen_set)? {
+                InflightTable::write(wx, &hash, &InflightRecord::new(payload))?;
+            }
+
             let entries = InflightTable::collect_all(wx)?;
             let mut events = Vec::new();
 

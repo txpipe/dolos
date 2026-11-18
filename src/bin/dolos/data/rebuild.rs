@@ -463,7 +463,7 @@ fn build_domain(
         .context("creating the in-memory WAL")?;
 
     let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
-    let query_limiter = QueryLimiter::new(config.serve.max_concurrent_queries);
+    let query_limiter = config.serve.query_limiter();
     let cache = open_store(
         "cache",
         dolos::storage::open_cache_store(config, query_limiter.clone()),
@@ -476,8 +476,10 @@ fn build_domain(
         mempool_config: config.mempool.clone(),
         genesis,
         chain: Arc::new(std::sync::RwLock::new(chain)),
+        storage_gauges: dolos::adapters::storage_gauges(&wal, None, &archive),
         wal,
         state,
+        tip_gauges: dolos::adapters::tip_gauges(&archive),
         archive,
         mempool: MempoolBackend::Ephemeral(dolos_core::builtin::EphemeralMempool::new()),
         cache,

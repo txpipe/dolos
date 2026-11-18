@@ -29,6 +29,10 @@ use tokio::sync::watch;
 
 use crate::blocks::make_conway_block_with_prev;
 
+/// The ids a request for transaction bodies asked for, and the bytes of the
+/// bodies the node replied with.
+pub type TxBodiesServed = (Vec<Vec<u8>>, Vec<Vec<u8>>);
+
 /// How a [`PeerFixture`] serves its chain.
 #[derive(Debug, Clone, Default)]
 pub struct PeerOptions {
@@ -58,6 +62,16 @@ pub struct PeerOptions {
     /// In these tx-submission sessions, numbered from 1, ask for transaction
     /// ids once, then close the session once the node replies.
     pub request_tx_ids_at: Vec<usize>,
+    /// Make that request a blocking one, as a node's first request is.
+    pub blocking_tx_ids_request: bool,
+    /// In every other tx-submission session, keep asking for transaction ids
+    /// and acknowledging them, and close the session at an offer of this id.
+    pub close_at_offer_of: Option<Vec<u8>>,
+    /// In every other tx-submission session, ask in a node's order and close
+    /// the session when judging this id's body: see [`serve_as_a_node`].
+    pub close_at_body_of: Option<Vec<u8>>,
+    /// How many transaction ids to ask for at a time; one when zero.
+    pub tx_ids_per_request: u16,
     /// Serve this block's body as bytes that decode as no block.
     pub corrupt_body: Option<u64>,
     /// Close each session with a FIN, as a node does, rather than a reset,
@@ -209,6 +223,8 @@ struct Shared {
     intersected_at: Mutex<Vec<Instant>>,
     sessions: AtomicUsize,
     tx_submissions: AtomicUsize,
+    tx_id_replies: Mutex<Vec<(usize, Vec<Vec<u8>>)>>,
+    tx_bodies_served: Mutex<Vec<TxBodiesServed>>,
     closed_by_node: AtomicUsize,
     stop: watch::Sender<bool>,
 }
@@ -232,6 +248,10 @@ impl Shared {
 
     fn stopped(&self) -> bool {
         *self.stop.borrow()
+    }
+
+    fn record_tx_id_reply(&self, session: usize, ids: Vec<Vec<u8>>) {
+        self.tx_id_replies.lock().unwrap().push((session, ids));
     }
 }
 
@@ -260,6 +280,8 @@ impl PeerFixture {
             intersected_at: Mutex::new(Vec::new()),
             sessions: AtomicUsize::new(0),
             tx_submissions: AtomicUsize::new(0),
+            tx_id_replies: Mutex::new(Vec::new()),
+            tx_bodies_served: Mutex::new(Vec::new()),
             closed_by_node: AtomicUsize::new(0),
             stop: watch::Sender::new(false),
         });
@@ -320,6 +342,27 @@ impl PeerFixture {
     /// The sessions that started tx-submission so far.
     pub fn tx_submissions(&self) -> usize {
         self.shared.tx_submissions.load(Ordering::SeqCst)
+    }
+
+    /// The transaction ids the node replied with, each with the number of its
+    /// tx-submission session, counted from 1.
+    pub fn tx_ids_offered(&self) -> Vec<(usize, Vec<u8>)> {
+        self.tx_id_replies()
+            .into_iter()
+            .flat_map(|(session, ids)| ids.into_iter().map(move |id| (session, id)))
+            .collect()
+    }
+
+    /// Each reply of transaction ids the node sent, empty ones too, in order,
+    /// with the number of its tx-submission session.
+    pub fn tx_id_replies(&self) -> Vec<(usize, Vec<Vec<u8>>)> {
+        self.shared.tx_id_replies.lock().unwrap().clone()
+    }
+
+    /// Each request for transaction bodies, in order.
+    /// [`PeerOptions::close_at_body_of`] is what asks for them.
+    pub fn tx_bodies_served(&self) -> Vec<TxBodiesServed> {
+        self.shared.tx_bodies_served.lock().unwrap().clone()
     }
 
     /// The connections closed with [`PeerOptions::close_with_fin`] that the
@@ -600,14 +643,51 @@ async fn serve_txsubmission(mut server: txsubmission::Server, shared: &Shared) {
 
     let number = shared.tx_submissions.fetch_add(1, Ordering::SeqCst) + 1;
     let options = &shared.options;
+    let per_request = options.tx_ids_per_request.max(1);
 
     if options.request_tx_ids_at.contains(&number) {
         if server
-            .acknowledge_and_request_tx_ids(false, 0, 1)
+            .acknowledge_and_request_tx_ids(options.blocking_tx_ids_request, 0, per_request)
             .await
             .is_ok()
         {
-            let _ = server.receive_next_reply().await;
+            if let Ok(txsubmission::Reply::TxIds(ids)) = server.receive_next_reply().await {
+                shared.record_tx_id_reply(number, ids.into_iter().map(|id| id.0 .1).collect());
+            }
+        }
+
+        return;
+    }
+
+    if let Some(poison) = &options.close_at_body_of {
+        // Any error is the session ending, which is all this fixture does anyway.
+        let _ = serve_as_a_node(&mut server, shared, number, poison, per_request).await;
+        return;
+    }
+
+    if let Some(poison) = &options.close_at_offer_of {
+        let mut acknowledge = 0;
+
+        while server
+            .acknowledge_and_request_tx_ids(false, acknowledge, per_request)
+            .await
+            .is_ok()
+        {
+            let Ok(txsubmission::Reply::TxIds(ids)) = server.receive_next_reply().await else {
+                return;
+            };
+
+            let ids: Vec<Vec<u8>> = ids.into_iter().map(|id| id.0 .1).collect();
+            let closes = ids.contains(poison);
+            acknowledge = ids.len() as u16;
+
+            shared.record_tx_id_reply(number, ids);
+
+            if closes {
+                return;
+            }
+
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
         return;
@@ -617,4 +697,70 @@ async fn serve_txsubmission(mut server: txsubmission::Server, shared: &Shared) {
         Some(delay) => tokio::time::sleep(delay).await,
         None => std::future::pending().await,
     }
+}
+
+/// Ask as a node's tx-submission inbound side does: a blocking first request,
+/// then for each offer the bodies and a non-blocking request with what was
+/// judged so far acknowledged, and a blocking one with everything acknowledged
+/// once an offer is empty. A node pipelines the bodies and the non-blocking
+/// request; the node under test sees and answers them in this same order.
+/// An offer holding `poison` closes the session once both are answered.
+async fn serve_as_a_node(
+    server: &mut txsubmission::Server,
+    shared: &Shared,
+    number: usize,
+    poison: &[u8],
+    per_request: u16,
+) -> Result<(), txsubmission::Error> {
+    let mut judged = 0;
+
+    loop {
+        let mut offer = request_offer(server, shared, number, true, judged, per_request).await?;
+        judged = 0;
+
+        while !offer.is_empty() {
+            let closes = offer.iter().any(|id| id.1 == poison);
+
+            server.request_txs(offer.clone()).await?;
+
+            if let txsubmission::Reply::Txs(bodies) = server.receive_next_reply().await? {
+                shared.tx_bodies_served.lock().unwrap().push((
+                    offer.iter().map(|id| id.1.clone()).collect(),
+                    bodies.into_iter().map(|body| body.1).collect(),
+                ));
+            }
+
+            let next = request_offer(server, shared, number, false, judged, per_request).await?;
+
+            if closes {
+                return Ok(());
+            }
+
+            judged = offer.len() as u16;
+            offer = next;
+        }
+    }
+}
+
+async fn request_offer(
+    server: &mut txsubmission::Server,
+    shared: &Shared,
+    number: usize,
+    blocking: bool,
+    acknowledge: u16,
+    per_request: u16,
+) -> Result<Vec<txsubmission::EraTxId>, txsubmission::Error> {
+    server
+        .acknowledge_and_request_tx_ids(blocking, acknowledge, per_request)
+        .await?;
+
+    let txsubmission::Reply::TxIds(ids) = server.receive_next_reply().await? else {
+        return Ok(Vec::new());
+    };
+
+    let ids: Vec<_> = ids.into_iter().map(|id| id.0).collect();
+
+    shared.record_tx_id_reply(number, ids.iter().map(|id| id.1.clone()).collect());
+
+    Ok(ids)
 }

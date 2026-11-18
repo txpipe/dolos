@@ -12,13 +12,14 @@ authors.workspace = true
 [dependencies]
 tracing.workspace = true
 tokio.workspace = true
-tower-http.workspace = true
+tower-http = { workspace = true, features = ["timeout"] }
 pallas.workspace = true
 hex.workspace = true
 bech32.workspace = true
 base58 = "0.2.0"
 serde.workspace = true
 serde_json.workspace = true
+opentelemetry.workspace = true
 
 axum = { version = "0.8.4" }
 

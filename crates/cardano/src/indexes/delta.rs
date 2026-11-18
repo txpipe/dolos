@@ -640,7 +640,7 @@ pub fn utxo_tags(output: &MultiEraOutput) -> Vec<Tag> {
 /// set (produced, recovered) gains its tags, every ref it takes out (consumed,
 /// undone) loses them, so applying both through one writer keeps the tags a
 /// projection of the set. Used by genesis, WAL replay, the epoch-boundary
-/// AVVM deletion and the stele restore.
+/// AVVM deletion and the snapshot restore.
 pub fn utxo_index_delta_from_utxo_delta(utxo_delta: &UtxoSetDelta) -> UtxoIndexDelta {
     let mut builder = CardanoIndexDeltaBuilder::new();
     builder.add_utxo_tags_from_delta(utxo_delta);

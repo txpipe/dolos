@@ -13,28 +13,26 @@ use crate::{
     boundary::{self, Boundary},
     export::{self, Document, Plan, Predecessor},
     inscription::Inscription,
-    planning::{self, EpochRange},
+    planning,
+    prepare::{self, Bundle, Finalizing},
     registry::{self, Preview, Published, Publishing},
-    Error, RetainedEpochs,
+    staging::{Budget, Staged},
+    Error,
 };
 
 /// The selection shared by publication, digest and reproduction.
 ///
 /// All fields are optional so [`Selection::default`] preserves the profile's
-/// measured defaults and selects every epoch available at the current cursor.
+/// measured defaults.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Selection {
-    pub epochs: Option<EpochRange>,
-    pub index_band: Option<NonZeroUsize>,
     pub producers: Option<NonZeroUsize>,
 }
 
 impl Selection {
     /// Apply every selection knob through the profile's canonical planning
-    /// functions. The order is shared by all hosts and commands.
+    /// functions, the same for all hosts and commands.
     pub fn apply(self, plan: Plan) -> Plan {
-        let plan = planning::restrict(plan, self.epochs);
-        let plan = planning::banded(plan, self.index_band);
         planning::produced(plan, self.producers)
     }
 }
@@ -43,26 +41,25 @@ impl Selection {
 pub trait SnapshotSource {
     fn committed_position(&self) -> Result<Option<ChainPoint>, Error>;
     fn epoch(&self) -> Result<Option<u64>, Error>;
-    fn plan(&self, network_magic: u64, retained: RetainedEpochs) -> Result<Plan, Error>;
+    fn plan(&self, network_magic: u64) -> Result<Plan, Error>;
 
     /// Build and select a plan in the same way for every snapshot operation.
-    fn selected_plan(
-        &self,
-        network_magic: u64,
-        retained: RetainedEpochs,
-        selection: Selection,
-    ) -> Result<Plan, Error> {
-        Ok(selection.apply(self.plan(network_magic, retained)?))
+    fn selected_plan(&self, network_magic: u64, selection: Selection) -> Result<Plan, Error> {
+        Ok(selection.apply(self.plan(network_magic)?))
     }
 
     /// Establish that `plan` stands on the first block of its sequence epoch.
     ///
-    /// Every operation below asks this itself; a host asks it first to refuse
-    /// before doing anything slow.
+    /// Publication, digest, reproduction and `prepare_boundary` each ask this
+    /// themselves, and a host asks it first to refuse before doing anything
+    /// slow. `stage_batch` and the `finalize_*` operations run on stores past
+    /// the boundary and do not.
     fn boundary(&self, plan: &Plan) -> Result<Boundary, Error>;
 
-    /// Write a directory stele through the same profile encoder publication
-    /// and registry publication use.
+    /// Export into the network root at `destination`: the closed epochs'
+    /// blocks into its `blocks` layout, then the snapshot naming them into its
+    /// `dolos` layout, each chained onto the latest snapshot it holds, through
+    /// the same profile encoder registry publication uses.
     fn publish_directory(
         &self,
         destination: &Path,
@@ -91,17 +88,60 @@ pub trait SnapshotSource {
         plan: &Plan,
         observer: &Observer,
     ) -> Result<Published, Error>;
+
+    /// Durably capture what this boundary alone holds, before replay advances.
+    fn prepare_boundary(
+        &self,
+        store: &prepare::Store,
+        plan: &Plan,
+        request: &prepare::Request<'_>,
+        observer: &Observer,
+    ) -> Result<Bundle, Error>;
+
+    /// Stage the closed windows `bundles` list from this frozen view, once.
+    /// `previous` is what the first of them follows.
+    fn stage_batch(
+        &self,
+        root: &Path,
+        bundles: &[Bundle],
+        previous: &dyn Predecessor,
+        budget: Budget,
+        observer: &Observer,
+    ) -> Result<Staged, Error>;
+
+    /// Reproduce a prepared boundary's canonical inscription without writing
+    /// it.
+    fn finalize_document(
+        &self,
+        finalizing: &Finalizing<'_>,
+        previous: &dyn Predecessor,
+    ) -> Result<Document, Error>;
+
+    /// Publish a prepared boundary into a repository, chained to what is there.
+    fn finalize_repository(
+        &self,
+        publishing: Publishing<'_>,
+        finalizing: &Finalizing<'_>,
+        observer: &Observer,
+    ) -> Result<Published, Error>;
 }
 
 /// A borrowed profile view. The stores remain private and cannot escape it.
 pub struct StoreSnapshot<'a, A, S> {
     archive: &'a A,
     state: &'a S,
+    mutable_slots: u64,
 }
 
 impl<'a, A: ArchiveStore, S: StateStore> StoreSnapshot<'a, A, S> {
-    pub fn new(archive: &'a A, state: &'a S) -> Self {
-        Self { archive, state }
+    /// A view of `archive` and `state`, on a chain whose genesis has
+    /// `mutable_slots` as its `3k/f` (`dolos_cardano::mutable_slots`).
+    pub fn new(archive: &'a A, state: &'a S, mutable_slots: u64) -> Self {
+        Self {
+            archive,
+            state,
+            mutable_slots,
+        }
     }
 }
 
@@ -124,8 +164,8 @@ impl<A: ArchiveStore, S: StateStore> SnapshotSource for StoreSnapshot<'_, A, S> 
         Ok(Some(summary.slot_epoch(position.slot()).0))
     }
 
-    fn plan(&self, network_magic: u64, retained: RetainedEpochs) -> Result<Plan, Error> {
-        export::plan(self.state, network_magic, retained)
+    fn plan(&self, network_magic: u64) -> Result<Plan, Error> {
+        export::plan(self.state, network_magic, self.mutable_slots)
     }
 
     fn boundary(&self, plan: &Plan) -> Result<Boundary, Error> {
@@ -138,7 +178,7 @@ impl<A: ArchiveStore, S: StateStore> SnapshotSource for StoreSnapshot<'_, A, S> 
         plan: &Plan,
         observer: &Observer,
     ) -> Result<Inscription, Error> {
-        export::publish(destination, plan, self.archive, self.state, None, observer)
+        export::publish(destination, plan, self.archive, self.state, observer)
     }
 
     fn digest_document(&self, plan: &Plan, previous: &dyn Predecessor) -> Result<Document, Error> {
@@ -150,7 +190,7 @@ impl<A: ArchiveStore, S: StateStore> SnapshotSource for StoreSnapshot<'_, A, S> 
         published: &Inscription,
         plan: &Plan,
     ) -> Result<Inscription, Error> {
-        export::verify_reproduction(published, plan, self.archive, self.state, None)
+        export::verify_reproduction(published, plan, self.archive, self.state)
     }
 
     fn preview_repository(
@@ -158,7 +198,7 @@ impl<A: ArchiveStore, S: StateStore> SnapshotSource for StoreSnapshot<'_, A, S> 
         publishing: Publishing<'_>,
         plan: &Plan,
     ) -> Result<Preview, Error> {
-        registry::preview(publishing, plan, self.archive, self.state, None)
+        registry::preview(publishing, plan, self.archive, self.state)
     }
 
     fn publish_repository(
@@ -167,6 +207,60 @@ impl<A: ArchiveStore, S: StateStore> SnapshotSource for StoreSnapshot<'_, A, S> 
         plan: &Plan,
         observer: &Observer,
     ) -> Result<Published, Error> {
-        registry::publish(publishing, plan, self.archive, self.state, None, observer)
+        registry::publish(publishing, plan, self.archive, self.state, observer)
+    }
+
+    fn prepare_boundary(
+        &self,
+        store: &prepare::Store,
+        plan: &Plan,
+        request: &prepare::Request<'_>,
+        observer: &Observer,
+    ) -> Result<Bundle, Error> {
+        prepare::prepare(store, plan, self.archive, self.state, request, observer)
+    }
+
+    fn stage_batch(
+        &self,
+        root: &Path,
+        bundles: &[Bundle],
+        previous: &dyn Predecessor,
+        budget: Budget,
+        observer: &Observer,
+    ) -> Result<Staged, Error> {
+        prepare::stage_batch(
+            root,
+            self.archive,
+            self.state,
+            bundles,
+            previous,
+            budget,
+            observer,
+        )
+    }
+
+    fn finalize_document(
+        &self,
+        finalizing: &Finalizing<'_>,
+        previous: &dyn Predecessor,
+    ) -> Result<Document, Error> {
+        let inscription = prepare::finalize(
+            &stelae::Discarding,
+            finalizing,
+            self.archive,
+            previous,
+            &Observer::silent(),
+        )?;
+
+        Document::of(inscription)
+    }
+
+    fn finalize_repository(
+        &self,
+        publishing: Publishing<'_>,
+        finalizing: &Finalizing<'_>,
+        observer: &Observer,
+    ) -> Result<Published, Error> {
+        registry::publish_prepared(publishing, finalizing, self.archive, observer)
     }
 }

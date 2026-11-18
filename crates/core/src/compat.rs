@@ -39,7 +39,7 @@ impl Display for IncompatibleStore {
 
         write!(
             f,
-            "; this dolos opens stores that record `{}`. Restore it from a stele (`dolos \
+            "; this dolos opens stores that record `{}`. Restore it from a snapshot (`dolos \
              bootstrap stelae --force`), replay a Cardano node database over it (`dolos \
              bootstrap immutabledb --source <db> --force`), or clear it and sync from genesis \
              (`dolos data reset --yes`, then `dolos daemon`); see {MIGRATION_GUIDE_URL}",

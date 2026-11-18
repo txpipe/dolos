@@ -2,7 +2,7 @@
 //! 0059).
 //!
 //! A use registers a [`CacheNamespace`] and keeps entries under it, keyed and
-//! valued by bytes in its own encoding. Nothing here enters the WAL, steles,
+//! valued by bytes in its own encoding. Nothing here enters the WAL, snapshots,
 //! restore or any ledger computation; deleting the cache changes no answer.
 //!
 //! [`TieredCache`] is the store: the memory tier
@@ -32,7 +32,7 @@ use tokio::{
     sync::{oneshot, Semaphore},
 };
 
-use crate::{builtin::MemoryCacheTier, config::CacheConfig, QueryLimiter};
+use crate::{builtin::MemoryCacheTier, config::CacheConfig, telemetry, QueryLimiter};
 
 /// What an entry cost to build, in the unit its use measures.
 pub type Cost = u64;
@@ -544,7 +544,9 @@ impl<D: CacheDiskTier> TieredCache<D> {
         let entry_key = key.2.clone();
         let (flight, retire) = self.record_flight(flights, key, None);
 
-        runtime.spawn(async move {
+        // A heavy scan's fill stays within its share and keeps its slot taken
+        // until the fill ends, even once the request that started it is gone.
+        let task = self.inner.limiter.carry_heavy_scan(async move {
             let limiter = cache.inner.limiter.clone();
 
             let run = move || {
@@ -577,6 +579,8 @@ impl<D: CacheDiskTier> TieredCache<D> {
 
             retire.finish(filled);
         });
+
+        runtime.spawn(task);
 
         Ok(flight)
     }
@@ -963,7 +967,7 @@ struct Metrics {
 impl Metrics {
     /// The gauges read the cache's stats when the meter collects them.
     fn new<D: CacheDiskTier>(cache: Weak<Inner<D>>) -> Self {
-        let meter = global::meter("dolos-cache");
+        let meter = global::meter(telemetry::METER);
 
         let gauge = |name: &'static str, unit: &'static str, read: fn(&TierStats) -> u64| {
             let cache = cache.clone();
@@ -990,16 +994,29 @@ impl Metrics {
         };
 
         Self {
-            hits: meter.u64_counter("cache_hits").build(),
-            misses: meter.u64_counter("cache_misses").build(),
-            fills: meter.u64_counter("cache_fills").build(),
-            evictions: meter.u64_counter("cache_evictions").build(),
-            fill_time: meter
-                .f64_histogram("cache_fill_time")
-                .with_unit("s")
+            hits: meter
+                .u64_counter("dolos.cache.hits")
+                .with_unit("{hit}")
                 .build(),
-            _bytes: gauge("cache_bytes", "By", |usage| usage.bytes),
-            _entries: gauge("cache_entries", "{entry}", |usage| usage.entries),
+            misses: meter
+                .u64_counter("dolos.cache.misses")
+                .with_unit("{miss}")
+                .build(),
+            fills: meter
+                .u64_counter("dolos.cache.fills")
+                .with_unit("{fill}")
+                .build(),
+            evictions: meter
+                .u64_counter("dolos.cache.evictions")
+                .with_unit("{eviction}")
+                .build(),
+            fill_time: meter
+                .f64_histogram("dolos.cache.fill.duration")
+                .with_unit("s")
+                .with_boundaries(telemetry::DURATION_BOUNDARIES.to_vec())
+                .build(),
+            _bytes: gauge("dolos.cache.bytes", "By", |usage| usage.bytes),
+            _entries: gauge("dolos.cache.entries", "{entry}", |usage| usage.entries),
         }
     }
 
@@ -1016,7 +1033,7 @@ impl Metrics {
     }
 
     fn filled(&self, namespace: &'static str, took: Duration) {
-        let attributes = [KeyValue::new("namespace", namespace)];
+        let attributes = [KeyValue::new(telemetry::NAMESPACE, namespace)];
         self.fills.add(1, &attributes);
         self.fill_time.record(took.as_secs_f64(), &attributes);
     }
@@ -1024,8 +1041,8 @@ impl Metrics {
 
 fn attributes(namespace: &'static str, tier: Tier) -> [KeyValue; 2] {
     [
-        KeyValue::new("namespace", namespace),
-        KeyValue::new("tier", tier.name()),
+        KeyValue::new(telemetry::NAMESPACE, namespace),
+        KeyValue::new(telemetry::TIER, tier.name()),
     ]
 }
 
@@ -1275,6 +1292,61 @@ mod tests {
         let value = cache.get_or_fill("slow", b"key", || entry("second", 1));
         assert_eq!(value.await.unwrap(), "first");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_heavy_scans_fill_keeps_its_slot_after_the_request_is_dropped() {
+        let limiter = QueryLimiter::with_heavy_scans(4, 1, Duration::ZERO);
+        let cache = registered(
+            TieredCache::memory(&CacheConfig::default(), limiter.clone()),
+            SLOW,
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(Gate::default());
+
+        let admission = limiter.admit_heavy().await.expect("a free slot");
+        let request = tokio::spawn({
+            let cache = cache.clone();
+            let (calls, gate) = (calls.clone(), gate.clone());
+            admission.scope(async move {
+                cache
+                    .get_or_fill("slow", b"key", move || {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        gate.wait();
+                        entry("value", 1)
+                    })
+                    .await
+            })
+        });
+
+        wait_for_calls(&calls, 1).await;
+        request.abort();
+        let _ = request.await;
+
+        let in_share = limiter.heavy_in_use();
+        let admitted = limiter.heavy_admitted();
+        let replacement = limiter.admit_heavy().await.is_some();
+
+        // Open first, so that a failed assertion does not leave the fill
+        // blocking the runtime's shutdown.
+        gate.open();
+        wait_for_fill(&cache, "slow", b"key").await;
+
+        assert_eq!(in_share, 1, "the fill counts in the heavy share");
+        assert_eq!(admitted, 1, "the fill keeps the slot");
+        assert!(
+            !replacement,
+            "no replacement scan enters while the fill runs"
+        );
+
+        // The fill's task lets go of the slot just after it answers.
+        let freed = tokio::time::timeout(Duration::from_secs(5), async {
+            while limiter.heavy_admitted() > 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+        freed.await.expect("the slot is freed once the fill ends");
+        assert!(limiter.admit_heavy().await.is_some());
     }
 
     #[tokio::test]

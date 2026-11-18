@@ -1,11 +1,13 @@
 //! Which store sets this profile publishes from.
 //!
-//! A stele captures the state immediately after the first block of its
+//! A snapshot captures the state immediately after the first block of its
 //! sequence epoch: Ewrap has closed epoch E-1, Estart has opened epoch E, and
 //! E's first block has been applied (decision 0025). [`check`] is the one place
-//! that rule is decided, and every path that builds layers — directory and
-//! registry publication, dry runs, digest and reproduction — asks it before a
-//! layer is written.
+//! that rule is decided, and every path that builds layers from these stores —
+//! directory and registry publication, dry runs, digest, reproduction and
+//! boundary preparation — asks it before a layer is written. A prepared
+//! boundary is finished later from stores that have moved on, so it asked when
+//! it was captured.
 //!
 //! ## The evidence
 //!
@@ -15,7 +17,7 @@
 //! pruned blocks with them, so its node stages a re-carried script or asset
 //! again as a first sighting and seals it into its period logs. That is a
 //! pruned node's accepted posture as a query node (decision 0064, item 4) and
-//! exactly what a stele must never carry, so a publisher keeps full history
+//! exactly what a snapshot must never carry, so a publisher keeps full history
 //! (item 3).
 //!
 //! The state cursor has to be the plan's point, and the archive has to hold the
@@ -28,7 +30,7 @@
 //!
 //! The archive must end at the cursor's block. Export reads logs and indexes by
 //! slot alone, and blocks applied after the cursor write rows inside the
-//! stele's windows: Ewrap keys an epoch's closing rows at its start, and a
+//! snapshot's windows: Ewrap keys an epoch's closing rows at its start, and a
 //! Byron main block shares the boundary block's slot. A sync stopped at the
 //! epoch stores nothing past its first block; an archive that ran on past a
 //! rebuilt state is refused.
@@ -40,8 +42,8 @@
 //! cannot show where the epoch opened, and is refused rather than trusted.
 //!
 //! Epoch 0 is never eligible. No boundary opens it, so there is no transition
-//! for a stele at sequence 0 to follow, and the first stele a chain can carry
-//! is `epoch-1`.
+//! for a snapshot at sequence 0 to follow, and the first snapshot a chain can
+//! carry is `epoch-1`.
 //!
 //! The state's bookkeeping has to show every boundary pass finished: no sync
 //! cursor set on the epoch row ([`EpochState::set_sync_cursors`]), and every
@@ -53,7 +55,7 @@
 //!
 //! It reads the stores once, before the walk. It does not keep them still: a
 //! caller exporting from stores something else is writing to gets an
-//! inconsistent stele whatever the cursor said at the start. The storage
+//! inconsistent snapshot whatever the cursor said at the start. The storage
 //! backends lock their directories against a second process, and the headless
 //! replay API lends its snapshot only while no import runs.
 
@@ -65,7 +67,7 @@ use dolos_core::{ArchiveStore, BlockBody, BlockSlot, ChainPoint, StateStore};
 
 use crate::{export::Plan, Error};
 
-/// What the stores showed about the boundary a stele is cut at.
+/// What the stores showed about the boundary a snapshot is cut at.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Boundary {
     /// The epoch the boundary opens: the plan's sequence.
@@ -135,7 +137,7 @@ impl std::fmt::Display for Ineligible {
             ),
             Self::InitialEpoch => write!(
                 f,
-                "no boundary opens epoch 0, so the first stele a chain can carry is epoch 1; \
+                "no boundary opens epoch 0, so the first snapshot a chain can carry is epoch 1; \
                  run dolos sync catchup --follow --stop-epoch 1"
             ),
             Self::MissingCursorBlock => write!(
@@ -159,13 +161,13 @@ impl std::fmt::Display for Ineligible {
                 f,
                 "the cursor block's parent {parent} is in the same epoch, so the state is past \
                  the epoch's first block and the boundary state is no longer in these stores; \
-                 restore the stele for this epoch, or cut the next one with \
+                 restore the snapshot for this epoch, or cut the next one with \
                  dolos sync catchup --follow --stop-epoch set to the following epoch"
             ),
             Self::ArchivePastCursor { tip } => write!(
                 f,
                 "the archive runs on past the cursor to {tip}, and the blocks after the cursor \
-                 wrote log and index records the stele cannot tell from the boundary's; publish \
+                 wrote log and index records the snapshot cannot tell from the boundary's; publish \
                  from a node whose archive ends at the cursor, as dolos sync catchup --follow \
                  --stop-epoch leaves it"
             ),
@@ -281,15 +283,8 @@ fn evidence<A: ArchiveStore>(
 
     // An empty archive holds no cursor block either, which is the refusal
     // that names it.
-    if let Some((first_slot, first_body)) = archive.get_range(None, None)?.next() {
-        let first = decode(first_slot, &first_body)?;
-
-        if first.number() > 1 {
-            return Err(refuse(Ineligible::PrunedArchive {
-                first: ChainPoint::Specific(first_slot, first.hash()),
-                number: first.number(),
-            }));
-        }
+    if let Some((first, number)) = pruned_start(archive)? {
+        return Err(refuse(Ineligible::PrunedArchive { first, number }));
     }
 
     let at_slot = archive.get_blocks_by_slot(&slot)?;
@@ -350,6 +345,41 @@ fn evidence<A: ArchiveStore>(
     })
 }
 
+/// The archive's first block and its number, when it is not the chain's
+/// first by the test `data rebuild` applies (block number at most 1). `None`
+/// for an archive that starts at origin, and for an empty one.
+pub(crate) fn pruned_start<A: ArchiveStore>(
+    archive: &A,
+) -> Result<Option<(ChainPoint, u64)>, Error> {
+    Ok(first_block(archive)?
+        .filter(|first| first.number > 1)
+        .map(|first| (first.point, first.number)))
+}
+
+/// What the archive's first block says about where the archive starts.
+pub(crate) struct FirstBlock {
+    pub point: ChainPoint,
+    pub number: u64,
+    /// Whether its header names a previous block. A chain's first block names
+    /// none, except a Byron genesis boundary block, which names the genesis.
+    pub names_predecessor: bool,
+}
+
+/// The archive's first block. `None` for an empty archive.
+pub(crate) fn first_block<A: ArchiveStore>(archive: &A) -> Result<Option<FirstBlock>, Error> {
+    let Some((slot, body)) = archive.get_range(None, None)?.next() else {
+        return Ok(None);
+    };
+
+    let first = decode(slot, &body)?;
+
+    Ok(Some(FirstBlock {
+        point: ChainPoint::Specific(slot, first.hash()),
+        number: first.number(),
+        names_predecessor: first.header().previous_hash().is_some(),
+    }))
+}
+
 fn decode(slot: BlockSlot, body: &BlockBody) -> Result<MultiEraBlock<'_>, Error> {
     MultiEraBlock::decode(body).map_err(|e| Error::UndecodableBlock {
         slot,
@@ -365,7 +395,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::{Network, RetainedEpochs};
+    use crate::Network;
 
     /// One era of `length`-slot epochs from slot zero.
     fn summary(length: u64) -> ChainSummary {
@@ -418,13 +448,7 @@ mod tests {
     }
 
     fn plan(summary: &ChainSummary, at: &ChainPoint) -> Plan {
-        Plan::new(
-            summary,
-            Network::for_magic(2),
-            at.clone(),
-            RetainedEpochs::default(),
-        )
-        .unwrap()
+        Plan::new(summary, Network::for_magic(2), at.clone(), 0).unwrap()
     }
 
     fn judge(
@@ -762,7 +786,7 @@ mod tests {
     }
 
     /// An archive that ran on past a boundary state holds the rows later
-    /// blocks wrote inside the stele's windows, and is refused up to its tip
+    /// blocks wrote inside the snapshot's windows, and is refused up to its tip
     /// with the store to publish from instead.
     #[test]
     fn an_archive_past_the_cursor_is_refused() {

@@ -17,6 +17,7 @@ use proptest::prelude::*;
 use serde::{de::DeserializeOwned, Serialize};
 
 use super::pools::PoolHash;
+use super::{CardanoDelta, CardanoEntity};
 
 /// Asserts that applying then undoing a delta restores the original entity
 /// state.
@@ -72,6 +73,20 @@ where
         state, original,
         "delta serde-then-undo is not reversible: deserialized undo did not restore original state",
     );
+}
+
+/// An entity and a delta that applies to it, for the WAL replay round trip
+/// in `model::replay_tests`. Each model module lists one per delta variant.
+pub type ReplayCase = BoxedStrategy<(Option<CardanoEntity>, CardanoDelta)>;
+
+pub fn replay_case<T, D>(strategy: impl Strategy<Value = (Option<T>, D)> + 'static) -> ReplayCase
+where
+    T: Into<CardanoEntity> + core::fmt::Debug,
+    D: Into<CardanoDelta> + core::fmt::Debug,
+{
+    strategy
+        .prop_map(|(entity, delta)| (entity.map(Into::into), delta.into()))
+        .boxed()
 }
 
 // --- Primitive strategies ---

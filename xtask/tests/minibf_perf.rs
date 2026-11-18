@@ -76,9 +76,10 @@ async fn verify_fixture<Stores: ToyStores>(stores: Stores) {
                         < (fixture.shape.blocks * fixture.shape.transactions_per_block) as u64
                 );
                 assert_eq!(work.utxo_refs, selected_rows);
+                assert_eq!(work.utxo_reads, selected_rows);
                 assert_eq!(work.exact_lookups, 0);
-                assert_eq!(work.tip_reads, selected_rows);
-                assert_eq!(work.block_reads - work.tip_reads, page_blocks);
+                assert_eq!(work.tip_reads, 0);
+                assert_eq!(work.block_reads, page_blocks);
                 assert!(work.decoded_bytes > 0);
             }
             _ => {}

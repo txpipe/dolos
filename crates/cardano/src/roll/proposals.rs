@@ -450,3 +450,220 @@ impl BlockVisitor for ProposalVisitor {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use pallas::ledger::primitives::conway::{
+        CostModels, DRepVotingThresholds, ExUnitPrices as ConwayExUnitPrices, ExUnits,
+        PoolVotingThresholds,
+    };
+
+    use super::*;
+
+    fn half() -> RationalNumber {
+        RationalNumber {
+            numerator: 1,
+            denominator: 2,
+        }
+    }
+
+    fn no_languages() -> CostModels {
+        CostModels {
+            plutus_v1: None,
+            plutus_v2: None,
+            plutus_v3: None,
+            unknown: BTreeMap::new(),
+        }
+    }
+
+    fn every_language() -> CostModels {
+        CostModels {
+            plutus_v1: Some(vec![1]),
+            plutus_v2: Some(vec![2]),
+            plutus_v3: Some(vec![3]),
+            unknown: BTreeMap::from([(7, vec![7])]),
+        }
+    }
+
+    fn no_fields() -> ProtocolParamUpdate {
+        ProtocolParamUpdate {
+            minfee_a: None,
+            minfee_b: None,
+            max_block_body_size: None,
+            max_transaction_size: None,
+            max_block_header_size: None,
+            key_deposit: None,
+            pool_deposit: None,
+            maximum_epoch: None,
+            desired_number_of_stake_pools: None,
+            pool_pledge_influence: None,
+            expansion_rate: None,
+            treasury_growth_rate: None,
+            min_pool_cost: None,
+            ada_per_utxo_byte: None,
+            cost_models_for_script_languages: None,
+            execution_costs: None,
+            max_tx_ex_units: None,
+            max_block_ex_units: None,
+            max_value_size: None,
+            collateral_percentage: None,
+            max_collateral_inputs: None,
+            pool_voting_thresholds: None,
+            drep_voting_thresholds: None,
+            min_committee_size: None,
+            committee_term_limit: None,
+            governance_action_validity_period: None,
+            governance_action_deposit: None,
+            drep_deposit: None,
+            drep_inactivity_period: None,
+            minfee_refscript_cost_per_byte: None,
+        }
+    }
+
+    fn every_field() -> ProtocolParamUpdate {
+        ProtocolParamUpdate {
+            minfee_a: Some(1),
+            minfee_b: Some(1),
+            max_block_body_size: Some(1),
+            max_transaction_size: Some(1),
+            max_block_header_size: Some(1),
+            key_deposit: Some(1),
+            pool_deposit: Some(1),
+            maximum_epoch: Some(1),
+            desired_number_of_stake_pools: Some(1),
+            pool_pledge_influence: Some(half()),
+            expansion_rate: Some(half()),
+            treasury_growth_rate: Some(half()),
+            min_pool_cost: Some(1),
+            ada_per_utxo_byte: Some(1),
+            cost_models_for_script_languages: Some(every_language()),
+            execution_costs: Some(ConwayExUnitPrices {
+                mem_price: half(),
+                step_price: half(),
+            }),
+            max_tx_ex_units: Some(ExUnits { mem: 1, steps: 1 }),
+            max_block_ex_units: Some(ExUnits { mem: 1, steps: 1 }),
+            max_value_size: Some(1),
+            collateral_percentage: Some(1),
+            max_collateral_inputs: Some(1),
+            pool_voting_thresholds: Some(PoolVotingThresholds {
+                motion_no_confidence: half(),
+                committee_normal: half(),
+                committee_no_confidence: half(),
+                hard_fork_initiation: half(),
+                security_voting_threshold: half(),
+            }),
+            drep_voting_thresholds: Some(DRepVotingThresholds {
+                motion_no_confidence: half(),
+                committee_normal: half(),
+                committee_no_confidence: half(),
+                update_constitution: half(),
+                hard_fork_initiation: half(),
+                pp_network_group: half(),
+                pp_economic_group: half(),
+                pp_technical_group: half(),
+                pp_governance_group: half(),
+                treasury_withdrawal: half(),
+            }),
+            min_committee_size: Some(1),
+            committee_term_limit: Some(1),
+            governance_action_validity_period: Some(1),
+            governance_action_deposit: Some(1),
+            drep_deposit: Some(1),
+            drep_inactivity_period: Some(1),
+            minfee_refscript_cost_per_byte: Some(half()),
+        }
+    }
+
+    /// Splits `$full` into one value per field, each with only that field
+    /// set over `$none`. The destructure has no `..`, so a field added to
+    /// the struct fails the build until it is listed here.
+    macro_rules! each_field_alone {
+        ($ty:ident, $full:expr, $none:expr, [$($field:ident),* $(,)?]) => {{
+            let $ty { $($field),* } = $full;
+            vec![$((stringify!($field), $ty { $field, ..$none })),*]
+        }};
+    }
+
+    /// DATA-MODEL-WORKAROUND(dolos#1375): ratification reads an empty
+    /// stored set as a named but empty cost-model map. That holds only
+    /// while every other Conway update field leaves a value behind.
+    #[test]
+    fn every_conway_update_field_alone_leaves_a_value() {
+        let singles = each_field_alone!(
+            ProtocolParamUpdate,
+            every_field(),
+            no_fields(),
+            [
+                minfee_a,
+                minfee_b,
+                max_block_body_size,
+                max_transaction_size,
+                max_block_header_size,
+                key_deposit,
+                pool_deposit,
+                maximum_epoch,
+                desired_number_of_stake_pools,
+                pool_pledge_influence,
+                expansion_rate,
+                treasury_growth_rate,
+                min_pool_cost,
+                ada_per_utxo_byte,
+                cost_models_for_script_languages,
+                execution_costs,
+                max_tx_ex_units,
+                max_block_ex_units,
+                max_value_size,
+                collateral_percentage,
+                max_collateral_inputs,
+                pool_voting_thresholds,
+                drep_voting_thresholds,
+                min_committee_size,
+                committee_term_limit,
+                governance_action_validity_period,
+                governance_action_deposit,
+                drep_deposit,
+                drep_inactivity_period,
+                minfee_refscript_cost_per_byte,
+            ]
+        );
+
+        for (field, update) in singles {
+            assert!(
+                !conway_to_pparamset(&update).is_empty(),
+                "`{field}` alone maps to no value"
+            );
+        }
+    }
+
+    /// DATA-MODEL-WORKAROUND(dolos#1375): each cost-model language leaves
+    /// a value, so a named cost-model map leaves none only when it is empty.
+    #[test]
+    fn only_an_empty_cost_model_map_leaves_no_value() {
+        let languages = each_field_alone!(
+            CostModels,
+            every_language(),
+            no_languages(),
+            [plutus_v1, plutus_v2, plutus_v3, unknown]
+        );
+
+        for (language, cost_models) in languages {
+            let update = ProtocolParamUpdate {
+                cost_models_for_script_languages: Some(cost_models),
+                ..no_fields()
+            };
+
+            assert!(
+                !conway_to_pparamset(&update).is_empty(),
+                "`{language}` alone maps to no value"
+            );
+        }
+
+        let empty = ProtocolParamUpdate {
+            cost_models_for_script_languages: Some(no_languages()),
+            ..no_fields()
+        };
+
+        assert!(conway_to_pparamset(&empty).is_empty());
+    }
+}

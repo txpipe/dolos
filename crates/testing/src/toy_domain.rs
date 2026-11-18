@@ -77,11 +77,22 @@ impl dolos_core::MempoolStore for Mempool {
         self.pending.read().map(|p| p.to_vec()).unwrap_or_default()
     }
 
+    fn count(&self) -> MempoolCount {
+        MempoolCount {
+            pending: self.pending.read().map(|p| p.len()).unwrap_or(0),
+            inflight: 0,
+        }
+    }
+
     fn mark_inflight(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
         Ok(())
     }
 
     fn mark_acknowledged(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
+        Ok(())
+    }
+
+    fn requeue_propagated(&self, _except: &[TxHash]) -> Result<(), MempoolError> {
         Ok(())
     }
 
@@ -420,6 +431,13 @@ impl<B: ToyStores> ToyDomain<B> {
         }
 
         domain
+    }
+
+    /// Swap the genesis the domain serves under, keeping its stores as genesis
+    /// left them: a node restarted under an edited config.
+    pub fn with_genesis(mut self, genesis: Arc<dolos_core::Genesis>) -> Self {
+        self.genesis = genesis;
+        self
     }
 
     /// Override the history policy so tests can exercise archive pruning;

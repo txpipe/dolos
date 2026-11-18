@@ -222,6 +222,10 @@ impl ArchiveStore for NoOpArchiveStore {
         Ok(())
     }
 
+    fn persist(&self) -> Result<(), ArchiveError> {
+        Ok(())
+    }
+
     fn slot_by_block_hash(&self, _hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
         Ok(None)
     }

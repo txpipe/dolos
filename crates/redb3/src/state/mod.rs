@@ -379,4 +379,72 @@ impl dolos_core::StateStore for StateStore {
     fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {
         Err(StateError::Unsupported("iter_utxos"))
     }
+
+    /// An empty [`Durability::Immediate`] commit, which redb guarantees also
+    /// makes every earlier commit durable, whatever durability it used. It
+    /// keeps quick repair, as the schema and writer commits do, so a hard stop
+    /// right after it does not cost a full repair on the next open.
+    fn persist(&self) -> Result<(), StateError> {
+        let mut wx = self.db().begin_write().map_err(Error::from)?;
+        wx.set_durability(Durability::Immediate)
+            .map_err(Error::from)?;
+        wx.set_quick_repair(true);
+        wx.commit().map_err(Error::from)?;
+
+        Ok(())
+    }
+}
+
+// Unix only: the test copies an open file, and Windows file locks are
+// mandatory, so the open store's lock refuses the copy's read.
+#[cfg(all(test, unix))]
+mod tests {
+    use dolos_core::StateStore as _;
+
+    use super::*;
+
+    fn point() -> ChainPoint {
+        ChainPoint::Specific(100, pallas::crypto::hash::Hash::new([7; 32]))
+    }
+
+    /// A commit redb was told need not be durable is durable once `persist`
+    /// returns. The file is copied while the store is still open, so the copy
+    /// holds only what reached the disk, not what a clean close would add.
+    #[test]
+    fn persist_makes_a_non_durable_commit_durable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state");
+        let copy = dir.path().join("copy");
+        let config = RedbStateConfig::default();
+
+        let store = StateStore::open(StateSchema::default(), &path, &config).unwrap();
+
+        let mut wx = store.db().begin_write().unwrap();
+        wx.set_durability(Durability::None).unwrap();
+        {
+            let mut table = wx.open_table(CURSOR_TABLE).unwrap();
+            let value = bincode::serialize(&point()).unwrap();
+            table.insert(CURRENT_CURSOR_KEY, &value).unwrap();
+        }
+        wx.commit().unwrap();
+
+        store.persist().unwrap();
+        std::fs::copy(&path, &copy).unwrap();
+        drop(store);
+
+        // The copy was not closed cleanly, so opening it repairs it. Refusing a
+        // full repair pins that `persist` saved the allocator state a quick
+        // repair loads.
+        let quick = redb::Database::builder()
+            .set_repair_callback(|session| session.abort())
+            .open(&copy);
+        assert!(quick.is_ok(), "{:?}", quick.err());
+        drop(quick);
+
+        let store = StateStore::open(StateSchema::default(), &copy, &config).unwrap();
+        assert_eq!(
+            dolos_core::StateStore::read_cursor(&store).unwrap(),
+            Some(point())
+        );
+    }
 }

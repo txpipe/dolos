@@ -2,48 +2,63 @@ name: Epoch Tests
 
 on:
   workflow_dispatch:
+    inputs:
+      network:
+        description: Run only this network's entries
+        type: choice
+        options: [all, mainnet, preprod, preview]
+        default: all
+      tag:
+        description: Run only the entries carrying this tag in tests/epoch_pots/matrix.json
+        type: choice
+        options: [all, conway]
+        default: all
 
 jobs:
-  epoch-test:
+  select:
     runs-on: ubuntu-latest
+    outputs:
+      entries: ${{ steps.filter.outputs.entries }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Filter the matrix
+        id: filter
+        env:
+          NETWORK: ${{ inputs.network }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          entries=$(jq -c --arg network "$NETWORK" --arg tag "$TAG" '
+            map(select($network == "all" or .network == $network)
+              | select($tag == "all" or ((.tags // []) | any(. == $tag))))
+          ' tests/epoch_pots/matrix.json)
+          echo "entries=$entries" >> "$GITHUB_OUTPUT"
+          jq -r '.[] | "\(.network)-\(.ground_truth_epoch)"' <<< "$entries"
+
+  epoch-test:
+    needs: select
+    if: needs.select.outputs.entries != '[]'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix:
-        include:
-          # mainnet: seed 200, upstream 200-400
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 242, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 243, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 245, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 250, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 278, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 279, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 280, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 285, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 286, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 287, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 288, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 289, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 290, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 300, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 325, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 326, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 350, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 352, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 375, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 400, upstream_range: "200-400" }
-          # mainnet: seed 200, upstream 200-500
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 500, upstream_range: "200-500" }
-          # preview: seed 500, upstream 500-700
-          - { network: preview, seed_epoch: 500, ground_truth_epoch: 550, upstream_range: "500-700" }
-          - { network: preview, seed_epoch: 500, ground_truth_epoch: 649, upstream_range: "500-700" }
-          - { network: preview, seed_epoch: 500, ground_truth_epoch: 700, upstream_range: "500-700" }
+        include: ${{ fromJSON(needs.select.outputs.entries) }}
 
     name: "${{ matrix.network }}-${{ matrix.ground_truth_epoch }}"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
@@ -66,31 +81,33 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-epoch-tests-
 
+      # Each archive streams into tar, so no copy of it sits on disk. Skip the
+      # AppleDouble `._*` files a macOS tar can add: the store and the chunk
+      # reader would take them for their own files.
       - name: Download seed
         run: |
           mkdir -p /tmp/fixtures/seeds
-          aws s3 cp "s3://${{ vars.S3_BUCKET }}/seeds/${{ matrix.network }}-${{ matrix.seed_epoch }}.tar" /tmp/seed.tar
-          tar xf /tmp/seed.tar -C /tmp/fixtures/seeds
-          rm /tmp/seed.tar
+          aws s3 cp "s3://${{ vars.S3_BUCKET }}/seeds/${{ matrix.network }}-${{ matrix.seed_epoch }}.tar" - | tar xf - --exclude='._*' -C /tmp/fixtures/seeds
 
       - name: Download ground truth
         run: |
           mkdir -p /tmp/fixtures/ground-truth
-          aws s3 cp "s3://${{ vars.S3_BUCKET }}/ground-truth/${{ matrix.network }}-${{ matrix.ground_truth_epoch }}.tar" /tmp/ground-truth.tar
-          tar xf /tmp/ground-truth.tar -C /tmp/fixtures/ground-truth
-          rm /tmp/ground-truth.tar
+          aws s3 cp "s3://${{ vars.S3_BUCKET }}/ground-truth/${{ matrix.network }}-${{ matrix.ground_truth_epoch }}.tar" - | tar xf - --exclude='._*' -C /tmp/fixtures/ground-truth
 
       - name: Download upstream
         run: |
           mkdir -p /tmp/fixtures/upstream
-          aws s3 cp "s3://${{ vars.S3_BUCKET }}/upstream/${{ matrix.network }}-${{ matrix.upstream_range }}.tar" /tmp/upstream.tar
-          tar xf /tmp/upstream.tar -C /tmp/fixtures/upstream
-          rm /tmp/upstream.tar
+          aws s3 cp "s3://${{ vars.S3_BUCKET }}/upstream/${{ matrix.network }}-${{ matrix.upstream_range }}.tar" - | tar xf - --exclude='._*' -C /tmp/fixtures/upstream
+          df -h /
 
+      # An optimised build keeps the replay inside the job limit; the debug
+      # assertions and overflow checks of a debug build stay on.
       - name: Run epoch test
         env:
           DOLOS_FIXTURE_DIR: /tmp/fixtures
-        run: cargo test --test epoch_pots -- --nocapture
+          CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: "true"
+          CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS: "true"
+        run: cargo test --release --test epoch_pots -- --nocapture
 
       - name: Cleanup
         if: always()

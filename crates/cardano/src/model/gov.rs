@@ -1694,11 +1694,54 @@ mod tests {
 }
 
 #[cfg(test)]
-mod prop_tests {
+pub(super) mod prop_tests {
     use super::testing::{any_committee, any_constitution, any_gov_state};
     use super::*;
     use crate::model::testing::{self as root, assert_delta_roundtrip};
+    use crate::model::testing::{replay_case, ReplayCase};
     use proptest::prelude::*;
+
+    prop_compose! {
+        fn any_gov_drep_snapshot()(
+            closing_epoch in root::any_epoch(),
+            dreps in prop::collection::btree_map(
+                root::any_stake_credential(),
+                (
+                    prop::option::of(root::any_epoch()),
+                    prop::option::of((root::any_slot(), root::any_tx_order())),
+                )
+                    .prop_map(|(expiry, unregistered_at)| DRepSnapshotEntry {
+                        expiry,
+                        unregistered_at,
+                    }),
+                0..3,
+            ),
+        ) -> GovDRepSnapshot {
+            GovDRepSnapshot::new(DRepSnapshot { closing_epoch, dreps })
+        }
+    }
+
+    /// One case per delta this module owns, for `model::replay_tests`.
+    pub(crate) fn replay_cases() -> Vec<ReplayCase> {
+        let gov = || any_gov_state().prop_map(Some);
+        vec![
+            replay_case((gov(), any_genesis_init())),
+            replay_case((gov(), any_committee_auth())),
+            replay_case((gov(), any_committee_resign())),
+            replay_case((gov(), any_committee_update())),
+            replay_case((gov(), any_committee_dissolve())),
+            replay_case((gov(), Just(CommitteeReseat::new()))),
+            replay_case((gov(), any_constitution_update())),
+            replay_case((gov(), any_gov_roots_update())),
+            replay_case((gov(), Just(GovDormancyReset::new()))),
+            replay_case((gov(), any_gov_distr_accumulate())),
+            replay_case((gov(), Just(GovDormancyTick::new()))),
+            replay_case((gov(), Just(CommitteeGc::new()))),
+            replay_case((gov(), any_gov_distr_rotate())),
+            replay_case((gov(), any_gov_drep_snapshot())),
+            replay_case((gov(), any_gov_distr_boundary_credit())),
+        ]
+    }
 
     prop_compose! {
         fn any_genesis_init()(

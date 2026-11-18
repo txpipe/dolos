@@ -1,3 +1,4 @@
+pub mod metrics;
 pub mod storage;
 
 use std::collections::HashMap;
@@ -50,6 +51,33 @@ pub struct DomainAdapter {
     pub cache: CacheBackend,
     pub tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
     pub query_limiter: QueryLimiter,
+    /// The chain tip gauges over `archive`, reporting while the domain lives.
+    pub tip_gauges: Arc<dolos_core::telemetry::TipGauges>,
+    /// The storage gauges over `wal` and `archive`, reporting while the
+    /// domain lives.
+    pub storage_gauges: Arc<metrics::StorageGauges>,
+}
+
+/// Registers the `dolos.sync.tip.*` gauges over the archive's tip block.
+pub fn tip_gauges(archive: &ArchiveStoreBackend) -> Arc<dolos_core::telemetry::TipGauges> {
+    let archive = archive.clone();
+
+    Arc::new(dolos_core::telemetry::TipGauges::register(move || {
+        let (_, body) = archive.get_tip().ok()??;
+        let block = MultiEraBlock::decode(&body).ok()?;
+
+        Some((block.slot(), block.number()))
+    }))
+}
+
+/// Registers the `dolos` meter's storage gauges over `wal`, whose file is at
+/// `wal_path` when it has one, and `archive`.
+pub fn storage_gauges(
+    wal: &WalAdapter,
+    wal_path: Option<std::path::PathBuf>,
+    archive: &ArchiveStoreBackend,
+) -> Arc<metrics::StorageGauges> {
+    Arc::new(metrics::StorageGauges::register(wal, wal_path, archive))
 }
 
 impl DomainAdapter {
@@ -148,8 +176,15 @@ impl Domain for DomainAdapter {
 
         // We then collect any gap between the from point and the current tip. This
         // assumes that no event will be sent between the creation of the receiver and
-        // the collection of the replay.
-        let replay = self.wal().iter_blocks(from, None)?.collect::<Vec<_>>();
+        // the collection of the replay. It holds what follows `from`, not `from`
+        // itself: a client at `from` already has that block, and
+        // `ChainCrawler::start` passes the WAL tip for a client with no intersect.
+        // `None` replays the whole WAL.
+        let replay = self
+            .wal()
+            .iter_blocks(from.clone(), None)?
+            .filter(|(point, _)| from.as_ref() != Some(point))
+            .collect::<Vec<_>>();
 
         Ok(TipSubscription { replay, receiver })
     }

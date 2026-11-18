@@ -19,7 +19,7 @@ use pallas::ledger::{
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 
-use crate::{bad_request, patterns, Facade};
+use crate::{bad_request, heavy_scan_limit, patterns, Facade};
 
 /// UTxO refs read, decoded and filtered per blocking task. A heavy match
 /// releases its permit between chunks, and a dropped one stops at the next
@@ -41,6 +41,27 @@ pub async fn by_pattern<D: Domain>(
         Err(err) => return bad_request(err.to_string()),
     };
 
+    // Output references are point lookups; every other pattern scans.
+    let heavy = matches!(
+        parsed,
+        patterns::Pattern::Address(_) | patterns::Pattern::Asset(_)
+    );
+
+    if !heavy {
+        return respond(&facade, parsed, filters).await;
+    }
+
+    match facade.query_limiter().admit_heavy().await {
+        Some(admission) => admission.scope(respond(&facade, parsed, filters)).await,
+        None => heavy_scan_limit(),
+    }
+}
+
+async fn respond<D: Domain>(
+    facade: &Facade<D>,
+    parsed: patterns::Pattern,
+    filters: MatchesFilters,
+) -> Response {
     let query = facade.query();
     let refs = match parsed {
         patterns::Pattern::Address(pattern) => {
@@ -56,7 +77,7 @@ pub async fn by_pattern<D: Domain>(
             .await
         }
         patterns::Pattern::OutputRef(pattern) => {
-            refs_for_output_ref_pattern(&facade, &pattern).await
+            refs_for_output_ref_pattern(facade, &pattern).await
         }
         patterns::Pattern::Any => return bad_request("wildcard patterns are not supported"),
     };
@@ -66,7 +87,7 @@ pub async fn by_pattern<D: Domain>(
         Err(err) => return err.into_response(),
     };
 
-    let matches = match build_matches(&facade, refs, filter, filters.resolve_hashes).await {
+    let matches = match build_matches(facade, refs, filter, filters.resolve_hashes).await {
         Ok(matches) => matches,
         Err(err) => return err.into_response(),
     };
@@ -1175,35 +1196,42 @@ mod tests {
     }
 
     const SLOW_READ: Duration = Duration::from_secs(1);
-    const HEALTH_BUDGET: Duration = Duration::from_millis(300);
+    const LIGHT_BUDGET: Duration = Duration::from_millis(300);
 
     fn policy_match_path(app: &TestApp) -> String {
         format!("/matches/{}.*", app.vectors().policy_id)
     }
 
+    /// A route that reads no UTxOs: the metadata of the tip block.
+    fn light_path(app: &TestApp) -> String {
+        let block = app.vectors().blocks.last().expect("missing block vectors");
+        format!("/metadata/{}", block.slot)
+    }
+
     #[tokio::test(flavor = "current_thread")]
-    async fn slow_match_does_not_stall_health_on_one_thread() {
+    async fn slow_match_does_not_stall_a_light_route_on_one_thread() {
         let app = TestApp::new_with_fault(Some(TestFault::SlowUtxoReads(SLOW_READ)));
         let path = policy_match_path(&app);
 
         let started = Instant::now();
         let matched = app.get_bytes(&path);
-        let health = async {
-            let (status, _) = app.get_bytes("/health").await;
+        let light_path = light_path(&app);
+        let light = async {
+            let (status, _) = app.get_bytes(&light_path).await;
             (status, started.elapsed())
         };
-        let ((match_status, _), (health_status, health_took)) = tokio::join!(matched, health);
+        let ((match_status, _), (light_status, light_took)) = tokio::join!(matched, light);
 
         assert_eq!(match_status, StatusCode::OK);
-        assert_eq!(health_status, StatusCode::OK);
+        assert_eq!(light_status, StatusCode::OK);
         assert!(
-            health_took < HEALTH_BUDGET,
-            "/health took {health_took:?} behind a slow match"
+            light_took < LIGHT_BUDGET,
+            "{light_path} took {light_took:?} behind a slow match"
         );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn slow_matches_do_not_stall_health_on_two_workers() {
+    async fn slow_matches_do_not_stall_a_light_route_on_two_workers() {
         let app = Arc::new(TestApp::new_with_fault(Some(TestFault::SlowUtxoReads(
             SLOW_READ,
         ))));
@@ -1217,25 +1245,26 @@ mod tests {
             })
             .collect();
 
-        // Let the matches reach their store reads before /health asks. The
+        // Let the matches reach their store reads before the light route asks. The
         // clock starts first: workers stuck in a read drive no timers, so the
         // sleep itself stalls with them.
         let started = Instant::now();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let health = tokio::spawn({
-            let app = app.clone();
+        let light_path = light_path(&app);
+        let light = tokio::spawn({
+            let (app, light_path) = (app.clone(), light_path.clone());
             async move {
-                let (status, _) = app.get_bytes("/health").await;
+                let (status, _) = app.get_bytes(&light_path).await;
                 (status, started.elapsed())
             }
         });
 
-        let (health_status, health_took) = health.await.expect("health task");
-        assert_eq!(health_status, StatusCode::OK);
+        let (light_status, light_took) = light.await.expect("light task");
+        assert_eq!(light_status, StatusCode::OK);
         assert!(
-            health_took < HEALTH_BUDGET,
-            "/health took {health_took:?} behind four slow matches"
+            light_took < LIGHT_BUDGET,
+            "{light_path} took {light_took:?} behind four slow matches"
         );
 
         for matched in matches {

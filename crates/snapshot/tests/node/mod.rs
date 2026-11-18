@@ -4,9 +4,9 @@
 //! ledger: a driver pair whose tests disagreed about what a node contains would
 //! prove nothing about the pair.
 //!
-//! Distinct from `tests/common`, which is a hand-pinned stele of literals for
-//! the goldens. This module is the opposite kind of fixture — everything in it
-//! comes out of `dolos-testing`'s seeder and a real ledger computation.
+//! Distinct from `tests/common`, which is a hand-pinned snapshot of literals
+//! for the goldens. This module is the opposite kind of fixture — everything in
+//! it comes out of `dolos-testing`'s seeder and a real ledger computation.
 
 // Each integration test binary compiles this module in full, so the parts one
 // binary does not reach look dead to it. They are not.
@@ -19,16 +19,13 @@ use dolos_core::{
     import::ImportExt as _, ArchiveStore as _, ArchiveWriter as _, Domain as _, StateStore as _,
     StateWriter as _,
 };
-use dolos_snapshot::{
-    export::{self, First, Plan},
-    RetainedEpochs,
-};
+use dolos_snapshot::export::{self, First, Plan};
 use dolos_testing::{
     blocks::make_conway_block_with_prev,
     synthetic::{build_synthetic_blocks, seed_epoch_logs, seed_reward_logs, SyntheticBlockConfig},
     toy_domain::{MemoryStores, ToyDomain, ToyStores},
 };
-use stelae::{dir::SteleDir, inscription::Inscription, progress::Observer};
+use stelae::{dir::SnapshotDir, inscription::Inscription, progress::Observer};
 
 /// Preview genesis, synthetic blocks and seeded logs, all inside epoch zero.
 ///
@@ -48,7 +45,7 @@ use stelae::{dir::SteleDir, inscription::Inscription, progress::Observer};
 /// epoch holds all of those.
 ///
 /// The stores then stand on the epoch-1 boundary — see [`stand_at_boundary`] —
-/// because a stele is only ever cut there.
+/// because a snapshot is only ever cut there.
 ///
 /// Deterministic: two calls build byte-identical ledgers, which is what lets
 /// the restore suite cross-check against an independently built node.
@@ -91,8 +88,8 @@ pub fn harness<B: ToyStores>() -> ToyDomain<B> {
 /// the epoch before, on its last slot, and the epoch's first block, on its
 /// first — and moves the state cursor onto the second. That is the evidence the
 /// boundary check reads. The ledger is not run over them: the ledger state the
-/// fixture computes stays the one a stele carries, and the blocks are what the
-/// archive shows about where the state stands.
+/// fixture computes stays the one a snapshot carries, and the blocks are what
+/// the archive shows about where the state stands.
 pub fn stand_at_boundary<B: ToyStores>(domain: &ToyDomain<B>, epoch: u64) {
     let summary = dolos_cardano::eras::load_chain_summary_from_state(domain.state()).unwrap();
     let start = summary.epoch_start(epoch);
@@ -150,7 +147,7 @@ pub use registry_node::Node;
 /// publishes from.
 ///
 /// Shared by `tests/publish.rs` and `tests/snapshot_verify.rs`, because a
-/// stele the one suite publishes is what the other verifies, and a second
+/// snapshot the one suite publishes is what the other verifies, and a second
 /// copy of the fixture would be a second answer to "where do the two plans
 /// stand".
 mod registry_node {
@@ -158,7 +155,7 @@ mod registry_node {
     use dolos_snapshot::{
         export::Plan,
         registry::{self, Published, Publishing, Registry},
-        Error, RetainedEpochs,
+        Error,
     };
     use dolos_testing::toy_domain::{MemoryStores, ToyDomain};
     use stelae::progress::Observer;
@@ -169,11 +166,11 @@ mod registry_node {
     /// on the first block of epoch 1, and sequence 2 on the first block of
     /// epoch 2 (decision 0025: `sequence` is the epoch the cursor stands in).
     ///
-    /// A stele is only cut from stores standing on its boundary, so each plan
-    /// has its own: `earlier` stands at epoch 1, `domain` has gone on to
-    /// epoch 2. Epoch 0's window is complete in both, so the second publish
-    /// inherits it; epoch 1's is the first's boundary sliver and the second's
-    /// whole epoch, so it is rebuilt.
+    /// A snapshot is only cut from stores standing on its boundary, so each
+    /// plan has its own: `earlier` stands at epoch 1, `domain` has gone on
+    /// to epoch 2. Epoch 0's window is complete in both, so the second
+    /// publish inherits it; epoch 1's is the first's boundary sliver and
+    /// the second's whole epoch, so it is rebuilt.
     pub struct Node {
         pub earlier: ToyDomain<MemoryStores>,
         pub domain: ToyDomain<MemoryStores>,
@@ -186,10 +183,8 @@ mod registry_node {
             let earlier = harness::<MemoryStores>();
             let domain = harness::<MemoryStores>();
 
-            let retained = RetainedEpochs::default();
-
-            let first = plan_at_boundary(&earlier, 1, retained.clone());
-            let second = plan_at_boundary(&domain, 2, retained);
+            let first = plan_at_boundary(&earlier, 1);
+            let second = plan_at_boundary(&domain, 2);
 
             assert_eq!(
                 first.epochs[..1],
@@ -243,33 +238,25 @@ mod registry_node {
         ) -> Result<Published, Error> {
             let stores = self.stores(plan);
 
-            registry::publish(
-                publishing,
-                plan,
-                stores.archive(),
-                stores.state(),
-                None,
-                observer,
-            )
+            registry::publish(publishing, plan, stores.archive(), stores.state(), observer)
         }
 
         /// The same publish, through a writer of the caller's — the interrupted
         /// transport the resume suite kills at a layer it chose.
-        pub fn publish_through<W: stelae::SteleWriter + Sync>(
+        pub fn publish_through<W: stelae::SnapshotWriter + Sync>(
             &self,
-            stele: &W,
+            snapshot: &W,
             publishing: Publishing<'_>,
             plan: &Plan,
         ) -> Result<Published, Error> {
             let stores = self.stores(plan);
 
             registry::publish_into(
-                stele,
+                snapshot,
                 publishing,
                 plan,
                 stores.archive(),
                 stores.state(),
-                None,
                 &Observer::silent(),
             )
         }
@@ -317,18 +304,13 @@ pub fn extend_archive_past_cursor<B: ToyStores>(domain: &ToyDomain<B>) -> dolos_
     next
 }
 
-/// A plan for `domain` standing on the **first block of `epoch`**, retaining
-/// the state dumps `retained` names.
+/// A plan for `domain` standing on the **first block of `epoch`**.
 ///
 /// Stores standing in an earlier epoch are moved onto that boundary first —
 /// see [`stand_at_boundary`] — so the plan is the one a publish from them would
-/// make. The harness ledger lives inside epoch zero, so this is how the dump
-/// paths, which need a sequence a retained list can name, are reached at all.
-pub fn plan_at_boundary<B: ToyStores>(
-    domain: &ToyDomain<B>,
-    epoch: u64,
-    retained: RetainedEpochs,
-) -> Plan {
+/// make. The harness ledger lives inside epoch zero, so this is how a later
+/// sequence is reached at all.
+pub fn plan_at_boundary<B: ToyStores>(domain: &ToyDomain<B>, epoch: u64) -> Plan {
     let summary = dolos_cardano::eras::load_chain_summary_from_state(domain.state()).unwrap();
     let cursor = domain.state().read_cursor().unwrap().unwrap();
 
@@ -336,7 +318,7 @@ pub fn plan_at_boundary<B: ToyStores>(
         stand_at_boundary(domain, epoch);
     }
 
-    let plan = plan_retaining(domain, retained);
+    let plan = plan_for(domain);
     assert_eq!(plan.sequence, epoch);
 
     plan
@@ -348,36 +330,85 @@ pub fn export_plan<B: ToyStores>(
     domain: &ToyDomain<B>,
     plan: &Plan,
 ) -> Inscription {
-    let stele = SteleDir::create(root).unwrap();
-
-    export::export(
-        &stele,
+    export::publish(
+        root,
         plan,
         domain.archive(),
         domain.state(),
-        None,
+        &Observer::silent(),
+    )
+    .unwrap()
+}
+
+/// [`export_plan`] into a bare image layout at `layout`, starting a lineage
+/// and writing no blocks snapshot: the Dolos snapshot alone, as a host writes
+/// it.
+pub fn export_layout<B: ToyStores>(
+    layout: &std::path::Path,
+    domain: &ToyDomain<B>,
+    plan: &Plan,
+) -> Inscription {
+    let snapshot = SnapshotDir::create(layout).unwrap();
+
+    export::export(
+        &snapshot,
+        plan,
+        domain.archive(),
+        domain.state(),
         &First,
         &Observer::silent(),
     )
     .unwrap()
 }
 
-/// The publish plan for `domain`, retaining the state dumps `retained` names.
-pub fn plan_retaining<B: ToyStores>(domain: &ToyDomain<B>, retained: RetainedEpochs) -> Plan {
+/// The publish plan for `domain`, standing where its stores stand.
+pub fn plan_for<B: ToyStores>(domain: &ToyDomain<B>) -> Plan {
     export::plan(
         domain.state(),
         domain.genesis().network_magic() as u64,
-        retained,
+        dolos_cardano::mutable_slots(&domain.genesis()),
     )
     .unwrap()
 }
 
-pub fn plan_for<B: ToyStores>(domain: &ToyDomain<B>) -> Plan {
-    plan_retaining(domain, RetainedEpochs::default())
-}
-
+/// Export `domain` into the network root at `root`: its blocks snapshot,
+/// where it closed an epoch, and the snapshot naming it.
 pub fn export_to<B: ToyStores>(root: &std::path::Path, domain: &ToyDomain<B>) -> Inscription {
     export_plan(root, domain, &plan_for(domain))
+}
+
+/// The snapshot layout of the network root at `root`.
+pub fn dolos(root: &std::path::Path) -> std::path::PathBuf {
+    root.join(export::DOLOS_REPOSITORY)
+}
+
+/// The blocks layout of the network root at `root`, where an export wrote
+/// one.
+pub fn blocks(root: &std::path::Path) -> Option<std::path::PathBuf> {
+    let blocks = root.join(export::BLOCKS_REPOSITORY);
+
+    blocks.exists().then_some(blocks)
+}
+
+/// The latest snapshot of the network root at `root`, resolved through its
+/// chain.
+pub fn resolved(root: &std::path::Path) -> stelae::dir::Snapshot {
+    SnapshotDir::open(dolos(root))
+        .unwrap()
+        .resolve_latest(&dolos_snapshot::DolosProfile)
+        .unwrap()
+}
+
+/// The latest blocks snapshot of the network root at `root`, resolved through
+/// its chain, where it holds one.
+pub fn resolved_blocks(root: &std::path::Path) -> Option<stelae::dir::Snapshot> {
+    let layout = SnapshotDir::open(blocks(root)?).unwrap();
+
+    match layout.resolve_latest(&stelae_blocks::BlocksProfile) {
+        Ok(snapshot) => Some(snapshot),
+        Err(error) if error.is_absent() => None,
+        Err(error) => panic!("{error}"),
+    }
 }
 
 /// An account's row of `window`, written straight to `domain`'s archive.
@@ -420,8 +451,7 @@ pub fn account_layer(
     epoch: u64,
 ) -> stelae::inscription::LayerDescriptor {
     inscription
-        .layers
-        .iter()
+        .layers()
         .find(|layer| {
             layer.kind == "log-account-epochs"
                 && layer.scope.get("epoch").and_then(serde_json::Value::as_u64) == Some(epoch)

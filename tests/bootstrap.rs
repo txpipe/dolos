@@ -4,13 +4,16 @@
 //! lifecycle with partial commits (WAL + state only), then verifies that
 //! `bootstrap()` recovers the archive store from WAL replay.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::str::FromStr as _;
 use std::sync::Arc;
 
 use dolos_cardano::indexes::utxo_index_delta_from_utxo_delta;
 use dolos_core::{
-    bootstrap::{catch_up_stores, recovery_plan, RecoveredStore, RecoveryPlan, RecoveryStep},
+    bootstrap::{
+        catch_up_state_only, catch_up_stores, recovery_plan, RecoveredStore, RecoveryPlan,
+        RecoveryStep,
+    },
     sync::SyncExt as _,
     ArchiveStore as _, BootstrapExt, ChainLogic, ChainPoint, Domain, StateStore, StateWriter,
     TagDimension, TxoRef, UtxoSetDelta, WalStore, WorkUnit,
@@ -544,6 +547,124 @@ fn snapshot_namespace(
         .collect()
 }
 
+fn snapshot_state(
+    domain: &ToyDomain,
+) -> BTreeMap<(dolos_core::Namespace, dolos_core::EntityKey), dolos_core::EntityValue> {
+    dolos_cardano::model::build_schema()
+        .keys()
+        .flat_map(|&ns| {
+            snapshot_namespace(domain, ns)
+                .into_iter()
+                .map(move |(key, value)| ((ns, key), value))
+        })
+        .collect()
+}
+
+#[test]
+fn test_catchup_restores_registered_pool_minting_context() {
+    use dolos_cardano::{CardanoDelta, PoolKey, PoolState};
+    use pallas::{crypto::hash::Hasher, ledger::traverse::MultiEraBlock};
+
+    let genesis = Arc::new(dolos_cardano::include::devnet::load());
+    let epoch_length = genesis.shelley.epoch_length.unwrap() as u64;
+    let (probe, _, _) = build_synthetic_blocks(SyntheticBlockConfig::default());
+    let block = MultiEraBlock::decode(&probe[0]).unwrap();
+    let operator = Hasher::<224>::hash(block.header().issuer_vkey().unwrap());
+    let pool_id =
+        bech32::encode::<bech32::Bech32>(bech32::Hrp::parse("pool").unwrap(), operator.as_ref())
+            .unwrap();
+    let registration = pallas::ledger::primitives::conway::Certificate::PoolRegistration {
+        operator,
+        vrf_keyhash: [1; 32].into(),
+        pledge: 0,
+        cost: 0,
+        margin: pallas::ledger::primitives::RationalNumber {
+            numerator: 0,
+            denominator: 1,
+        },
+        reward_account: [&[0xe0][..], operator.as_ref()].concat().into(),
+        pool_owners: vec![].into(),
+        relays: vec![],
+        pool_metadata: None,
+    };
+    let cfg = SyntheticBlockConfig {
+        pool_id,
+        slot: epoch_length - 1,
+        txs_per_block: 1,
+        seed_amount: dolos_testing::MIN_UTXO_AMOUNT + 500_000_007,
+        plain_txs: true,
+        extra_certs_by_block: vec![vec![vec![registration]], vec![], vec![]],
+        ..Default::default()
+    };
+    let (blocks, _, config) = build_synthetic_blocks(cfg);
+    let clean = ToyDomain::new_with_genesis_and_config(genesis.clone(), config.clone(), None, None);
+    let recovered = ToyDomain::new_with_genesis_and_config(genesis, config, None, None);
+
+    for domain in [&clean, &recovered] {
+        for block in &blocks[..2] {
+            domain.roll_forward(block.clone()).unwrap();
+        }
+    }
+
+    let target = recovered.state().read_cursor().unwrap().unwrap();
+    let before = snapshot_state(&recovered);
+    let pool = recovered
+        .state()
+        .read_entity_typed::<PoolState>(&PoolKey(operator))
+        .unwrap()
+        .unwrap();
+    assert_eq!(pool.snapshot.epoch(), Some(1));
+    assert_eq!(pool.snapshot.unwrap_live().blocks_minted, 1);
+
+    clean.roll_forward(blocks[2].clone()).unwrap();
+    feed_blocks_partial(&recovered, &blocks[2..], CrashAfter::Wal);
+    assert_eq!(snapshot_state(&recovered), before);
+
+    let (point, mut log) = recovered.wal().find_tip().unwrap().unwrap();
+    assert!(log
+        .delta
+        .iter()
+        .any(|delta| matches!(delta, CardanoDelta::MintedBlocksInc(_))));
+    let encoded_deltas = bincode::serialize(&log.delta).unwrap();
+    dolos_cardano::CardanoLogic::prepare_replay(
+        recovered.state(),
+        recovered.genesis(),
+        &log.block,
+        &mut log.delta,
+    )
+    .unwrap();
+    assert_eq!(bincode::serialize(&log.delta).unwrap(), encoded_deltas);
+
+    let encoded_wal_delta = |domain: &ToyDomain| {
+        bincode::serialize(&domain.wal().read_entry(&point).unwrap().unwrap().delta).unwrap()
+    };
+    let wal_delta = encoded_wal_delta(&recovered);
+    recovered.bootstrap().unwrap();
+    assert_eq!(
+        recovered.state().read_cursor().unwrap(),
+        Some(point.clone())
+    );
+    let expected = snapshot_state(&clean);
+    assert_eq!(snapshot_state(&recovered), expected);
+    let pool = recovered
+        .state()
+        .read_entity_typed::<PoolState>(&PoolKey(operator))
+        .unwrap()
+        .unwrap();
+    assert_eq!(pool.snapshot.epoch(), Some(1));
+    assert_eq!(pool.snapshot.unwrap_live().blocks_minted, 2);
+    assert_eq!(encoded_wal_delta(&recovered), wal_delta);
+
+    recovered.bootstrap().unwrap();
+    assert_eq!(snapshot_state(&recovered), expected);
+    assert_eq!(encoded_wal_delta(&recovered), wal_delta);
+
+    clean.rollback(&target).unwrap();
+    recovered.rollback(&target).unwrap();
+    assert_eq!(snapshot_state(&recovered), before);
+    assert_eq!(snapshot_state(&recovered), snapshot_state(&clean));
+}
+
 #[test]
 fn test_bootstrap_origin_cursor_is_noop() {
     let genesis = Arc::new(dolos_cardano::include::devnet::load());
@@ -608,8 +729,7 @@ fn test_recovery_plan_when_the_wal_covers_the_lag() {
 }
 
 /// A WAL reset to its tip, past the state, holds only the synthetic entry
-/// there: the plan says the lag is not covered, and catch-up, unable to reach
-/// the tip, fails.
+/// there: the plan says the lag is not covered, and catch-up refuses it.
 #[test]
 fn test_recovery_plan_when_the_wal_is_short() {
     let (blocks, _, cardano_config) = build_synthetic_blocks(SyntheticBlockConfig::default());
@@ -631,13 +751,13 @@ fn test_recovery_plan_when_the_wal_is_short() {
 
     assert!(matches!(
         catch_up_stores(&domain),
-        Err(dolos_core::DomainError::InconsistentState { .. })
+        Err(dolos_core::DomainError::WalGap { .. })
     ));
 }
 
 /// A WAL pruned past the state, with no synthetic entry left: it no longer
-/// reaches back to the state, so the lag is not covered. Catch-up still
-/// replays what remains and reaches the tip, the pruned blocks never applied.
+/// reaches back to the state, so the lag is not covered. Catch-up refuses it,
+/// and the state does not change.
 #[test]
 fn test_recovery_plan_when_the_wal_is_pruned_past_the_state() {
     let (blocks, _, cardano_config) = build_synthetic_blocks(SyntheticBlockConfig::default());
@@ -669,13 +789,21 @@ fn test_recovery_plan_when_the_wal_is_pruned_past_the_state() {
         assert!(!step(&plan, store).unwrap().covered, "{store:?}");
     }
 
-    catch_up_stores(&domain).unwrap();
-    assert_eq!(domain.state().read_cursor().unwrap(), Some(wal_tip));
+    let cursor = domain.state().read_cursor().unwrap();
+    let entities = snapshot_state(&domain);
+    let error = catch_up_stores(&domain).unwrap_err();
+    assert!(matches!(
+        error,
+        dolos_core::DomainError::WalGap { wal, state }
+            if wal == wal_tip && state == cursor
+    ));
+    assert_eq!(domain.state().read_cursor().unwrap(), cursor);
+    assert_eq!(snapshot_state(&domain), entities);
 }
 
 /// A WAL that still reaches back to the state, but holds a synthetic entry
 /// past it where a block was: the blocks before that entry were discarded, so
-/// the lag is not covered, though catch-up replays the rest to the tip.
+/// the lag is not covered. Catch-up refuses it, and the state does not change.
 #[test]
 fn test_recovery_plan_when_a_synthetic_entry_is_past_the_state() {
     let (blocks, _, cardano_config) = build_synthetic_blocks(SyntheticBlockConfig::default());
@@ -711,8 +839,16 @@ fn test_recovery_plan_when_a_synthetic_entry_is_past_the_state() {
         assert_eq!(step.entries, blocks.len() as u64 - 1);
     }
 
-    catch_up_stores(&domain).unwrap();
-    assert_eq!(domain.state().read_cursor().unwrap(), Some(wal_tip));
+    let cursor = domain.state().read_cursor().unwrap();
+    let entities = snapshot_state(&domain);
+    let error = catch_up_stores(&domain).unwrap_err();
+    assert!(matches!(
+        error,
+        dolos_core::DomainError::WalGap { wal, state }
+            if wal == wal_tip && state == cursor
+    ));
+    assert_eq!(domain.state().read_cursor().unwrap(), cursor);
+    assert_eq!(snapshot_state(&domain), entities);
 }
 
 /// State at the WAL tip with the archive behind it: only the archive replays.
@@ -757,4 +893,502 @@ fn test_recovery_plan_of_committed_stores_is_current() {
     let plan = plan_for(&domain);
     assert!(plan.is_current(), "{plan:?}");
     assert!(plan.covers_lag);
+}
+
+/// The datum a same-slot block's WAL entry adds, keyed by `tag`, so the state
+/// shows which of the pair it applied.
+fn datum(tag: u8) -> pallas::crypto::hash::Hash<32> {
+    pallas::crypto::hash::Hash::new([tag; 32])
+}
+
+const EBB_DATUM: u8 = 0xe0;
+const MAIN_DATUM: u8 = 0x3a;
+
+/// A WAL entry for `block` whose one delta adds [`datum`] `tag`, carrying the
+/// undo data a roll's apply leaves in it before the WAL commit.
+fn datum_entry(
+    block: &dolos_core::RawBlock,
+    tag: u8,
+) -> dolos_core::LogValue<dolos_cardano::CardanoDelta> {
+    use dolos_core::EntityDelta as _;
+
+    let mut delta = dolos_cardano::DatumRefIncrement::new(datum(tag), vec![tag]);
+    delta.apply(&mut None);
+
+    dolos_core::LogValue {
+        block: block.to_vec(),
+        delta: vec![delta.into()],
+        inputs: Default::default(),
+    }
+}
+
+/// The refcount of [`datum`] `tag` in the state; none while it is absent.
+fn datum_refs(domain: &ToyDomain, tag: u8) -> Option<u64> {
+    domain
+        .state()
+        .read_entity_typed::<dolos_cardano::DatumState>(&dolos_cardano::DatumKey(datum(tag)))
+        .unwrap()
+        .map(|state| state.refcount)
+}
+
+/// The boundary block opening Byron epoch 1 and the main block numbered
+/// `number` chained onto it at the same slot, as WAL entries adding the
+/// [`EBB_DATUM`] and the [`MAIN_DATUM`].
+fn same_slot_pair(number: u64) -> [dolos_core::LogEntry<dolos_cardano::CardanoDelta>; 2] {
+    use dolos_testing::blocks::{byron_ebb_slot, make_byron_ebb, make_conway_block_with_prev};
+
+    let (ebb, ebb_block) = make_byron_ebb(1, pallas::crypto::hash::Hash::new([7u8; 32]));
+    let (main, main_block) = make_conway_block_with_prev(byron_ebb_slot(1), ebb.hash(), number);
+
+    [
+        (ebb, datum_entry(&ebb_block, EBB_DATUM)),
+        (main, datum_entry(&main_block, MAIN_DATUM)),
+    ]
+}
+
+/// Main block numbers giving a pair whose main block sorts after its
+/// boundary block in the WAL, and one whose main block sorts first.
+fn both_key_orders() -> [u64; 2] {
+    let main_sorts_first = |number: &u64| {
+        let [(ebb, _), (main, _)] = same_slot_pair(*number);
+        main.into_bytes() < ebb.into_bytes()
+    };
+
+    [
+        (0..).find(|n| !main_sorts_first(n)).unwrap(),
+        (0..).find(main_sorts_first).unwrap(),
+    ]
+}
+
+/// A crash after the main block's WAL commit, with the state at the boundary
+/// block that shares its slot: catch-up replays the main block, whichever of
+/// the two sorts first.
+#[test]
+fn test_catchup_replays_the_block_sharing_the_cursor_slot() {
+    for number in both_key_orders() {
+        let domain = ToyDomain::new(None, None);
+        let [ebb, main] = same_slot_pair(number);
+        let main_point = main.0.clone();
+
+        WalStore::append_entries(domain.wal(), vec![ebb]).unwrap();
+        catch_up_stores(&domain).unwrap();
+        assert_eq!(datum_refs(&domain, EBB_DATUM), Some(1));
+
+        WalStore::append_entries(domain.wal(), vec![main]).unwrap();
+
+        let plan = plan_for(&domain);
+        assert_eq!(
+            step(&plan, RecoveredStore::State).map(|step| step.entries),
+            Some(1),
+            "main block numbered {number}: {plan:?}"
+        );
+
+        catch_up_stores(&domain).unwrap();
+
+        assert_eq!(
+            datum_refs(&domain, MAIN_DATUM),
+            Some(1),
+            "main block numbered {number}"
+        );
+        assert_eq!(datum_refs(&domain, EBB_DATUM), Some(1));
+        assert_eq!(domain.state().read_cursor().unwrap(), Some(main_point));
+
+        // Nothing left to replay, and a second catch-up applies nothing twice.
+        assert!(step(&plan_for(&domain), RecoveredStore::State).is_none());
+        catch_up_stores(&domain).unwrap();
+        assert_eq!(datum_refs(&domain, MAIN_DATUM), Some(1));
+    }
+}
+
+/// The same crash after the WAL was reseeded at the boundary block, as a
+/// restore or a discarded WAL leaves it: the WAL holds that block only as a
+/// seed entry naming its hash, while the archive holds its body. Catch-up
+/// still replays the main block, whichever of the two sorts first.
+#[test]
+fn test_catchup_replays_the_block_sharing_a_seeded_cursor_slot() {
+    for number in both_key_orders() {
+        let domain = ToyDomain::new(None, None);
+        let [ebb, main] = same_slot_pair(number);
+        let (ebb_point, main_point) = (ebb.0.clone(), main.0.clone());
+
+        WalStore::append_entries(domain.wal(), vec![ebb]).unwrap();
+        catch_up_stores(&domain).unwrap();
+
+        dolos_core::seed_wal_from_state(domain.state(), domain.wal()).unwrap();
+        let seed = domain.wal().read_entry(&ebb_point).unwrap().unwrap();
+        assert!(seed.block.is_empty(), "main block numbered {number}");
+        let archived = domain
+            .archive()
+            .get_blocks_by_slot(&ebb_point.slot())
+            .unwrap();
+        assert_eq!(archived.len(), 1, "main block numbered {number}");
+
+        WalStore::append_entries(domain.wal(), vec![main]).unwrap();
+
+        let plan = plan_for(&domain);
+        let state = step(&plan, RecoveredStore::State).unwrap();
+        assert_eq!(state.entries, 1, "main block numbered {number}: {plan:?}");
+        assert!(state.covered, "main block numbered {number}: {plan:?}");
+
+        catch_up_stores(&domain).unwrap();
+
+        assert_eq!(
+            datum_refs(&domain, MAIN_DATUM),
+            Some(1),
+            "main block numbered {number}"
+        );
+        assert_eq!(datum_refs(&domain, EBB_DATUM), Some(1));
+        assert_eq!(domain.state().read_cursor().unwrap(), Some(main_point));
+    }
+}
+
+/// A seed entry vouches only for the block whose hash it names: with another
+/// body archived at the boundary block's slot, catch-up refuses before it
+/// replays anything.
+#[test]
+fn test_catchup_refuses_an_archived_block_a_seed_entry_does_not_name() {
+    use dolos_core::ArchiveWriter as _;
+
+    for number in both_key_orders() {
+        let domain = ToyDomain::new(None, None);
+        let [ebb, main] = same_slot_pair(number);
+        let ebb_point = ebb.0.clone();
+
+        WalStore::append_entries(domain.wal(), vec![ebb]).unwrap();
+        catch_up_stores(&domain).unwrap();
+        dolos_core::seed_wal_from_state(domain.state(), domain.wal()).unwrap();
+
+        let (foreign, body) = dolos_testing::blocks::make_conway_block(ebb_point.slot());
+        let writer = domain.archive().start_writer().unwrap();
+        writer.undo(&ebb_point).unwrap();
+        writer.apply(&foreign, &body).unwrap();
+        writer.commit().unwrap();
+
+        WalStore::append_entries(domain.wal(), vec![main]).unwrap();
+
+        let case = format!("main block numbered {number}");
+        let error = catch_up_stores(&domain).unwrap_err();
+        assert!(
+            format!("{error:?}").contains("is not the same as the WAL block"),
+            "{case}: {error:?}"
+        );
+        assert_eq!(datum_refs(&domain, MAIN_DATUM), None, "{case}");
+        assert_eq!(
+            domain.state().read_cursor().unwrap(),
+            Some(ebb_point),
+            "{case}"
+        );
+    }
+}
+
+/// A cursor holding only a slot, as ESTART leaves it at the epoch's first
+/// block: catch-up replays every block at that slot, in chain order.
+#[test]
+fn test_catchup_from_a_slot_cursor_replays_its_slot() {
+    for number in both_key_orders() {
+        let domain = ToyDomain::new(None, None);
+        let [ebb, main] = same_slot_pair(number);
+        let slot = ebb.0.slot();
+        let main_point = main.0.clone();
+
+        let writer = domain.state().start_writer().unwrap();
+        writer.set_cursor(ChainPoint::Slot(slot)).unwrap();
+        writer.commit().unwrap();
+
+        WalStore::append_entries(domain.wal(), vec![ebb, main]).unwrap();
+
+        let plan = plan_for(&domain);
+        let state = step(&plan, RecoveredStore::State).unwrap();
+        assert_eq!(state.entries, 2, "main block numbered {number}: {plan:?}");
+        assert_eq!(state.from, Some(slot));
+
+        catch_up_stores(&domain).unwrap();
+
+        assert_eq!(datum_refs(&domain, EBB_DATUM), Some(1), "{number}");
+        assert_eq!(datum_refs(&domain, MAIN_DATUM), Some(1), "{number}");
+        assert_eq!(domain.state().read_cursor().unwrap(), Some(main_point));
+    }
+}
+
+/// Both blocks of a same-slot pair applied: a rollback to the boundary block
+/// undoes the main block and drops it from the WAL, and a rollback to the
+/// main block undoes nothing, whichever of the two sorts first.
+#[test]
+fn test_rollback_keeps_the_chain_order_of_a_shared_slot() {
+    for number in both_key_orders() {
+        for to_ebb in [true, false] {
+            let domain = ToyDomain::new(None, None);
+            let [ebb, main] = same_slot_pair(number);
+            let (ebb_point, main_point) = (ebb.0.clone(), main.0.clone());
+
+            WalStore::append_entries(domain.wal(), vec![ebb, main]).unwrap();
+            catch_up_stores(&domain).unwrap();
+            assert_eq!(
+                domain.state().read_cursor().unwrap(),
+                Some(main_point.clone())
+            );
+
+            let to = if to_ebb { &ebb_point } else { &main_point };
+            domain.rollback(to).unwrap();
+
+            let case = format!("main block numbered {number}, rolled back to {to}");
+
+            assert_eq!(
+                domain.state().read_cursor().unwrap().as_ref(),
+                Some(to),
+                "{case}"
+            );
+            assert_eq!(datum_refs(&domain, EBB_DATUM), Some(1), "{case}");
+
+            let main_refs = if to_ebb { None } else { Some(1) };
+            assert_eq!(datum_refs(&domain, MAIN_DATUM), main_refs, "{case}");
+
+            assert!(domain.wal().contains_point(&ebb_point).unwrap(), "{case}");
+            assert_eq!(
+                domain.wal().contains_point(&main_point).unwrap(),
+                !to_ebb,
+                "{case}"
+            );
+
+            // The WAL agrees with the state: nothing to replay.
+            assert!(
+                step(&plan_for(&domain), RecoveredStore::State).is_none(),
+                "{case}"
+            );
+        }
+    }
+}
+
+/// The archive's exact records, in key order.
+fn exact_records(domain: &ToyDomain) -> Vec<dolos_core::ExactRecord> {
+    domain
+        .archive()
+        .iter_exact_records(0..u64::MAX)
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// A rollback to the boundary block that stopped after it undid the main
+/// block in the state and in the archive's indexes, before it cut the WAL and
+/// the archived blocks: catch-up replays the main block and restores its index
+/// entries, whichever of the pair sorts first.
+#[test]
+fn test_catchup_repairs_the_index_of_an_archived_block_sharing_the_cursor_slot() {
+    use dolos_core::{ArchiveWriter as _, EntityMap};
+
+    for number in both_key_orders() {
+        let domain = ToyDomain::new(None, None);
+        let [ebb, main] = same_slot_pair(number);
+        let (ebb_point, main_point) = (ebb.0.clone(), main.0.clone());
+
+        WalStore::append_entries(domain.wal(), vec![ebb, main]).unwrap();
+        catch_up_stores(&domain).unwrap();
+        let expected = exact_records(&domain);
+
+        let log = domain.wal().read_entry(&main_point).unwrap().unwrap();
+        let undo =
+            dolos_cardano::CardanoLogic::compute_undo(&log.block, &log.inputs, main_point.clone())
+                .unwrap();
+        let mut entities = EntityMap::default();
+        dolos_core::state::undo_delta_chunk::<ToyDomain>(&mut entities, domain.state(), &log.delta)
+            .unwrap();
+        dolos_cardano::CardanoLogic::settle_undo(domain.state(), &mut entities).unwrap();
+
+        let writer = domain.state().start_writer().unwrap();
+        dolos_core::state::save_entities::<ToyDomain>(&writer, &entities).unwrap();
+        writer.apply_utxoset(&undo.utxo_delta).unwrap();
+        writer.undo_utxo_tags(&undo.utxo_index_delta).unwrap();
+        writer.set_cursor(ebb_point.clone()).unwrap();
+        writer.commit().unwrap();
+
+        let archive = domain.archive().start_writer().unwrap();
+        archive.undo_index(&undo.archive_index_deltas).unwrap();
+        archive.commit().unwrap();
+
+        let case = format!("main block numbered {number}");
+        assert_eq!(datum_refs(&domain, MAIN_DATUM), None, "{case}");
+        assert_ne!(exact_records(&domain), expected, "{case}: nothing undone");
+        assert_eq!(
+            domain
+                .archive()
+                .get_blocks_by_slot(&ebb_point.slot())
+                .unwrap()
+                .len(),
+            2
+        );
+
+        catch_up_stores(&domain).unwrap();
+
+        assert_eq!(
+            domain.state().read_cursor().unwrap(),
+            Some(main_point),
+            "{case}"
+        );
+        assert_eq!(datum_refs(&domain, MAIN_DATUM), Some(1), "{case}");
+        assert_eq!(datum_refs(&domain, EBB_DATUM), Some(1), "{case}");
+        assert_eq!(exact_records(&domain), expected, "{case}");
+    }
+}
+
+/// A crash after the main block's state commit and before its archive
+/// commit, at the slot its boundary block shares: the archive holds the
+/// boundary block alone, and catch-up archives the main block after it, with
+/// its index entries, whichever of the two sorts first.
+#[test]
+fn test_catchup_archives_the_block_sharing_the_archive_tip_slot() {
+    for number in both_key_orders() {
+        let case = format!("main block numbered {number}");
+
+        let synced = ToyDomain::new(None, None);
+        WalStore::append_entries(synced.wal(), Vec::from(same_slot_pair(number))).unwrap();
+        catch_up_stores(&synced).unwrap();
+        let expected = exact_records(&synced);
+
+        let domain = ToyDomain::new(None, None);
+        let [ebb, main] = same_slot_pair(number);
+        let main_point = main.0.clone();
+        let chain = vec![ebb.1.block.clone(), main.1.block.clone()];
+
+        WalStore::append_entries(domain.wal(), vec![ebb]).unwrap();
+        catch_up_stores(&domain).unwrap();
+
+        WalStore::append_entries(domain.wal(), vec![main]).unwrap();
+        catch_up_state_only(&domain).unwrap();
+        assert_eq!(
+            domain.state().read_cursor().unwrap(),
+            Some(main_point.clone()),
+            "{case}"
+        );
+
+        let plan = plan_for(&domain);
+        let archive = step(&plan, RecoveredStore::Archive);
+        assert_eq!(
+            archive.map(|step| step.entries),
+            Some(1),
+            "{case}: {plan:?}"
+        );
+
+        catch_up_stores(&domain).unwrap();
+
+        let archived = |domain: &ToyDomain| {
+            domain
+                .archive()
+                .get_blocks_by_slot(&main_point.slot())
+                .unwrap()
+        };
+        assert_eq!(archived(&domain), chain, "{case}");
+        assert_eq!(exact_records(&domain), expected, "{case}");
+
+        // Nothing left to replay, and a second catch-up archives nothing twice.
+        let plan = plan_for(&domain);
+        assert!(
+            step(&plan, RecoveredStore::Archive).is_none(),
+            "{case}: {plan:?}"
+        );
+        catch_up_stores(&domain).unwrap();
+        assert_eq!(archived(&domain), chain, "{case}");
+    }
+}
+
+/// An archive whose tip slot holds a block the WAL's block there does not
+/// chain onto lacks nothing at that slot: the archive replay skips it, as it
+/// skips every block at or before its tip slot.
+#[test]
+fn test_archive_replay_skips_a_block_not_chained_onto_its_tip() {
+    use dolos_core::ArchiveWriter as _;
+
+    for number in both_key_orders() {
+        let domain = ToyDomain::new(None, None);
+        let [ebb, main] = same_slot_pair(number);
+        let ebb_point = ebb.0.clone();
+
+        WalStore::append_entries(domain.wal(), vec![ebb]).unwrap();
+        catch_up_stores(&domain).unwrap();
+
+        let (foreign, body) = dolos_testing::blocks::make_conway_block(ebb_point.slot());
+        let writer = domain.archive().start_writer().unwrap();
+        writer.undo(&ebb_point).unwrap();
+        writer.apply(&foreign, &body).unwrap();
+        writer.commit().unwrap();
+
+        WalStore::append_entries(domain.wal(), vec![main]).unwrap();
+
+        let plan = plan_for(&domain);
+        assert!(
+            step(&plan, RecoveredStore::Archive).is_none(),
+            "main block numbered {number}: {plan:?}"
+        );
+    }
+}
+
+/// Both blocks of a same-slot pair applied: a rollback to the boundary block
+/// takes the main block's body out of the archive and keeps the boundary
+/// block's, and a rollback to the main block keeps both, whichever of the two
+/// sorts first.
+fn rollback_cuts_the_archive_at_the_point<B: dolos_testing::toy_domain::ToyStores>() {
+    for number in both_key_orders() {
+        for to_ebb in [true, false] {
+            let domain = ToyDomain::<B>::with_backend(
+                Arc::new(dolos_cardano::include::devnet::load()),
+                Default::default(),
+                None,
+                None,
+            );
+            let [ebb, main] = same_slot_pair(number);
+            let (ebb_point, main_point) = (ebb.0.clone(), main.0.clone());
+            let (ebb_block, main_block) = (ebb.1.block.clone(), main.1.block.clone());
+
+            WalStore::append_entries(domain.wal(), vec![ebb, main]).unwrap();
+            catch_up_stores(&domain).unwrap();
+
+            let to = if to_ebb { &ebb_point } else { &main_point };
+            domain.rollback(to).unwrap();
+
+            let case = format!("main block numbered {number}, rolled back to {to}");
+
+            let kept = match to_ebb {
+                true => vec![ebb_block.clone()],
+                false => vec![ebb_block.clone(), main_block.clone()],
+            };
+            assert_eq!(
+                domain
+                    .archive()
+                    .get_blocks_by_slot(&ebb_point.slot())
+                    .unwrap(),
+                kept,
+                "{case}"
+            );
+
+            let (tip_slot, tip) = domain.archive().get_tip().unwrap().unwrap();
+            assert_eq!(tip_slot, ebb_point.slot(), "{case}");
+            assert_eq!(&tip, kept.last().unwrap(), "{case}");
+
+            // The main block archives again after the boundary block.
+            if to_ebb {
+                WalStore::append_entries(domain.wal(), vec![same_slot_pair(number)[1].clone()])
+                    .unwrap();
+                catch_up_stores(&domain).unwrap();
+
+                assert_eq!(
+                    domain
+                        .archive()
+                        .get_blocks_by_slot(&ebb_point.slot())
+                        .unwrap(),
+                    vec![ebb_block, main_block],
+                    "{case}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_rollback_cuts_the_memory_archive_at_the_point() {
+    rollback_cuts_the_archive_at_the_point::<dolos_testing::toy_domain::MemoryStores>();
+}
+
+#[test]
+fn test_rollback_cuts_the_fjall_archive_at_the_point() {
+    rollback_cuts_the_archive_at_the_point::<dolos_testing::toy_domain::FjallStores>();
 }
