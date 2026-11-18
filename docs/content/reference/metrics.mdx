@@ -54,7 +54,7 @@ Every request series carries `surface`: `minibf`, `minikupo`, `grpc` or `trp`.
 | `http.server.active_requests`<br />`http_server_active_requests` | `dolos-minibf`, `dolos-minikupo` | up-down counter, `{request}` | `surface`, `http.route`, `http.request.method` | Requests being answered now |
 | `dolos.http.server.request.dropped`<br />`dolos_http_server_request_dropped_total` | `dolos-minibf`, `dolos-minikupo` | counter, `{request}` | `surface`, `http.route`, `http.request.method` | Requests whose client went away before the answer |
 
-- `http.route` is the route template the request matched, such as `/addresses/{address}/utxos`, with MiniBF's `route_prefix` in front when one is set. A request no route matched is `unmatched`. The values are the routes the [MiniBF](../apis/minibf#coverage) and [MiniKupo](../apis/minikupo#coverage) pages list.
+- `http.route` is the route template the request matched, such as `/addresses/{address}/utxos`, with MiniBF's `route_prefix` in front when one is set. A request no route matched is `unmatched`. The values are the routes the [MiniBF](../apis/minibf#coverage) and [MiniKupo](../apis/minikupo#coverage) pages list, with two differences on MiniKupo: its matches route is `/matches/{*pattern}`, and since MiniKupo also serves every route under `/v1`, each route has a second value with `/v1` in front, such as `/v1/metadata/{slot-no}`.
 - `http.request.method` is the standard method (`GET`, `POST`, …), or `_OTHER` for any other.
 - `http.response.status_code` is the status the node answered.
 - The duration runs from the request reaching the node to its response head, the body not included. The request deadline (`request_timeout_seconds`) sits inside this measure, so a request it cut is a duration sample with status `504`, not a drop.
@@ -168,7 +168,7 @@ sum by (service_instance_id, surface) (
   rate({__name__=~"http_server_request_duration_seconds_count|rpc_server_call_duration_seconds_count"}[5m]))
 ```
 
-The first is zero and the second low on an idle node; `dolos_query_limiter_in_use` is zero too.
+The first is zero and the second low on an idle node; `dolos_query_limiter_in_use` is zero too. A gRPC server stream counts in the first until it sends its first message, so a client that holds a `WatchTx`, `WaitForTx` or `WatchMempool` stream nothing has matched yet keeps it above zero on a node that is otherwise idle.
 
 ### Saturated
 
@@ -199,7 +199,7 @@ sum by (service_instance_id, surface) (
 max by (service_instance_id) (dolos_query_blocking_outlived) > 0
 ```
 
-Drops alone are clients giving up. Drops with `dolos_query_blocking_outlived` above zero are work the node still does for nobody: it holds permits, and heavy slots, that live requests wait for. A closure that outlives its caller for less than an export interval may not show; `max_over_time(dolos_query_blocking_outlived[15m])` keeps what the exports saw. The `504` samples of `http_server_request_duration_seconds_count` are the requests the deadline cut.
+A server stream its client leaves after the stream's first message is not a drop: it ends as `dolos_rpc_server_streams_ended_total{rpc_response_status_code="CANCELLED"}`. Drops alone are clients giving up. Drops with `dolos_query_blocking_outlived` above zero are work the node still does for nobody: it holds permits, and heavy slots, that live requests wait for. A closure that outlives its caller for less than an export interval may not show; `max_over_time(dolos_query_blocking_outlived[15m])` keeps what the exports saw. The `504` samples of `http_server_request_duration_seconds_count` are the requests the deadline cut.
 
 ### With resource attributes on `target_info`
 
