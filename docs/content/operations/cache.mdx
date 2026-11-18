@@ -90,7 +90,7 @@ The cache records OpenTelemetry metrics under the `dolos-core` meter:
 | `dolos.cache.entries`       | gauge     | `namespace`, `tier`     |
 | `dolos.cache.bytes`         | gauge     | `namespace`, `tier`     |
 
-`tier` is `memory` or `disk`; the disk tier's own evictions are not counted. A lookup reads the disk only after a memory miss, so a namespace's hit rate is its memory and disk hits over its hits and misses on the memory tier. A node with a [`[telemetry]`](../configuration/schema#telemetry) section exports these metrics over OTLP.
+`tier` is `memory` or `disk`; the disk tier's own evictions are not counted. A lookup reads the disk only after a memory miss, so a namespace's hit rate is its memory and disk hits over its hits and misses on the memory tier. A node with a [`[telemetry]`](../configuration/schema#telemetry) section exports these metrics over OTLP; the [metric reference](../reference/metrics#cache) gives their Prometheus names and units.
 
 ## Pruned nodes
 

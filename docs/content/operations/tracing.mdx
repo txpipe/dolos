@@ -1,36 +1,99 @@
 ---
-title: Tracing
+title: Telemetry
 sidebar:
   order: 3
 ---
 
-Dolos can export per-transaction OpenTelemetry traces that track the full mempool lifecycle of each submitted transaction. This feature is off by default. When it is on, traces are sent to an OTLP-compatible collector such as Jaeger or Grafana Tempo.
+Dolos exports OpenTelemetry metrics and traces over OTLP to one collector endpoint. Metrics cover every serving surface, the query limiter, the chain tip, the cache and the stores; the [metric reference](../reference/metrics) lists every series. Traces follow the mempool lifecycle of each submitted transaction. Export is off by default. Dolos serves no metrics route of its own: MiniBF's former `/metrics` route and MiniKupo's `/health` route are gone, and what they reported is exported here.
 
 ## Configuration
 
-The `[telemetry]` section in your `dolos.toml` controls trace export, and the metric export beside it. Export is on when the section is present, and off when it is absent. The [configuration reference](../configuration/schema#telemetry) lists every field:
+The `[telemetry]` section in your `dolos.toml` turns export on when present and off when absent. The [configuration reference](../configuration/schema#telemetry) lists every field:
 
-| property        | type   | default                   | description                                 |
-| --------------- | ------ | ------------------------- | ------------------------------------------- |
-| `otlp_endpoint` | string | `"http://localhost:4317"` | endpoint of the OTLP collector              |
-| `otlp_protocol` | string | `"grpc"`                  | `grpc` or `http-protobuf`                   |
-| `service_name`  | string | `"dolos"`                 | service name reported in traces and metrics |
+| property                   | type    | default                   | description                                          |
+| -------------------------- | ------- | ------------------------- | ---------------------------------------------------- |
+| `otlp_endpoint`            | string  | `"http://localhost:4317"` | where both signals go                                |
+| `otlp_protocol`            | string  | `"grpc"`                  | `grpc` or `http-protobuf`, for both signals          |
+| `service_name`             | string  | `"dolos"`                 | the `service.name` resource attribute                |
+| `metrics`                  | boolean | `true`                    | `false` turns the metric export off and keeps traces |
+| `metrics_interval_seconds` | integer | `60`                      | how often metrics are pushed                         |
 
-Example:
+With `grpc`, `otlp_endpoint` is the collector's gRPC address, usually on port 4317. With `http-protobuf`, it is the collector's base URL, usually on port 4318: traces are posted to `/v1/traces` and metrics to `/v1/metrics` under it. An `https://` endpoint is reached over TLS on either protocol.
 
 ```toml
 [telemetry]
-otlp_endpoint = "http://localhost:4317"
-service_name = "dolos"
+otlp_endpoint = "https://otlp.example.com"
+otlp_protocol = "http-protobuf"
 ```
 
-## Local OTLP Setup for Testing
+### Credentials
 
-To get traces flowing on your local machine, you need an OTLP-compatible collector running alongside Dolos. Below are two common options.
+Credentials are not part of the configuration. The exporters send the headers of the standard `OTEL_EXPORTER_OTLP_HEADERS` environment variable, a comma-separated list of `key=value` pairs with URL-encoded values:
 
-### Option A: Jaeger all-in-one
+```sh
+export OTEL_EXPORTER_OTLP_HEADERS="authorization=Basic%20dXNlcjpzZWNyZXQ="
+```
 
-Jaeger ships as a single Docker image that includes an OTLP gRPC receiver and a web UI.
+### Resource attributes
+
+Every metric and span carries the resource of its process: `service.name` (from `service_name`), `service.instance.id` (the hostname), `service.version` (the Dolos version) and `dolos.network` (`mainnet`, `preprod`, `preview`, or a custom network's magic). The standard `OTEL_RESOURCE_ATTRIBUTES` variable overrides any of them and adds others, which is how a deployment names its pods:
+
+```sh
+export OTEL_RESOURCE_ATTRIBUTES="service.instance.id=dolos-0,deployment.environment=prod"
+```
+
+## A minimal collector
+
+The [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/) receives both signals and hands them on. This configuration receives OTLP on both protocols, serves the metrics to Prometheus on port 8889 with the resource attributes as labels, and prints spans:
+
+```yaml
+receivers:
+  otlp:
+    protocols:
+      grpc: { endpoint: 0.0.0.0:4317 }
+      http: { endpoint: 0.0.0.0:4318 }
+
+exporters:
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    resource_to_telemetry_conversion: { enabled: true }
+  debug: {}
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      exporters: [prometheus]
+    traces:
+      receivers: [otlp]
+      exporters: [debug]
+```
+
+Run it with the contrib image, and point Prometheus at it keeping the `job` and `instance` labels the collector sets:
+
+```sh
+docker run -d --name otelcol -p 4317:4317 -p 4318:4318 -p 8889:8889 \
+  -v "$PWD/collector.yaml:/etc/otelcol-contrib/config.yaml:ro" \
+  otel/opentelemetry-collector-contrib:0.115.1
+```
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: dolos
+    honor_labels: true
+    static_configs: [{ targets: ["localhost:8889"] }]
+```
+
+Without `resource_to_telemetry_conversion`, the resource attributes stay on a `target_info` series; the [metric reference](../reference/metrics#with-resource-attributes-on-target_info) shows how queries change. In production, replace `debug` with a trace backend such as Jaeger or Grafana Tempo.
+
+## Traces
+
+### Local setup
+
+To see traces on your local machine, you can also point Dolos straight at a backend that receives OTLP itself.
+
+Jaeger ships as a single Docker image that includes an OTLP receiver and a web UI:
 
 ```sh
 docker run -d --name jaeger \
@@ -40,8 +103,6 @@ docker run -d --name jaeger \
 ```
 
 This exposes the OTLP gRPC endpoint on port `4317` and the Jaeger UI on `http://localhost:16686`.
-
-### Option B: Grafana Tempo + Grafana
 
 If you prefer a Grafana-based stack, use a `docker-compose.yml` like the following:
 
@@ -66,6 +127,8 @@ services:
 
 You will also need a minimal `tempo.yaml` configuration that enables the OTLP gRPC receiver. Refer to the [Grafana Tempo documentation](https://grafana.com/docs/tempo/latest/) for details.
 
+A trace backend may not accept metrics. Set `metrics = false` while pointing Dolos straight at one, or put the collector above in front of it.
+
 ### Enable telemetry in Dolos
 
 Add the `[telemetry]` section to your `dolos.toml`; an empty one exports with the defaults:
@@ -74,7 +137,7 @@ Add the `[telemetry]` section to your `dolos.toml`; an empty one exports with th
 [telemetry]
 ```
 
-The default `otlp_endpoint` (`http://localhost:4317`) matches both setups above, so you don't need to change it when running everything on the same host.
+The default `otlp_endpoint` (`http://localhost:4317`) matches the setups above, so you don't need to change it when running everything on the same host.
 
 ### Verify traces arrive
 
@@ -84,14 +147,15 @@ The default `otlp_endpoint` (`http://localhost:4317`) matches both setups above,
 
 A healthy trace shows a root span with child spans nested underneath, representing the different lifecycle stages of the transaction.
 
-### Troubleshooting
+## Troubleshooting
 
-- **Connection refused** — The collector is not running or is not listening on the expected port. Make sure the Docker container is up and port `4317` is published.
-- **Wrong port** — Verify that `otlp_endpoint` points to the gRPC port (`4317` by default), not the HTTP port.
-- **Firewall** — If running the collector on a different host, ensure your firewall allows inbound gRPC traffic on the configured port.
+- **Connection refused** — The collector is not running or is not listening on the expected port. Make sure the container is up and its port is published.
+- **Wrong port** — `grpc` goes to the gRPC port (`4317` by default) and `http-protobuf` to the HTTP port (`4318`); a mismatch fails every export.
+- **Firewall** — If running the collector on a different host, ensure your firewall allows inbound traffic on the configured port.
+- **`Unimplemented`** — A span export error naming gRPC code `Unimplemented` means the collector has no traces pipeline; add one.
 
-Dolos logs an error at startup if the OTLP exporter cannot reach the configured endpoint, which is the quickest way to confirm connectivity.
+When metric exports start failing, Dolos logs one warning naming the error, and one line when they recover; the failures in between are not repeated.
 
 ## Relation to Logging
 
-Tracing is independent of the [`[logging]`](../operations/logging) configuration. Both can be active simultaneously. Without a `[telemetry]` section (the default), there is zero runtime overhead — no spans are exported and no collector connection is attempted.
+Telemetry is independent of the [`[logging]`](../operations/logging) configuration. Both can be active simultaneously. Without a `[telemetry]` section (the default), no metrics or spans are exported and no collector connection is attempted.
