@@ -12,10 +12,10 @@ Every metric series Dolos exports, by area. Dolos pushes its metrics over OTLP t
 ## Naming
 
 - A name the OpenTelemetry semantic conventions define is used as they define it: `http.server.request.duration`, `http.server.active_requests` and `rpc.server.call.duration`. The request count is the count of the duration histogram; there is no separate request counter.
-- Every other name sits under `dolos.`, dotted by area and then by subject: `dolos.query.*`, `dolos.cache.*`, `dolos.storage.*`, `dolos.sync.*`. Dolos's own additions to a standard family mirror its path, as in `dolos.http.server.request.dropped`.
-- The attributes Dolos defines are bare lowercase keys from one vocabulary: `surface`, `store`, `keyspace`, `namespace`, `tier` and `outcome` for any result. Request series also carry the semantic-convention attributes of their family (`http.route`, `rpc.method`, …). The resource attributes Dolos defines sit under `dolos.`.
-- Durations are histograms in seconds, sizes are in bytes, and counts carry a unit annotation such as `{request}` or `{entry}`.
-- The meter is the crate that records: `dolos-core`, `dolos-fjall`, `dolos-minibf`, `dolos-minikupo`, `dolos-grpc` and `dolos-trp`. Queries need not name it: the `surface` attribute tells the serving surfaces apart.
+- Every other name sits under `dolos.`, dotted by area and then by subject: `dolos.query.*`, `dolos.cache.*`, `dolos.storage.*`, `dolos.sync.*`, `dolos.build.*`. Dolos's own additions to a standard family mirror its path, as in `dolos.http.server.request.dropped`.
+- The attributes Dolos defines are bare lowercase keys from one vocabulary: `surface`, `store`, `keyspace`, `namespace`, `tier`, `outcome` for any result, and `version` and `git_sha` for the build. Request series also carry the semantic-convention attributes of their family (`http.route`, `rpc.method`, …), and the process CPU time its `cpu.mode`. The resource attributes Dolos defines sit under `dolos.`.
+- Durations are histograms in seconds, sizes are in bytes, and counts carry a unit annotation such as `{request}` or `{entry}`. `dolos.build.info` is the one series without a unit.
+- The meter is the crate that records: `dolos-core`, `dolos-fjall`, `dolos-minibf`, `dolos-minikupo`, `dolos-grpc` and `dolos-trp`, plus `dolos`, the binary's own, for the [process](#process) series. Queries need not name it: the `surface` attribute tells the serving surfaces apart.
 
 ### Prometheus names
 
@@ -151,6 +151,27 @@ Under the `dolos-core` meter; [Cache](../operations/cache#metrics) explains how 
 | `dolos.storage.l0_runs_max`<br />`dolos_storage_l0_runs_max` | `dolos-fjall` | gauge, `{run}` | `store`, `keyspace` | Most L0 runs in one keyspace of the store |
 
 Under the `dolos-fjall` meter. The largest number of L0 runs in any keyspace of a Fjall store, and the keyspace that holds it. `store` is `state` (keyspaces `state-cursor`, `state-utxos`, `state-entities`, `state-tags`) or `archive` (`archive-blocks`, `archive-logs`, `archive-tags`, `index-exact`, `index-entity`, `archive-meta`). Fjall halts a keyspace's writes at 30 runs until compaction catches up, so a value climbing toward 30 means compaction falls behind the writes. A store opened read-only does not report it. See [Performance](../operations/performance#fjall-compaction-backlog).
+
+## Process
+
+Under the `dolos` meter, reported whenever metric export is on.
+
+| series | meter | type, unit | labels | meaning |
+| ------ | ----- | ---------- | ------ | ------- |
+| `dolos.build.info`<br />`dolos_build_info` | `dolos` | gauge, none | `version`, `git_sha` | Always 1; its labels name the running build |
+| `process.uptime`<br />`process_uptime_seconds` | `dolos` | gauge, `s` | none | Time since the process started exporting metrics |
+| `process.cpu.time`<br />`process_cpu_time_seconds_total` | `dolos` | counter, `s` | `cpu.mode` | CPU time the process used, Linux only |
+| `process.memory.usage`<br />`process_memory_usage_bytes` | `dolos` | up-down counter, `By` | none | Resident memory, Linux only |
+| `process.memory.virtual`<br />`process_memory_virtual_bytes` | `dolos` | up-down counter, `By` | none | Virtual memory, Linux only |
+| `process.unix.file_descriptor.count`<br />`process_unix_file_descriptor_count` | `dolos` | up-down counter, `{file_descriptor}` | none | Open file descriptors, Linux only |
+| `process.thread.count`<br />`process_thread_count` | `dolos` | up-down counter, `{thread}` | none | Threads of the process, Linux only |
+
+- `version` is the Dolos version and `git_sha` the commit it was built from, or `unknown` for a build without one, such as one from a source tarball. Join it to another series to label it with the build: `… * on (service_instance_id) group_left (version, git_sha) dolos_build_info`.
+- `process.uptime` counts from when metric export is set up, at startup. A drop to near zero is a restart.
+- The names, units and types follow the OpenTelemetry process semantic conventions. Only build info and uptime are reported on every platform; the others read `/proc/self` and are reported on Linux only.
+- `cpu.mode` is `user` or `system`. Take the `rate()` of the CPU time for the cores in use.
+- `process.memory.usage` is the resident set (`VmRSS`), `process.memory.virtual` the virtual size (`VmSize`) and `process.thread.count` the `Threads` of `/proc/self/status`. The descriptor count is the number of entries in `/proc/self/fd`.
+- A read of `/proc` that fails leaves that series out of the export, and logs one warning the first time.
 
 ## Example queries
 

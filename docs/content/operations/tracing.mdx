@@ -4,7 +4,7 @@ sidebar:
   order: 3
 ---
 
-Dolos exports OpenTelemetry metrics and traces over OTLP to one collector endpoint. Metrics cover every serving surface, the query limiter, the chain tip, the cache and the stores; the [metric reference](../reference/metrics) lists every series. Traces follow the mempool lifecycle of each submitted transaction. Export is off by default. Dolos serves no metrics route of its own: MiniBF's former `/metrics` route and MiniKupo's `/health` route are gone, and what they reported is exported here.
+Dolos exports OpenTelemetry metrics and traces over OTLP to one collector endpoint. Metrics cover every serving surface, the query limiter, the chain tip, the cache, the stores, and the process and its build; the [metric reference](../reference/metrics) lists every series. Traces follow the mempool lifecycle of each submitted transaction. Export is off by default. Dolos serves no metrics route of its own: MiniBF's former `/metrics` route and MiniKupo's `/health` route are gone, and what they reported is exported here.
 
 ## Configuration
 
