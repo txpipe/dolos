@@ -377,4 +377,13 @@ All agents working on this repository must verify their modifications by running
 - New implementations should follow the trait-based architecture patterns
 - Storage implementations that share a trait should maintain the same observable contract across backends
 
+### Changelog
+
+Never edit `CHANGELOG.md` by hand, in any pull request. It is generated at release time by
+[git-cliff](https://git-cliff.org) (`cliff.toml`) from the conventional-commit titles on
+`main`, so a change reaches the changelog through its commit or squash title: a `feat`/`fix`/…
+type, an optional scope, and `!` for a breaking change. Put the release-note wording in that
+title and, if it needs more, in the pull request body. If a branch already edits
+`CHANGELOG.md`, drop that edit rather than resolving a conflict in it.
+
 These verification steps ensure code quality, maintain consistency across storage backends, and prevent introducing technical debt into the codebase.
