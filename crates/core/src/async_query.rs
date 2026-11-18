@@ -2,19 +2,21 @@ use std::{
     collections::{HashMap, HashSet},
     future::Future,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use futures_util::{stream, StreamExt as _};
 use itertools::Itertools as _;
 
+use opentelemetry::metrics::Meter;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraTx};
 
 use crate::{
-    archive::ArchiveStore, ArchiveError, BlockBody, BlockHash, BlockHeight, BlockSlot, ChainError,
-    ChainPoint, Domain, DomainError, EraCbor, TagDimension, TxHash, TxOrder, UtxoPosition,
+    archive::ArchiveStore, telemetry::queries::QueryMetrics, ArchiveError, BlockBody, BlockHash,
+    BlockHeight, BlockSlot, ChainError, ChainPoint, Domain, DomainError, EraCbor, TagDimension,
+    TxHash, TxOrder, UtxoPosition,
 };
 
 /// Lightweight block metadata for a transaction, extracted via a single decode.
@@ -145,11 +147,15 @@ pub const LOCATE_CHUNK: usize = 256;
 /// [`HeavyAdmission::scope`] holds at most [`Self::heavy_share`] permits in
 /// all, so the rest stay free for every other request, and each blocking
 /// closure it starts keeps the request's slot taken until it ends.
+///
+/// Every limiter records its waits, admissions and closures on the global
+/// meter as it is when the limiter is built, or on [`Self::with_meter`]'s.
 #[derive(Debug, Clone)]
 pub struct QueryLimiter {
     permits: Arc<Semaphore>,
     cap: usize,
     heavy: Arc<HeavyScans>,
+    metrics: Arc<QueryMetrics>,
 }
 
 #[derive(Debug)]
@@ -218,7 +224,15 @@ impl QueryLimiter {
                 share: Arc::new(Semaphore::new(share_cap)),
                 share_cap,
             }),
+            metrics: Arc::new(QueryMetrics::global()),
         }
+    }
+
+    /// This limiter, recording its waits, admissions and closures on `meter`
+    /// instead of the global meter.
+    pub fn with_meter(mut self, meter: &Meter) -> Self {
+        self.metrics = Arc::new(QueryMetrics::with_meter(meter));
+        self
     }
 
     pub fn cap(&self) -> usize {
@@ -276,6 +290,15 @@ impl QueryLimiter {
     /// Take a heavy-scan slot, waiting at most [`Self::heavy_queue`] for one
     /// in arrival order; `None` once the wait runs out.
     pub async fn admit_heavy(&self) -> Option<HeavyAdmission> {
+        let called = Instant::now();
+        let admission = self.take_heavy_slot().await;
+
+        self.metrics.admission(called, admission.is_some());
+
+        admission
+    }
+
+    async fn take_heavy_slot(&self) -> Option<HeavyAdmission> {
         let slots = self.heavy.slots.clone();
 
         let slot = if self.heavy.queue.is_zero() {
@@ -325,6 +348,7 @@ impl QueryLimiter {
         T: Send + 'static,
         F: FnOnce() -> T + Send + 'static,
     {
+        let called = Instant::now();
         let heavy = self.current_heavy_scan();
 
         let share = match &heavy {
@@ -346,7 +370,14 @@ impl QueryLimiter {
             .await
             .map_err(|_| limiter_closed())?;
 
+        self.metrics.waited(called);
+
+        // Dropping this future leaves the closure running: `_caller` then
+        // counts it as outliving its caller until `closure` ends.
+        let (closure, _caller) = self.metrics.spawn();
+
         let handle = tokio::task::spawn_blocking(move || {
+            let _ended = closure.start();
             let _held = (permit, share, heavy);
             f()
         });

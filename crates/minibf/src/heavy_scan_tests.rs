@@ -9,7 +9,8 @@ use std::{
 };
 
 use axum::http::{header, StatusCode};
-use dolos_core::QueryLimiter;
+use dolos_core::{telemetry::queries::LimiterGauges, QueryLimiter};
+use dolos_testing::metrics::{MetricsRecorder, Snapshot};
 use serde_json::{json, Value};
 
 use crate::test_support::{TestApp, TestFault, SUBMIT_TESTS};
@@ -22,6 +23,25 @@ const SLOW_READ: Duration = Duration::from_secs(3);
 
 fn limiter(app: &TestApp) -> QueryLimiter {
     dolos_core::Domain::query_limiter(&app.facade().inner).clone()
+}
+
+fn admissions(snapshot: &Snapshot, outcome: &str) -> dolos_testing::metrics::HistogramPoint {
+    snapshot
+        .histogram(
+            "dolos.query.heavy.admission.duration",
+            &[("outcome", outcome)],
+        )
+        .unwrap_or_else(|| panic!("no {outcome} admission"))
+}
+
+fn gauge(snapshot: &Snapshot, name: &str) -> usize {
+    snapshot
+        .value(name, &[])
+        .unwrap_or_else(|| panic!("no {name}")) as usize
+}
+
+fn closures(snapshot: &Snapshot, name: &str) -> f64 {
+    snapshot.value(name, &[]).unwrap_or(0.0)
 }
 
 /// Every heavy-scan route, the two account scans of the stakes-only ruling
@@ -119,7 +139,12 @@ fn sample(limiter: QueryLimiter) -> (Arc<Peaks>, tokio::task::JoinHandle<()>) {
 
 #[tokio::test]
 async fn heavy_routes_wait_out_the_queue_then_get_503() {
-    let app = TestApp::new_admitting(None, QueryLimiter::with_heavy_scans(32, 1, QUEUE), 120);
+    let capture = MetricsRecorder::default();
+    let app = TestApp::new_admitting(
+        None,
+        QueryLimiter::with_heavy_scans(32, 1, QUEUE).with_meter(&capture.meter("test")),
+        120,
+    );
     let held = limiter(&app).admit_heavy().await.expect("a free slot");
 
     for path in heavy_paths(&app) {
@@ -143,6 +168,11 @@ async fn heavy_routes_wait_out_the_queue_then_get_503() {
             "{path}"
         );
     }
+
+    // Each 503 is one rejected admission, as long as the queue.
+    let rejected = admissions(&capture.collect(), "rejected");
+    assert_eq!(rejected.count, heavy_paths(&app).len() as u64);
+    assert!(rejected.min.unwrap() >= QUEUE.as_secs_f64(), "{rejected:?}");
 
     for path in light_paths(&app) {
         let (status, _) = app.get_bytes(&path).await;
@@ -200,7 +230,12 @@ async fn the_limit_admits_its_configured_count() {
 #[tokio::test]
 async fn a_queued_heavy_request_proceeds_when_a_slot_frees() {
     let queue = Duration::from_secs(5);
-    let app = TestApp::new_admitting(None, QueryLimiter::with_heavy_scans(32, 1, queue), 120);
+    let capture = MetricsRecorder::default();
+    let app = TestApp::new_admitting(
+        None,
+        QueryLimiter::with_heavy_scans(32, 1, queue).with_meter(&capture.meter("test")),
+        120,
+    );
     let held = limiter(&app).admit_heavy().await.expect("a free slot");
     let path = format!("/accounts/{}/utxos", app.vectors().stake_address);
 
@@ -214,6 +249,12 @@ async fn a_queued_heavy_request_proceeds_when_a_slot_frees() {
 
     assert_eq!(status, StatusCode::OK);
     assert!(started.elapsed() < queue, "{:?}", started.elapsed());
+
+    // The request asked for its slot before the release began its sleep, so
+    // its admission took at least that sleep. The held slot is the other.
+    let admitted = admissions(&capture.collect(), "admitted");
+    assert_eq!(admitted.count, 2);
+    assert!(admitted.max.unwrap() >= QUEUE.as_secs_f64(), "{admitted:?}");
 }
 
 #[tokio::test]
@@ -270,12 +311,14 @@ async fn the_deadline_counts_the_wait_for_a_slot() {
 /// while light routes keep answering.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_request_past_its_deadline_keeps_its_slot_until_its_read_ends() {
+    let capture = MetricsRecorder::default();
     let app = TestApp::new_admitting(
         Some(TestFault::SlowUtxoReads(SLOW_READ)),
-        QueryLimiter::with_heavy_scans(32, 1, Duration::ZERO),
+        QueryLimiter::with_heavy_scans(32, 1, Duration::ZERO).with_meter(&capture.meter("test")),
         1,
     );
     let limiter = limiter(&app);
+    let _gauges = LimiterGauges::with_meter(&limiter, &capture.meter("test"));
     let (peaks, sampler) = sample(limiter.clone());
     let path = format!("/addresses/{}/utxos", app.vectors().address);
     let replacement = format!("/scripts/{}/utxos", app.vectors().script_hash);
@@ -286,11 +329,27 @@ async fn a_request_past_its_deadline_keeps_its_slot_until_its_read_ends() {
 
     assert_eq!(limiter.heavy_admitted(), 1);
     assert_eq!(limiter.heavy_in_use(), 1);
+
+    // The gauges read the slot and permits the surviving read holds.
+    let held = capture.collect();
+    assert_eq!(gauge(&held, "dolos.query.limiter.capacity"), 32);
+    assert_eq!(gauge(&held, "dolos.query.heavy.capacity"), 1);
+    assert_eq!(gauge(&held, "dolos.query.heavy.share.capacity"), 16);
+    assert_eq!(gauge(&held, "dolos.query.heavy.admitted"), 1);
+    assert_eq!(gauge(&held, "dolos.query.heavy.share.in_use"), 1);
+    assert_eq!(gauge(&held, "dolos.query.limiter.in_use"), 1);
+    assert_eq!(closures(&held, "dolos.query.blocking.in_flight"), 1.0);
+    assert_eq!(closures(&held, "dolos.query.blocking.outlived"), 1.0);
+
     assert_eq!(
         app.get_bytes(&replacement).await.0,
         StatusCode::SERVICE_UNAVAILABLE
     );
     assert_eq!(app.get_bytes("/blocks/latest").await.0, StatusCode::OK);
+
+    let still = capture.collect();
+    assert!(started.elapsed() < SLOW_READ);
+    assert_eq!(closures(&still, "dolos.query.blocking.outlived"), 1.0);
 
     wait_until_free(&limiter).await;
     assert!(started.elapsed() >= SLOW_READ);
@@ -298,7 +357,29 @@ async fn a_request_past_its_deadline_keeps_its_slot_until_its_read_ends() {
     peaks.stop.store(true, Ordering::SeqCst);
     sampler.await.unwrap();
     assert_eq!(peaks.admitted.load(Ordering::SeqCst), 1);
+    assert_eq!(peaks.heavy_in_use.load(Ordering::SeqCst), 1);
     assert_eq!(limiter.heavy_in_use(), 0);
+
+    // The closure lowers both counters as it ends, just after its slot frees,
+    // one after the other.
+    let ended = Instant::now();
+    while {
+        let snapshot = capture.collect();
+        closures(&snapshot, "dolos.query.blocking.in_flight") > 0.0
+            || closures(&snapshot, "dolos.query.blocking.outlived") > 0.0
+    } {
+        assert!(
+            ended.elapsed() < Duration::from_secs(1),
+            "the read never ended"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    let free = capture.collect();
+    assert_eq!(closures(&free, "dolos.query.blocking.outlived"), 0.0);
+    assert_eq!(gauge(&free, "dolos.query.heavy.admitted"), 0);
+    assert_eq!(gauge(&free, "dolos.query.heavy.share.in_use"), 0);
+    assert_eq!(gauge(&free, "dolos.query.limiter.in_use"), 0);
 }
 
 /// A client that goes away mid-scan frees nothing until the read it started
@@ -346,6 +427,8 @@ async fn heavy_requests_leave_query_permits_to_light_routes() {
             120,
         ));
         let limiter = limiter(&app);
+        let capture = MetricsRecorder::default();
+        let _gauges = LimiterGauges::with_meter(&limiter, &capture.meter("test"));
         let (peaks, sampler) = sample(limiter.clone());
 
         let paths = [
@@ -363,6 +446,7 @@ async fn heavy_requests_leave_query_permits_to_light_routes() {
             .collect();
 
         wait_until_busy(&limiter).await;
+        let busy = capture.collect();
 
         for _ in 0..3 {
             let started = Instant::now();
@@ -390,5 +474,15 @@ async fn heavy_requests_leave_query_permits_to_light_routes() {
         assert!(peaks.admitted.load(Ordering::SeqCst) <= heavy);
         assert!(peaks.in_use.load(Ordering::SeqCst) <= cap);
         assert_eq!(limiter.heavy_admitted(), 0);
+
+        // The capacities are the configured ones, and a reading while busy
+        // stays within them.
+        let at = |name| gauge(&busy, name);
+        assert_eq!(at("dolos.query.limiter.capacity"), cap, "cap {cap}");
+        assert_eq!(at("dolos.query.heavy.capacity"), heavy, "cap {cap}");
+        assert_eq!(at("dolos.query.heavy.share.capacity"), share, "cap {cap}");
+        assert!(at("dolos.query.limiter.in_use") <= cap, "cap {cap}");
+        assert!(at("dolos.query.heavy.admitted") <= heavy, "cap {cap}");
+        assert!(at("dolos.query.heavy.share.in_use") <= share, "cap {cap}");
     }
 }
