@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use axum::http::{header, StatusCode};
 use dolos_core::{telemetry::queries::LimiterGauges, QueryLimiter};
-use dolos_testing::metrics::{HistogramPoint, MetricsCapture, Snapshot};
+use dolos_testing::metrics::{HistogramPoint, MetricsRecorder, Snapshot};
 use serde_json::{json, Value};
 
 use crate::test_support::{TestApp, TestFault};
@@ -30,6 +30,12 @@ fn admissions(snapshot: &Snapshot, outcome: &str) -> HistogramPoint {
 
 fn value(snapshot: &Snapshot, name: &str) -> f64 {
     snapshot.value(name, &[]).unwrap_or(0.0)
+}
+
+/// A route that reads no UTxOs: the metadata of the tip block.
+fn light_path(app: &TestApp) -> String {
+    let block = app.vectors().blocks.last().expect("missing block vectors");
+    format!("/metadata/{}", block.slot)
 }
 
 fn heavy_patterns(app: &TestApp) -> Vec<String> {
@@ -64,10 +70,10 @@ async fn wait_until_free(limiter: &QueryLimiter) {
 
 #[tokio::test]
 async fn heavy_matches_wait_out_the_queue_then_get_503() {
-    let capture = MetricsCapture::new();
+    let capture = MetricsRecorder::default();
     let app = TestApp::new_admitting(
         None,
-        QueryLimiter::with_heavy_scans(32, 1, QUEUE).with_meter(&capture.meter()),
+        QueryLimiter::with_heavy_scans(32, 1, QUEUE).with_meter(&capture.meter("test")),
         120,
     );
     let held = limiter(&app).admit_heavy().await.expect("a free slot");
@@ -102,13 +108,10 @@ async fn heavy_matches_wait_out_the_queue_then_get_503() {
     assert_eq!(rejected.count, 2 * heavy_patterns(&app).len() as u64);
     assert!(rejected.min.unwrap() >= QUEUE.as_secs_f64(), "{rejected:?}");
 
-    for path in ["/health", "/metadata/0"] {
-        assert_ne!(
-            app.get_bytes(path).await.0,
-            StatusCode::SERVICE_UNAVAILABLE,
-            "{path}"
-        );
-    }
+    assert_ne!(
+        app.get_bytes("/metadata/0").await.0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
 
     drop(held);
 
@@ -121,10 +124,10 @@ async fn heavy_matches_wait_out_the_queue_then_get_503() {
 #[tokio::test]
 async fn a_queued_heavy_match_proceeds_when_a_slot_frees() {
     let queue = Duration::from_secs(5);
-    let capture = MetricsCapture::new();
+    let capture = MetricsRecorder::default();
     let app = TestApp::new_admitting(
         None,
-        QueryLimiter::with_heavy_scans(32, 1, queue).with_meter(&capture.meter()),
+        QueryLimiter::with_heavy_scans(32, 1, queue).with_meter(&capture.meter("test")),
         120,
     );
     let held = limiter(&app).admit_heavy().await.expect("a free slot");
@@ -174,14 +177,14 @@ async fn the_deadline_counts_the_wait_for_a_slot() {
 /// taken until that read ends, so no replacement enters beside it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_match_past_its_deadline_keeps_its_slot_until_its_read_ends() {
-    let capture = MetricsCapture::new();
+    let capture = MetricsRecorder::default();
     let app = TestApp::new_admitting(
         Some(TestFault::SlowUtxoReads(SLOW_READ)),
-        QueryLimiter::with_heavy_scans(32, 1, Duration::ZERO).with_meter(&capture.meter()),
+        QueryLimiter::with_heavy_scans(32, 1, Duration::ZERO).with_meter(&capture.meter("test")),
         1,
     );
     let limiter = limiter(&app);
-    let _gauges = LimiterGauges::with_meter(&limiter, &capture.meter());
+    let _gauges = LimiterGauges::with_meter(&limiter, &capture.meter("test"));
     let policy = format!("/matches/{}.*", app.vectors().policy_id);
     let address = format!("/matches/{}", app.vectors().address);
 
@@ -207,7 +210,7 @@ async fn a_match_past_its_deadline_keeps_its_slot_until_its_read_ends() {
         app.get_bytes(&address).await.0,
         StatusCode::SERVICE_UNAVAILABLE
     );
-    assert_eq!(app.get_bytes("/health").await.0, StatusCode::OK);
+    assert_eq!(app.get_bytes(&light_path(&app)).await.0, StatusCode::OK);
 
     let still = capture.collect();
     assert!(started.elapsed() < SLOW_READ);

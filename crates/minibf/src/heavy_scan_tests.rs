@@ -10,7 +10,7 @@ use std::{
 
 use axum::http::{header, StatusCode};
 use dolos_core::{telemetry::queries::LimiterGauges, QueryLimiter};
-use dolos_testing::metrics::{MetricsCapture, Snapshot};
+use dolos_testing::metrics::{MetricsRecorder, Snapshot};
 use serde_json::{json, Value};
 
 use crate::test_support::{TestApp, TestFault, SUBMIT_TESTS};
@@ -139,10 +139,10 @@ fn sample(limiter: QueryLimiter) -> (Arc<Peaks>, tokio::task::JoinHandle<()>) {
 
 #[tokio::test]
 async fn heavy_routes_wait_out_the_queue_then_get_503() {
-    let capture = MetricsCapture::new();
+    let capture = MetricsRecorder::default();
     let app = TestApp::new_admitting(
         None,
-        QueryLimiter::with_heavy_scans(32, 1, QUEUE).with_meter(&capture.meter()),
+        QueryLimiter::with_heavy_scans(32, 1, QUEUE).with_meter(&capture.meter("test")),
         120,
     );
     let held = limiter(&app).admit_heavy().await.expect("a free slot");
@@ -230,10 +230,10 @@ async fn the_limit_admits_its_configured_count() {
 #[tokio::test]
 async fn a_queued_heavy_request_proceeds_when_a_slot_frees() {
     let queue = Duration::from_secs(5);
-    let capture = MetricsCapture::new();
+    let capture = MetricsRecorder::default();
     let app = TestApp::new_admitting(
         None,
-        QueryLimiter::with_heavy_scans(32, 1, queue).with_meter(&capture.meter()),
+        QueryLimiter::with_heavy_scans(32, 1, queue).with_meter(&capture.meter("test")),
         120,
     );
     let held = limiter(&app).admit_heavy().await.expect("a free slot");
@@ -311,14 +311,14 @@ async fn the_deadline_counts_the_wait_for_a_slot() {
 /// while light routes keep answering.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_request_past_its_deadline_keeps_its_slot_until_its_read_ends() {
-    let capture = MetricsCapture::new();
+    let capture = MetricsRecorder::default();
     let app = TestApp::new_admitting(
         Some(TestFault::SlowUtxoReads(SLOW_READ)),
-        QueryLimiter::with_heavy_scans(32, 1, Duration::ZERO).with_meter(&capture.meter()),
+        QueryLimiter::with_heavy_scans(32, 1, Duration::ZERO).with_meter(&capture.meter("test")),
         1,
     );
     let limiter = limiter(&app);
-    let _gauges = LimiterGauges::with_meter(&limiter, &capture.meter());
+    let _gauges = LimiterGauges::with_meter(&limiter, &capture.meter("test"));
     let (peaks, sampler) = sample(limiter.clone());
     let path = format!("/addresses/{}/utxos", app.vectors().address);
     let replacement = format!("/scripts/{}/utxos", app.vectors().script_hash);
@@ -427,8 +427,8 @@ async fn heavy_requests_leave_query_permits_to_light_routes() {
             120,
         ));
         let limiter = limiter(&app);
-        let capture = MetricsCapture::new();
-        let _gauges = LimiterGauges::with_meter(&limiter, &capture.meter());
+        let capture = MetricsRecorder::default();
+        let _gauges = LimiterGauges::with_meter(&limiter, &capture.meter("test"));
         let (peaks, sampler) = sample(limiter.clone());
 
         let paths = [

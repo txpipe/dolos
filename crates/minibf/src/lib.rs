@@ -28,9 +28,9 @@ use tower_http::{
 use tracing::Level;
 
 use dolos_core::{
-    config::MinibfConfig, ArchiveStore as _, AsyncQueryFacade, BlockSlot, CancelToken, Domain,
-    EraCbor, LogEntity, QueryLimiter, RangeOf, ServeError, StateEntity, StateError,
-    StateStore as _, SubmitExt, TxOrder,
+    config::MinibfConfig, telemetry::requests::RequestMetrics, ArchiveStore as _, AsyncQueryFacade,
+    BlockSlot, CancelToken, Domain, EraCbor, LogEntity, QueryLimiter, RangeOf, ServeError,
+    StateEntity, StateError, StateStore as _, SubmitExt, TxOrder,
 };
 
 mod error;
@@ -39,6 +39,7 @@ pub(crate) mod hacks;
 mod heavy_scan_tests;
 pub(crate) mod inputs;
 pub(crate) mod mapping;
+mod metrics;
 pub(crate) mod offchain;
 mod pagination;
 mod routes;
@@ -336,6 +337,21 @@ where
 }
 
 pub(crate) fn build_router_with_facade<D>(facade: Facade<D>) -> Router
+where
+    D: Domain + SubmitExt + Clone + Send + Sync + 'static,
+    Option<AccountState>: From<D::Entity>,
+    Option<PoolState>: From<D::Entity>,
+    Option<EpochState>: From<D::Entity>,
+    Option<DRepState>: From<D::Entity>,
+    Option<ProposalState>: From<D::Entity>,
+    Option<GovState>: From<D::Entity>,
+    Option<MetadataLabelState>: From<D::Entity>,
+{
+    build_router_with_metrics(facade, metrics::request_metrics())
+}
+
+/// The router, recording its requests on `requests`.
+pub(crate) fn build_router_with_metrics<D>(facade: Facade<D>, requests: RequestMetrics) -> Router
 where
     D: Domain + SubmitExt + Clone + Send + Sync + 'static,
     Option<AccountState>: From<D::Entity>,
@@ -789,7 +805,13 @@ where
             CorsLayer::permissive()
         } else {
             CorsLayer::new()
-        });
+        })
+        // Outside the deadline, so a cut request is a 504 and a drop is the
+        // client's; outside CORS, so preflights are counted too.
+        .layer(axum::middleware::from_fn_with_state(
+            requests,
+            metrics::record,
+        ));
     // Added via `Router::layer`, NormalizePathLayer runs *after* route matching
     // and never trims before routing (`/blocks/latest/` would miss its route).
     // Wrap the router with it and nest that behind an outer `Router` via

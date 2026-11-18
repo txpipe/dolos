@@ -2183,32 +2183,19 @@ paths:
         304:
           $ref: "#/components/responses/304"
 
-  /health:
+  /metrics:
     get:
-      operationId: getHealth
+      operationId: getMetrics
       tags: ["Health"]
-      summary: Get Health
+      summary: Get Metrics
       description: |
-        Retrieve Kupo's application health status. Note that this call is cheap and does not halt the various concurrent tasks performed by the Kupo.
-
-        This endpoint has two possible content-types: `application/json` or `text/plain`. The latter returns health in a format suitable for [Prometheus](https://prometheus.io/docs/introduction/overview/). The server defaults to `application/json`, but you can control this behavior by passing a corresponding `Accept` header.
-
-        In addition, the server may return any of the following response codes:
-        - 200: when healthy
-        - 202: when connected to a chain producer but still syncing
-        - 503: when disconnected from a chain producer
+        Retrieve Kupo's application health status, always with a `200 OK` status.
       responses:
         200:
-          description: Healthy
+          description: Metrics
           headers: *default-headers
           content:
-            "application/json;charset=utf-8":
-              schema:
-                $ref: "#/components/schemas/Health"
-
             "text/plain;charset=utf-8":
-              schema:
-                $ref: "#/components/schemas/HealthPrometheus"
               example: &HealthPrometheusExample |
                 # TYPE kupo_configuration_indexes gauge
                 kupo_configuration_indexes  1.0
@@ -2227,47 +2214,6 @@ paths:
 
                 # TYPE kupo_seconds_since_last_block gauge
                 kupo_seconds_since_last_block  2.0
-
-        202:
-          description: Syncing
-          headers: *default-headers
-          content:
-            "application/json;charset=utf-8":
-              schema:
-                $ref: "#/components/schemas/Health"
-
-            "text/plain;charset=utf-8":
-              example: *HealthPrometheusExample
-              schema:
-                $ref: "#/components/schemas/HealthPrometheus"
-
-        503:
-          description: Unavailable
-          headers: *default-headers
-          content:
-            "application/json;charset=utf-8":
-              schema:
-                $ref: "#/components/schemas/Health"
-
-            "text/plain;charset=utf-8":
-              example: *HealthPrometheusExample
-              schema:
-                $ref: "#/components/schemas/HealthPrometheus"
-
-  /metrics:
-    get:
-      operationId: getMetrics
-      tags: ["Health"]
-      summary: Get Metrics
-      description: |
-        Like [`/health`](#operation/getHealth), but always return `200 OK` as a status.
-      responses:
-        200:
-          description: Metrics
-          headers: *default-headers
-          content:
-            "text/plain;charset=utf-8":
-              example: *HealthPrometheusExample
               schema:
                 $ref: "#/components/schemas/HealthPrometheus"
 

@@ -9,7 +9,7 @@ use dolos_core::{
     telemetry::{queries::LimiterGauges, DURATION_BOUNDARIES},
     QueryLimiter,
 };
-use dolos_testing::metrics::{MetricsCapture, Snapshot};
+use dolos_testing::metrics::{MetricsRecorder, Snapshot};
 
 const WAIT: &str = "dolos.query.limiter.wait.duration";
 const ADMISSION: &str = "dolos.query.heavy.admission.duration";
@@ -34,8 +34,8 @@ async fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_closure_waiting_for_a_permit_records_at_least_its_wait() {
-    let capture = MetricsCapture::new();
-    let limiter = QueryLimiter::new(1).with_meter(&capture.meter());
+    let capture = MetricsRecorder::default();
+    let limiter = QueryLimiter::new(1).with_meter(&capture.meter("test"));
     let first_ended = Arc::new(Mutex::new(None));
 
     let first = tokio::spawn({
@@ -81,8 +81,8 @@ async fn a_closure_waiting_for_a_permit_records_at_least_its_wait() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_closure_whose_caller_is_dropped_outlives_it_until_it_ends() {
-    let capture = MetricsCapture::new();
-    let limiter = QueryLimiter::new(4).with_meter(&capture.meter());
+    let capture = MetricsRecorder::default();
+    let limiter = QueryLimiter::new(4).with_meter(&capture.meter("test"));
     let (release, released) = mpsc::channel::<()>();
 
     let caller = tokio::spawn({
@@ -125,8 +125,8 @@ async fn a_closure_whose_caller_is_dropped_outlives_it_until_it_ends() {
 
 #[tokio::test]
 async fn a_panicking_closure_still_ends() {
-    let capture = MetricsCapture::new();
-    let limiter = QueryLimiter::new(1).with_meter(&capture.meter());
+    let capture = MetricsRecorder::default();
+    let limiter = QueryLimiter::new(1).with_meter(&capture.meter("test"));
 
     let outcome = limiter.run_blocking(|| panic!("a failed read")).await;
     assert!(outcome.is_err());
@@ -140,9 +140,9 @@ async fn a_panicking_closure_still_ends() {
 
 #[tokio::test]
 async fn admission_records_each_outcome() {
-    let capture = MetricsCapture::new();
+    let capture = MetricsRecorder::default();
     let limiter = QueryLimiter::with_heavy_scans(4, 1, Duration::from_millis(100))
-        .with_meter(&capture.meter());
+        .with_meter(&capture.meter("test"));
 
     let held = limiter.admit_heavy().await.expect("a free slot");
     assert!(limiter.admit_heavy().await.is_none());
@@ -163,9 +163,10 @@ async fn admission_records_each_outcome() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn each_occupancy_gauge_reads_its_own_count() {
-    let capture = MetricsCapture::new();
-    let limiter = QueryLimiter::with_heavy_scans(8, 2, Duration::ZERO).with_meter(&capture.meter());
-    let _gauges = LimiterGauges::with_meter(&limiter, &capture.meter());
+    let capture = MetricsRecorder::default();
+    let limiter =
+        QueryLimiter::with_heavy_scans(8, 2, Duration::ZERO).with_meter(&capture.meter("test"));
+    let _gauges = LimiterGauges::with_meter(&limiter, &capture.meter("test"));
 
     // Two slots taken, one heavy closure and two light ones running: the
     // in-use, admitted and share readings all differ.

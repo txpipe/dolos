@@ -1,8 +1,10 @@
-//! Captures what instruments record, for tests that assert on metrics.
+//! An in-memory meter provider for tests that assert on exported metrics.
 //!
-//! A [`MetricsCapture`] owns an in-memory meter provider. Build instruments
-//! on [`MetricsCapture::meter`], then read every point with
-//! [`MetricsCapture::collect`]. Points are cumulative.
+//! Each [`MetricsRecorder`] owns its provider, so tests running in parallel
+//! never see one another's samples, and nothing touches the global provider.
+//! Build instruments on [`MetricsRecorder::meter`], then read every point with
+//! [`MetricsRecorder::collect`] or [`MetricsRecorder::points`]. Points are
+//! cumulative.
 
 use std::collections::BTreeMap;
 
@@ -109,20 +111,14 @@ macro_rules! values {
     };
 }
 
-/// An in-memory meter provider and its exporter.
-pub struct MetricsCapture {
+/// A meter provider whose samples a test reads back.
+pub struct MetricsRecorder {
     provider: SdkMeterProvider,
     exporter: InMemoryMetricExporter,
 }
 
-impl Default for MetricsCapture {
+impl Default for MetricsRecorder {
     fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl MetricsCapture {
-    pub fn new() -> Self {
         let exporter = InMemoryMetricExporter::default();
         let provider = SdkMeterProvider::builder()
             .with_periodic_exporter(exporter.clone())
@@ -130,10 +126,12 @@ impl MetricsCapture {
 
         Self { provider, exporter }
     }
+}
 
-    /// A meter of this provider.
-    pub fn meter(&self) -> Meter {
-        self.provider.meter("test")
+impl MetricsRecorder {
+    /// A meter of this recorder's provider.
+    pub fn meter(&self, name: &'static str) -> Meter {
+        self.provider.meter(name)
     }
 
     /// Every point recorded so far.
@@ -178,5 +176,37 @@ impl MetricsCapture {
         }
 
         Snapshot { points }
+    }
+
+    /// Every exported point as `name{key=value,...} value`, attributes and
+    /// points sorted. Histograms show `count=<n>`; sums and gauges show their
+    /// value.
+    pub fn points(&self) -> Vec<String> {
+        let mut points: Vec<String> = self
+            .collect()
+            .points
+            .into_iter()
+            .map(|((name, attributes), point)| {
+                let value = match point {
+                    Point::Value(value) => value.to_string(),
+                    Point::Histogram(histogram) => format!("count={}", histogram.count),
+                };
+
+                format!("{name}{{{attributes}}} {value}")
+            })
+            .collect();
+
+        points.sort();
+        points
+    }
+
+    /// The points of the instrument `name`.
+    pub fn points_of(&self, name: &str) -> Vec<String> {
+        let prefix = format!("{name}{{");
+
+        self.points()
+            .into_iter()
+            .filter(|point| point.starts_with(&prefix))
+            .collect()
     }
 }
