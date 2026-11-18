@@ -1,5 +1,5 @@
 //! What every Dolos metric shares: the meter of this crate, the histogram
-//! boundaries, the attribute keys and the request instruments.
+//! boundaries, the attribute keys, and the request and query instruments.
 //!
 //! A name the OpenTelemetry semantic conventions define is used as defined;
 //! every other name sits under `dolos.`, by area and then by subject.
@@ -10,6 +10,7 @@ use std::sync::{Arc, Weak};
 
 use opentelemetry::{global, metrics::ObservableGauge};
 
+pub mod queries;
 pub mod requests;
 pub mod storage;
 

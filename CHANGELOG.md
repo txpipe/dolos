@@ -13,6 +13,7 @@ All notable changes to this project will be documented in this file.
 - *(minibf)* [**breaking**] Remove the `/metrics` route: the chain tip is exported as the `dolos.sync.tip.slot` and `dolos.sync.tip.block_number` metrics
 - *(minibf, minikupo)* Export metrics for every request (duration by route template, method and status, active requests, and requests the client abandoned)
 - *(minikupo)* [**breaking**] Remove the `/health` route: the exported request and chain tip metrics replace it
+- *(core)* Export how full the query limiter and heavy-scan admission are, how long callers wait for them, and the blocking query closures in flight, including those that outlived their caller
 - *(telemetry)* Export storage metrics: disk usage per store and keyspace, compaction and flush activity, the slot range the WAL and the archive hold, and commit and housekeeping durations
 
 ## [2.0.0-alpha.0] - 2026-09-11
