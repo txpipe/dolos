@@ -175,6 +175,47 @@ and the archive untouched.
 Logs go to stderr at the config's `[logging]` level and filter, as the node's
 do; results go to stdout.
 
+### `store relabel`
+
+Overwrite the compatibility identifier and internal format a state or archive
+store recorded, so a development or soak instance survives a prerelease
+identifier bump without a re-restore. **This is a development tool, never an
+operator migration**: it does not ship in the `dolos` binary, and a store it
+relabels is admitted on the developer's word, not because its data matches the
+new release.
+
+```
+cargo xtask store relabel <PATH> --contract <ID> --format <N> [--yes]
+```
+
+- `<PATH>` is a state directory (`<storage.path>/state`) or an archive
+  directory (`<storage.path>/archive`); the kind is detected from the store's
+  keyspaces and printed. Any other directory is refused.
+- Without `--yes` it prints the current and the new values and writes
+  nothing. With `--yes` it writes both through the store's own
+  `record_identity`, then reopens the store and prints what it reads back.
+- `--contract` is taken as given, unchecked against the identifiers this
+  release supports; `--format` must be 1 or more.
+- The store is opened exclusively. **Stop the node first**: a store another
+  process holds is refused and nothing is written.
+
+To run it inside the dolos container image (Debian 12, glibc), build a
+linux/amd64 binary in the Rust image of the same Debian release, from the
+repository root, then copy it out of the build volume:
+
+```
+docker run --rm --platform linux/amd64 -v "$PWD":/src:ro -w /src \
+  -v dolos-xtask-amd64:/target -e CARGO_TARGET_DIR=/target \
+  rust:1.93-bookworm cargo build --locked --release -p xtask --bin cargo-xtask
+
+docker run --rm -v dolos-xtask-amd64:/target:ro -v "$PWD":/out debian:12-slim \
+  cp /target/release/cargo-xtask /out/cargo-xtask-linux-amd64
+```
+
+Copy `cargo-xtask-linux-amd64` into a one-off pod running the dolos image,
+with the node's volume mounted and the node stopped, and run
+`cargo-xtask-linux-amd64 store relabel …` there.
+
 ### `e2e-test`
 
 Run the e2e smoke + sync test suites.

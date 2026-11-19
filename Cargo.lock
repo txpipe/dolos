@@ -7372,6 +7372,7 @@ dependencies = [
  "dolos-minibf",
  "dolos-redb3",
  "dolos-testing",
+ "fjall",
  "hdrhistogram",
  "hex",
  "itertools 0.14.0",
