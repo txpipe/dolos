@@ -2275,15 +2275,15 @@ mod tests {
     #[test]
     fn compatibility_accepts_only_the_supported_contracts() {
         assert_eq!(
-            Compatibility::parse("v2-alpha.2").unwrap().as_str(),
-            "v2-alpha.2"
+            Compatibility::parse("v2-beta.1").unwrap().as_str(),
+            "v2-beta.1"
         );
         assert_eq!(Compatibility::current().as_str(), SUPPORTED_CONTRACTS[0]);
 
-        for refused in ["v2-alpha.0", "v2-alpha.1"] {
+        for refused in ["v2-alpha.0", "v2-alpha.1", "v2-alpha.2"] {
             let message = Compatibility::parse(refused).unwrap_err().to_string();
             assert!(message.contains(refused), "{message}");
-            assert!(message.contains("\"v2-alpha.2\""), "{message}");
+            assert!(message.contains("\"v2-beta.1\""), "{message}");
         }
     }
 

@@ -8,7 +8,7 @@
 //! State is organized into four keyspaces based on access patterns:
 //!
 //! 1. **`state-cursor`**: Chain position tracking, and the compatibility
-//!    identity the store recorded when it was created
+//!    identity and internal format the store recorded when it was created
 //!
 //! 2. **`state-utxos`**: UTxO set storage Key: `[tx_hash:32][index:4]` (36
 //!    bytes) Value: CBOR `[era, body, slot, tx_index]` (`[era, body]` for a
@@ -68,17 +68,20 @@ const CURSOR_KEY: &[u8] = &[0u8];
 /// Key for the compatibility identity, beside the cursor
 const IDENTITY_KEY: &[u8] = b"identity";
 
+/// Key for the internal format the store was written in, beside the identity
+const FORMAT_KEY: &[u8] = b"format";
+
 /// Fjall-based state store implementation with unified entities keyspace.
 ///
 /// Uses 4 keyspaces:
-/// - `cursor`: Chain position tracking and the compatibility identity
+/// - `cursor`: Chain position tracking, the compatibility identity and format
 /// - `utxos`: UTxO set storage
 /// - `entities`: All entity types with namespace hash prefixes
 /// - `tags`: Live-UTxO tags, a projection of `utxos`
 #[derive(Clone)]
 pub struct StateStore {
     db: Database,
-    /// Cursor keyspace (chain position and compatibility identity)
+    /// Cursor keyspace (chain position, compatibility identity and format)
     cursor: Keyspace,
     /// UTxO set keyspace
     utxos: Keyspace,
@@ -178,10 +181,30 @@ impl StateStore {
         Ok(value.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
     }
 
-    /// Record the compatibility identity, synced to disk before it returns.
-    pub fn record_identity(&self, identity: &str) -> Result<(), Error> {
+    /// The internal format the store recorded beside its identity, a
+    /// big-endian `u32`; `None` for a store that records none.
+    pub fn format(&self) -> Result<Option<u32>, Error> {
+        let Some(bytes) = self.cursor.get(FORMAT_KEY)? else {
+            return Ok(None);
+        };
+
+        let bytes: [u8; 4] = bytes
+            .as_ref()
+            .try_into()
+            .map_err(|_| Error::Codec(format!("a store format of {} bytes, not 4", bytes.len())))?;
+
+        Ok(Some(u32::from_be_bytes(bytes)))
+    }
+
+    /// Record the compatibility identity and the internal format in one
+    /// batch, synced to disk before it returns.
+    pub fn record_identity(&self, identity: &str, format: u32) -> Result<(), Error> {
         self.writable()?;
-        self.cursor.insert(IDENTITY_KEY, identity.as_bytes())?;
+
+        let mut batch = self.db.batch();
+        batch.insert(&self.cursor, IDENTITY_KEY, identity.as_bytes());
+        batch.insert(&self.cursor, FORMAT_KEY, format.to_be_bytes());
+        batch.commit()?;
         self.db.persist(PersistMode::SyncAll)?;
 
         Ok(())
@@ -597,7 +620,7 @@ mod tests {
             let error = store.start_writer().err().unwrap();
             assert!(error.to_string().contains("read-only"), "{error}");
 
-            let error = store.record_identity("other").unwrap_err();
+            let error = store.record_identity("other", 1).unwrap_err();
             assert!(matches!(error, Error::ReadOnly), "{error:?}");
 
             // Nothing was committed through the view, so there is nothing to sync.
@@ -607,6 +630,28 @@ mod tests {
         assert!(
             files(dir.path()) == before,
             "a read-only store changed a file"
+        );
+    }
+
+    #[test]
+    fn the_identity_and_format_survive_a_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state");
+
+        {
+            let store = StateStore::open(&path, Preset::Standard).unwrap();
+            assert_eq!(store.identity().unwrap(), None);
+            assert_eq!(store.format().unwrap(), None);
+
+            store.record_identity("v2-beta.1", 7).unwrap();
+        }
+
+        let store = StateStore::open(&path, Preset::Standard).unwrap();
+        assert_eq!(store.identity().unwrap().as_deref(), Some("v2-beta.1"));
+        assert_eq!(store.format().unwrap(), Some(7));
+        assert_eq!(
+            store.cursor.get(FORMAT_KEY).unwrap().unwrap().as_ref(),
+            7u32.to_be_bytes()
         );
     }
 

@@ -8,7 +8,11 @@ use crate::config::{Compatibility, MIGRATION_GUIDE_URL};
 /// The `compatibility` values a configuration may declare, the current one
 /// first. A persistent store records the current one when it is created, and
 /// this release opens only stores that record one of them.
-pub const SUPPORTED_CONTRACTS: &[&str] = &["v2-alpha.2"];
+pub const SUPPORTED_CONTRACTS: &[&str] = &["v2-beta.1"];
+
+/// The newest internal format this binary writes; it reads every format up
+/// to it. A store records the format it was created in beside its identity.
+pub const STORE_FORMAT: u32 = 1;
 
 /// Whether this release opens a store that records `identity`.
 pub fn reads_store_identity(identity: &str) -> bool {
@@ -16,8 +20,9 @@ pub fn reads_store_identity(identity: &str) -> bool {
 }
 
 /// A persistent store this release refuses to open: one holding data with no
-/// identity, written before stores recorded one, or one created under a
-/// contract this release does not read. No configuration changes the answer.
+/// identity, written before stores recorded one, one created under a contract
+/// this release does not read, or one recording no internal format or a newer
+/// one than [`STORE_FORMAT`]. No configuration changes the answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IncompatibleStore {
     /// Which store: `state` or `archive`.
@@ -26,15 +31,26 @@ pub struct IncompatibleStore {
     /// The identity the store records; `None` for a store holding data
     /// without one.
     pub found: Option<String>,
+    /// The internal format the store records, read only for a store whose
+    /// identity is supported: `None` when it records none.
+    pub found_format: Option<u32>,
 }
 
 impl Display for IncompatibleStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "the {} store at {} ", self.store, self.path.display())?;
 
-        match &self.found {
-            Some(found) => write!(f, "records the compatibility identity `{found}`")?,
-            None => f.write_str("holds data but records no compatibility identity")?,
+        match (&self.found, self.found_format) {
+            (Some(found), _) if !reads_store_identity(found) => {
+                write!(f, "records the compatibility identity `{found}`")?
+            }
+            (Some(_), None) => f.write_str("records no internal format")?,
+            (Some(_), Some(format)) => write!(
+                f,
+                "was written in internal format {format} by a newer dolos; this one reads up to \
+                 {STORE_FORMAT}"
+            )?,
+            (None, _) => f.write_str("holds data but records no compatibility identity")?,
         }
 
         write!(
@@ -61,6 +77,7 @@ mod tests {
                 store: "state",
                 path: PathBuf::from("data/state"),
                 found: found.clone(),
+                found_format: None,
             }
             .to_string();
 
@@ -79,6 +96,44 @@ mod tests {
                 Some(found) => assert!(message.contains(&format!("`{found}`")), "{message}"),
                 None => assert!(message.contains("no compatibility identity"), "{message}"),
             }
+        }
+    }
+
+    #[test]
+    fn a_format_refusal_names_the_formats_and_the_remedy() {
+        let refusal = |found_format| {
+            IncompatibleStore {
+                store: "archive",
+                path: PathBuf::from("data/archive"),
+                found: Some(SUPPORTED_CONTRACTS[0].to_string()),
+                found_format,
+            }
+            .to_string()
+        };
+
+        let missing = refusal(None);
+        assert!(missing.contains("records no internal format"), "{missing}");
+
+        let newer = refusal(Some(STORE_FORMAT + 1));
+        assert!(
+            newer.contains(&format!(
+                "internal format {} by a newer dolos; this one reads up to {STORE_FORMAT}",
+                STORE_FORMAT + 1
+            )),
+            "{newer}"
+        );
+
+        for message in [missing, newer] {
+            assert!(message.contains("data/archive"), "{message}");
+            assert!(
+                message.contains(&format!("`{}`", SUPPORTED_CONTRACTS[0])),
+                "{message}"
+            );
+            assert!(
+                message.contains("dolos bootstrap stelae --force"),
+                "{message}"
+            );
+            assert!(message.contains(MIGRATION_GUIDE_URL), "{message}");
         }
     }
 
