@@ -81,7 +81,7 @@ fn the_ordinary_example_parses() {
     ));
 
     assert_eq!(config, expected);
-    assert_eq!(config.compatibility().as_str(), "v2-alpha.2");
+    assert_eq!(config.compatibility().as_str(), "v2-beta.1");
 }
 
 #[test]
@@ -421,7 +421,7 @@ fn compatibility_is_checked_first() {
     assert!(matches!(missing, ConfigError::MissingCompatibility));
     let message = missing.to_string();
     assert!(message.contains("`compatibility`"), "{message}");
-    assert!(message.contains("\"v2-alpha.2\""), "{message}");
+    assert!(message.contains("\"v2-beta.1\""), "{message}");
 
     let malformed = load(Some(&fixture("compatibility/malformed.toml"))).unwrap_err();
     assert!(matches!(malformed, ConfigError::MalformedCompatibility(_)));
@@ -430,6 +430,7 @@ fn compatibility_is_checked_first() {
     for (file, declared) in [
         ("compatibility/unsupported.toml", "v2-alpha.0"),
         ("compatibility/previous-alpha.toml", "v2-alpha.1"),
+        ("compatibility/previous-prerelease.toml", "v2-alpha.2"),
     ] {
         let unsupported = load(Some(&fixture(file))).unwrap_err();
         assert!(matches!(
@@ -438,11 +439,11 @@ fn compatibility_is_checked_first() {
         ));
         let message = unsupported.to_string();
         assert!(message.contains(&format!("\"{declared}\"")), "{message}");
-        assert!(message.contains("supports \"v2-alpha.2\""), "{message}");
+        assert!(message.contains("supports \"v2-beta.1\""), "{message}");
     }
 
     let supported = load(Some(&fixture("ordinary.toml"))).unwrap();
-    assert_eq!(supported.compatibility().as_str(), "v2-alpha.2");
+    assert_eq!(supported.compatibility().as_str(), "v2-beta.1");
 }
 
 #[test]
@@ -1007,7 +1008,7 @@ fn config_check_prints_the_network_and_stores() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("dolos.toml"),
-        "compatibility = \"v2-alpha.2\"\n\n[chain]\nprotocol = \"cardano\"\nnetwork = \"PreView\"\n\n[storage.cache]\nenabled = false\n",
+        "compatibility = \"v2-beta.1\"\n\n[chain]\nprotocol = \"cardano\"\nnetwork = \"PreView\"\n\n[storage.cache]\nenabled = false\n",
     )
     .unwrap();
     assert_check_prints(
@@ -1019,7 +1020,7 @@ fn config_check_prints_the_network_and_stores() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("other.toml"),
-        "compatibility = \"v2-alpha.2\"\n\n[chain]\nprotocol = \"cardano\"\nnetwork = \"preview\"\n\n[history]\nmode = \"none\"\n",
+        "compatibility = \"v2-beta.1\"\n\n[chain]\nprotocol = \"cardano\"\nnetwork = \"preview\"\n\n[history]\nmode = \"none\"\n",
     )
     .unwrap();
     assert_check_prints(
@@ -1171,7 +1172,7 @@ fn as_config_file(block: &str) -> String {
         return block.to_string();
     }
 
-    let mut file = String::from("compatibility = \"v2-alpha.2\"\n\n");
+    let mut file = String::from("compatibility = \"v2-beta.1\"\n\n");
 
     if !block.lines().any(|line| line.trim() == "[chain]") {
         file.push_str("[chain]\nprotocol = \"cardano\"\nnetwork = \"mainnet\"\n\n");
@@ -1445,7 +1446,7 @@ fn nested_environment_variables_override_the_file() {
     assert_eq!(limiter.cap(), 8);
     assert_eq!(limiter.heavy_limit(), 2);
     assert_eq!(limiter.heavy_queue(), Duration::ZERO);
-    assert_eq!(config.compatibility().as_str(), "v2-alpha.2");
+    assert_eq!(config.compatibility().as_str(), "v2-beta.1");
 }
 
 #[test]
@@ -1886,7 +1887,7 @@ fn a_variable_wrong_on_its_own_is_named() {
         (
             write(
                 "chainless.toml",
-                "compatibility = \"v2-alpha.2\"\n".to_string(),
+                "compatibility = \"v2-beta.1\"\n".to_string(),
             ),
             &[("DOLOS_CHAIN__NETWROK", "preview")][..],
             "DOLOS_CHAIN__NETWROK",

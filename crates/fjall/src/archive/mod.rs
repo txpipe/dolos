@@ -32,8 +32,9 @@
 //!    first seen at). Key: `[kind_hash:8][id:kind width]` → `[slot:8]`. See
 //!    [`entity`].
 //!
-//! 6. **`archive-meta`**: the compatibility identity the store recorded when it
-//!    was created, under the key `identity`.
+//! 6. **`archive-meta`**: the compatibility identity and internal format the
+//!    store recorded when it was created, under the keys `identity` and
+//!    `format`.
 //!
 //! The tag and exact keyspaces are projections of the blocks and are written
 //! in the same batch as the block locations, so the history and its lookups
@@ -148,12 +149,15 @@ mod keyspace_names {
     pub const EXACT: &str = "index-exact";
     /// Entity index keyspace (entity id -> first-seen slot)
     pub const ENTITY: &str = "index-entity";
-    /// Store metadata keyspace (the compatibility identity)
+    /// Store metadata keyspace (the compatibility identity and format)
     pub const META: &str = "archive-meta";
 }
 
 /// Key for the compatibility identity in the metadata keyspace
 const IDENTITY_KEY: &[u8] = b"identity";
+
+/// Key for the internal format the store was written in, beside the identity
+const FORMAT_KEY: &[u8] = b"format";
 
 fn io_err(e: std::io::Error) -> ArchiveError {
     ArchiveError::InternalError(e.to_string())
@@ -363,10 +367,30 @@ impl ArchiveStore {
         Ok(value.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
     }
 
-    /// Record the compatibility identity, synced to disk before it returns.
-    pub fn record_identity(&self, identity: &str) -> Result<(), Error> {
+    /// The internal format the store recorded beside its identity, a
+    /// big-endian `u32`; `None` for a store that records none.
+    pub fn format(&self) -> Result<Option<u32>, Error> {
+        let Some(bytes) = self.meta.get(FORMAT_KEY)? else {
+            return Ok(None);
+        };
+
+        let bytes: [u8; 4] = bytes
+            .as_ref()
+            .try_into()
+            .map_err(|_| Error::Codec(format!("a store format of {} bytes, not 4", bytes.len())))?;
+
+        Ok(Some(u32::from_be_bytes(bytes)))
+    }
+
+    /// Record the compatibility identity and the internal format in one
+    /// batch, synced to disk before it returns.
+    pub fn record_identity(&self, identity: &str, format: u32) -> Result<(), Error> {
         self.writable()?;
-        self.meta.insert(IDENTITY_KEY, identity.as_bytes())?;
+
+        let mut batch = self.db.batch();
+        batch.insert(&self.meta, IDENTITY_KEY, identity.as_bytes());
+        batch.insert(&self.meta, FORMAT_KEY, format.to_be_bytes());
+        batch.commit()?;
         self.db.persist(PersistMode::SyncAll)?;
 
         Ok(())
@@ -1977,7 +2001,7 @@ mod tests {
 
             for error in [
                 store.compact().unwrap_err(),
-                store.record_identity("other").unwrap_err(),
+                store.record_identity("other", 1).unwrap_err(),
             ] {
                 assert!(matches!(error, Error::ReadOnly), "{error:?}");
             }
@@ -1990,6 +2014,28 @@ mod tests {
 
         let store = ArchiveStore::open(schema(), &path, None, Preset::Standard).unwrap();
         assert_eq!(store.get_tip().unwrap().unwrap().0, 102);
+    }
+
+    #[test]
+    fn the_identity_and_format_survive_a_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive");
+
+        {
+            let store = ArchiveStore::open(schema(), &path, None, Preset::Standard).unwrap();
+            assert_eq!(store.identity().unwrap(), None);
+            assert_eq!(store.format().unwrap(), None);
+
+            store.record_identity("v2-beta.1", 7).unwrap();
+        }
+
+        let store = ArchiveStore::open(schema(), &path, None, Preset::Standard).unwrap();
+        assert_eq!(store.identity().unwrap().as_deref(), Some("v2-beta.1"));
+        assert_eq!(store.format().unwrap(), Some(7));
+        assert_eq!(
+            store.meta.get(FORMAT_KEY).unwrap().unwrap().as_ref(),
+            7u32.to_be_bytes()
+        );
     }
 
     /// Blocks committed and persisted are there when the archive is reopened
