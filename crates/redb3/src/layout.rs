@@ -186,14 +186,25 @@ mod tests {
         let path = dir.path().join("held.redb");
         std::fs::write(&path, b"").unwrap();
 
+        // read-write, as redb opens the file it locks exclusively
+        let other = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+
         let held = locked_shared(&path).unwrap().unwrap();
         assert!(held.locked, "the file took no shared lock");
+        assert!(
+            matches!(other.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+            "the probe's lock doesn't refuse an exclusive one"
+        );
 
         let copy = held.file.try_clone().unwrap();
         drop(held);
 
-        let other = std::fs::File::open(&path).unwrap();
-        assert!(other.try_lock().is_ok(), "the copy kept the probe's lock");
+        let locked = other.try_lock();
+        assert!(locked.is_ok(), "the copy kept the probe's lock: {locked:?}");
         drop(copy);
     }
 }
