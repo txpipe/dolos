@@ -191,13 +191,16 @@ cargo xtask store relabel <PATH> --contract <ID> --format <N> [--yes]
 - `<PATH>` is a state directory (`<storage.path>/state`) or an archive
   directory (`<storage.path>/archive`); the kind is detected from the store's
   keyspaces and printed. Any other directory is refused.
-- Without `--yes` it prints the current and the new values and writes
-  nothing. With `--yes` it writes both through the store's own
-  `record_identity`, then reopens the store and prints what it reads back.
+- Without `--yes` it prints the current and the new values and leaves the
+  store's files untouched: it reads a temporary mirror it makes beside the
+  store and removes afterwards, so the directory holding the store must be
+  writable even for a dry run. With `--yes` it writes both through the
+  store's own `record_identity`, then reopens the store and prints what it
+  reads back.
 - `--contract` is taken as given, unchecked against the identifiers this
   release supports; `--format` must be 1 or more.
-- The store is opened exclusively. **Stop the node first**: a store another
-  process holds is refused and nothing is written.
+- **Stop the node first**: a store another process holds is refused, by the
+  dry run as well, and nothing is written.
 
 To run it inside the dolos container image (Debian 12, glibc), build a
 linux/amd64 binary in the Rust image of the same Debian release, from the

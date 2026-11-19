@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Result};
 use dolos_fjall::archive::ArchiveStore;
+use dolos_fjall::view::View;
 use dolos_fjall::{Preset, StateStore};
 
 /// The keys `record_identity` writes, in the kind's metadata keyspace.
@@ -167,8 +168,10 @@ pub fn relabel(args: &RelabelArgs) -> Result<Outcome> {
 
 /// The kind of store at `path`, from its keyspaces, and the label it records.
 ///
-/// Opens the fjall database alone, exclusively and without background
-/// workers, and creates no keyspace: a dry run stops here.
+/// Reads a [`View`] of the database, a mirror beside the store, so the
+/// store's own files stay untouched: every writable fjall open rewrites some.
+/// The view still fails while another process holds the store. A dry run
+/// stops here.
 pub fn inspect(path: &Path) -> Result<(StoreKind, Label)> {
     let kind = [StoreKind::State, StoreKind::Archive]
         .into_iter()
@@ -181,7 +184,8 @@ pub fn inspect(path: &Path) -> Result<(StoreKind, Label)> {
         })?;
 
     let database = kind.database(path);
-    let db = fjall::Database::builder(&database)
+    let view = View::of(&database, path).map_err(|error| typed_refusal(&database, error))?;
+    let db = fjall::Database::builder(view.path())
         .worker_threads_unchecked(0)
         .open()
         .map_err(|error| refusal(&database, error))?;
@@ -293,6 +297,7 @@ fn held(path: &Path) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::hash::{Hash, Hasher};
 
     use dolos::storage::{ArchiveStoreBackend, StateStoreBackend};
     use dolos_core::compat::{STORE_FORMAT, SUPPORTED_CONTRACTS};
@@ -302,6 +307,7 @@ mod tests {
     const OLD_CONTRACT: &str = "v2-alpha.0";
 
     type Dump = BTreeMap<(String, Vec<u8>), Vec<u8>>;
+    type Snapshot = BTreeMap<PathBuf, (u64, std::time::SystemTime, u64)>;
 
     fn args(path: &Path, contract: &str, format: u32, yes: bool) -> RelabelArgs {
         RelabelArgs {
@@ -397,6 +403,53 @@ mod tests {
         }
     }
 
+    /// Name, length, modification time and a hash of the contents of every
+    /// file under `dir`, and the names of the entries beside it.
+    fn files(dir: &Path) -> (Snapshot, Vec<std::ffi::OsString>) {
+        fn walk(dir: &Path, root: &Path, snapshot: &mut Snapshot) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                let meta = std::fs::metadata(&path).unwrap();
+
+                if meta.is_dir() {
+                    walk(&path, root, snapshot);
+                } else {
+                    let name = path.strip_prefix(root).unwrap().to_path_buf();
+                    let mut hasher = std::hash::DefaultHasher::new();
+                    std::fs::read(&path).unwrap().hash(&mut hasher);
+                    let file = (meta.len(), meta.modified().unwrap(), hasher.finish());
+                    snapshot.insert(name, file);
+                }
+            }
+        }
+
+        let mut snapshot = Snapshot::new();
+        walk(dir, dir, &mut snapshot);
+
+        let mut beside: Vec<_> = std::fs::read_dir(dir.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        beside.sort();
+
+        (snapshot, beside)
+    }
+
+    #[test]
+    fn a_dry_run_leaves_every_file_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+
+        for (kind, path) in stores(dir.path()) {
+            // the rows are still in the journal, which a writable open trims
+            let database = kind.database(&path);
+            let before = files(&database);
+
+            relabel(&args(&path, "v2-beta.9", 3, false)).unwrap();
+
+            assert_eq!(files(&database), before, "{kind}");
+        }
+    }
+
     #[test]
     fn yes_rewrites_both_keys_and_nothing_else() {
         let dir = tempfile::tempdir().unwrap();
@@ -433,11 +486,13 @@ mod tests {
                 }
             };
 
-            let error = relabel(&args(&path, "dev-7", 2, true)).unwrap_err();
-            assert!(
-                error.to_string().contains("held by another process"),
-                "{error:#}"
-            );
+            for yes in [false, true] {
+                let error = relabel(&args(&path, "dev-7", 2, yes)).unwrap_err();
+                assert!(
+                    error.to_string().contains("held by another process"),
+                    "{error:#}"
+                );
+            }
 
             holder();
             assert_eq!(inspect(&path).unwrap(), (kind, label(OLD_CONTRACT, 1)));
