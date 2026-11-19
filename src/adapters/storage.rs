@@ -38,7 +38,7 @@ use dolos_core::{
     TieredCache, TxHash, TxStatus, TxoRef, UtxoEntry, UtxoIndexDelta, UtxoMap, UtxoSet,
     UtxoSetDelta, WalError, WalStore,
 };
-use dolos_redb3::cache::RedbCacheTier;
+use dolos_redb3::{cache::RedbCacheTier, wal::Needed};
 use serde::{de::DeserializeOwned, Serialize};
 
 use crate::prelude::Error;
@@ -785,14 +785,16 @@ pub fn open_wal_store<D>(config: &RootConfig) -> Result<WalStoreBackend<D>, Erro
 where
     D: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
 {
-    open_wal_replaying(config, &[])
+    open_wal_replaying(config, &[], &[])
 }
 
 /// [`open_wal_store`] for a start that then catches up stores at `positions`
-/// from the WAL (see [`replay_positions`]).
+/// from the WAL (see [`replay_positions`]), keeping a WAL that holds a block
+/// they still need (see [`needed_blocks`]).
 fn open_wal_replaying<D>(
     config: &RootConfig,
     positions: &[Option<BlockSlot>],
+    needed: &[Needed],
 ) -> Result<WalStoreBackend<D>, Error>
 where
     D: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
@@ -804,6 +806,7 @@ where
                 &path,
                 &RedbWalConfig::default(),
                 positions,
+                needed,
             );
             Ok(WalStoreBackend::Redb(redb_opened(&path, opened)?))
         }
@@ -824,6 +827,73 @@ fn replay_positions(
         state.read_cursor().ok().flatten().map(|point| point.slot()),
         archive.get_tip().ok().flatten().map(|(slot, _)| slot),
     ]
+}
+
+/// The blocks the state and the archive still need from the WAL, which a
+/// reset would lose, so a writable open keeps a WAL holding one.
+///
+/// A start reseeds an emptied WAL at the state cursor and syncs on from
+/// there, so the archive loses the blocks the state applied past its tip. An
+/// archive the dataset doesn't keep, or a rolling one left empty, which is
+/// whole with whatever reaches it next, needs none. A state cursor without a
+/// block hash can't be reseeded from, so it needs every block from its slot.
+/// A position that fails to read needs every block it could.
+fn needed_blocks(
+    config: &RootConfig,
+    state: &StateStoreBackend,
+    archive: &ArchiveStoreBackend,
+) -> Vec<Needed> {
+    let cursor = match state.read_cursor() {
+        Ok(Some(cursor)) if cursor != ChainPoint::Origin => cursor,
+        Ok(_) => return vec![],
+        Err(error) => {
+            return vec![Needed {
+                from: 0,
+                through: None,
+                by: format!("the state cursor fails to read ({error})"),
+            }]
+        }
+    };
+
+    let slot = cursor.slot();
+    let mut needed = vec![];
+
+    if !cursor.is_fully_defined() {
+        needed.push(Needed {
+            from: slot,
+            through: None,
+            by: format!("the state cursor at slot {slot} has no block hash"),
+        });
+    }
+
+    let kept = config.keeps_archive() && config.storage.archive.kind != StoreType::Ephemeral;
+    let refills = config.history.max_slots().is_some();
+
+    if !kept {
+        return needed;
+    }
+
+    let (from, by) = match archive.get_tip() {
+        Ok(Some((tip, _))) if tip >= slot => return needed,
+        Ok(Some((tip, _))) => (
+            tip.saturating_add(1),
+            format!("the archive, at slot {tip}, is behind the state at slot {slot}"),
+        ),
+        Ok(None) if refills => return needed,
+        Ok(None) => (
+            0,
+            format!("the archive, empty, is behind the state at slot {slot}"),
+        ),
+        Err(error) => (0, format!("the archive tip fails to read ({error})")),
+    };
+
+    needed.push(Needed {
+        from,
+        through: Some(slot),
+        by,
+    });
+
+    needed
 }
 
 /// A no-op archive when `history.mode` is `none`.
@@ -963,7 +1033,8 @@ pub fn open_cache_store(config: &RootConfig, limiter: QueryLimiter) -> Result<Ca
 /// Open the dataset's stores, creating those not there. State and archive
 /// are admitted first: a writable WAL open resets a WAL this release can't
 /// read, so a store this release refuses stops the open before the WAL is
-/// touched.
+/// touched. One the stores still need is kept, and the open fails with
+/// [`WalError::Kept`].
 pub fn open_data_stores<D>(config: &RootConfig) -> Result<Stores<D>, Error>
 where
     D: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
@@ -971,9 +1042,10 @@ where
     let state = open_state_store(config)?;
     let archive = open_archive_store(config)?;
     let positions = replay_positions(&state, &archive);
+    let needed = needed_blocks(config, &state, &archive);
 
     Ok(Stores {
-        wal: open_wal_replaying(config, &positions)?,
+        wal: open_wal_replaying(config, &positions, &needed)?,
         state,
         archive,
         mempool: open_mempool_store(config)?,
@@ -1056,7 +1128,8 @@ impl From<Error> for OpenError {
 /// is [`OpenError::Unclean`]; it mirrors each fjall store in a folder beside
 /// it while the store lives, [`OpenError::Unviewable`] where it cannot. While
 /// the observed stores live, a writer cannot open them. State and archive
-/// are admitted before the WAL opens, as in [`open_data_stores`].
+/// are admitted before the WAL opens, and a WAL they still need is kept, as
+/// in [`open_data_stores`].
 pub fn open_existing_stores<D>(config: &RootConfig, access: Access) -> Result<Stores<D>, OpenError>
 where
     D: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
@@ -1072,17 +1145,20 @@ where
             existing(&path)?;
 
             let positions = replay_positions(&state, &archive);
+            let needed = needed_blocks(config, &state, &archive);
 
             let opened = match access {
                 Access::Observe => dolos_redb3::wal::RedbWalStore::open_read_only_replaying(
                     &path,
                     &RedbWalConfig::default(),
                     &positions,
+                    &needed,
                 ),
                 Access::Mutate => dolos_redb3::wal::RedbWalStore::open_replaying(
                     &path,
                     &RedbWalConfig::default(),
                     &positions,
+                    &needed,
                 ),
             };
 
@@ -3223,17 +3299,8 @@ mod tests {
     /// [`written_wal`], stamped `version` instead of the one this release
     /// reads.
     fn written_wal_at(config: &RootConfig, version: u32) {
-        use dolos_redb3::redb::TableDefinition;
-
         written_wal(config);
-
-        let db = dolos_redb3::redb::Database::create(config.wal_path().unwrap()).unwrap();
-        let wx = db.begin_write().unwrap();
-        wx.open_table(TableDefinition::<&str, u32>::new("wal_metadata"))
-            .unwrap()
-            .insert("version", version)
-            .unwrap();
-        wx.commit().unwrap();
+        stamp_wal(config, version);
     }
 
     /// A state or an archive this release refuses stops the open before the
@@ -3466,21 +3533,53 @@ mod tests {
     /// writable or read-only: from the lower of the two, so a store at the
     /// start, or holding nothing, has them all decoded, and with both at the
     /// tip only the newest are. The WAL is reset, or read as empty, exactly
-    /// when the entry that fails is among those decoded.
+    /// when the entry that fails is among those decoded, unless the archive
+    /// lacks what the state applied: then a writable open keeps it.
     #[test]
     fn each_store_position_decides_the_wal_entries_an_open_decodes() {
-        type Open = fn(&RootConfig) -> WalStoreBackend<dolos_cardano::CardanoDelta>;
+        /// What an open makes of the WAL: kept, reset or read as empty, or
+        /// read as it is.
+        #[derive(Debug, PartialEq)]
+        enum Made {
+            Kept,
+            Empty,
+            Read,
+        }
 
-        let opens: [(&str, Open); 3] = [
-            ("open_data_stores", |config| {
-                open_data_stores(config).unwrap().wal
-            }),
-            ("open_existing_stores Mutate", |config| {
-                open_existing_stores(config, Access::Mutate).unwrap().wal
-            }),
-            ("open_existing_stores Observe", |config| {
-                open_existing_stores(config, Access::Observe).unwrap().wal
-            }),
+        type Open = fn(&RootConfig) -> Made;
+
+        fn made(wal: WalStoreBackend<dolos_cardano::CardanoDelta>) -> Made {
+            match wal.is_empty() {
+                Ok(true) => Made::Empty,
+                Ok(false) => Made::Read,
+                Err(error) => panic!("{error}"),
+            }
+        }
+
+        let opens: [(&str, Open, bool); 3] = [
+            (
+                "open_data_stores",
+                |config| match open_data_stores(config) {
+                    Ok(stores) => made(stores.wal),
+                    Err(Error::WalError(WalError::Kept { .. })) => Made::Kept,
+                    Err(error) => panic!("{error:?}"),
+                },
+                true,
+            ),
+            (
+                "open_existing_stores Mutate",
+                |config| match open_existing_stores(config, Access::Mutate) {
+                    Ok(stores) => made(stores.wal),
+                    Err(OpenError::Storage(Error::WalError(WalError::Kept { .. }))) => Made::Kept,
+                    Err(error) => panic!("{error:?}"),
+                },
+                true,
+            ),
+            (
+                "open_existing_stores Observe",
+                |config| made(open_existing_stores(config, Access::Observe).unwrap().wal),
+                false,
+            ),
         ];
 
         // (the state at the tip, the archive at the tip), and whether the
@@ -3492,13 +3591,21 @@ mod tests {
         ];
 
         for (at_tip, unreadable) in cases {
-            for (name, open) in opens {
+            for (name, open, writable) in opens {
                 let temp = tempfile::tempdir().unwrap();
                 let config = config_over(&temp.path().join("data"));
                 written_with_stores_at(&config, at_tip);
 
-                let wal = open(&config);
-                assert_eq!(wal.is_empty().unwrap(), unreadable, "{name} {at_tip:?}");
+                // the archive, holding nothing, lacks what the state applied
+                let lacks = at_tip == (true, false);
+
+                let expected = match (unreadable, lacks && writable) {
+                    (true, true) => Made::Kept,
+                    (true, false) => Made::Empty,
+                    (false, _) => Made::Read,
+                };
+
+                assert_eq!(open(&config), expected, "{name} {at_tip:?}");
             }
         }
     }
@@ -3522,6 +3629,369 @@ mod tests {
         drop(stores);
 
         assert!(std::fs::read(&wal).unwrap() == before, "the WAL changed");
+    }
+
+    fn point_at(slot: BlockSlot) -> ChainPoint {
+        ChainPoint::Specific(slot, [1u8; 32].into())
+    }
+
+    /// A dataset this release opens, its state cursor at `cursor` and its
+    /// archive's tip at slot `archive`, if any, over a WAL holding a block
+    /// at each slot from 85 to 100. With the cursor at 100 and the archive
+    /// behind, it is what a crash between their commits leaves.
+    fn written_at(config: &RootConfig, cursor: ChainPoint, archive: Option<BlockSlot>) {
+        written_state(config, current().as_deref());
+
+        let state = dolos_fjall::StateStore::open(
+            config.storage.state_path().unwrap(),
+            dolos_fjall::Preset::Standard,
+        )
+        .unwrap();
+        let writer = state.start_writer().unwrap();
+        writer.set_cursor(cursor).unwrap();
+        writer.commit().unwrap();
+        state.shutdown().unwrap();
+
+        if config.storage.archive_path().is_some() {
+            let store = opened_archive(config, current().as_deref());
+
+            if let Some(slot) = archive {
+                let writer = store.start_writer().unwrap();
+                writer
+                    .apply(&point_at(slot), &std::sync::Arc::new(vec![1u8; 8]))
+                    .unwrap();
+                writer.commit().unwrap();
+            }
+
+            store.shutdown().unwrap();
+        }
+
+        let rolled = LogValue {
+            block: vec![0x82, 0x00, 0x80],
+            ..LogValue::origin()
+        };
+
+        let wal = open_wal_store::<dolos_cardano::CardanoDelta>(config).unwrap();
+        let entries = (85..=100).map(|slot| (point_at(slot), rolled.clone()));
+        wal.append_entries(entries.collect()).unwrap();
+        drop(wal);
+    }
+
+    /// Stamp the dataset's WAL `version`, its entries as they are.
+    fn stamp_wal(config: &RootConfig, version: u32) {
+        use dolos_redb3::redb::TableDefinition;
+
+        let db = dolos_redb3::redb::Database::create(config.wal_path().unwrap()).unwrap();
+        let wx = db.begin_write().unwrap();
+        wx.open_table(TableDefinition::<&str, u32>::new("wal_metadata"))
+            .unwrap()
+            .insert("version", version)
+            .unwrap();
+        wx.commit().unwrap();
+    }
+
+    /// Replace the dataset's WAL entry at `slot` with bytes no release decodes.
+    fn break_wal_at(config: &RootConfig, slot: BlockSlot) {
+        use dolos_redb3::{redb::TableDefinition, wal::DbChainPoint};
+
+        let db = dolos_redb3::redb::Database::create(config.wal_path().unwrap()).unwrap();
+        let wx = db.begin_write().unwrap();
+        wx.open_table(TableDefinition::<DbChainPoint, Vec<u8>>::new("wal"))
+            .unwrap()
+            .insert(DbChainPoint::from(point_at(slot)), vec![0xde, 0xad])
+            .unwrap();
+        wx.commit().unwrap();
+    }
+
+    /// A named way to make a dataset's WAL one this release can't read.
+    type Unread = (&'static str, fn(&RootConfig));
+
+    /// The ways [`written_at`]'s WAL becomes one this release can't read.
+    const UNREADABLE: [Unread; 3] = [
+        ("older", |config| {
+            stamp_wal(config, dolos_redb3::wal::CURRENT_WAL_VERSION - 1)
+        }),
+        ("newer", |config| {
+            stamp_wal(config, dolos_redb3::wal::CURRENT_WAL_VERSION + 1)
+        }),
+        // where the archive's replay reads it
+        ("undecodable", |config| break_wal_at(config, 95)),
+    ];
+
+    type Writable = fn(&RootConfig) -> Result<WalStoreBackend<dolos_cardano::CardanoDelta>, String>;
+
+    /// The writable opens of a dataset, each failing only with
+    /// [`WalError::Kept`], as its message.
+    const WRITABLE: [(&str, Writable); 2] = [
+        ("open_data_stores", |config| {
+            match open_data_stores(config) {
+                Ok(stores) => Ok(stores.wal),
+                Err(Error::WalError(kept @ WalError::Kept { .. })) => Err(kept.to_string()),
+                Err(error) => panic!("{error:?}"),
+            }
+        }),
+        (
+            "open_existing_stores",
+            |config| match open_existing_stores(config, Access::Mutate) {
+                Ok(stores) => Ok(stores.wal),
+                Err(OpenError::Storage(Error::WalError(kept @ WalError::Kept { .. }))) => {
+                    Err(kept.to_string())
+                }
+                Err(error) => panic!("{error:?}"),
+            },
+        ),
+    ];
+
+    /// Open the dataset `written` makes with each writable open, and check
+    /// each keeps its WAL byte for byte, saying each of `said` and what to
+    /// do, or, with `said` empty, resets it.
+    fn assert_kept(
+        case: &str,
+        written: impl Fn() -> (tempfile::TempDir, RootConfig),
+        said: &[&str],
+    ) {
+        let remedy = [
+            "is kept as it is",
+            "start that release once",
+            "`dolos data rebuild`",
+        ];
+
+        for (name, open) in WRITABLE {
+            let (_temp, config) = written();
+            let wal = config.wal_path().unwrap();
+            let before = std::fs::read(&wal).unwrap();
+
+            match open(&config) {
+                Err(error) if !said.is_empty() => {
+                    assert!(
+                        std::fs::read(&wal).unwrap() == before,
+                        "{case} {name}: it changed"
+                    );
+
+                    for said in said.iter().chain(&remedy) {
+                        assert!(error.contains(said), "{case} {name}: {said:?} in {error}");
+                    }
+                }
+                Ok(wal) if said.is_empty() => {
+                    assert!(wal.is_empty().unwrap(), "{case} {name}: not reset");
+                }
+                Err(error) => panic!("{case} {name}: {error}"),
+                Ok(_) => panic!("{case} {name}: opened, not kept"),
+            }
+        }
+    }
+
+    /// After a crash between the state's commit and the archive's, the WAL
+    /// holds blocks the state applied and the archive lacks. A writable open
+    /// keeps it, of another version or failing to decode where the archive's
+    /// replay reads it, and fails saying why and what to do. With the archive
+    /// at the state, a reset loses nothing, and the WAL is reset.
+    #[test]
+    fn a_wal_the_archive_still_needs_is_kept() {
+        let archives = [
+            (
+                Some(90),
+                "the archive, at slot 90, is behind the state at slot 100",
+                "the block at slot 91",
+            ),
+            (
+                None,
+                "the archive, empty, is behind the state at slot 100",
+                "the block at slot 85",
+            ),
+        ];
+
+        for (case, unreadable) in UNREADABLE {
+            for (archive, behind, held) in archives {
+                let written = || {
+                    let temp = tempfile::tempdir().unwrap();
+                    let config = config_over(&temp.path().join("data"));
+                    written_at(&config, point_at(100), archive);
+                    unreadable(&config);
+                    (temp, config)
+                };
+
+                assert_kept(&format!("{case} {archive:?}"), written, &[behind, held]);
+            }
+
+            let written = || {
+                let temp = tempfile::tempdir().unwrap();
+                let config = config_over(&temp.path().join("data"));
+                written_at(&config, point_at(100), Some(100));
+                unreadable(&config);
+                (temp, config)
+            };
+
+            assert_kept(&format!("{case} caught up"), written, &[]);
+        }
+    }
+
+    /// A state cursor holding only a slot, as ESTART leaves one at an epoch's
+    /// first block, can't be reseeded from: a writable open keeps a WAL
+    /// holding a block from that slot on. A cursor naming its block, with no
+    /// archive to lack anything, lets it reset.
+    #[test]
+    fn a_wal_a_cursor_without_a_block_hash_needs_is_kept() {
+        let cursors = [
+            (
+                ChainPoint::Slot(100),
+                vec![
+                    "the state cursor at slot 100 has no block hash",
+                    "the block at slot 100",
+                ],
+            ),
+            (point_at(100), vec![]),
+        ];
+
+        for (case, unreadable) in UNREADABLE {
+            for (cursor, said) in &cursors {
+                let written = || {
+                    let temp = tempfile::tempdir().unwrap();
+                    let mut config = config_over(&temp.path().join("data"));
+                    config.history = HistoryConfig::none();
+                    written_at(&config, cursor.clone(), None);
+                    unreadable(&config);
+                    (temp, config)
+                };
+
+                assert_kept(&format!("{case} {cursor}"), written, said);
+            }
+        }
+    }
+
+    /// Only an archive the dataset keeps whole needs the blocks it lacks: a
+    /// rolling one left empty is whole with whatever reaches it next, and
+    /// one not kept, ephemeral or with history off, holds nothing to lose.
+    #[test]
+    fn only_an_archive_kept_whole_needs_what_it_lacks() {
+        let rolling = |config: &mut RootConfig| {
+            config.history = HistoryConfig::rolling(HistoryWindow::slots(1_000))
+        };
+
+        type Layout = fn(&mut RootConfig);
+
+        let layouts: [(&str, Layout, Option<BlockSlot>, bool); 4] = [
+            ("rolling, behind", rolling, Some(90), true),
+            ("rolling, empty", rolling, None, false),
+            (
+                "ephemeral",
+                |config| config.storage.archive = ArchiveStoreConfig::ephemeral(),
+                None,
+                false,
+            ),
+            (
+                "history off",
+                |config| config.history = HistoryConfig::none(),
+                None,
+                false,
+            ),
+        ];
+
+        for (case, layout, archive, kept) in layouts {
+            let written = || {
+                let temp = tempfile::tempdir().unwrap();
+                let mut config = config_over(&temp.path().join("data"));
+                layout(&mut config);
+                written_at(&config, point_at(100), archive);
+                stamp_wal(&config, dolos_redb3::wal::CURRENT_WAL_VERSION + 1);
+                (temp, config)
+            };
+
+            let said: &[&str] = if kept {
+                &["behind the state at slot 100"]
+            } else {
+                &[]
+            };
+
+            assert_kept(case, written, said);
+        }
+    }
+
+    /// A state at Origin applied no block, so the archive lacks nothing and
+    /// the WAL is reset, even holding a block at slot 0.
+    #[test]
+    fn a_state_at_origin_needs_nothing_from_the_wal() {
+        let written = || {
+            let temp = tempfile::tempdir().unwrap();
+            let config = config_over(&temp.path().join("data"));
+            written_at(&config, ChainPoint::Origin, None);
+
+            let wal = open_wal_store::<dolos_cardano::CardanoDelta>(&config).unwrap();
+            let block = LogValue {
+                block: vec![0x82, 0x00, 0x80],
+                ..LogValue::origin()
+            };
+            wal.append_entries(vec![(point_at(0), block)]).unwrap();
+            drop(wal);
+
+            stamp_wal(&config, dolos_redb3::wal::CURRENT_WAL_VERSION + 1);
+            (temp, config)
+        };
+
+        assert_kept("origin", written, &[]);
+    }
+
+    /// A state cursor that fails to read can't say what the archive lacks,
+    /// so a writable open keeps a WAL holding any block.
+    #[test]
+    fn a_state_cursor_that_fails_to_read_keeps_the_wal() {
+        let written = || {
+            let temp = tempfile::tempdir().unwrap();
+            let config = config_over(&temp.path().join("data"));
+            written_state_with_unreadable_cursor(&config);
+            written_archive(&config, current().as_deref());
+
+            let wal = open_wal_store::<dolos_cardano::CardanoDelta>(&config).unwrap();
+            let block = LogValue {
+                block: vec![0x82, 0x00, 0x80],
+                ..LogValue::origin()
+            };
+            wal.append_entries(vec![(point_at(85), block)]).unwrap();
+            drop(wal);
+
+            stamp_wal(&config, dolos_redb3::wal::CURRENT_WAL_VERSION + 1);
+            (temp, config)
+        };
+
+        assert_kept(
+            "unreadable cursor",
+            written,
+            &["the state cursor fails to read", "the block at slot 85"],
+        );
+    }
+
+    /// An observing open reads a WAL the archive still needs as empty, and
+    /// leaves it byte-identical, with one warning saying a writable open
+    /// keeps it.
+    #[test]
+    fn observing_a_wal_the_archive_still_needs_says_it_is_kept() {
+        for (case, unreadable) in UNREADABLE {
+            let temp = tempfile::tempdir().unwrap();
+            let config = config_over(&temp.path().join("data"));
+            written_at(&config, point_at(100), Some(90));
+            unreadable(&config);
+
+            let wal = config.wal_path().unwrap();
+            let before = std::fs::read(&wal).unwrap();
+
+            let warned = warned_while(|| {
+                let stores =
+                    open_existing_stores::<dolos_cardano::CardanoDelta>(&config, Access::Observe)
+                        .unwrap();
+                assert!(stores.wal.find_tip().unwrap().is_none(), "{case}");
+            });
+
+            assert!(std::fs::read(&wal).unwrap() == before, "{case}: it changed");
+            assert_eq!(warned.len(), 1, "{case}: {warned:?}");
+
+            for said in [
+                "a writable open keeps it",
+                "the archive, at slot 90, is behind the state at slot 100",
+                "the block at slot 91",
+            ] {
+                assert!(warned[0].contains(said), "{case}: {said:?} in {warned:?}");
+            }
+        }
     }
 
     /// Over stores this release opens, `--continue` proceeds whatever storage

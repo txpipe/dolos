@@ -1254,6 +1254,147 @@ fn an_archive_behind_the_state_is_refused_even_with_the_flag() {
     }
 }
 
+/// Stamp the WAL `version`, its entries as they are, as a release reading
+/// another version leaves it.
+fn stamp_wal(node: &Node, version: u32) {
+    use dolos_redb3::redb::{Database, TableDefinition};
+
+    let db = Database::create(node.config.wal_path().unwrap()).unwrap();
+    let wx = db.begin_write().unwrap();
+    wx.open_table(TableDefinition::<&str, u32>::new("wal_metadata"))
+        .unwrap()
+        .insert("version", version)
+        .unwrap();
+    wx.commit().unwrap();
+}
+
+/// Replace the WAL entry at `at` with bytes no release decodes.
+fn break_wal_entry(node: &Node, at: &ChainPoint) {
+    use dolos_redb3::{
+        redb::{Database, TableDefinition},
+        wal::DbChainPoint,
+    };
+
+    let db = Database::create(node.config.wal_path().unwrap()).unwrap();
+    let wx = db.begin_write().unwrap();
+    wx.open_table(TableDefinition::<DbChainPoint, Vec<u8>>::new("wal"))
+        .unwrap()
+        .insert(DbChainPoint::from(at.clone()), vec![0xde, 0xad])
+        .unwrap();
+    wx.commit().unwrap();
+}
+
+/// A WAL this release can't read is kept while a store still needs a block
+/// it holds: after a crash between the state's commit and the archive's, of
+/// another version or failing to decode where the archive's replay reads
+/// it, and under a state cursor holding only a slot. `sync recover` stops,
+/// saying why and what to do, and leaves the WAL byte for byte; its dry run
+/// reads it as empty, warning that a writable open keeps it.
+#[test]
+fn a_wal_a_store_still_needs_is_kept_by_recover() {
+    let reads = dolos_redb3::wal::CURRENT_WAL_VERSION;
+    let mut cases = vec![];
+
+    for version in [reads - 1, reads + 1] {
+        let (node, _) = lagging(CrashAfter::State);
+        stamp_wal(&node, version);
+        cases.push((format!("version {version}"), node, "is behind the state"));
+    }
+
+    let (node, blocks) = lagging(CrashAfter::State);
+    break_wal_entry(&node, &point(&blocks[2]));
+    cases.push(("undecodable".into(), node, "is behind the state"));
+
+    let (node, genesis, blocks) = fixture("");
+    let domain = start(&node, &genesis);
+    domain.roll_forward_batch(blocks[..3].to_vec()).unwrap();
+    feed_until_crash(&domain, &blocks[3..], CrashAfter::Wal);
+    domain.shutdown().unwrap();
+    drop(domain);
+    set_state_cursor(&node, ChainPoint::Slot(point(&blocks[3]).slot()));
+    stamp_wal(&node, reads + 1);
+    cases.push(("hashless".into(), node, "has no block hash"));
+
+    for (case, node, why) in cases {
+        let wal = node.config.wal_path().unwrap();
+        let before = std::fs::read(&wal).unwrap();
+
+        let dry_run = node.run(&["sync", "recover", "--dry-run"]);
+        let warned = stderr_words(&dry_run);
+        assert!(
+            warned.contains("a writable open keeps it"),
+            "{case}: {warned}"
+        );
+        assert!(std::fs::read(&wal).unwrap() == before, "{case}: dry run");
+
+        let output = node.run(&["sync", "recover"]);
+        let message = stderr_words(&output);
+        assert_eq!(code(&output), Some(1), "{case}: {message}");
+
+        for said in [
+            "is kept as it is",
+            why,
+            "start that release once",
+            "dolos data rebuild",
+        ] {
+            assert!(message.contains(said), "{case}: {said:?} in {message}");
+        }
+
+        assert!(
+            std::fs::read(&wal).unwrap() == before,
+            "{case}: the WAL changed"
+        );
+    }
+}
+
+/// After a crash before the state's commit, the state and the archive agree
+/// and a start syncs the WAL's blocks again: a WAL of another version is
+/// wiped, and `sync recover` seeds it at the state cursor.
+#[test]
+fn a_wal_no_store_needs_is_reset_by_recover() {
+    let (node, blocks) = lagging(CrashAfter::Wal);
+    let at = point(&blocks[1]);
+    stamp_wal(&node, dolos_redb3::wal::CURRENT_WAL_VERSION + 1);
+
+    let output = node.run(&["sync", "recover", "--format", "json"]);
+    assert_eq!(code(&output), Some(0), "{}", stderr_words(&output));
+    assert_eq!(json(&output)["action"], "seed_wal");
+
+    assert_eq!(
+        store_positions(&node),
+        (Some(at.clone()), Some(at.clone()), Some(at.slot()))
+    );
+}
+
+/// A start, as `sync catchup` makes one, stops on a WAL a store still needs
+/// before it reaches for a peer, and leaves it byte for byte.
+#[test]
+#[cfg_attr(
+    feature = "debug",
+    ignore = "the debug feature's console subscriber panics a sync built without tokio_unstable"
+)]
+fn a_start_stops_on_a_wal_a_store_still_needs() {
+    let (node, _) = lagging(CrashAfter::State);
+    stamp_wal(&node, dolos_redb3::wal::CURRENT_WAL_VERSION + 1);
+
+    let wal = node.config.wal_path().unwrap();
+    let before = std::fs::read(&wal).unwrap();
+
+    let output = node.run(&["sync", "catchup"]);
+    let message = stderr_words(&output);
+    assert_eq!(code(&output), Some(1), "{message}");
+
+    for said in [
+        "is kept as it is",
+        "is behind the state",
+        "start that release once",
+    ] {
+        assert!(message.contains(said), "{said:?} in {message}");
+    }
+
+    assert!(std::fs::read(&wal).unwrap() == before, "the WAL changed");
+}
+
 #[test]
 fn a_rollback_moves_every_store_to_the_point() {
     let (node, blocks) = synced();
