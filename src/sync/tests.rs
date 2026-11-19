@@ -783,6 +783,12 @@ fn a_wal_point_the_peer_may_yet_hold_is_retried() {
             vec![off_the_peer(20), off_the_peer(30)],
             31,
         ),
+        // Its oldest point is offered last, and isn't all it holds.
+        (
+            "a WAL holding three points, two offered",
+            vec![off_the_peer(10), off_the_peer(20), off_the_peer(30)],
+            31,
+        ),
     ];
 
     for (case, points, blocks) in cases {
@@ -811,6 +817,56 @@ fn a_wal_point_the_peer_may_yet_hold_is_retried() {
             "{case}: {failure}"
         );
     }
+}
+
+/// A WAL holding one point alone that the peer holds, as a reset or a
+/// bootstrap leaves it, is the usual start: the sync intersects there and
+/// goes on, giving up nothing.
+#[test]
+fn a_lone_wal_point_the_peer_holds_syncs_on_from_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, domain) = domain_over(temp.path(), no_backoff(3));
+
+    let behind = peer(PeerOptions {
+        initial_blocks: 30,
+        ..Default::default()
+    });
+
+    let (progress, stages) = catch_up(&config, &behind, &domain);
+    stages.teardown();
+    assert!(progress.succeeded(SyncLimit::CatchUp));
+
+    // Empty the WAL and seed it at the state cursor, as a start does after a
+    // reset.
+    let seed = behind.tip();
+    assert_eq!(state_cursor(&domain), Some(seed.clone()));
+
+    let held = domain
+        .wal()
+        .iter_logs(None, None)
+        .unwrap()
+        .map(|(point, _)| point)
+        .collect_vec();
+    domain.wal().remove_points(&held).unwrap();
+    wal_holding(&domain, std::slice::from_ref(&seed));
+
+    // The fixture's chain is the same at every length, so this peer holds
+    // the seed.
+    let ahead = peer(PeerOptions {
+        initial_blocks: 40,
+        ..Default::default()
+    });
+
+    let (progress, stages) = catch_up(&config, &ahead, &domain);
+    stages.teardown();
+
+    if let Some(failure) = progress.upstream_failure() {
+        panic!("the sync gave up: {failure}");
+    }
+
+    assert!(progress.succeeded(SyncLimit::CatchUp));
+    assert_eq!(ahead.intersects(), 1);
+    assert_eq!(state_cursor(&domain), Some(ahead.tip()));
 }
 
 #[test]
