@@ -312,11 +312,28 @@ impl dolos_core::EntityDelta for DequeueMir {
 }
 
 #[cfg(test)]
-mod prop_tests {
+pub(super) mod prop_tests {
     use super::testing::{any_pending_mir_state, any_pending_reward_state};
     use super::*;
     use crate::model::testing::{self as root, assert_delta_roundtrip};
+    use crate::model::testing::{replay_case, ReplayCase};
     use proptest::prelude::*;
+
+    /// One case per delta this module owns, for `model::replay_tests`.
+    pub(crate) fn replay_cases() -> Vec<ReplayCase> {
+        vec![
+            replay_case((
+                prop::option::of(any_pending_reward_state()),
+                any_enqueue_reward(),
+            )),
+            replay_case((
+                prop::option::of(any_pending_reward_state()),
+                any_dequeue_reward(),
+            )),
+            replay_case((prop::option::of(any_pending_mir_state()), any_enqueue_mir())),
+            replay_case((prop::option::of(any_pending_mir_state()), any_dequeue_mir())),
+        ]
+    }
 
     prop_compose! {
         fn any_enqueue_reward()(

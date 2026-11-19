@@ -6,21 +6,27 @@
 //! and its `history.window`, which bounds how much chain history a restore
 //! bothers to read.
 //!
-//! ## The two sources are one restore
+//! ## A source names a network root
 //!
-//! `file://DIR` and `oci://HOST/PATH` differ in where the bytes come from and in
-//! nothing else: the same plan, the same refusals, the same store writes, the
-//! same checkpoints. Only two things are the registry's alone — `--point`,
-//! which names which stele in a repository to read, and `--insecure`, which is
-//! for a registry on a loopback address.
+//! The snapshot is in the root's `dolos` repository and the blocks of its
+//! closed epochs in its `blocks` repository: `oci://HOST/PATH` reads
+//! `PATH/dolos` and `PATH/blocks`, and `file://DIR` reads `DIR/dolos` and `DIR/blocks`, each an
+//! OCI image layout. `file://DIR` and `oci://HOST/PATH` differ in where the
+//! bytes come from and in nothing else: the same plan, the same refusals, the
+//! same store writes, the same checkpoints. Only two things are the registry's
+//! alone — `--point`, which names which snapshot in a repository to read, and
+//! `--insecure`, which is for a registry on a loopback address.
 //!
-//! ## A restore has no resume
+//! ## `--continue` resumes the snapshot a restore started from
 //!
-//! An interrupted restore leaves data in storage, which `bootstrap` refuses
-//! until `--force` clears it, so a restore always starts from empty stores. The
-//! progress file it writes as it goes is overwritten rather than obeyed:
-//! `dolos_snapshot::restore::Checkpoint` states why a progress file that
-//! outlived the stores it describes would otherwise skip layers onto nothing.
+//! A restore records, beside its progress file, the source it reads and the
+//! snapshot's sequence and digest. `--continue` reads that snapshot again, by
+//! its epoch tag in a registry and never `latest`, and skips the layers the
+//! progress file names, refusing when the snapshot is gone or the records can't
+//! be trusted. With no records it restores as without the flag, over storage
+//! that holds no data. Without the flag a restore refuses partial data until
+//! `--force` clears it, and overwrites any progress file rather than obey it:
+//! `dolos_snapshot::restore::Checkpoint` states why.
 
 use std::path::{Path, PathBuf};
 
@@ -32,25 +38,30 @@ use dolos_snapshot::{
     facade::{self as snapshot, RestoreInput, SnapshotRepository},
     node,
     registry::{self, Auth, Point, Repository},
-    restore::Source,
+    restore::{
+        blocks_dir, blocks_wanted, profile_repository, ResumeRefusal, Source, SourceRecord,
+        BLOCKS_REPOSITORY, DOLOS_REPOSITORY,
+    },
 };
 
 use crate::{
     feedback::{Feedback, RestoreProgress},
+    output::Usage,
     registry::CredentialArgs,
 };
 
 #[derive(Debug, clap::Args, Clone)]
 pub struct Args {
-    /// Where to restore from, as a URL: `file://DIR` naming a stele directory,
-    /// or `oci://HOST/PATH` naming a repository in a registry. Defaults to the
-    /// configured network's official repository, and is required for a custom
-    /// network
+    /// Where to restore from, as a URL naming a network root: `file://DIR`, a
+    /// directory holding `dolos/` and `blocks/`, each an OCI image layout, or
+    /// `oci://HOST/PATH`, whose `PATH/dolos` and `PATH/blocks` repositories
+    /// are read. Defaults to the configured network's official root, and is
+    /// required for a custom network
     #[arg(long)]
     pub source: Option<Source>,
 
-    /// which stele in the repository to restore: `latest`, or `epoch-N` for the
-    /// stele published at the end of epoch N. Registry sources only.
+    /// which snapshot to restore: `latest`, or `epoch-N` for the snapshot cut
+    /// at the boundary that opens epoch N. Registry sources only.
     #[arg(long, value_name = "POINT", default_value = "latest")]
     pub point: Point,
 
@@ -67,15 +78,27 @@ pub struct Args {
     pub scratch_dir: Option<PathBuf>,
 
     /// skip the restore disk-space preflight and continue even when the
-    /// stele's declared sizes exceed the available space
+    /// estimate of what the restore will occupy exceeds the available space
     #[arg(long, action)]
     pub skip_space_check: bool,
+
+    /// how many layers to read ahead of the one being written; a registry
+    /// restore stages each in the scratch directory until its turn. 0 or 1
+    /// reads one layer at a time
+    #[arg(long, value_name = "LAYERS", default_value_t = dolos_snapshot::restore::DEFAULT_READ_AHEAD)]
+    pub read_ahead: usize,
+
+    /// Resume an interrupted restore from the layers it recorded, reading the
+    /// snapshot it started from again; with nothing to resume, restore as
+    /// without the flag into storage that holds no data
+    #[arg(long = "continue")]
+    pub resume: bool,
 
     #[command(flatten)]
     pub credentials: CredentialArgs,
 }
 
-/// What the prompt offers as the stele's source.
+/// What the prompt offers as the snapshot's source.
 #[cfg(feature = "utils")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceChoice {
@@ -91,7 +114,7 @@ impl std::fmt::Display for SourceChoice {
         match self {
             SourceChoice::Official(url) => write!(f, "the official repository ({url})"),
             SourceChoice::Custom => {
-                f.write_str("another source (an OCI repository or a file:// stele directory)")
+                f.write_str("another source (a network root in a registry or a file:// directory)")
             }
         }
     }
@@ -119,16 +142,16 @@ impl Args {
     pub fn inquire(network: Option<&KnownNetwork>) -> miette::Result<Self> {
         let choice = match source_choices(network).as_slice() {
             [only] => *only,
-            choices => inquire::Select::new("where is the stele?", choices.to_vec())
+            choices => inquire::Select::new("where is the snapshot?", choices.to_vec())
                 .prompt()
                 .into_diagnostic()?,
         };
 
         let source = match choice {
             SourceChoice::Official(url) => url.to_string(),
-            SourceChoice::Custom => inquire::Text::new("where is the stele?")
+            SourceChoice::Custom => inquire::Text::new("where is the snapshot?")
                 .with_help_message(
-                    "oci://HOST/PATH for a repository in a registry, or file://DIR for a stele directory",
+                    "oci://HOST/PATH for a network root in a registry, or file://DIR for a directory holding dolos/ and blocks/",
                 )
                 .with_placeholder(custom_placeholder())
                 .prompt()
@@ -141,12 +164,14 @@ impl Args {
             insecure: false,
             scratch_dir: None,
             skip_space_check: false,
+            read_ahead: dolos_snapshot::restore::DEFAULT_READ_AHEAD,
+            resume: false,
             credentials: super::from_environment()?,
         })
     }
 }
 
-/// The stele to restore: what the invocation names, else the known network's
+/// The snapshot to restore: what the invocation names, else the known network's
 /// official repository.
 pub(super) fn source(args: &Args, network: Option<&KnownNetwork>) -> miette::Result<Source> {
     if let Some(source) = &args.source {
@@ -154,7 +179,7 @@ pub(super) fn source(args: &Args, network: Option<&KnownNetwork>) -> miette::Res
     }
 
     let network = network.ok_or_else(|| {
-        miette::miette!("a custom network has no default stele repository; pass --source")
+        miette::miette!("a custom network has no default snapshot repository; pass --source")
     })?;
 
     network
@@ -164,60 +189,378 @@ pub(super) fn source(args: &Args, network: Option<&KnownNetwork>) -> miette::Res
         .map_err(|e: String| miette::miette!("{e}"))
 }
 
-/// Where a restore reads from, with the credentials a repository is read
-/// with.
-pub(super) enum Inputs {
-    Dir(PathBuf),
-    Repo(Repository, Auth),
+/// Where a restore reads the snapshot and its blocks from, with the credentials
+/// both repositories are read with.
+enum Reader {
+    Dir {
+        dolos: PathBuf,
+        blocks: PathBuf,
+    },
+    Repo {
+        repositories: Repositories,
+        auth: Auth,
+    },
+}
+
+/// A registry root's two repositories: the snapshot's and the blocks
+/// repository beside it.
+struct Repositories {
+    dolos: Repository,
+    blocks: Repository,
+}
+
+impl Repositories {
+    /// Both repositories, opened by `open`: the snapshot's first, then the
+    /// blocks repository.
+    fn open<T>(&self, open: impl Fn(&Repository) -> miette::Result<T>) -> miette::Result<(T, T)> {
+        Ok((open(&self.dolos)?, open(&self.blocks)?))
+    }
+}
+
+/// A restore's resolved inputs.
+pub(super) struct Inputs {
+    reader: Reader,
+    /// The network root as read, a directory by its resolved path, for the
+    /// record.
+    source: Source,
+    /// The snapshot to read in a repository.
+    point: Point,
+    resuming: Option<Resuming>,
+}
+
+/// What a `--continue` resumes.
+struct Resuming {
+    record: SourceRecord,
+    /// The record's source, parsed.
+    source: Source,
+    /// The layers the progress file records.
+    layers: usize,
 }
 
 /// Resolves the source and, for a repository, the credentials, so that
 /// `--force`, which `clears` says is to clear storage, clears nothing for a
 /// restore that would refuse them, and the restore reads with the credentials
-/// that were checked.
+/// that were checked. A `--continue` with records takes the recorded source
+/// and snapshot.
 pub(super) fn resolve(
     config: &RootConfig,
     args: &Args,
     network: Option<&KnownNetwork>,
     clears: bool,
 ) -> miette::Result<Inputs> {
-    match source(args, network)? {
-        Source::Dir(dir) => Ok(Inputs::Dir(check_dir(config, &dir, clears)?)),
-        Source::Repo(repo) => {
-            let auth = args.credentials.auth(&repo, network)?;
+    let resuming = match args.resume {
+        true => unfinished(config, args)?,
+        false => None,
+    };
 
-            Ok(Inputs::Repo(repo, auth))
+    let (source, point) = match &resuming {
+        Some(resuming) => (
+            resuming.source.clone(),
+            Point::Epoch(resuming.record.sequence),
+        ),
+        None => (source(args, network)?, args.point),
+    };
+
+    let (reader, source) = match source {
+        Source::Dir(root) => {
+            let root = match &resuming {
+                Some(resuming) => reopen_dir(&root, &resuming.record)?,
+                None => check_dir(config, &root, clears)?,
+            };
+
+            let reader = Reader::Dir {
+                dolos: root.join(DOLOS_REPOSITORY),
+                blocks: root.join(BLOCKS_REPOSITORY),
+            };
+
+            (reader, Source::Dir(root))
+        }
+        Source::Repo(root) => {
+            let auth = args.credentials.auth(&root, network)?;
+            let repository = |name| {
+                profile_repository(&root, name)
+                    .into_diagnostic()
+                    .with_context(|| format!("naming the {name} repository under {root}"))
+            };
+
+            let reader = Reader::Repo {
+                repositories: Repositories {
+                    dolos: repository(DOLOS_REPOSITORY)?,
+                    blocks: repository(BLOCKS_REPOSITORY)?,
+                },
+                auth,
+            };
+
+            (reader, Source::Repo(root))
+        }
+    };
+
+    Ok(Inputs {
+        reader,
+        source,
+        point,
+        resuming,
+    })
+}
+
+/// What `--continue` resumes: the source record an interrupted restore left,
+/// with the layers its progress file records, once the invocation agrees
+/// with it. `None` over storage holding no data and no records, which
+/// restores as without the flag.
+fn unfinished(config: &RootConfig, args: &Args) -> miette::Result<Option<Resuming>> {
+    let root = &config.storage.path;
+
+    let unfinished = match dolos_snapshot::restore::unfinished(root) {
+        Ok(unfinished) => unfinished,
+        Err(dolos_snapshot::Error::Resume(refusal)) => return Err(refused(refusal)),
+        Err(other) => {
+            return Err(other)
+                .into_diagnostic()
+                .context("reading the records of an interrupted restore")
+        }
+    };
+
+    match (unfinished.record, unfinished.progress) {
+        (Some(record), progress) => {
+            let source = record.source.parse().map_err(|reason: String| {
+                refused(ResumeRefusal::Unreadable {
+                    path: dolos_snapshot::restore::source_path_in(root),
+                    reason,
+                })
+            })?;
+
+            agrees(args, &record)?;
+
+            let layers = progress.map_or(0, |progress| progress.completed.len());
+            still_holds(config, layers)?;
+
+            Ok(Some(Resuming {
+                record,
+                source,
+                layers,
+            }))
+        }
+        (None, Some(_)) => Err(refused(ResumeRefusal::Unrecorded {
+            storage: root.clone(),
+        })),
+        (None, None) => {
+            let held = dolos::storage::held_data(config).into_diagnostic()?;
+
+            if held.is_empty() {
+                return Ok(None);
+            }
+
+            let held: Vec<_> = held.iter().map(|path| path.display().to_string()).collect();
+
+            miette::bail!(
+                "nothing to resume: no snapshot restore left its records in {}, and storage holds \
+                 data ({}). Use --force to replace it",
+                root.display(),
+                held.join(", "),
+            )
         }
     }
 }
 
-/// The stele directory `dir`, once it is known to hold a stele and, when
-/// `clears`, to lie out of the reach of the clear with the stele's own
-/// files, the ones the restore reads. The restore reads it by the path
-/// checked, with any `..` in it resolved.
-fn check_dir(config: &RootConfig, dir: &Path, clears: bool) -> miette::Result<PathBuf> {
-    let dir = dolos::storage::resolve_parent_dirs(dir)
+/// Refuse a resume over stores something else wrote since the restore was
+/// interrupted, as a WAL with entries shows, or, when the progress file
+/// records `layers`, over an archive kept on disk that no longer holds them:
+/// an index holding no data, whatever block segments survive it, or a
+/// segment file missing or cut short before the newest block the index
+/// locates. Recorded layers wrote index rows, save empty leading epochs, so a
+/// stop after only those is refused too. Older segments lost beside the
+/// newest aren't caught. The library refuses a state cursor other than the
+/// snapshot's.
+fn still_holds(config: &RootConfig, layers: usize) -> miette::Result<()> {
+    let index = dolos::storage::archive_index(config).into_diagnostic()?;
+
+    if dolos::storage::wal_holds_entries(config) {
+        miette::bail!(
+            "the WAL at {} has entries, which a snapshot restore never writes, so something else \
+             wrote this node after the restore was interrupted. Use --force to start over",
+            config.wal_path().unwrap_or_default().display(),
+        );
+    }
+
+    let on_disk = config.keeps_archive() && config.storage.archive_path().is_some();
+
+    if layers == 0 || !on_disk {
+        return Ok(());
+    }
+
+    if !index.holds_data {
+        miette::bail!(
+            "the restore progress in {} records {layers} layers, and the archive index they were \
+             written to holds no data. Use --force to start over",
+            config.storage.path.display(),
+        );
+    }
+
+    if let Some(segment) = index.missing_segment {
+        miette::bail!(
+            "the restore progress in {} records {layers} layers, and {}, where the archive index \
+             locates their newest block, is missing or ends before that block. Use --force to \
+             start over",
+            config.storage.path.display(),
+            segment.display(),
+        );
+    }
+
+    Ok(())
+}
+
+/// Refuse, as a usage error naming the recorded value, a `--source` or an
+/// `--point epoch-N` other than the record's. `--point latest`, the default,
+/// always agrees: the record pins the snapshot, and the moving tag isn't read.
+fn agrees(args: &Args, record: &SourceRecord) -> miette::Result<()> {
+    if let Some(given) = &args.source {
+        let given = match given {
+            Source::Dir(dir) => Source::Dir(
+                dolos::storage::resolve_parent_dirs(dir)
+                    .into_diagnostic()
+                    .context("resolving --source")?,
+            ),
+            repo => repo.clone(),
+        };
+
+        if given.to_string() != record.source {
+            Err(Usage::new(
+                format!(
+                    "--source {given} is not the source of the restore --continue resumes, {}",
+                    record.source
+                ),
+                Some(
+                    "leave --source out to resume, or use --force to start over from this one"
+                        .to_owned(),
+                ),
+            ))?;
+        }
+    }
+
+    if let Point::Epoch(epoch) = args.point {
+        if epoch != record.sequence {
+            Err(Usage::new(
+                format!(
+                    "--point epoch-{epoch} is not the snapshot the restore --continue resumes, \
+                     epoch-{}",
+                    record.sequence
+                ),
+                Some(
+                    "leave --point out to resume, or use --force to start over from this one"
+                        .to_owned(),
+                ),
+            ))?;
+        }
+    }
+
+    Ok(())
+}
+
+/// The recorded network root, refused as gone when its `dolos` directory
+/// holds no snapshot.
+fn reopen_dir(root: &Path, record: &SourceRecord) -> miette::Result<PathBuf> {
+    match dolos_snapshot::dir::SnapshotDir::open(root.join(DOLOS_REPOSITORY)) {
+        Ok(_) => Ok(root.to_path_buf()),
+        Err(_) => Err(refused(ResumeRefusal::Gone(record.clone()))),
+    }
+}
+
+/// A resume refused, with the flag that starts over.
+fn refused(refusal: ResumeRefusal) -> miette::Report {
+    miette::miette!("{refusal}. Use --force to start over")
+}
+
+/// The network root `root`, once it holds a `dolos` and a `blocks` image
+/// layout, the first's latest snapshot resolves, chain and all, and the second
+/// holds the blocks snapshot that Dolos snapshot reads, when it reads one; and,
+/// when `clears`, once both lie out of the reach of the clear with their own
+/// files, the ones the restore reads. An image layout alone is not a snapshot:
+/// a refused publish leaves one with no tags. The restore reads the root by
+/// the path checked, with any `..` in it resolved.
+fn check_dir(config: &RootConfig, root: &Path, clears: bool) -> miette::Result<PathBuf> {
+    use dolos_snapshot::dir::SnapshotDir;
+
+    let root = dolos::storage::resolve_parent_dirs(root)
         .into_diagnostic()
         .context("resolving --source")?;
 
-    dolos_snapshot::dir::SteleDir::open(&dir)
+    let [dolos, blocks] = [DOLOS_REPOSITORY, BLOCKS_REPOSITORY].map(|name| root.join(name));
+
+    for (dir, name) in [(&dolos, DOLOS_REPOSITORY), (&blocks, BLOCKS_REPOSITORY)] {
+        check_root_dir(&root, dir, name)?;
+    }
+
+    let snapshot = SnapshotDir::open(&dolos)
+        .and_then(|layout| layout.resolve_latest(&dolos_snapshot::DolosProfile))
+        .map_err(dolos_snapshot::Error::from)
         .into_diagnostic()
-        .with_context(|| format!("{} holds no stele", dir.display()))?;
+        .with_context(|| format!("{} holds no snapshot", dolos.display()))?;
+
+    let wanted = match snapshot.chain() {
+        Some(chain) => blocks_wanted(chain, config.history.max_slots())
+            .into_diagnostic()
+            .with_context(|| format!("reading the snapshot in {}", dolos.display()))?
+            .map(|reference| (reference, chain.head().sequence)),
+        None => None,
+    };
+
+    match wanted {
+        Some((reference, sequence)) => blocks_dir(&blocks, reference, sequence)
+            .map(drop)
+            .into_diagnostic(),
+        None => SnapshotDir::open(&blocks)
+            .map(drop)
+            .map_err(dolos_snapshot::Error::from)
+            .into_diagnostic()
+            .with_context(|| format!("{} is not a blocks repository", blocks.display())),
+    }?;
 
     if clears {
-        use dolos_snapshot::dir::{BLOBS_DIR, BLOB_INDEX_FILE, INSCRIPTION_FILE};
+        use dolos_snapshot::dir::{BLOBS_DIR, INDEX_FILE, LAYOUT_FILE};
+
+        let reads: Vec<_> = [&dolos, &blocks]
+            .into_iter()
+            .flat_map(|dir| [LAYOUT_FILE, INDEX_FILE, BLOBS_DIR].map(|name| dir.join(name)))
+            .collect();
 
         super::refuse_what_the_clear_takes(
             config,
-            &dir,
-            &[INSCRIPTION_FILE, BLOB_INDEX_FILE, BLOBS_DIR].map(|name| dir.join(name)),
-            "the stele",
+            &root,
+            &reads,
+            "the source",
             "the restore",
-            "move the stele out of the storage root",
+            "move the source out of the storage root",
         )?;
     }
 
-    Ok(dir)
+    Ok(root)
+}
+
+/// Refuse a network root whose `name` directory, `dir`, is absent or is not
+/// a directory. Any other fault reading it, such as a permission or a
+/// symlink loop, is refused with its own cause rather than read as absent.
+fn check_root_dir(root: &Path, dir: &Path, name: &str) -> miette::Result<()> {
+    use std::io::ErrorKind;
+
+    let help = format!(
+        "a file:// source names a network root holding `{DOLOS_REPOSITORY}/` and \
+         `{BLOCKS_REPOSITORY}/`, each an OCI image layout"
+    );
+
+    match std::fs::metadata(dir) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => miette::bail!(help = help, "{} is not a directory", dir.display()),
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+            miette::bail!(
+                help = help,
+                "{} holds no `{name}` directory",
+                root.display()
+            )
+        }
+        Err(error) => Err(error)
+            .into_diagnostic()
+            .with_context(|| format!("reading {}", dir.display())),
+    }
 }
 
 /// What every restore needs before it can read a layer, whatever the source is.
@@ -232,6 +575,7 @@ struct Node {
 struct RestoreOptions<'a> {
     feedback: &'a Feedback,
     skip_space_check: bool,
+    read_ahead: usize,
 }
 
 impl Node {
@@ -255,14 +599,41 @@ impl Node {
     }
 
     /// What this node knows about itself, as the restore driver takes it.
-    fn restoring(&self, skip_space_check: bool) -> dolos_snapshot::restore::Restoring<'_> {
+    fn restoring<'a>(
+        &'a self,
+        inputs: &'a Inputs,
+        options: RestoreOptions<'_>,
+    ) -> dolos_snapshot::restore::Restoring<'a> {
         dolos_snapshot::restore::Restoring {
             network_magic: self.magic,
             max_history: self.max_history,
             storage_path: &self.root,
-            resume: false,
-            skip_space_check,
+            resume: inputs.resuming.is_some(),
+            skip_space_check: options.skip_space_check,
+            journals: self.journals(),
+            read_ahead: options.read_ahead,
+            source: Some(&inputs.source),
         }
+    }
+
+    /// What the stores' journals may hold between them: each fjall store's
+    /// `journal_mb`, and nothing for a backend that keeps no such journal.
+    fn journals(&self) -> u64 {
+        use dolos::storage::{ArchiveStoreBackend, StateStoreBackend};
+
+        const MIB: u64 = 1024 * 1024;
+
+        let state = match &self.stores.state {
+            StateStoreBackend::Fjall(state) => state.tuning().journal_mb,
+            _ => 0,
+        };
+
+        let archive = match &self.stores.archive {
+            ArchiveStoreBackend::Fjall(archive) => archive.tuning().journal_mb,
+            _ => 0,
+        };
+
+        (state + archive) * MIB
     }
 
     /// Where the restore writes.
@@ -286,51 +657,87 @@ fn restore(
     let node = Node::open(config)?;
     let progress = RestoreProgress::for_stderr(options.feedback);
     let observer = progress.observer();
-    let restoring = node.restoring(options.skip_space_check);
+    let restoring = node.restoring(&inputs, options);
 
-    let outcome = match inputs {
-        Inputs::Dir(dir) => snapshot::restore(
-            RestoreInput::Directory(&dir),
-            restoring,
-            node.target(),
-            Some(&observer),
+    let mut opened = None;
+
+    let (input, reading) = match &inputs.reader {
+        Reader::Dir { dolos, blocks } => (
+            RestoreInput::Directory {
+                path: dolos,
+                blocks: Some(blocks),
+            },
+            dolos.display().to_string(),
         ),
-        Inputs::Repo(repo, auth) => {
+        Reader::Repo { repositories, auth } => {
             // Staging resolution remains node policy. The profile facade
             // receives the resolved inputs and never reads configuration or
-            // environment on its own.
+            // environment on its own. Both repositories stage in the same
+            // directory, which the preflight sizes for the two.
             let scratch = node::scratch_dir(&config.storage, args.scratch_dir.as_deref());
-            let repository = SnapshotRepository::open(
-                &repo,
-                args.insecure,
-                auth,
-                scratch,
-                registry::Tuning::default(),
-            )
-            .into_diagnostic()
-            .context("opening the repository")?;
+            let open = |repo: &Repository| {
+                SnapshotRepository::open(
+                    repo,
+                    args.insecure,
+                    auth.clone(),
+                    scratch.clone(),
+                    registry::Tuning::default(),
+                )
+                .into_diagnostic()
+                .with_context(|| format!("opening the repository {repo}"))
+            };
 
-            println!("source:   {repo} ({})", args.point);
+            let opened = opened.insert(repositories.open(open)?);
 
-            snapshot::restore(
-                RestoreInput::Repository {
-                    repository: &repository,
-                    point: args.point,
-                },
-                restoring,
-                node.target(),
-                Some(&observer),
+            println!("source:   {} ({})", repositories.dolos, inputs.point);
+            println!("blocks:   {}", repositories.blocks);
+
+            (
+                repository_input(opened, inputs.point),
+                repositories.dolos.to_string(),
             )
         }
-    }
-    .into_diagnostic()
-    .context("restoring the stele")?;
+    };
+
+    report_resume(&inputs);
+
+    let outcome = snapshot::restore(input, restoring, node.target(), Some(&observer));
+
+    let outcome = match outcome {
+        Err(dolos_snapshot::Error::Resume(refusal)) => return Err(refused(refusal)),
+        outcome => outcome
+            .into_diagnostic()
+            .with_context(|| format!("restoring the snapshot from {reading}"))?,
+    };
 
     progress.finish();
 
     report(&outcome.plan, &outcome.outlook, &outcome.summary);
 
     Ok(())
+}
+
+/// A registry restore's input: the snapshot at `point` in the first repository
+/// of `opened`, its closed epochs' blocks in the second.
+fn repository_input(
+    (repository, blocks): &(SnapshotRepository, SnapshotRepository),
+    point: Point,
+) -> RestoreInput<'_> {
+    RestoreInput::Repository {
+        repository,
+        point,
+        blocks: Some(blocks),
+    }
+}
+
+/// The line a resumed restore starts with, before its first layer.
+fn report_resume(inputs: &Inputs) {
+    if let Some(Resuming { record, layers, .. }) = &inputs.resuming {
+        println!(
+            "resuming: {} epoch-{} ({}), {layers} layers recorded",
+            record.source, record.sequence, record.inscription_digest,
+        );
+    }
 }
 
 /// What the run did, in the numbers an operator checks.
@@ -363,48 +770,13 @@ fn report(
 
     // Printed only when it happened, and never folded into the epoch line: an
     // epoch dropped by the history window is this node's own configuration, and
-    // a layer dropped for a kind this build does not implement is a stele from
+    // a layer dropped for a kind this build does not implement is a snapshot from
     // a publisher ahead of it. An operator acts on the second by upgrading.
     if !plan.skipped_unknown.is_empty() {
         println!(
             "skipped:  {} layer(s) this build has no kind for ({}); upgrade to restore them",
             plan.skipped_unknown.len(),
             plan.skipped_kinds().join(", "),
-        );
-    }
-
-    // The one line about layers this restore deliberately did not read. A
-    // dump is a past epoch's state, and this run is building a node that
-    // stands at the stele's sequence — so what an operator learns here is what
-    // the stele *carries*, which is the difference between a repository they
-    // can restore an old epoch out of later and one they cannot.
-    //
-    // With the layer count when it is short of a whole one, because a dump may
-    // be. Only the tip is checked for completeness — a publisher whose
-    // predecessor did not carry every shard of an epoch warns and publishes the
-    // short dump anyway — so an epoch listed bare here and an epoch missing
-    // nine of its shards would otherwise read identically, and the second is
-    // not a repository that restores that epoch.
-    let dumps = plan.carried_dumps();
-
-    if !dumps.is_empty() {
-        let epochs: Vec<String> = dumps
-            .iter()
-            .map(|dump| match dump.is_whole() {
-                true => dump.epoch.to_string(),
-                false => format!(
-                    "{} (partial: {} of {} layers)",
-                    dump.epoch,
-                    dump.carried,
-                    dolos_snapshot::restore::CarriedDump::expected(),
-                ),
-            })
-            .collect();
-
-        println!(
-            "dumps:    {} retained state dump(s) carried and not restored (epochs {})",
-            dumps.len(),
-            epochs.join(", "),
         );
     }
 
@@ -433,6 +805,7 @@ pub(super) fn run(
     let options = RestoreOptions {
         feedback,
         skip_space_check: args.skip_space_check,
+        read_ahead: args.read_ahead,
     };
 
     restore(config, args, inputs, options)
@@ -442,7 +815,7 @@ pub(super) fn run(
 mod progress_tests {
     use dolos_snapshot::progress::{Event, Outcome, Progress as _};
 
-    use crate::feedback::{Feedback, SteleProgress};
+    use crate::feedback::{Feedback, SnapshotProgress};
 
     const PER_RESTORE: usize = 3 + 16;
 
@@ -454,7 +827,7 @@ mod progress_tests {
     /// bytes would stall on exactly the layers a resumed run gets for free.
     #[test]
     fn the_restore_renderer_tracks_a_resumed_fixture_scale_run() {
-        let progress = SteleProgress::restoring(&Feedback::hidden());
+        let progress = SnapshotProgress::restoring(&Feedback::hidden());
 
         let epoch = serde_json::json!({"networkMagic": 2, "epoch": 0});
         let shard = serde_json::json!({"networkMagic": 2, "epoch": 0, "shard": 0});
@@ -518,7 +891,7 @@ mod progress_tests {
         assert_eq!(progress.layers_length(), Some(PER_RESTORE as u64));
 
         // A running total over every blob the restore pulled, rather than the
-        // last one's size — see `SteleProgress`.
+        // last one's size — see `SnapshotProgress`.
         let pulled = (PER_RESTORE as u64 - 1) * 8_192;
 
         assert_eq!(progress.blob_position(), pulled);
@@ -549,6 +922,8 @@ mod tests {
             insecure: false,
             scratch_dir: None,
             skip_space_check: false,
+            read_ahead: dolos_snapshot::restore::DEFAULT_READ_AHEAD,
+            resume: false,
             credentials: CredentialArgs::default(),
         }
     }
@@ -572,8 +947,8 @@ mod tests {
 
     #[test]
     fn an_explicit_source_wins() {
-        let resolved = source(&args(Some("file://stele")), Some(&networks::PREVIEW)).unwrap();
-        assert!(matches!(resolved, Source::Dir(dir) if dir == Path::new("stele")));
+        let resolved = source(&args(Some("file://snapshot")), Some(&networks::PREVIEW)).unwrap();
+        assert!(matches!(resolved, Source::Dir(dir) if dir == Path::new("snapshot")));
 
         let resolved = source(
             &args(Some("oci://ghcr.io/txpipe/dolos-snapshots/preview")),
@@ -604,10 +979,335 @@ mod tests {
         assert!(placeholder.parse::<Source>().is_ok(), "{placeholder}");
     }
 
+    /// A registry root resolves to its `dolos` and `blocks` repositories, and
+    /// the root is what the restore records.
+    #[test]
+    fn a_registry_root_reads_its_dolos_and_blocks_repositories() {
+        let storage = tempfile::tempdir().unwrap();
+
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = storage.path().to_path_buf();
+
+        for (given, root) in [
+            (None, networks::PREVIEW.stelae.registry),
+            (
+                Some("oci://127.0.0.1:5000/mirror/preview"),
+                "oci://127.0.0.1:5000/mirror/preview",
+            ),
+        ] {
+            let inputs = resolve(&config, &args(given), Some(&networks::PREVIEW), false).unwrap();
+
+            let Reader::Repo { repositories, .. } = &inputs.reader else {
+                panic!("{root} did not resolve to repositories");
+            };
+
+            assert_eq!(repositories.dolos.to_string(), format!("{root}/dolos"));
+            assert_eq!(repositories.blocks.to_string(), format!("{root}/blocks"));
+            assert_eq!(inputs.source.to_string(), root);
+        }
+    }
+
+    /// The network root a `file://` source names, with whichever of its two
+    /// directories it lacks.
+    fn root_without(missing: Option<&str>) -> (tempfile::TempDir, RootConfig) {
+        let dir = tempfile::tempdir().unwrap();
+
+        for name in [DOLOS_REPOSITORY, BLOCKS_REPOSITORY] {
+            if Some(name) != missing {
+                dolos_snapshot::dir::SnapshotDir::create(dir.path().join(name)).unwrap();
+            }
+        }
+
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = dir.path().join("data");
+
+        (dir, config)
+    }
+
+    /// A root missing either directory is refused, naming the one it lacks.
+    #[test]
+    fn a_root_missing_a_directory_is_refused_naming_it() {
+        for name in [DOLOS_REPOSITORY, BLOCKS_REPOSITORY] {
+            let (root, config) = root_without(Some(name));
+
+            let message = check_dir(&config, root.path(), false)
+                .unwrap_err()
+                .to_string();
+
+            assert!(
+                message.contains(&format!("holds no `{name}` directory")),
+                "{message}"
+            );
+        }
+    }
+
+    /// A root whose `dolos` is a file is refused as not a directory, not as
+    /// lacking one.
+    #[test]
+    fn a_root_whose_directory_is_a_file_is_refused_as_not_a_directory() {
+        let (root, config) = root_without(Some(DOLOS_REPOSITORY));
+        let dolos = root.path().join(DOLOS_REPOSITORY);
+        std::fs::write(&dolos, b"").unwrap();
+
+        let message = check_dir(&config, root.path(), false)
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(message, format!("{} is not a directory", dolos.display()));
+    }
+
+    /// A root that is a file holds neither directory: reading under it is
+    /// refused as the missing `dolos`, not as a fault.
+    #[test]
+    fn a_root_that_is_a_file_is_refused_as_holding_no_directory() {
+        let (dir, config) = root_without(None);
+        let root = dir.path().join("root");
+        std::fs::write(&root, b"").unwrap();
+
+        let message = check_dir(&config, &root, false).unwrap_err().to_string();
+
+        assert_eq!(
+            message,
+            format!("{} holds no `{DOLOS_REPOSITORY}` directory", root.display())
+        );
+    }
+
+    /// A fault reading a root's directory other than its absence, here a
+    /// symlink loop, is refused with the OS cause, not as a missing directory.
+    #[cfg(unix)]
+    #[test]
+    fn a_root_that_cannot_be_read_is_refused_with_its_cause() {
+        let (root, config) = root_without(Some(DOLOS_REPOSITORY));
+        let dolos = root.path().join(DOLOS_REPOSITORY);
+        std::os::unix::fs::symlink(&dolos, &dolos).unwrap();
+
+        let report = check_dir(&config, root.path(), false).unwrap_err();
+        let message = report.to_string();
+        let causes: Vec<String> = report.chain().skip(1).map(ToString::to_string).collect();
+
+        assert!(!message.contains("holds no"), "{message}");
+        assert_eq!(message, format!("reading {}", dolos.display()));
+
+        let looped = std::io::Error::from_raw_os_error(nix::libc::ELOOP).to_string();
+        assert!(
+            causes.iter().any(|cause| cause.contains(&looped)),
+            "{causes:?}"
+        );
+    }
+
+    /// A registry restore opens the root's `dolos` repository for the snapshot
+    /// and its `blocks` repository for the blocks, in that order.
+    #[test]
+    fn a_registry_restore_opens_the_dolos_then_the_blocks_repository() {
+        let storage = tempfile::tempdir().unwrap();
+
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = storage.path().to_path_buf();
+
+        let root = "oci://127.0.0.1:5000/mirror/preview";
+        let inputs = resolve(&config, &args(Some(root)), None, false).unwrap();
+        let Reader::Repo { repositories, .. } = &inputs.reader else {
+            panic!("{root} did not resolve to repositories");
+        };
+
+        let opened = repositories.open(|repo| Ok(repo.to_string())).unwrap();
+
+        assert_eq!(opened, (format!("{root}/dolos"), format!("{root}/blocks")));
+    }
+
+    /// The registry input reads the snapshot from the first opened repository
+    /// and hands the second over as the blocks repository.
+    #[test]
+    fn a_registry_input_hands_over_the_blocks_repository() {
+        // What `main` installs before any client is built.
+        #[allow(clippy::let_underscore_must_use)]
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let scratch = tempfile::tempdir().unwrap();
+        let open = |path: &str| {
+            let repository: Repository = format!("oci://127.0.0.1:1/mirror/preview/{path}")
+                .parse()
+                .unwrap();
+
+            SnapshotRepository::open(
+                &repository,
+                true,
+                Auth::Anonymous,
+                scratch.path().to_path_buf(),
+                registry::Tuning::default(),
+            )
+            .unwrap()
+        };
+
+        let opened = (open(DOLOS_REPOSITORY), open(BLOCKS_REPOSITORY));
+
+        let RestoreInput::Repository {
+            repository,
+            point,
+            blocks: Some(blocks),
+        } = repository_input(&opened, Point::Epoch(7))
+        else {
+            panic!("the registry input hands over no blocks repository");
+        };
+
+        assert!(std::ptr::eq(repository, &opened.0));
+        assert!(std::ptr::eq(blocks, &opened.1));
+        assert_eq!(point, Point::Epoch(7));
+    }
+
+    /// A root with both directories is read for its snapshot: an empty `dolos`
+    /// layout is refused as holding none.
+    #[test]
+    fn a_root_with_both_directories_is_read_for_its_snapshot() {
+        let (root, config) = root_without(None);
+
+        let message = check_dir(&config, root.path(), false)
+            .unwrap_err()
+            .to_string();
+
+        assert!(message.contains("holds no snapshot"), "{message}");
+        assert!(
+            message.contains(&root.path().join(DOLOS_REPOSITORY).display().to_string()),
+            "{message}"
+        );
+    }
+
     #[test]
     fn a_custom_network_without_a_source_names_the_flag() {
         let message = source(&args(None), None).unwrap_err().to_string();
 
         assert!(message.contains("--source"), "{message}");
+    }
+
+    /// A `--continue` over a registry record reads the recorded repository
+    /// at the recorded epoch's tag, never `latest`, which `--point` defaults
+    /// to and the soak chart passes.
+    #[test]
+    fn a_registry_resume_reads_the_recorded_epoch_tag() {
+        let storage = tempfile::tempdir().unwrap();
+
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = storage.path().to_path_buf();
+
+        let record = SourceRecord::new(
+            &"oci://127.0.0.1:5000/cardano/preview".parse().unwrap(),
+            42,
+            format!("sha256:{}", "ab".repeat(32)).parse().unwrap(),
+        )
+        .unwrap();
+
+        record
+            .save(&dolos_snapshot::restore::source_path_in(storage.path()))
+            .unwrap();
+
+        let args = Args {
+            resume: true,
+            ..args(None)
+        };
+        assert_eq!(args.point, Point::Latest);
+
+        let inputs = resolve(&config, &args, None, false).unwrap();
+
+        assert_eq!(inputs.point, Point::Epoch(42));
+        assert!(matches!(inputs.reader, Reader::Repo { .. }));
+        assert_eq!(inputs.source.to_string(), record.source);
+
+        let resuming = inputs.resuming.expect("nothing to resume");
+        assert_eq!(resuming.record, record);
+        assert_eq!(resuming.layers, 0);
+    }
+
+    /// Recorded layers are checked against an archive index only where one
+    /// is kept on disk. With no archive, the restore itself refuses at its
+    /// first index records, which this check must not pre-empt with `--force`
+    /// advice; an archive in memory is empty after any run.
+    #[test]
+    fn recorded_layers_are_checked_only_against_an_archive_on_disk() {
+        use dolos_core::config::{HistoryMode, StoreType};
+
+        let storage = tempfile::tempdir().unwrap();
+
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = storage.path().to_path_buf();
+
+        still_holds(&config, 0).unwrap();
+
+        let message = still_holds(&config, 3).unwrap_err().to_string();
+        assert!(message.contains("archive index"), "{message}");
+        assert!(message.contains("--force"), "{message}");
+
+        let mut none = config.clone();
+        none.history.mode = HistoryMode::None;
+        still_holds(&none, 3).unwrap();
+
+        let mut in_memory = config.clone();
+        in_memory.storage.archive.kind = StoreType::Ephemeral;
+        still_holds(&in_memory, 3).unwrap();
+    }
+
+    /// Over fjall stores, the journals the restore is handed are both stores'
+    /// `journal_mb`, as their own tuning states it.
+    #[test]
+    fn the_restore_is_handed_both_fjall_journals() {
+        use dolos::storage::{ArchiveStoreBackend, StateStoreBackend};
+
+        let storage = tempfile::tempdir().unwrap();
+
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = storage.path().to_path_buf();
+
+        let node = Node::open(&config).unwrap();
+
+        let (StateStoreBackend::Fjall(state), ArchiveStoreBackend::Fjall(archive)) =
+            (&node.stores.state, &node.stores.archive)
+        else {
+            panic!("the default configuration opens fjall stores");
+        };
+
+        let expected = (state.tuning().journal_mb + archive.tuning().journal_mb) << 20;
+        assert!(expected > 0);
+        assert_eq!(node.journals(), expected);
+
+        let inputs = Inputs {
+            reader: Reader::Dir {
+                dolos: storage.path().join("root/dolos"),
+                blocks: storage.path().join("root/blocks"),
+            },
+            source: Source::Dir(storage.path().join("root")),
+            point: Point::Latest,
+            resuming: None,
+        };
+        let feedback = Feedback::hidden();
+        let options = RestoreOptions {
+            feedback: &feedback,
+            skip_space_check: false,
+            read_ahead: dolos_snapshot::restore::DEFAULT_READ_AHEAD,
+        };
+
+        assert_eq!(node.restoring(&inputs, options).journals, expected);
+    }
+
+    /// A node that keeps no archive is handed its state store's journal
+    /// alone.
+    #[test]
+    fn a_node_without_an_archive_is_handed_only_its_state_journal() {
+        use dolos::storage::StateStoreBackend;
+        use dolos_core::config::HistoryMode;
+
+        let storage = tempfile::tempdir().unwrap();
+
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = storage.path().to_path_buf();
+        config.history.mode = HistoryMode::None;
+
+        let node = Node::open(&config).unwrap();
+
+        let StateStoreBackend::Fjall(state) = &node.stores.state else {
+            panic!("the default configuration opens a fjall state store");
+        };
+
+        let expected = state.tuning().journal_mb << 20;
+        assert!(expected > 0);
+        assert_eq!(node.journals(), expected);
     }
 }

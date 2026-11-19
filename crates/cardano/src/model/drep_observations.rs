@@ -120,9 +120,18 @@ impl dolos_core::EntityDelta for DRepObservation {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
+    use crate::model::testing::{replay_case, ReplayCase};
     use dolos_core::EntityDelta as _;
     use proptest::prelude::*;
+
+    /// One case per delta this module owns, for `model::replay_tests`.
+    pub(crate) fn replay_cases() -> Vec<ReplayCase> {
+        vec![replay_case((
+            prop::option::of(any_drep_observation_state()),
+            any_drep_observation(),
+        ))]
+    }
 
     use super::{testing::*, *};
     use crate::model::testing::{self as root, assert_delta_roundtrip};

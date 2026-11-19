@@ -20,7 +20,8 @@
 //! `entity-{kind}` and `state-{ns}` kind string — which is where the namespace
 //! and kind strings live now that no record names one — the layer header and
 //! scope shapes, and the `position`/`parameters` key spellings, the shard,
-//! schema and entity maps included.
+//! schema and entity maps included, and the inscription's `diff`, `tip` and
+//! `previous`.
 
 mod common;
 
@@ -29,20 +30,19 @@ use dolos_core::{BlockHash, ChainPoint};
 use dolos_snapshot::{
     entity_kind_for,
     layers::{blocks, entities, indexes, logs, state},
-    log_ns_for, state_ns_for, DolosProfile, RetainedEpochs, BLOCKS, DIGESTS, INDEXES,
+    log_ns_for, state_ns_for, DolosProfile, BLOCKS, INDEXES,
 };
 use stelae::{
-    dir::SteleDir,
+    dir::SnapshotDir,
     frame::Limits,
-    inscription::{HistoryEntry, Inscription},
-    Digest, SteleReader, SteleWriter,
+    inscription::{canonical_json, Inscription, Link},
+    Digest, SnapshotReader, SnapshotWriter,
 };
-use stelae_driver::digests;
 
 /// `(kind, diffId, records, uncompressedSize)`, in inscription order.
 ///
 /// `records` counts the protocol's header record, as a descriptor does.
-const GOLDEN_LAYERS: [(&str, &str, u64, u64); 71] = [
+const GOLDEN_LAYERS: [(&str, &str, u64, u64); 45] = [
     (
         BLOCKS,
         "sha256:14a05418723da3c0b4117b5f30ef07d96887b3e12eae114988ff299a654ff106",
@@ -165,21 +165,9 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 71] = [
     ),
     (
         "state-account-addresses",
-        "sha256:9c4a51d9ef3969cea7075cf31eaadf82efc9bef6e5427296976201af4663d8e5",
-        2,
-        165,
-    ),
-    (
-        "state-account-addresses",
         "sha256:5296f2db380326b740501e5706a980bf5dc8f96d8fc6b5c3e37f825ebc43b204",
         2,
         165,
-    ),
-    (
-        "state-account-history",
-        "sha256:c4e4cb1b7a4ecaf6804618da5129b902df3c492f3208aed1086d0743716ddd74",
-        2,
-        94,
     ),
     (
         "state-account-history",
@@ -189,27 +177,9 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 71] = [
     ),
     (
         "state-account-stats",
-        "sha256:fb559ba24aa5e92941ccd2b33dd20f21f22c01b44cc6fd242d24ae052675466e",
-        2,
-        100,
-    ),
-    (
-        "state-account-stats",
         "sha256:4b975663bbfa3cc3ace23747798006f9c4522b23ada4ab24e915b55669a1a7e2",
         2,
         100,
-    ),
-    (
-        "state-accounts",
-        "sha256:5a67c8b2cb5a0d97796c7d91e959ae1d910ef25898bacbc8ed779658cefa69c7",
-        2,
-        87,
-    ),
-    (
-        "state-accounts",
-        "sha256:5e0b352aa5bb8714d8efe7829bcf5256a26a3145ff64171f4ba46a86a8dce285",
-        2,
-        87,
     ),
     (
         "state-accounts",
@@ -225,39 +195,15 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 71] = [
     ),
     (
         "state-address-stats",
-        "sha256:0d820a3c63c97a565053ec9124aa8b7940699b733f95011bff5cc693d7fbdd33",
-        2,
-        129,
-    ),
-    (
-        "state-address-stats",
         "sha256:0f6efee560dae76bc7b2606ad0976393e272eb95209b6510cf991747d7d2e14f",
         2,
         129,
     ),
     (
         "state-asset-mints",
-        "sha256:3eb35ada567e8ef3a8f10f2251e4243baebfb099303ee832e70a8ac1db6a4a8a",
-        2,
-        110,
-    ),
-    (
-        "state-asset-mints",
         "sha256:abb614124da91e880ecad69f1328cfcbf42365361329deff228b53079a794eb1",
         2,
         110,
-    ),
-    (
-        "state-datums",
-        "sha256:abb490f9cae46a0cbf58d824a3f98f74b73f5177da8fe184cf6273c46ab2fe2b",
-        2,
-        85,
-    ),
-    (
-        "state-datums",
-        "sha256:874a5240997e8cc2534c53b74b40a1cf0bcc2b6180eaa69b6c106a6bf1f93027",
-        2,
-        85,
     ),
     (
         "state-datums",
@@ -273,21 +219,9 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 71] = [
     ),
     (
         "state-drep-observations",
-        "sha256:f2789dcf0197343a9b43eb32599cd2d99bcec6ef49cfff8cbcf99506384ae21e",
-        2,
-        93,
-    ),
-    (
-        "state-drep-observations",
         "sha256:58537af4c146e79a3ada8e8caffa0470e40f284a9e3e9b023e8a23e6404073e0",
         2,
         93,
-    ),
-    (
-        "state-dreps",
-        "sha256:551848fb7c136cca366bfd8e76040bac90b28a315a928713cb841f443f531491",
-        2,
-        81,
     ),
     (
         "state-dreps",
@@ -297,19 +231,7 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 71] = [
     ),
     (
         "state-epochs",
-        "sha256:c1771bfc8542e6bdc0d40e96c089ee7b5ced9b4baf7eec87ceaab36afd54b240",
-        2,
-        52,
-    ),
-    (
-        "state-epochs",
         "sha256:46ccba5a377265c232d395c5f1743992eb157dfc7993a0a8ec2c6845cb46fbf7",
-        2,
-        52,
-    ),
-    (
-        "state-eras",
-        "sha256:c5fd885c371e58c40507e6eff70f9eb070046b01d6f5697869f35cc8379579c7",
         2,
         52,
     ),
@@ -321,21 +243,9 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 71] = [
     ),
     (
         "state-first-mints",
-        "sha256:94b89268cdf55f473af5e917975959b43bde1b891deb0f92bfb98b82ca8ff16d",
-        2,
-        126,
-    ),
-    (
-        "state-first-mints",
         "sha256:04ef916b6323f686282d603a8edf0f988035390352002e07963f0e19030e96a4",
         2,
         126,
-    ),
-    (
-        "state-first-scripts",
-        "sha256:e1bb5d99ddf8da17f68129f071c768c9e3248e02e466ff2ac0d5dfbfccaa1769",
-        2,
-        96,
     ),
     (
         "state-first-scripts",
@@ -345,21 +255,9 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 71] = [
     ),
     (
         "state-gov",
-        "sha256:bb2573643fc2cfaa7a7572e744d8b9fb9211f894d1382a7b31e4c4bdb364cb9c",
-        2,
-        49,
-    ),
-    (
-        "state-gov",
         "sha256:c1614f8eeeda9390316ecb7fe40527a4c84e8eec01ee54a71dce70bb443b1c23",
         2,
         49,
-    ),
-    (
-        "state-metadata-labels",
-        "sha256:99751fb775b806ad332f8ab9a59996ab111efc79ef4dec0d8448a545cc4df70a",
-        2,
-        69,
     ),
     (
         "state-metadata-labels",
@@ -369,21 +267,9 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 71] = [
     ),
     (
         "state-payment-addresses",
-        "sha256:7a4e13103ac0a0e27c68e99003ff194cd88a41976575b3f4f46883744fcd1fb2",
-        2,
-        129,
-    ),
-    (
-        "state-payment-addresses",
         "sha256:e8dc2798d9e16d7d7cf951ecad06f272c051c989f00a45d76d581611ce73769a",
         2,
         129,
-    ),
-    (
-        "state-payment-stats",
-        "sha256:d314a74345438deffc1e13e8987318a70a179815d3a7418cd576aad7bd40cafe",
-        2,
-        96,
     ),
     (
         "state-payment-stats",
@@ -393,21 +279,9 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 71] = [
     ),
     (
         "state-pending-mirs",
-        "sha256:e417ae2faa9f3dcfe3f62b80e8d5ad5ac25b41b738383358c518887702563d03",
-        2,
-        91,
-    ),
-    (
-        "state-pending-mirs",
         "sha256:d679db631912bbcc0e3677a8030d03e500cd431095c127892b21677c66d056d5",
         2,
         91,
-    ),
-    (
-        "state-pending-rewards",
-        "sha256:71aa41dfb750773162dd7772afa87eb3324b950b4309f0ee3251243b01a02ab8",
-        2,
-        94,
     ),
     (
         "state-pending-rewards",
@@ -417,39 +291,15 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 71] = [
     ),
     (
         "state-pools",
-        "sha256:6d7073e18f52f06db36118ece39733e2a472a7f0297b8881bc62c553404a7625",
-        2,
-        80,
-    ),
-    (
-        "state-pools",
         "sha256:2e08f9652e630bb56ccebab9fa7b9a718803b001a1e701daee0fc2f98386447d",
         2,
         80,
     ),
     (
         "state-proposals",
-        "sha256:d3c5a0e174489d9a8522624369f38f3505ce8deb89e68d519fccbe2ff51a54a9",
-        2,
-        92,
-    ),
-    (
-        "state-proposals",
         "sha256:b2b0cd4830b6717c2560c00186b083b16cf9aab342528d3382a575aac1c83859",
         2,
         92,
-    ),
-    (
-        "state-utxos",
-        "sha256:c0e71f6801ef23c52e701b4d29df6d58ae8fa60effd13733f726be43570fbaa7",
-        2,
-        91,
-    ),
-    (
-        "state-utxos",
-        "sha256:657fb8c96c49238b79bb48349af39432ea310f498c49c55aa5b076cf166d5d94",
-        2,
-        91,
     ),
     (
         "state-utxos",
@@ -463,55 +313,62 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 71] = [
         2,
         91,
     ),
-    (
-        DIGESTS,
-        "sha256:13f9bbdf676ac47ad7238a52fa525f4413a88335c23d2d567c888abd8dedec80",
-        3,
-        250,
-    ),
 ];
 
-/// The stele's identity: sha256 of the canonical inscription.
+/// The snapshot's identity: sha256 of the canonical inscription.
 const GOLDEN_INSCRIPTION: &str =
-    "sha256:22ff30a27e126e8ba1d7b0a960e8f874640aafe138c1904fe4f80e397f48504c";
+    "sha256:aa516d6e2e165af5add28943c687249e0f267a6348a7a8a6917a7a121c0dc73e";
 
-fn history() -> Vec<HistoryEntry> {
-    vec![
-        HistoryEntry {
-            sequence: EPOCH - 2,
-            inscription_digest: Digest::from_bytes([0x55; 32]),
-        },
-        HistoryEntry {
-            sequence: EPOCH - 1,
-            inscription_digest: Digest::from_bytes([0x66; 32]),
-        },
-    ]
+/// The snapshot the fixture follows.
+fn previous() -> Link {
+    Link {
+        sequence: EPOCH - 1,
+        inscription_digest: Digest::from_bytes([0x66; 32]),
+    }
 }
 
-/// Write the whole fixture stele into `root`: its layers and an inscription.
-fn write_stele(root: &std::path::Path) -> (Inscription, Digest) {
-    let stele = SteleDir::create(root).unwrap();
+/// The blocks snapshot a fixture snapshot names in `position.blocks`.
+const BLOCKS_INSCRIPTION: [u8; 32] = [0x77; 32];
+
+/// The identity of the same snapshot when its `position` names
+/// [`BLOCKS_INSCRIPTION`].
+const GOLDEN_INSCRIPTION_WITH_BLOCKS: &str =
+    "sha256:36ed809939600d529888ea2955d8ad72b10b2cbc1add0db3e7d7fd5b37906439";
+
+/// Write the whole fixture snapshot into `root`: its layers and an inscription.
+///
+/// A shape golden, not an export: every epoch layer is in `diff` and the state
+/// is the `tip`, so both arrays and the link are frozen.
+fn write_snapshot(root: &std::path::Path) -> (Inscription, Digest) {
+    write_snapshot_naming(root, None)
+}
+
+/// [`write_snapshot`], with `blocks` in its `position`.
+fn write_snapshot_naming(root: &std::path::Path, blocks: Option<&Digest>) -> (Inscription, Digest) {
+    let snapshot = SnapshotDir::create(root).unwrap();
 
     let point = ChainPoint::Specific(END_SLOT, BlockHash::new(POINT_HASH));
 
     let mut inscription = Inscription::new(
         &DolosProfile,
         EPOCH,
-        dolos_snapshot::position(&network(), &point, EPOCH).unwrap(),
-        dolos_snapshot::parameters(&RetainedEpochs::new(vec![DUMP_EPOCH]).unwrap()),
+        dolos_snapshot::position(&network(), &point, EPOCH, blocks).unwrap(),
+        dolos_snapshot::parameters(),
         dolos_snapshot::compression(),
     );
 
-    inscription.history = history();
+    inscription.previous = Some(previous());
 
-    inscription.layers = all_layers()
-        .into_iter()
-        .map(|(kind, scope, records)| {
-            write_layer(&stele, kind, scope.as_ref(), &records).descriptor
-        })
-        .collect();
+    for (kind, scope, records) in all_layers() {
+        let descriptor = write_layer(&snapshot, kind, scope.as_ref(), &records).descriptor;
 
-    let digest = stele.seal(&DolosProfile, &inscription).unwrap();
+        match dolos_snapshot::is_state_kind(kind) {
+            true => inscription.tip.push(descriptor),
+            false => inscription.diff.push(descriptor),
+        }
+    }
+
+    let digest = snapshot.seal(&DolosProfile, &inscription).unwrap();
 
     (inscription, digest)
 }
@@ -528,7 +385,7 @@ fn per_kind_diff_ids_are_pinned() {
     assert_eq!(
         layers.len(),
         GOLDEN_LAYERS.len(),
-        "the stele no longer has the layers the goldens pin"
+        "the snapshot no longer has the layers the goldens pin"
     );
 
     for ((kind, scope, records), (expected_kind, diff_id, count, size)) in
@@ -548,12 +405,13 @@ fn per_kind_diff_ids_are_pinned() {
     }
 }
 
-/// The whole stele: written, read back through the streaming reader under the
-/// default limits, and reproduced byte for byte by a second, independent write.
+/// The whole snapshot: written, read back through the streaming reader under
+/// the default limits, and reproduced byte for byte by a second, independent
+/// write.
 #[test]
-fn a_complete_stele_reads_back_and_reproduces_its_digest() {
+fn a_complete_snapshot_reads_back_and_reproduces_its_digest() {
     let first = tempfile::tempdir().unwrap();
-    let (inscription, digest) = write_stele(first.path());
+    let (inscription, digest) = write_snapshot(first.path());
 
     assert_eq!(
         digest.to_string(),
@@ -562,9 +420,10 @@ fn a_complete_stele_reads_back_and_reproduces_its_digest() {
     );
 
     // The document survives the trip to disk in canonical form, and belongs to
-    // this profile.
-    let stele = SteleDir::open(first.path()).unwrap();
-    let read = stele.read_inscription().unwrap();
+    // this profile. Its own sequence alone: the snapshot it links to is not here.
+    let layout = SnapshotDir::open(first.path()).unwrap();
+    let snapshot = layout.pull_sequence(&DolosProfile, EPOCH).unwrap();
+    let read = snapshot.read_inscription().unwrap();
 
     assert_eq!(read, inscription);
     assert_eq!(read.digest().unwrap(), digest);
@@ -573,11 +432,11 @@ fn a_complete_stele_reads_back_and_reproduces_its_digest() {
     // Every layer streams back under the *default* record ceiling — the
     // confirmation the stelae crate's streaming reader was left waiting for from
     // its first real profile.
-    let index = stele.blob_index().unwrap();
+    let index = snapshot.blob_index().unwrap();
     assert_eq!(index.len(), GOLDEN_LAYERS.len());
 
-    for descriptor in &read.layers {
-        let mut reader = stele
+    for descriptor in read.layers() {
+        let mut reader = snapshot
             .stream_layer(&index, &DolosProfile, descriptor, Limits::default())
             .unwrap();
 
@@ -605,17 +464,29 @@ fn a_complete_stele_reads_back_and_reproduces_its_digest() {
     // Written twice, independently: same document, same bytes, same blobs. This
     // is the property the whole protocol rests on, now under a real profile.
     let second = tempfile::tempdir().unwrap();
-    let (again, again_digest) = write_stele(second.path());
+    let (again, again_digest) = write_snapshot(second.path());
 
     assert_eq!(again, inscription);
     assert_eq!(again_digest, digest);
+
+    let second_layout = SnapshotDir::open(second.path()).unwrap();
+
+    // The inscription blob, the manifests and the tags, byte for byte.
     assert_eq!(
-        std::fs::read(first.path().join("inscription.json")).unwrap(),
-        std::fs::read(second.path().join("inscription.json")).unwrap(),
+        std::fs::read(layout.blob_path(&digest)).unwrap(),
+        std::fs::read(second_layout.blob_path(&digest)).unwrap(),
+    );
+    assert_eq!(
+        std::fs::read(first.path().join(stelae::dir::INDEX_FILE)).unwrap(),
+        std::fs::read(second.path().join(stelae::dir::INDEX_FILE)).unwrap(),
     );
 
-    let second_index = SteleDir::open(second.path()).unwrap().blob_index().unwrap();
-    for descriptor in &inscription.layers {
+    let second_index = second_layout
+        .pull_sequence(&DolosProfile, EPOCH)
+        .unwrap()
+        .blob_index()
+        .unwrap();
+    for descriptor in inscription.layers() {
         assert_eq!(
             index.blob_for(&descriptor.diff_id),
             second_index.blob_for(&descriptor.diff_id),
@@ -625,21 +496,20 @@ fn a_complete_stele_reads_back_and_reproduces_its_digest() {
     }
 }
 
-/// The descriptors a `SteleDir` writes are the numbers the per-kind goldens
+/// The descriptors a `SnapshotDir` writes are the numbers the per-kind goldens
 /// pin — so the two tests cannot drift apart and quietly agree with themselves.
 #[test]
 fn descriptors_match_the_per_kind_goldens() {
     let temp = tempfile::tempdir().unwrap();
-    let (inscription, _) = write_stele(temp.path());
+    let (inscription, _) = write_snapshot(temp.path());
 
     assert_eq!(
-        inscription.layers.len(),
+        inscription.layers().count(),
         GOLDEN_LAYERS.len(),
-        "the stele no longer has the layers the goldens pin"
+        "the snapshot no longer has the layers the goldens pin"
     );
 
-    for (descriptor, (kind, diff_id, records, size)) in inscription.layers.iter().zip(GOLDEN_LAYERS)
-    {
+    for (descriptor, (kind, diff_id, records, size)) in inscription.layers().zip(GOLDEN_LAYERS) {
         assert_eq!(descriptor.kind, kind);
         assert_eq!(descriptor.diff_id.to_string(), diff_id);
         assert_eq!(descriptor.records, records);
@@ -653,7 +523,7 @@ fn descriptors_match_the_per_kind_goldens() {
 #[test]
 fn the_canonical_inscription_is_pinned() {
     let temp = tempfile::tempdir().unwrap();
-    let (inscription, _) = write_stele(temp.path());
+    let (inscription, _) = write_snapshot(temp.path());
 
     let canonical = String::from_utf8(inscription.canonicalize().unwrap()).unwrap();
 
@@ -665,13 +535,63 @@ fn the_canonical_inscription_is_pinned() {
     assert!(!canonical.contains("vnd.stelae.stelae"));
 }
 
+/// `position.blocks` (decision 0080): its spelling and form, and that a
+/// position without it is the one the inscription golden above already pins.
+#[test]
+fn the_position_is_pinned_with_and_without_its_blocks_reference() {
+    let point = ChainPoint::Specific(END_SLOT, BlockHash::new(POINT_HASH));
+    let blocks = Digest::from_bytes(BLOCKS_INSCRIPTION);
+
+    let canonical = |blocks: Option<&Digest>| {
+        let position = dolos_snapshot::position(&network(), &point, EPOCH, blocks).unwrap();
+        String::from_utf8(canonical_json(&position).unwrap()).unwrap()
+    };
+
+    assert_eq!(canonical(None), CANONICAL_POSITION);
+    assert_eq!(canonical(Some(&blocks)), CANONICAL_POSITION_WITH_BLOCKS);
+    assert!(CANONICAL_INSCRIPTION.contains(&format!(r#""position":{CANONICAL_POSITION}"#)));
+}
+
+/// The Dolos snapshot that names its blocks snapshot, end to end: the field
+/// moves the identity, and the document reads back with it.
+#[test]
+fn a_snapshot_naming_its_blocks_is_pinned() {
+    let temp = tempfile::tempdir().unwrap();
+    let blocks = Digest::from_bytes(BLOCKS_INSCRIPTION);
+    let (inscription, digest) = write_snapshot_naming(temp.path(), Some(&blocks));
+
+    assert_eq!(digest.to_string(), GOLDEN_INSCRIPTION_WITH_BLOCKS);
+
+    let read = SnapshotDir::open(temp.path())
+        .unwrap()
+        .pull_sequence(&DolosProfile, EPOCH)
+        .unwrap()
+        .read_inscription()
+        .unwrap();
+    assert_eq!(read, inscription);
+
+    let position = dolos_snapshot::read_position(&read.position).unwrap();
+    assert_eq!(position.blocks, Some(blocks));
+}
+
+const CANONICAL_POSITION: &str = concat!(
+    r#"{"epoch":7,"network":{"magic":764824073,"name":"mainnet"},"#,
+    r#""point":{"hash":"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b","slot":101}}"#,
+);
+
+const CANONICAL_POSITION_WITH_BLOCKS: &str = concat!(
+    r#"{"blocks":"sha256:7777777777777777777777777777777777777777777777777777777777777777","#,
+    r#""epoch":7,"network":{"magic":764824073,"name":"mainnet"},"#,
+    r#""point":{"hash":"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b","slot":101}}"#,
+);
+
 /// The whole document, so the diff of a format change is readable.
 ///
 /// JCS sorts object keys, so the layout below is the protocol's, not this
 /// crate's — but every *string* in it is this profile's, and that is what the
 /// literal is for.
 const CANONICAL_INSCRIPTION: &str = concat!(
-    r#"{"compression":{"algo":"zstd","level":9},"history":[{"inscriptionDigest":"sha256:5555555555555555555555555555555555555555555555555555555555555555","sequence":5},{"inscriptionDigest":"sha256:6666666666666666666666666666666666666666666666666666666666666666","sequence":6}],"layers":["#,
+    r#"{"compression":{"algo":"zstd","level":9},"diff":["#,
     r#"{"diffId":"sha256:14a05418723da3c0b4117b5f30ef07d96887b3e12eae114988ff299a654ff106","kind":"blocks","#,
     r#""mediaType":"application/vnd.dolos.stelae.blocks.v1+zstd","records":4,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":167},"#,
@@ -731,169 +651,92 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":117},"#,
     r#"{"diffId":"sha256:26e58433f499d63f4d1cc0a6d007a3a3e699a8d4adc5009f9a8d419752f9a6e3","kind":"entity-stake","#,
     r#""mediaType":"application/vnd.dolos.stelae.entity-stake.v1+zstd","records":3,"#,
-    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":118},"#,
-    r#"{"diffId":"sha256:9c4a51d9ef3969cea7075cf31eaadf82efc9bef6e5427296976201af4663d8e5","kind":"state-account-addresses","#,
-    r#""mediaType":"application/vnd.dolos.stelae.state-account-addresses.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":165},"#,
+    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":118}"#,
+    r#"],"parameters":{"#,
+    r#""entities":{"asset":32,"script":28,"stake":29},"#,
+    r#""indexKeyHash":"xxh3-64","#,
+    r#""schemas":{"account-address-epochs":1,"account-addresses":1,"account-epochs":1,"account-history":1,"account-stats":1,"accounts":1,"address-stats":1,"asset-mint-chunks":1,"asset-mints":1,"datums":1,"drep-epochs":1,"drep-observations":1,"dreps":1,"epochs":1,"eras":1,"first-mint-chunks":1,"first-mints":1,"first-script-chunks":1,"first-scripts":1,"gov":1,"metadata-labels":1,"payment-address-epochs":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"policy-first-mint-chunks":1,"pool-epochs":1,"pools":1,"proposals":1,"utxos":1},"#,
+    r#""shards":{"account-addresses":1,"account-history":1,"account-stats":1,"accounts":16,"address-stats":1,"asset-mints":1,"datums":16,"drep-observations":1,"dreps":1,"epochs":1,"eras":1,"first-mints":1,"first-scripts":1,"gov":1,"metadata-labels":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"pools":1,"proposals":1,"utxos":16}"#,
+    r#"},"position":{"#,
+    r#""epoch":7,"network":{"magic":764824073,"name":"mainnet"},"#,
+    r#""point":{"hash":"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b","slot":101}},"previous":{"inscriptionDigest":"sha256:6666666666666666666666666666666666666666666666666666666666666666","sequence":6},"#,
+    r#""profile":{"name":"io.txpipe.dolos.cardano","version":1},"schema":1,"sequence":7,"tip":["#,
     r#"{"diffId":"sha256:5296f2db380326b740501e5706a980bf5dc8f96d8fc6b5c3e37f825ebc43b204","kind":"state-account-addresses","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-account-addresses.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":165},"#,
-    r#"{"diffId":"sha256:c4e4cb1b7a4ecaf6804618da5129b902df3c492f3208aed1086d0743716ddd74","kind":"state-account-history","#,
-    r#""mediaType":"application/vnd.dolos.stelae.state-account-history.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":94},"#,
     r#"{"diffId":"sha256:b209613f115dddc3b4640598614219f7134454c7dea863d4648e89f21beca75a","kind":"state-account-history","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-account-history.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":94},"#,
-    r#"{"diffId":"sha256:fb559ba24aa5e92941ccd2b33dd20f21f22c01b44cc6fd242d24ae052675466e","kind":"state-account-stats","#,
-    r#""mediaType":"application/vnd.dolos.stelae.state-account-stats.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":100},"#,
     r#"{"diffId":"sha256:4b975663bbfa3cc3ace23747798006f9c4522b23ada4ab24e915b55669a1a7e2","kind":"state-account-stats","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-account-stats.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":100},"#,
-    r#"{"diffId":"sha256:5a67c8b2cb5a0d97796c7d91e959ae1d910ef25898bacbc8ed779658cefa69c7","kind":"state-accounts","#,
-    r#""mediaType":"application/vnd.dolos.stelae.state-accounts.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":87},"#,
-    r#"{"diffId":"sha256:5e0b352aa5bb8714d8efe7829bcf5256a26a3145ff64171f4ba46a86a8dce285","kind":"state-accounts","#,
-    r#""mediaType":"application/vnd.dolos.stelae.state-accounts.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":1},"uncompressedSize":87},"#,
     r#"{"diffId":"sha256:8a7f1a94728c2ca976c3b707e5e58836f7496247c6544f6f5ea0c3ef10f8a16a","kind":"state-accounts","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-accounts.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":87},"#,
     r#"{"diffId":"sha256:cc80b288bae52273c8e3add97f66b64d2a3c3473c8c11c1c03d263481e665c78","kind":"state-accounts","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-accounts.v1+zstd","records":2,"#,
     r#""scope":{"shard":1},"uncompressedSize":87},"#,
-    r#"{"diffId":"sha256:0d820a3c63c97a565053ec9124aa8b7940699b733f95011bff5cc693d7fbdd33","kind":"state-address-stats","#,
-    r#""mediaType":"application/vnd.dolos.stelae.state-address-stats.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":129},"#,
     r#"{"diffId":"sha256:0f6efee560dae76bc7b2606ad0976393e272eb95209b6510cf991747d7d2e14f","kind":"state-address-stats","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-address-stats.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":129},"#,
-    r#"{"diffId":"sha256:3eb35ada567e8ef3a8f10f2251e4243baebfb099303ee832e70a8ac1db6a4a8a","kind":"state-asset-mints","#,
-    r#""mediaType":"application/vnd.dolos.stelae.state-asset-mints.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":110},"#,
     r#"{"diffId":"sha256:abb614124da91e880ecad69f1328cfcbf42365361329deff228b53079a794eb1","kind":"state-asset-mints","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-asset-mints.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":110},"#,
-    r#"{"diffId":"sha256:abb490f9cae46a0cbf58d824a3f98f74b73f5177da8fe184cf6273c46ab2fe2b","kind":"state-datums","#,
-    r#""mediaType":"application/vnd.dolos.stelae.state-datums.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":85},"#,
-    r#"{"diffId":"sha256:874a5240997e8cc2534c53b74b40a1cf0bcc2b6180eaa69b6c106a6bf1f93027","kind":"state-datums","#,
-    r#""mediaType":"application/vnd.dolos.stelae.state-datums.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":1},"uncompressedSize":85},"#,
     r#"{"diffId":"sha256:8f9643ce925ad592e62c2f983a08c428f28fb29bb51933366bc6bba836a02a83","kind":"state-datums","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-datums.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":85},"#,
     r#"{"diffId":"sha256:787590170393d2b876f4f3fba2cb0640462ce3dd94cba7825c90534e95e77e55","kind":"state-datums","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-datums.v1+zstd","records":2,"#,
     r#""scope":{"shard":1},"uncompressedSize":85},"#,
-    r#"{"diffId":"sha256:f2789dcf0197343a9b43eb32599cd2d99bcec6ef49cfff8cbcf99506384ae21e","kind":"state-drep-observations","#,
-    r#""mediaType":"application/vnd.dolos.stelae.state-drep-observations.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":93},"#,
     r#"{"diffId":"sha256:58537af4c146e79a3ada8e8caffa0470e40f284a9e3e9b023e8a23e6404073e0","kind":"state-drep-observations","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-drep-observations.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":93},"#,
-    r#"{"diffId":"sha256:551848fb7c136cca366bfd8e76040bac90b28a315a928713cb841f443f531491","kind":"state-dreps","#,
-    r#""mediaType":"application/vnd.dolos.stelae.state-dreps.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":81},"#,
     r#"{"diffId":"sha256:65344d61b41dbba4434cb79c6b6bdbb5043bd01b6b4c7486f080d944cc60029a","kind":"state-dreps","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-dreps.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":81},"#,
-    r#"{"diffId":"sha256:c1771bfc8542e6bdc0d40e96c089ee7b5ced9b4baf7eec87ceaab36afd54b240","kind":"state-epochs","#,
-    r#""mediaType":"application/vnd.dolos.stelae.state-epochs.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":52},"#,
     r#"{"diffId":"sha256:46ccba5a377265c232d395c5f1743992eb157dfc7993a0a8ec2c6845cb46fbf7","kind":"state-epochs","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-epochs.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":52},"#,
-    r#"{"diffId":"sha256:c5fd885c371e58c40507e6eff70f9eb070046b01d6f5697869f35cc8379579c7","kind":"state-eras","#,
-    r#""mediaType":"application/vnd.dolos.stelae.state-eras.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":52},"#,
     r#"{"diffId":"sha256:1428f74ac30be5b84f17937afb1f41cbf30c4677698b7c3686afee195f696da3","kind":"state-eras","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-eras.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":52},"#,
-    r#"{"diffId":"sha256:94b89268cdf55f473af5e917975959b43bde1b891deb0f92bfb98b82ca8ff16d","kind":"state-first-mints","#,
-    r#""mediaType":"application/vnd.dolos.stelae.state-first-mints.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":126},"#,
     r#"{"diffId":"sha256:04ef916b6323f686282d603a8edf0f988035390352002e07963f0e19030e96a4","kind":"state-first-mints","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-first-mints.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":126},"#,
-    r#"{"diffId":"sha256:e1bb5d99ddf8da17f68129f071c768c9e3248e02e466ff2ac0d5dfbfccaa1769","kind":"state-first-scripts","#,
-    r#""mediaType":"application/vnd.dolos.stelae.state-first-scripts.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":96},"#,
     r#"{"diffId":"sha256:10ff2257802ddb96381112aa569bac0c82fdb26f323468aeec5ffb9514ee1391","kind":"state-first-scripts","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-first-scripts.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":96},"#,
-    r#"{"diffId":"sha256:bb2573643fc2cfaa7a7572e744d8b9fb9211f894d1382a7b31e4c4bdb364cb9c","kind":"state-gov","#,
-    r#""mediaType":"application/vnd.dolos.stelae.state-gov.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":49},"#,
     r#"{"diffId":"sha256:c1614f8eeeda9390316ecb7fe40527a4c84e8eec01ee54a71dce70bb443b1c23","kind":"state-gov","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-gov.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":49},"#,
-    r#"{"diffId":"sha256:99751fb775b806ad332f8ab9a59996ab111efc79ef4dec0d8448a545cc4df70a","kind":"state-metadata-labels","#,
-    r#""mediaType":"application/vnd.dolos.stelae.state-metadata-labels.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":69},"#,
     r#"{"diffId":"sha256:7e8bfb405b282d3ff72671b7e1262d23337c3ceb4d97abc78c3be26788ed1ca9","kind":"state-metadata-labels","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-metadata-labels.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":69},"#,
-    r#"{"diffId":"sha256:7a4e13103ac0a0e27c68e99003ff194cd88a41976575b3f4f46883744fcd1fb2","kind":"state-payment-addresses","#,
-    r#""mediaType":"application/vnd.dolos.stelae.state-payment-addresses.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":129},"#,
     r#"{"diffId":"sha256:e8dc2798d9e16d7d7cf951ecad06f272c051c989f00a45d76d581611ce73769a","kind":"state-payment-addresses","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-payment-addresses.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":129},"#,
-    r#"{"diffId":"sha256:d314a74345438deffc1e13e8987318a70a179815d3a7418cd576aad7bd40cafe","kind":"state-payment-stats","#,
-    r#""mediaType":"application/vnd.dolos.stelae.state-payment-stats.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":96},"#,
     r#"{"diffId":"sha256:f1e14f31961be425a1699e499a9295767a2d9265c5c2afc0830e70b1845d5508","kind":"state-payment-stats","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-payment-stats.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":96},"#,
-    r#"{"diffId":"sha256:e417ae2faa9f3dcfe3f62b80e8d5ad5ac25b41b738383358c518887702563d03","kind":"state-pending-mirs","#,
-    r#""mediaType":"application/vnd.dolos.stelae.state-pending-mirs.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":91},"#,
     r#"{"diffId":"sha256:d679db631912bbcc0e3677a8030d03e500cd431095c127892b21677c66d056d5","kind":"state-pending-mirs","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-pending-mirs.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":91},"#,
-    r#"{"diffId":"sha256:71aa41dfb750773162dd7772afa87eb3324b950b4309f0ee3251243b01a02ab8","kind":"state-pending-rewards","#,
-    r#""mediaType":"application/vnd.dolos.stelae.state-pending-rewards.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":94},"#,
     r#"{"diffId":"sha256:39fa85f5115b7e8ef7a2a839c3e06864d6751f61a647db46074da658d8a13e0c","kind":"state-pending-rewards","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-pending-rewards.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":94},"#,
-    r#"{"diffId":"sha256:6d7073e18f52f06db36118ece39733e2a472a7f0297b8881bc62c553404a7625","kind":"state-pools","#,
-    r#""mediaType":"application/vnd.dolos.stelae.state-pools.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":80},"#,
     r#"{"diffId":"sha256:2e08f9652e630bb56ccebab9fa7b9a718803b001a1e701daee0fc2f98386447d","kind":"state-pools","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-pools.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":80},"#,
-    r#"{"diffId":"sha256:d3c5a0e174489d9a8522624369f38f3505ce8deb89e68d519fccbe2ff51a54a9","kind":"state-proposals","#,
-    r#""mediaType":"application/vnd.dolos.stelae.state-proposals.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":92},"#,
     r#"{"diffId":"sha256:b2b0cd4830b6717c2560c00186b083b16cf9aab342528d3382a575aac1c83859","kind":"state-proposals","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-proposals.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":92},"#,
-    r#"{"diffId":"sha256:c0e71f6801ef23c52e701b4d29df6d58ae8fa60effd13733f726be43570fbaa7","kind":"state-utxos","#,
-    r#""mediaType":"application/vnd.dolos.stelae.state-utxos.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":91},"#,
-    r#"{"diffId":"sha256:657fb8c96c49238b79bb48349af39432ea310f498c49c55aa5b076cf166d5d94","kind":"state-utxos","#,
-    r#""mediaType":"application/vnd.dolos.stelae.state-utxos.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":1},"uncompressedSize":91},"#,
     r#"{"diffId":"sha256:61d7398a24f1c458b5030b44c5677229cef133ffb47c9b6416fecaaacb5adcd6","kind":"state-utxos","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-utxos.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":91},"#,
     r#"{"diffId":"sha256:f193e457cf6094ca38250b65ce07d37be4e056b816106a56545d751d30bd8673","kind":"state-utxos","#,
     r#""mediaType":"application/vnd.dolos.stelae.state-utxos.v1+zstd","records":2,"#,
-    r#""scope":{"shard":1},"uncompressedSize":91},"#,
-    r#"{"diffId":"sha256:13f9bbdf676ac47ad7238a52fa525f4413a88335c23d2d567c888abd8dedec80","kind":"digests","#,
-    r#""mediaType":"application/vnd.dolos.stelae.digests.v1+zstd","records":3,"#,
-    r#""scope":{"lastImmutable":3},"uncompressedSize":250}"#,
-    r#"],"parameters":{"#,
-    r#""entities":{"asset":32,"script":28,"stake":29},"#,
-    r#""indexKeyHash":"xxh3-64","#,
-    r#""schemas":{"account-address-epochs":1,"account-addresses":1,"account-epochs":1,"account-history":1,"account-stats":1,"accounts":1,"address-stats":1,"asset-mint-chunks":1,"asset-mints":1,"datums":1,"drep-epochs":1,"drep-observations":1,"dreps":1,"epochs":1,"eras":1,"first-mint-chunks":1,"first-mints":1,"first-script-chunks":1,"first-scripts":1,"gov":1,"metadata-labels":1,"payment-address-epochs":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"policy-first-mint-chunks":1,"pool-epochs":1,"pools":1,"proposals":1,"utxos":1},"#,
-    r#""shards":{"account-addresses":1,"account-history":1,"account-stats":1,"accounts":16,"address-stats":1,"asset-mints":1,"datums":16,"drep-observations":1,"dreps":1,"epochs":1,"eras":1,"first-mints":1,"first-scripts":1,"gov":1,"metadata-labels":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"pools":1,"proposals":1,"utxos":16},"#,
-    r#""stateEpochs":[4]"#,
-    r#"},"position":{"#,
-    r#""epoch":7,"network":{"magic":764824073,"name":"mainnet"},"#,
-    r#""point":{"hash":"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b","slot":101}},"profile":{"name":"io.txpipe.dolos.cardano","version":1},"schema":1,"sequence":7}"#,
+    r#""scope":{"shard":1},"uncompressedSize":91}"#,
+    r#"]}"#,
 );
 /// Decode one record with the codec its layer kind names, so the streaming pass
 /// exercises every codec rather than only the framing underneath them.
@@ -928,9 +771,6 @@ fn decode_one(kind: &str, record: &[u8]) {
         }
         INDEXES => {
             indexes::decode(record).unwrap();
-        }
-        DIGESTS => {
-            digests::decode(record).unwrap();
         }
         other => panic!("no codec for layer kind {other:?}"),
     }

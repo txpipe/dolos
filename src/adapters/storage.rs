@@ -16,13 +16,16 @@ use std::{
 
 use bytes::Bytes;
 use dolos_core::{
-    archive::{ArchiveError, ArchiveStore as CoreArchiveStore, ArchiveWriter as CoreArchiveWriter},
+    archive::{
+        ArchiveError, ArchiveIngest, ArchiveStore as CoreArchiveStore,
+        ArchiveWriter as CoreArchiveWriter, BatchIngest, Settling,
+    },
     builtin::{
         EmptyBlockIter, EmptyLogIter, EmptySlotIter, MemoryArchiveStore, MemoryStateStore,
         MemoryStateWriter, NoDiskTier, NoOpArchiveStore, NoOpArchiveWriter,
     },
     cache::Cost,
-    compat::{reads_store_identity, IncompatibleStore},
+    compat::{reads_store_identity, IncompatibleStore, STORE_FORMAT},
     config::{
         Compatibility, RedbMempoolConfig, RedbStateConfig, RedbWalConfig, RootConfig,
         StateStoreConfig, StoreType,
@@ -59,7 +62,7 @@ pub fn ensure_storage_path(config: &RootConfig) -> Result<PathBuf, Error> {
 /// Empty the storage directory.
 ///
 /// A `remove_dir_all` of the whole path and not a per-store wipe, which matters
-/// for one thing that is not a store: a stele restore's progress file lives
+/// for one thing that is not a store: a snapshot restore's progress file lives
 /// inside `storage.path`, and a progress file that outlived the stores it
 /// describes would tell a resumed restore to skip layers whose data is gone.
 /// Anything that clears storage has to clear that too, and taking the directory
@@ -364,10 +367,10 @@ pub fn normalize(path: &Path) -> std::io::Result<PathBuf> {
 ///
 /// Deciding is separated from doing because only one of the outcomes is
 /// destructive, and it must not happen until the run is fully known. An
-/// interactive bootstrap asks which method to use — and, for a stele, where the
-/// stele is — *after* the flags are parsed, so a `--force` that cleared first
-/// would take a working node away on a typo, a cancel, or a machine with no
-/// terminal, and hand back nothing in its place.
+/// interactive bootstrap asks which method to use — and, for a snapshot, where
+/// the snapshot is — *after* the flags are parsed, so a `--force` that cleared
+/// first would take a working node away on a typo, a cancel, or a machine with
+/// no terminal, and hand back nothing in its place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Existing {
     /// Data is there and `--skip-if-data` says to leave it alone.
@@ -386,7 +389,9 @@ pub struct ExistingDataPolicy {
     /// `--skip-if-data`: leave a node alone and exit zero. Data without a
     /// node, and a store this release refuses, are not skipped.
     pub skip_if_data: bool,
-    /// `--continue`: go ahead, resuming a replay from its committed position.
+    /// `--continue`: go ahead and resume, a replay from its committed
+    /// position and a snapshot restore from its records. The source decides
+    /// whether there is anything to resume.
     pub r#continue: bool,
 }
 
@@ -406,6 +411,22 @@ struct Found {
     /// with data or one this release refuses, a WAL or an archive that fails
     /// to open, or block segments.
     held: Vec<PathBuf>,
+    /// What the archive's index holds, for a resume's recorded layers.
+    index: ArchiveIndex,
+}
+
+/// What the archive's index holds, as a resume checks its recorded layers
+/// against it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ArchiveIndex {
+    /// The index holds data, or fails to open or to read. Block segments
+    /// alone, as a lost archive volume beside a separate `blocks_path`
+    /// leaves, don't set it.
+    pub holds_data: bool,
+    /// The segment file the index locates its newest block in, when that
+    /// file is missing or ends before the block does, as a lost or emptied
+    /// blocks volume beside a kept index leaves.
+    pub missing_segment: Option<PathBuf>,
 }
 
 /// Open the stores whose directories exist, creating no store directory: a
@@ -456,13 +477,23 @@ fn found_in_storage(config: &RootConfig) -> Result<Found, Error> {
     if let Some(path) = config.storage.archive_path().filter(|path| path.exists()) {
         // Any failure but the identity's is left to the command that uses the
         // archive, as before stores recorded identities, and counts as data.
-        let holds_data = match open_archive_index(config) {
-            Ok(archive) => archive.holds_data().unwrap_or(true),
+        let (holds_data, newest) = match open_archive_index(config) {
+            Ok(archive) => (
+                archive.holds_data().unwrap_or(true),
+                archive.newest_block_location().ok().flatten(),
+            ),
             Err(refusal @ ArchiveError::IncompatibleStore(_)) => {
                 found.refused.get_or_insert(refusal.into());
-                true
+                (true, None)
             }
-            Err(_) => true,
+            Err(_) => (true, None),
+        };
+
+        let segments = config.storage.blocks_path().unwrap_or_else(|| path.clone());
+
+        found.index = ArchiveIndex {
+            holds_data,
+            missing_segment: newest.and_then(|location| missing_segment(&segments, location)),
         };
 
         if holds_data || holds_segments(&path) {
@@ -490,6 +521,24 @@ fn open_archive_index(config: &RootConfig) -> Result<ArchiveStoreBackend, Archiv
         dolos_cardano::model::build_log_schema(),
         config.storage.archive.kind,
     )
+}
+
+/// The segment file under `dir` that `location` names, when it is missing or
+/// ends before the frame does. Its metadata is read, since opening the
+/// segments would create `dir`; a file whose metadata fails to read for
+/// another reason counts as holding the frame.
+fn missing_segment(dir: &Path, location: dolos_fjall::flatfiles::BlockLocation) -> Option<PathBuf> {
+    let segment = dir.join(dolos_fjall::flatfiles::segment_filename(
+        location.segment_id,
+    ));
+    let end = location.offset + u64::from(location.length);
+
+    match std::fs::metadata(&segment) {
+        Ok(metadata) if metadata.len() >= end => None,
+        Ok(_) => Some(segment),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(segment),
+        Err(_) => None,
+    }
 }
 
 /// Whether `dir` holds a block segment file. Something there that can't be
@@ -561,10 +610,7 @@ pub fn inspect_existing_data(
     }
 
     if let Some(wal) = found.wal_in_use {
-        return Err(Error::message(format!(
-            "the WAL at {} is in use by another process. Stop it, then run the bootstrap again",
-            wal.display()
-        )));
+        return Err(wal_in_use(&wal));
     }
 
     if found.held.is_empty() {
@@ -604,6 +650,60 @@ pub fn inspect_existing_data(
     Err(Error::message(format!(
         "{detected}. Use --force to replace it, or --skip-if-data to leave it and exit 0"
     )))
+}
+
+/// The managed stores holding data, as [`inspect_existing_data`] finds them
+/// with no flag given: empty when it would go ahead. A store this release
+/// refuses, a state that fails to open or to read its cursor, and a WAL
+/// another process holds are errors, as they are there.
+pub fn held_data(config: &RootConfig) -> Result<Vec<PathBuf>, Error> {
+    Ok(found_or_refused(config)?.held)
+}
+
+/// What the archive's index holds, with [`held_data`]'s errors: whether it
+/// holds data, and whether the segment file its newest block location names
+/// still holds that block. Holding no data, and no segment to check, for a
+/// node that keeps no archive on disk.
+pub fn archive_index(config: &RootConfig) -> Result<ArchiveIndex, Error> {
+    Ok(found_or_refused(config)?.index)
+}
+
+/// What storage holds, or the error [`held_data`] raises for it.
+fn found_or_refused(config: &RootConfig) -> Result<Found, Error> {
+    let mut found = found_in_storage(config)?;
+
+    if let Some(refusal) = found.refused.take() {
+        return Err(refusal);
+    }
+
+    if let Some(error) = found.unreadable.take() {
+        return Err(error);
+    }
+
+    if let Some(wal) = &found.wal_in_use {
+        return Err(wal_in_use(wal));
+    }
+
+    Ok(found)
+}
+
+/// Whether the WAL reads as holding an entry. One that can't be read without
+/// repair, as a process killed while holding it open leaves, can't be told
+/// and reads as `false`.
+pub fn wal_holds_entries(config: &RootConfig) -> bool {
+    use dolos_redb3::wal::WalProbe;
+
+    config
+        .wal_path()
+        .filter(|path| path.exists())
+        .is_some_and(|path| matches!(dolos_redb3::wal::probe(&path), Ok(WalProbe::Entries)))
+}
+
+fn wal_in_use(wal: &Path) -> Error {
+    Error::message(format!(
+        "the WAL at {} is in use by another process. Stop it, then run the bootstrap again",
+        wal.display()
+    ))
 }
 
 /// The decision on storage holding a store this release refuses: `--force`
@@ -1071,7 +1171,8 @@ fn existing(path: &Path) -> Result<(), OpenError> {
 }
 
 /// Admit a persistent store only if it records an identity this release
-/// reads, recording the current one on a new store before its first write.
+/// reads in an internal format no newer than [`STORE_FORMAT`], recording the
+/// current identity and format on a new store before its first write.
 ///
 /// A store without an identity is new while it holds nothing; holding data, a
 /// release that predates store identities wrote it. The configuration plays
@@ -1080,23 +1181,28 @@ fn admit<E>(
     store: &'static str,
     path: &Path,
     identity: Option<String>,
+    format: impl FnOnce() -> Result<Option<u32>, dolos_fjall::Error>,
     holds_data: impl FnOnce() -> Result<bool, dolos_fjall::Error>,
-    record: impl FnOnce(&str) -> Result<(), dolos_fjall::Error>,
+    record: impl FnOnce(&str, u32) -> Result<(), dolos_fjall::Error>,
 ) -> Result<(), E>
 where
     E: From<IncompatibleStore> + From<dolos_fjall::Error>,
 {
-    let found = match identity {
-        Some(found) if reads_store_identity(&found) => return Ok(()),
-        Some(found) => Some(found),
-        None if holds_data()? => None,
-        None => return Ok(record(Compatibility::current().as_str())?),
+    let (found, found_format) = match identity {
+        Some(found) if reads_store_identity(&found) => match format()? {
+            Some(format) if format <= STORE_FORMAT => return Ok(()),
+            format => (Some(found), format),
+        },
+        Some(found) => (Some(found), None),
+        None if holds_data()? => (None, None),
+        None => return Ok(record(Compatibility::current().as_str(), STORE_FORMAT)?),
     };
 
     Err(IncompatibleStore {
         store,
         path: path.to_path_buf(),
         found,
+        found_format,
     }
     .into())
 }
@@ -1313,6 +1419,12 @@ where
         }
     }
 
+    fn remove_points(&self, points: &[ChainPoint]) -> Result<(), WalError> {
+        match self {
+            Self::Redb(s) => WalStore::remove_points(s, points),
+        }
+    }
+
     fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, WalError> {
         match self {
             Self::Redb(s) => WalStore::prune_history(s, max_slots, max_prune),
@@ -1412,10 +1524,11 @@ impl StateStoreBackend {
             "state",
             path,
             store.identity()?,
+            || store.format(),
             || store.holds_data(),
-            |identity| match access {
+            |identity, format| match access {
                 Access::Observe => Ok(()),
-                Access::Mutate => store.record_identity(identity),
+                Access::Mutate => store.record_identity(identity, format),
             },
         )?;
 
@@ -1450,6 +1563,15 @@ impl StateStoreBackend {
     pub fn identity(&self) -> Result<Option<String>, StateError> {
         match self {
             Self::Fjall(s) => Ok(s.identity()?),
+            Self::Redb(_) | Self::Memory(_) => Ok(None),
+        }
+    }
+
+    /// The internal format the store recorded beside its identity; `None`
+    /// for the stores that do not record one.
+    pub fn format(&self) -> Result<Option<u32>, StateError> {
+        match self {
+            Self::Fjall(s) => Ok(s.format()?),
             Self::Redb(_) | Self::Memory(_) => Ok(None),
         }
     }
@@ -1797,10 +1919,11 @@ impl ArchiveStoreBackend {
             "archive",
             path,
             store.identity()?,
+            || store.format(),
             || store.holds_data(),
-            |identity| match access {
+            |identity, format| match access {
                 Access::Observe => Ok(()),
-                Access::Mutate => store.record_identity(identity),
+                Access::Mutate => store.record_identity(identity, format),
             },
         )?;
 
@@ -1878,6 +2001,16 @@ impl ArchiveStoreBackend {
         }
     }
 
+    /// The internal format the store recorded beside its identity; `None`
+    /// for the stores that do not record one.
+    pub fn format(&self) -> Result<Option<u32>, ArchiveError> {
+        match self {
+            Self::Fjall(s) => Ok(s.format()?),
+            Self::LogsOnly(inner) => inner.format(),
+            Self::Memory(_) | Self::EntityReads(_) | Self::NoOp(_) => Ok(None),
+        }
+    }
+
     /// Whether the index holds any block location, log row or index entry,
     /// as the identity check reads it; `false` for the stores that do not
     /// record an identity.
@@ -1886,6 +2019,48 @@ impl ArchiveStoreBackend {
             Self::Fjall(s) => Ok(s.holds_data()?),
             Self::LogsOnly(inner) => inner.holds_data(),
             Self::Memory(_) | Self::EntityReads(_) | Self::NoOp(_) => Ok(false),
+        }
+    }
+
+    /// The location of the newest block the index holds, without reading its
+    /// frame; `None` for the stores that keep no segment files.
+    pub fn newest_block_location(
+        &self,
+    ) -> Result<Option<dolos_fjall::flatfiles::BlockLocation>, ArchiveError> {
+        match self {
+            Self::Fjall(s) => Ok(s.newest_block()?.map(|(_, location)| location)),
+            Self::LogsOnly(inner) => inner.newest_block_location(),
+            Self::Memory(_) | Self::EntityReads(_) | Self::NoOp(_) => Ok(None),
+        }
+    }
+
+    /// The slot of the oldest block the index holds; `None` for the stores
+    /// that keep no segment files.
+    pub fn oldest_block_slot(&self) -> Result<Option<BlockSlot>, ArchiveError> {
+        match self {
+            Self::Fjall(s) => s.oldest_block_slot(),
+            Self::LogsOnly(inner) => inner.oldest_block_slot(),
+            Self::Memory(_) | Self::EntityReads(_) | Self::NoOp(_) => Ok(None),
+        }
+    }
+
+    /// The slot of the newest block the index holds; `None` for the stores
+    /// that keep no segment files.
+    pub fn newest_block_slot(&self) -> Result<Option<BlockSlot>, ArchiveError> {
+        match self {
+            Self::Fjall(s) => Ok(s.newest_block()?.map(|(slot, _)| slot)),
+            Self::LogsOnly(inner) => inner.newest_block_slot(),
+            Self::Memory(_) | Self::EntityReads(_) | Self::NoOp(_) => Ok(None),
+        }
+    }
+
+    /// The directory of the block segment files; `None` for the stores that
+    /// keep none.
+    pub fn segments_dir(&self) -> Option<PathBuf> {
+        match self {
+            Self::Fjall(s) => Some(s.segments_dir().to_path_buf()),
+            Self::LogsOnly(inner) => inner.segments_dir(),
+            Self::Memory(_) | Self::EntityReads(_) | Self::NoOp(_) => None,
         }
     }
 
@@ -2327,6 +2502,20 @@ impl CoreArchiveStore for ArchiveStoreBackend {
         }
     }
 
+    fn start_ingest(&self) -> Result<Box<dyn ArchiveIngest + '_>, ArchiveError> {
+        match self {
+            Self::Fjall(s) => CoreArchiveStore::start_ingest(s),
+            _ => Ok(Box::new(BatchIngest::new(self))),
+        }
+    }
+
+    fn settle_ingested(&self) -> Result<Settling, ArchiveError> {
+        match self {
+            Self::Fjall(s) => CoreArchiveStore::settle_ingested(s),
+            _ => Ok(Settling::none()),
+        }
+    }
+
     fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
         match self {
             Self::Memory(s) => CoreArchiveStore::slot_by_block_hash(s, hash),
@@ -2510,6 +2699,13 @@ impl MempoolStore for MempoolBackend {
         }
     }
 
+    fn count(&self) -> dolos_core::MempoolCount {
+        match self {
+            Self::Ephemeral(s) => s.count(),
+            Self::Redb(s) => s.count(),
+        }
+    }
+
     fn mark_inflight(&self, hashes: &[TxHash]) -> Result<(), MempoolError> {
         match self {
             Self::Ephemeral(s) => s.mark_inflight(hashes),
@@ -2619,7 +2815,7 @@ mod tests {
         let store = dolos_fjall::StateStore::open(path, dolos_fjall::Preset::Standard).unwrap();
 
         if let Some(identity) = identity {
-            store.record_identity(identity).unwrap();
+            store.record_identity(identity, STORE_FORMAT).unwrap();
         }
 
         let writer = store.start_writer().unwrap();
@@ -2648,7 +2844,7 @@ mod tests {
         .unwrap();
 
         if let Some(identity) = identity {
-            store.record_identity(identity).unwrap();
+            store.record_identity(identity, STORE_FORMAT).unwrap();
         }
 
         let writer = store.start_writer().unwrap();
@@ -2703,7 +2899,7 @@ mod tests {
             .unwrap();
 
         store
-            .record_identity(current().as_deref().unwrap())
+            .record_identity(current().as_deref().unwrap(), STORE_FORMAT)
             .unwrap();
         cursor.rotate_memtable_and_wait().unwrap();
         let keyspace = cursor.path().to_path_buf();
@@ -2793,6 +2989,36 @@ mod tests {
         }
     }
 
+    /// A segment is missing when its file is absent or ends before the
+    /// frame does. One that runs past the frame, as frames written after the
+    /// newest indexed one leave it, holds the frame. One whose metadata fails
+    /// to read for another reason counts as holding the frame: here, on unix,
+    /// a path through a file. Windows reports that path as not found.
+    #[test]
+    fn a_segment_is_missing_when_absent_or_cut_short() {
+        let dir = tempfile::tempdir().unwrap();
+        let location = dolos_fjall::flatfiles::BlockLocation {
+            segment_id: 3,
+            offset: 10,
+            length: 5,
+        };
+        let segment = dir.path().join("000003.segment");
+
+        assert_eq!(missing_segment(dir.path(), location), Some(segment.clone()));
+
+        std::fs::write(&segment, [0; 14]).unwrap();
+        assert_eq!(missing_segment(dir.path(), location), Some(segment.clone()));
+
+        std::fs::write(&segment, [0; 15]).unwrap();
+        assert_eq!(missing_segment(dir.path(), location), None);
+
+        std::fs::write(&segment, [0; 16]).unwrap();
+        assert_eq!(missing_segment(dir.path(), location), None);
+
+        #[cfg(unix)]
+        assert_eq!(missing_segment(&segment, location), None);
+    }
+
     #[test]
     fn a_new_store_records_the_identity_and_reopens() {
         let temp = tempfile::tempdir().unwrap();
@@ -2801,6 +3027,8 @@ mod tests {
         let stores = open_data_stores::<dolos_cardano::CardanoDelta>(&config).unwrap();
         assert_eq!(stores.state.identity().unwrap(), current());
         assert_eq!(stores.archive.identity().unwrap(), current());
+        assert_eq!(stores.state.format().unwrap(), Some(STORE_FORMAT));
+        assert_eq!(stores.archive.format().unwrap(), Some(STORE_FORMAT));
 
         let writer = stores.state.start_writer().unwrap();
         writer.set_cursor(ChainPoint::Origin).unwrap();
@@ -2816,6 +3044,8 @@ mod tests {
         );
         assert_eq!(stores.state.identity().unwrap(), current());
         assert_eq!(stores.archive.identity().unwrap(), current());
+        assert_eq!(stores.state.format().unwrap(), Some(STORE_FORMAT));
+        assert_eq!(stores.archive.format().unwrap(), Some(STORE_FORMAT));
     }
 
     /// A store left empty by a release that recorded nothing is a new store.
@@ -2872,10 +3102,11 @@ mod tests {
         assert!(refusal(open_archive_store(&config)).is_some());
     }
 
-    /// `v2-alpha.1` stores predate the freeze-hardening record layouts.
+    /// Earlier prerelease stores predate the record layouts and formats this
+    /// release reads.
     #[test]
     fn an_unsupported_identity_is_refused() {
-        for identity in ["v1", "v2-alpha.1"] {
+        for identity in ["v1", "v2-alpha.1", "v2-alpha.2"] {
             let temp = tempfile::tempdir().unwrap();
             let config = config_over(&temp.path().join("data"));
             written_state(&config, Some(identity));
@@ -2893,6 +3124,111 @@ mod tests {
         }
     }
 
+    /// Stores holding data under the current identity, in `format`, or with
+    /// no format recorded beside the identity, as a release that predates
+    /// formats wrote them.
+    fn written_in_format(config: &RootConfig, format: Option<u32>) {
+        written_state(config, None);
+        opened_archive(config, None).shutdown().unwrap();
+
+        let identity = current().unwrap();
+        let state = dolos_fjall::StateStore::open(
+            config.storage.state_path().unwrap(),
+            dolos_fjall::Preset::Standard,
+        )
+        .unwrap();
+        let archive = dolos_fjall::archive::ArchiveStore::open(
+            StateSchema::default(),
+            config.storage.archive_path().unwrap(),
+            None,
+            dolos_fjall::Preset::Standard,
+        )
+        .unwrap();
+
+        match format {
+            Some(format) => {
+                state.record_identity(&identity, format).unwrap();
+                archive.record_identity(&identity, format).unwrap();
+            }
+            None => {
+                for (db, keyspace) in [
+                    (state.database(), "state-cursor"),
+                    (archive.database(), "archive-meta"),
+                ] {
+                    let keyspace = db.keyspace(keyspace, Default::default).unwrap();
+                    keyspace.insert("identity", identity.as_bytes()).unwrap();
+                }
+            }
+        }
+
+        state.shutdown().unwrap();
+        archive.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_supported_identity_without_a_format_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(&temp.path().join("data"));
+        written_in_format(&config, None);
+
+        for refused in [
+            refusal(open_state_store(&config)),
+            refusal(open_archive_store(&config)),
+        ] {
+            let refused = refused.expect("a store without a format opened");
+            assert_eq!((refused.found, refused.found_format), (current(), None));
+        }
+
+        let message = open_state_store(&config).err().unwrap().to_string();
+        assert!(message.contains("records no internal format"), "{message}");
+        assert!(
+            message.contains("dolos bootstrap stelae --force"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_newer_format_is_refused_naming_both_formats() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(&temp.path().join("data"));
+        let newer = STORE_FORMAT + 1;
+        written_in_format(&config, Some(newer));
+
+        for refused in [
+            refusal(open_state_store(&config)),
+            refusal(open_archive_store(&config)),
+        ] {
+            let refused = refused.expect("a store in a newer format opened");
+            assert_eq!(
+                (refused.found, refused.found_format),
+                (current(), Some(newer))
+            );
+        }
+
+        let message = open_archive_store(&config).err().unwrap().to_string();
+        assert!(
+            message.contains(&format!(
+                "internal format {newer} by a newer dolos; this one reads up to {STORE_FORMAT}"
+            )),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn the_current_format_is_admitted() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(&temp.path().join("data"));
+        written_in_format(&config, Some(STORE_FORMAT));
+
+        let stores = open_data_stores::<dolos_cardano::CardanoDelta>(&config).unwrap();
+        assert_eq!(stores.state.format().unwrap(), Some(STORE_FORMAT));
+        assert_eq!(stores.archive.format().unwrap(), Some(STORE_FORMAT));
+        assert_eq!(
+            stores.state.read_cursor().unwrap(),
+            Some(ChainPoint::Origin)
+        );
+    }
+
     /// The identity is the only input: every configuration a node could be
     /// given over the same stores opens what this release wrote and refuses
     /// the rest.
@@ -2906,7 +3242,13 @@ mod tests {
             |config| config.sync.wal_path = Some("journal".into()),
         ];
 
-        for recorded in [None, Some("v1"), Some("v2-alpha.1"), current().as_deref()] {
+        for recorded in [
+            None,
+            Some("v1"),
+            Some("v2-alpha.1"),
+            Some("v2-alpha.2"),
+            current().as_deref(),
+        ] {
             let expected = match recorded {
                 Some(identity) if reads_store_identity(identity) => None,
                 _ => Some(recorded.map(str::to_string)),
@@ -2953,7 +3295,7 @@ mod tests {
         let path = config.storage.state_path().unwrap();
         let state = dolos_fjall::StateStore::open(path, dolos_fjall::Preset::Standard).unwrap();
         state
-            .record_identity(Compatibility::current().as_str())
+            .record_identity(Compatibility::current().as_str(), STORE_FORMAT)
             .unwrap();
 
         let utxo = (
@@ -3447,11 +3789,11 @@ mod tests {
     fn a_relative_link_is_followed_from_its_own_directory() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("data");
-        std::fs::create_dir_all(root.join("stele")).unwrap();
+        std::fs::create_dir_all(root.join("snapshot")).unwrap();
         std::fs::create_dir_all(temp.path().join("srv")).unwrap();
 
-        let link = temp.path().join("srv").join("stele");
-        std::os::unix::fs::symlink(Path::new("..").join("data").join("stele"), &link).unwrap();
+        let link = temp.path().join("srv").join("snapshot");
+        std::os::unix::fs::symlink(Path::new("..").join("data").join("snapshot"), &link).unwrap();
 
         assert!(reaches_into(&link, &root).unwrap());
         assert!(reaches_into(&link.join("blobs"), &root).unwrap());
@@ -4168,6 +4510,9 @@ mod lifecycle_tests {
         let progress = progress_path_in(&storage);
         std::fs::write(&progress, b"{}").unwrap();
 
+        let record = dolos_snapshot::restore::source_path_in(&storage);
+        std::fs::write(&record, b"{}").unwrap();
+
         // A stand-in for the stores the progress file describes, so the
         // assertion is about a directory that had a node in it.
         std::fs::write(storage.join("state"), b"a store").unwrap();
@@ -4179,6 +4524,10 @@ mod lifecycle_tests {
         assert!(
             !progress.exists(),
             "a progress file outlived the stores it describes"
+        );
+        assert!(
+            !record.exists(),
+            "a source record outlived the stores it describes"
         );
 
         assert!(
@@ -4203,5 +4552,6 @@ mod lifecycle_tests {
         let storage = std::path::Path::new("/var/lib/dolos/data");
 
         assert!(progress_path_in(storage).starts_with(storage));
+        assert!(dolos_snapshot::restore::source_path_in(storage).starts_with(storage));
     }
 }

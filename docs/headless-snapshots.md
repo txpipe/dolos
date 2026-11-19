@@ -2,12 +2,13 @@
 
 The snapshot profile can be embedded without Dolos service features. The
 `headless_snapshot` example opens committed stores through the replay facade,
-builds one selected plan, writes a directory stele, and reproduces it through
-the public API:
+builds one selected plan, writes it into a directory network root (the Dolos
+snapshot in `dolos/`, the closed epochs' blocks it names through `position.blocks` in
+`blocks/`), and reproduces it through the public API:
 
 ```sh
 cargo run --no-default-features --example headless_snapshot -- \
-  ./dolos.toml ./stele
+  ./dolos.toml ./root
 ```
 
 This facade was qualified from Dolos revision
@@ -18,12 +19,14 @@ revision `703cc34b`.
 ## Planning and reproduction
 
 `ReplayWorkspace::snapshot()` returns a read-only `SnapshotSource`. The host
-supplies the network magic, retained epochs and `facade::Selection`; the
-library applies epoch restriction and producer sizing in the same order for
-publication, digest and verification. The resulting plan can
+supplies the network magic and `facade::Selection`; the
+library applies its producer sizing the same way for publication, digest and
+verification. The resulting plan can
 be passed to:
 
-- `publish_directory` with an explicit destination and progress observer;
+- `publish_directory` with an explicit network root and progress observer,
+  which writes the blocks snapshot into its `blocks/` and the Dolos snapshot
+  into its `dolos/` (a plan that names its blocks snapshot writes `dolos/` alone);
 - `preview_repository` or `publish_repository` with explicit
   `SnapshotRepository::publishing()` policy;
 - `digest_document` with an explicit predecessor; or
@@ -42,7 +45,7 @@ sequence epoch, with the archive ending there, as a sync stopped at that epoch
 `Error::NotABoundary` is the boundary refusal, `Error::UnanchoredPoint` refuses
 a hand-built plan whose cursor has no hash, and none of them writes a layer for
 stores that fail the check. Their own input checks can fail first with other errors: a destination
-that already holds a stele, or a reproduction whose sequence or network does
+that already holds a snapshot, or a reproduction whose sequence or network does
 not match the published one. `boundary` asks the boundary question up front.
 See "Only the boundary cut is published" in
 [the profile](../crates/snapshot/PROFILE.md).
@@ -66,6 +69,22 @@ single restore entry point for both `RestoreInput::Directory` and
 `RestoreInput::Repository`; it accepts explicit target stores, `Restoring`
 resume/space policy, and an optional observer. `None`
 selects a silent observer.
+
+A source names a network root, and each profile's repository is under it:
+`restore::Source::profile` with `DOLOS_REPOSITORY` or `BLOCKS_REPOSITORY`
+gives `oci://HOST/PATH/dolos` and `oci://HOST/PATH/blocks` in a registry, and
+`DIR/dolos` and `DIR/blocks` on disk, each an OCI image layout:
+
+```text
+DIR/
+├── dolos/    the Dolos snapshots: oci-layout, index.json, blobs/
+└── blocks/   the blocks profile's snapshots, the same layout
+```
+
+Pass the `dolos` repository as the input's snapshot and the `blocks` one as
+its `blocks`; a snapshot whose closed epochs' blocks are in the blocks
+repository is refused without it. `Restoring::source` takes the root, and the restore's
+`SourceRecord` names the root and both repositories.
 
 The library deliberately does not infer credentials, a scratch directory,
 publication journal, or rebuild policy. An application may use Dolos's `node`

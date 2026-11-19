@@ -1538,6 +1538,8 @@ dependencies = [
  "gasket",
  "hex",
  "http",
+ "http-body",
+ "http-body-util",
  "hyper",
  "indicatif",
  "inquire",
@@ -1552,14 +1554,21 @@ dependencies = [
  "opentelemetry_sdk",
  "pallas",
  "paste",
+ "pin-project-lite",
+ "prost 0.13.5",
+ "prost-types 0.13.5",
  "protoc-wkt",
  "rayon",
  "redb-extras",
+ "reqwest 0.13.5",
  "rustls",
  "serde",
  "serde_json",
  "serial_test",
  "stats_alloc",
+ "stelae",
+ "stelae-blocks",
+ "stelae-driver",
  "tempfile",
  "thiserror 2.0.21",
  "tikv-jemallocator",
@@ -1572,6 +1581,8 @@ dependencies = [
  "tonic-web",
  "tower 0.4.13",
  "tower-http 0.6.8",
+ "tower-layer",
+ "tower-service",
  "tracing",
  "tracing-log",
  "tracing-opentelemetry",
@@ -1580,6 +1591,7 @@ dependencies = [
  "unicase",
  "unicode-normalization",
  "vergen-gitcl",
+ "whoami",
  "xxhash-rust",
  "zstd",
 ]
@@ -1627,6 +1639,7 @@ dependencies = [
  "hex",
  "itertools 0.14.0",
  "opentelemetry",
+ "opentelemetry_sdk",
  "pallas",
  "proptest",
  "rayon",
@@ -1653,6 +1666,8 @@ dependencies = [
  "dolos-flatfiles",
  "dolos-testing",
  "fjall",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "pallas",
  "same-file",
  "smallvec",
@@ -1696,6 +1711,7 @@ dependencies = [
  "num-bigint",
  "num-rational",
  "num-traits",
+ "opentelemetry",
  "pallas",
  "reqwest 0.12.28",
  "serde",
@@ -1719,6 +1735,7 @@ dependencies = [
  "dolos-testing",
  "hex",
  "http-body-util",
+ "opentelemetry",
  "pallas",
  "serde",
  "serde_json",
@@ -1778,6 +1795,7 @@ dependencies = [
  "serde",
  "serde_json",
  "stelae",
+ "stelae-blocks",
  "stelae-driver",
  "tempfile",
  "thiserror 2.0.21",
@@ -1801,6 +1819,8 @@ dependencies = [
  "futures-util",
  "hex",
  "itertools 0.14.0",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "pallas",
  "rand 0.9.3",
  "serde",
@@ -1822,6 +1842,7 @@ dependencies = [
  "itertools 0.14.0",
  "jsonrpsee",
  "opentelemetry",
+ "opentelemetry_sdk",
  "pallas",
  "rand 0.9.3",
  "serde",
@@ -2002,9 +2023,8 @@ checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
 
 [[package]]
 name = "fjall"
-version = "3.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40cb1eb0cef3792900897b32c8282f6417bc978f6af46400a2f14bf0e649ae30"
+version = "3.1.13"
+source = "git+https://github.com/txpipe/fjall?rev=ae794ad448d90214c3491df4c50f59f0fe15cf90#ae794ad448d90214c3491df4c50f59f0fe15cf90"
 dependencies = [
  "byteorder-lite",
  "byteview",
@@ -3184,9 +3204,9 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "lsm-tree"
-version = "3.1.0"
+version = "3.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc5fa40c207eed45c811085aaa1b0a25fead22e298e286081cd4b98785fe759b"
+checksum = "5498808f4d41cf785079d3ef3f28716f1b4364af1b512f3097bfb651bded1b3e"
 dependencies = [
  "byteorder-lite",
  "byteview",
@@ -3206,9 +3226,9 @@ dependencies = [
 
 [[package]]
 name = "lz4_flex"
-version = "0.11.6"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
+checksum = "7ef0d4ed8669f8f8826eb00dc878084aa8f253506c4fd5e8f58f5bce72ddb97e"
 dependencies = [
  "twox-hash",
 ]
@@ -5726,8 +5746,8 @@ checksum = "5c0e04424e733e69714ca1bbb9204c1a57f09f5493439520f9f68c132ad25eec"
 
 [[package]]
 name = "stelae"
-version = "0.5.2"
-source = "git+https://github.com/txpipe/stelae?rev=7b18c6f3e3166cef48d5c569b5908f85a82dd1e8#7b18c6f3e3166cef48d5c569b5908f85a82dd1e8"
+version = "0.6.0"
+source = "git+https://github.com/txpipe/stelae?rev=b2735ed829cbafdc57273a42871510aa564b00b3#b2735ed829cbafdc57273a42871510aa564b00b3"
 dependencies = [
  "bytes",
  "futures-util",
@@ -5748,12 +5768,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "stelae-blocks"
+version = "0.6.0"
+source = "git+https://github.com/txpipe/stelae?rev=b2735ed829cbafdc57273a42871510aa564b00b3#b2735ed829cbafdc57273a42871510aa564b00b3"
+dependencies = [
+ "minicbor 0.26.4",
+ "serde_json",
+ "stelae",
+ "stelae-driver",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "stelae-driver"
-version = "0.5.2"
-source = "git+https://github.com/txpipe/stelae?rev=7b18c6f3e3166cef48d5c569b5908f85a82dd1e8#7b18c6f3e3166cef48d5c569b5908f85a82dd1e8"
+version = "0.6.0"
+source = "git+https://github.com/txpipe/stelae?rev=b2735ed829cbafdc57273a42871510aa564b00b3#b2735ed829cbafdc57273a42871510aa564b00b3"
 dependencies = [
  "fs4",
- "minicbor 0.26.4",
  "serde",
  "serde_json",
  "stelae",
@@ -6313,11 +6344,13 @@ dependencies = [
  "pin-project",
  "sync_wrapper",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tower 0.5.2",
  "tower-layer",
  "tower-service",
  "tracing",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -6443,6 +6476,7 @@ dependencies = [
  "http-body",
  "iri-string",
  "pin-project-lite",
+ "tokio",
  "tower 0.5.2",
  "tower-layer",
  "tower-service",
@@ -7338,6 +7372,7 @@ dependencies = [
  "dolos-minibf",
  "dolos-redb3",
  "dolos-testing",
+ "fjall",
  "hdrhistogram",
  "hex",
  "itertools 0.14.0",

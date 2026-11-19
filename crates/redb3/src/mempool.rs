@@ -11,8 +11,8 @@ use tracing::{debug, warn};
 use crate::handle::Handle;
 
 use dolos_core::{
-    config::RedbMempoolConfig, ChainPoint, EraCbor, MempoolError, MempoolEvent, MempoolPage,
-    MempoolStore, MempoolTx, MempoolTxStage, TxHash, TxStatus,
+    config::RedbMempoolConfig, ChainPoint, EraCbor, MempoolCount, MempoolError, MempoolEvent,
+    MempoolPage, MempoolStore, MempoolTx, MempoolTxStage, TxHash, TxStatus,
 };
 
 // ── Error newtype (mirrors wal/mod.rs pattern) ──────────────────────────
@@ -473,6 +473,10 @@ impl PendingTable {
         Ok(table.len()? > 0)
     }
 
+    fn len(rx: &redb::ReadTransaction) -> Result<u64, RedbMempoolError> {
+        Ok(rx.open_table(Self::DEF)?.len()?)
+    }
+
     fn peek(rx: &redb::ReadTransaction) -> Result<Vec<MempoolTx>, RedbMempoolError> {
         let table = rx.open_table(Self::DEF)?;
         let iter = table.iter()?;
@@ -558,6 +562,10 @@ impl InflightTable {
     fn initialize(wx: &redb::WriteTransaction) -> Result<(), RedbMempoolError> {
         wx.open_table(Self::DEF)?;
         Ok(())
+    }
+
+    fn len(rx: &redb::ReadTransaction) -> Result<u64, RedbMempoolError> {
+        Ok(rx.open_table(Self::DEF)?.len()?)
     }
 
     fn get(
@@ -830,6 +838,19 @@ impl MempoolStore for RedbMempool {
             Err(_) => return vec![],
         };
         PendingTable::peek(&rx).unwrap_or_default()
+    }
+
+    fn count(&self) -> MempoolCount {
+        let Ok(rx) = self.db.begin_read() else {
+            return MempoolCount::default();
+        };
+
+        let len = |len: Result<u64, RedbMempoolError>| len.unwrap_or(0) as usize;
+
+        MempoolCount {
+            pending: len(PendingTable::len(&rx)),
+            inflight: len(InflightTable::len(&rx)),
+        }
     }
 
     fn mark_inflight(&self, hashes: &[TxHash]) -> Result<(), MempoolError> {

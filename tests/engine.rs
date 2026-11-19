@@ -43,10 +43,15 @@ fn public_builder_cleanly_initializes_configured_stores() {
 fn the_builder_sizes_the_query_limiter_from_the_configuration() {
     let (mut node, genesis, _) = fixture();
     node.config.serve.max_concurrent_queries = 4;
+    node.config.serve.max_concurrent_heavy_scans = 3;
+    node.config.serve.heavy_scan_queue_seconds = 7;
 
     let domain = DomainBuilder::new(&node.config, genesis).build().unwrap();
 
-    assert_eq!(domain.query_limiter().cap(), 4);
+    let limiter = domain.query_limiter();
+    assert_eq!(limiter.cap(), 4);
+    assert_eq!(limiter.heavy_limit(), 3);
+    assert_eq!(limiter.heavy_queue(), std::time::Duration::from_secs(7));
     domain.shutdown().unwrap();
 }
 
@@ -182,12 +187,7 @@ fn configured_boundary_survives_inspection_and_requires_explicit_advancement() {
             Some(boundary.clone())
         );
         assert_eq!(snapshot.epoch().unwrap(), Some(1));
-        let plan = snapshot
-            .plan(
-                u64::from(genesis.network_magic()),
-                dolos_snapshot::planning::retained_epochs(&[]).unwrap(),
-            )
-            .unwrap();
+        let plan = snapshot.plan(u64::from(genesis.network_magic())).unwrap();
         assert_eq!(plan.sequence, 1);
         drop(snapshot);
         workspace.finish().unwrap();
@@ -243,12 +243,7 @@ fn the_boundary_delta_is_the_index_tail_a_traversal_finds() {
     assert!(!delta.tags.is_empty());
 
     let snapshot = session.snapshot();
-    let plan = snapshot
-        .plan(
-            magic,
-            dolos_snapshot::planning::retained_epochs(&[]).unwrap(),
-        )
-        .unwrap();
+    let plan = snapshot.plan(magic).unwrap();
     let silent = dolos_snapshot::progress::Observer::silent();
     let scratch = tempfile::tempdir().unwrap();
 
@@ -309,19 +304,18 @@ fn a_stop_epoch_cut_publishes_and_a_later_cursor_is_refused() {
         .unwrap();
     session.finish().unwrap();
 
-    let retained = || dolos_snapshot::planning::retained_epochs(&[]).unwrap();
     let silent = dolos_snapshot::progress::Observer::silent();
-    let steles = tempfile::tempdir().unwrap();
+    let snapshots = tempfile::tempdir().unwrap();
 
     let workspace = ReplayWorkspace::open(&node.config, genesis.clone()).unwrap();
     let snapshot = workspace.snapshot();
-    let plan = snapshot.plan(magic, retained()).unwrap();
+    let plan = snapshot.plan(magic).unwrap();
     let evidence = snapshot.boundary(&plan).unwrap();
     assert_eq!(evidence.epoch, 1);
     assert_eq!(evidence.first, boundary);
     assert_eq!(evidence.parent, before);
     snapshot
-        .publish_directory(&steles.path().join("cut"), &plan, &silent)
+        .publish_directory(&snapshots.path().join("cut"), &plan, &silent)
         .unwrap();
     drop(snapshot);
     workspace.finish().unwrap();
@@ -333,7 +327,7 @@ fn a_stop_epoch_cut_publishes_and_a_later_cursor_is_refused() {
 
     let workspace = ReplayWorkspace::open(&node.config, genesis).unwrap();
     let snapshot = workspace.snapshot();
-    let plan = snapshot.plan(magic, retained()).unwrap();
+    let plan = snapshot.plan(magic).unwrap();
     assert_eq!(
         plan.sequence, 1,
         "still in epoch 1, one block past its first"
@@ -351,7 +345,7 @@ fn a_stop_epoch_cut_publishes_and_a_later_cursor_is_refused() {
         "{refused:?}"
     );
 
-    let late = steles.path().join("late");
+    let late = snapshots.path().join("late");
     let err = snapshot
         .publish_directory(&late, &plan, &silent)
         .unwrap_err();
@@ -359,14 +353,17 @@ fn a_stop_epoch_cut_publishes_and_a_later_cursor_is_refused() {
         matches!(err, dolos_snapshot::Error::NotABoundary { .. }),
         "{err:?}"
     );
-    assert!(
-        !late.join("blobs").join("sha256").exists()
-            || std::fs::read_dir(late.join("blobs").join("sha256"))
-                .unwrap()
-                .next()
-                .is_none(),
-        "a refused publish wrote a layer"
-    );
+    for repository in [
+        dolos_snapshot::export::DOLOS_REPOSITORY,
+        dolos_snapshot::export::BLOCKS_REPOSITORY,
+    ] {
+        let blobs = late.join(repository).join("blobs").join("sha256");
+
+        assert!(
+            !blobs.exists() || std::fs::read_dir(&blobs).unwrap().next().is_none(),
+            "a refused publish wrote a layer into {repository}"
+        );
+    }
     drop(snapshot);
     workspace.finish().unwrap();
 }

@@ -2,3 +2,4 @@
 
 pub mod debug;
 pub mod perf;
+pub mod store;

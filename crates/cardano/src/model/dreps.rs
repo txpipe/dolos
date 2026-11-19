@@ -647,11 +647,27 @@ impl dolos_core::EntityDelta for DRepDormancyRelease {
 }
 
 #[cfg(test)]
-mod prop_tests {
+pub(super) mod prop_tests {
     use super::testing::{self, any_drep_state};
     use super::*;
     use crate::model::testing::{self as root, assert_delta_roundtrip};
+    use crate::model::testing::{replay_case, ReplayCase};
     use proptest::prelude::*;
+
+    /// One case per delta this module owns, for `model::replay_tests`.
+    pub(crate) fn replay_cases() -> Vec<ReplayCase> {
+        vec![
+            replay_case((prop::option::of(any_drep_state()), any_drep_registration())),
+            replay_case((any_drep_state().prop_map(Some), any_drep_unregistration())),
+            replay_case((prop::option::of(any_drep_state()), any_drep_activity())),
+            replay_case((any_drep_state().prop_map(Some), any_drep_expiration())),
+            replay_case((prop::option::of(any_drep_state()), any_drep_expiry_update())),
+            replay_case((
+                prop::option::of(any_drep_state()),
+                any_drep_dormancy_release(),
+            )),
+        ]
+    }
 
     prop_compose! {
         fn any_drep_registration()(

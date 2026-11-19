@@ -26,10 +26,10 @@ where
 
     let tag = address_tag(&parse_address(&address)?);
 
-    let utxos = crate::routes::utxos::load_tag_page(&domain, &tag, &pagination).await?;
+    let utxos = crate::utxos::load_tag_page(&domain, &tag, &pagination).await?;
 
     // If the address holds no UTxO and is not seen on the chain, send 404.
-    if utxos.is_empty() && crate::routes::utxos::tag_is_empty(&domain, &tag).await? {
+    if utxos.is_empty() && crate::utxos::tag_is_empty(&domain, &tag).await? {
         if is_address_in_chain(&domain, &address).await? {
             return Ok(Json(vec![]));
         }

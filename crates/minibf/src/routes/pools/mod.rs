@@ -12,7 +12,7 @@ use dolos_cardano::{
     final_rows::newest_final_row,
     indexes::CardanoArchiveIndexExt,
     model::{AccountState, FixedNamespace as _, PoolState},
-    pallas_extras, pool_history, AccountKey, PoolHash, PoolKey,
+    pallas_extras, pool_history, AccountKey, CertPosition, PoolHash, PoolKey,
 };
 use dolos_core::{
     keys, ArchiveStore as _, BlockSlot, Domain, Entity as _, KeyRange, StateStore as _,
@@ -80,10 +80,7 @@ fn live_stake_pool(account: &AccountState) -> Option<PoolHash> {
         return None;
     }
 
-    account
-        .delegated_pool_live()
-        .or(account.retired_pool.as_ref())
-        .copied()
+    account.delegated_pool_live().copied()
 }
 
 fn live_stake_denominator_pool(
@@ -163,11 +160,7 @@ where
             return Ok(acc);
         }
 
-        if account
-            .delegated_pool_live()
-            .or(account.retired_pool.as_ref())
-            == Some(&target_pool)
-        {
+        if account.delegated_pool_live() == Some(&target_pool) {
             Ok(acc + account.live_stake())
         } else {
             Ok(acc)
@@ -503,14 +496,15 @@ fn logged_pools<D: Domain>(domain: &D) -> Result<Vec<PoolState>, StatusCode> {
     Ok(newest.into_values().collect())
 }
 
-/// The listing order of `/pools` and `/pools/extended`: the slot of each
-/// pool's first registration, as db-sync's `pool_hash.id` orders them, the
-/// operator breaking ties. A pool the Shelley genesis stakes lists first, and
-/// one whose registration the archive no longer holds last.
+/// The listing order of `/pools` and `/pools/extended`: the position (slot,
+/// transaction, certificate) of each pool's first registration, as db-sync's
+/// `pool_hash.id` orders them, the operator breaking ties. A pool the Shelley
+/// genesis stakes lists first, and one whose registration the archive no
+/// longer holds last.
 async fn listing_order<D: Domain>(
     domain: &Facade<D>,
     pools: &[PoolHash],
-) -> Result<Vec<(BlockSlot, PoolHash)>, Error> {
+) -> Result<Vec<(CertPosition, PoolHash)>, Error> {
     let positions = pool_history::first_registrations(&domain.inner, pools.to_vec())
         .await
         .map_err(log_and_500("failed to read the pools' first registrations"))?;
@@ -518,17 +512,20 @@ async fn listing_order<D: Domain>(
     Ok(positions
         .into_iter()
         .zip(pools)
-        .map(|(at, operator)| (at.map_or(BlockSlot::MAX, |(slot, ..)| slot), *operator))
+        .map(|(at, operator)| (at.unwrap_or(UNKNOWN_POSITION), *operator))
         .collect())
 }
 
+/// Where a pool whose first registration the archive no longer holds sorts.
+const UNKNOWN_POSITION: CertPosition = (BlockSlot::MAX, usize::MAX, usize::MAX);
+
 fn select_pools(
-    pools: impl IntoIterator<Item = (BlockSlot, PoolHash)>,
+    pools: impl IntoIterator<Item = (CertPosition, PoolHash)>,
     pagination: &Pagination,
 ) -> Vec<PoolHash> {
-    let mut pools: Vec<(BlockSlot, PoolHash)> = pools.into_iter().collect();
+    let mut pools: Vec<(CertPosition, PoolHash)> = pools.into_iter().collect();
 
-    pools.sort_unstable_by_key(|(slot, operator)| (*slot, *operator));
+    pools.sort_unstable();
 
     if matches!(pagination.order, crate::pagination::Order::Desc) {
         pools.reverse();
@@ -784,6 +781,26 @@ pub(super) mod testing {
     use dolos_testing::synthetic::SyntheticBlockConfig;
     use pallas::crypto::hash::Hash;
     use serde_json::Value;
+
+    /// A registration of `operator` with zeroed parameters.
+    pub fn register(operator: [u8; 28]) -> pallas::ledger::primitives::conway::Certificate {
+        use pallas::ledger::primitives::{conway::Certificate, Bytes, RationalNumber, Set};
+
+        Certificate::PoolRegistration {
+            operator: operator.into(),
+            vrf_keyhash: [1u8; 32].into(),
+            pledge: 0,
+            cost: 0,
+            margin: RationalNumber {
+                numerator: 0,
+                denominator: 1,
+            },
+            reward_account: Bytes::from([&[0xe0][..], &[0x21; 28][..]].concat()),
+            pool_owners: Set::from(vec![[2u8; 28].into()]),
+            relays: vec![],
+            pool_metadata: None,
+        }
+    }
 
     pub fn invalid_pool_id() -> &'static str {
         "not-a-pool"
@@ -1147,11 +1164,11 @@ mod tests {
     #[test]
     fn select_pools_orders_and_paginates() {
         let pools = vec![
-            (30, Hash::from([3u8; 28])),
-            (10, Hash::from([1u8; 28])),
-            (20, Hash::from([2u8; 28])),
-            // same register slot as [2u8; 28]: stable tie-break on operator
-            (20, Hash::from([9u8; 28])),
+            ((30, 0, 0), Hash::from([3u8; 28])),
+            ((10, 0, 0), Hash::from([1u8; 28])),
+            ((20, 0, 0), Hash::from([2u8; 28])),
+            // same block as [2u8; 28], a later certificate of the same tx
+            ((20, 0, 1), Hash::from([9u8; 28])),
         ];
 
         let asc = select_pools(pools.clone(), &Pagination::default());
@@ -1190,6 +1207,81 @@ mod tests {
             second_page,
             vec![Hash::from([9u8; 28]), Hash::from([3u8; 28])]
         );
+    }
+
+    /// Pools first registered in the same block list by transaction, then
+    /// certificate, as db-sync's `pool_hash.id` does, not by operator.
+    #[test]
+    fn select_pools_breaks_same_slot_ties_by_tx_and_cert() {
+        let pools = vec![
+            ((20, 1, 0), Hash::from([1u8; 28])),
+            ((20, 0, 1), Hash::from([2u8; 28])),
+            ((20, 0, 0), Hash::from([3u8; 28])),
+            (UNKNOWN_POSITION, Hash::from([0u8; 28])),
+        ];
+
+        let asc = select_pools(pools.clone(), &Pagination::default());
+        assert_eq!(asc, [3u8, 2, 1, 0].map(|x| Hash::from([x; 28])).to_vec());
+
+        let desc = Pagination {
+            order: crate::pagination::Order::Desc,
+            ..Pagination::default()
+        };
+        assert_eq!(
+            select_pools(pools, &desc),
+            [0u8, 1, 2, 3].map(|x| Hash::from([x; 28])).to_vec()
+        );
+    }
+
+    /// Three pools first registered in one block, in a transaction and
+    /// certificate order unlike their operator order: `/pools` and
+    /// `/pools/extended` list them in chain order, ascending and descending.
+    #[tokio::test]
+    async fn pools_list_same_block_registrations_in_chain_order() {
+        use blockfrost_openapi::models::pool_list_extended_inner::PoolListExtendedInner;
+
+        use crate::{mapping::bech32_pool, routes::pools::testing::register};
+
+        const A: [u8; 28] = [0x71; 28];
+        const B: [u8; 28] = [0x72; 28];
+        const C: [u8; 28] = [0x73; 28];
+
+        // the vector pool registers in block 0; the three first register in
+        // block 1, tx 0 carrying C then A, tx 1 carrying B
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 3,
+            txs_per_block: 2,
+            extra_certs_by_block: vec![
+                vec![vec![], vec![]],
+                vec![vec![register(C), register(A)], vec![register(B)]],
+                vec![vec![], vec![]],
+            ],
+            ..Default::default()
+        });
+
+        let ids: Vec<String> = [C, A, B].map(|x| bech32_pool(x).unwrap()).to_vec();
+        let ours = |listed: Vec<String>| -> Vec<String> {
+            listed.into_iter().filter(|x| ids.contains(x)).collect()
+        };
+        let mut reversed = ids.clone();
+        reversed.reverse();
+
+        for (order, expected) in [("asc", &ids), ("desc", &reversed)] {
+            let (status, bytes) = app
+                .get_bytes(&format!("/pools?count=100&order={order}"))
+                .await;
+            assert_eq!(status, StatusCode::OK);
+            let listed: Vec<String> = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(&ours(listed), expected, "/pools {order}");
+
+            let (status, bytes) = app
+                .get_bytes(&format!("/pools/extended?count=100&order={order}"))
+                .await;
+            assert_eq!(status, StatusCode::OK);
+            let listed: Vec<PoolListExtendedInner> = serde_json::from_slice(&bytes).unwrap();
+            let listed = listed.into_iter().map(|x| x.pool_id).collect();
+            assert_eq!(&ours(listed), expected, "/pools/extended {order}");
+        }
     }
 
     #[test]
@@ -1483,11 +1575,14 @@ mod tests {
 mod retired_pool_phases {
     use crate::{mapping::bech32_pool, test_support::TestApp};
     use axum::http::StatusCode;
-    use blockfrost_openapi::models::{pool::Pool, pool_list_retire_inner::PoolListRetireInner};
+    use blockfrost_openapi::models::{
+        account_content::AccountContent, pool::Pool, pool_delegators_inner::PoolDelegatorsInner,
+        pool_list_retire_inner::PoolListRetireInner,
+    };
     use dolos_cardano::{
         final_rows::FinalRows, indexes::CardanoArchiveIndexExt as _,
-        pallas_extras::MultiEraPoolRegistration, CalidusRegistration, PoolHash, PoolKey,
-        PoolRegistration, PoolState,
+        pallas_extras::MultiEraPoolRegistration, AccountKey, AccountState, CalidusRegistration,
+        PoolDelegation, PoolHash, PoolKey, PoolRegistration, PoolState,
     };
     use dolos_core::{
         ArchiveStore as _, ArchiveWriter as _, BlockSlot, Domain as _, EntityDelta as _,
@@ -1931,5 +2026,75 @@ mod retired_pool_phases {
         assert_eq!(status, StatusCode::OK);
         let retired: Vec<PoolListRetireInner> = serde_json::from_slice(&bytes).unwrap();
         assert!(retired.is_empty());
+    }
+
+    /// Clear every delegation to `pool` as the retirement leaves it after the
+    /// epoch boundary: the live delegation is `NotDelegated` and the account
+    /// keeps the retired pool in `retired_pool`. Returns the cleared accounts.
+    fn clear_delegations(domain: &ToyDomain, pool: PoolHash) -> Vec<AccountKey> {
+        let delegators: Vec<(AccountKey, AccountState)> = domain
+            .state()
+            .iter_entities_typed::<AccountState>(None)
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|(_, account)| account.delegated_pool_live() == Some(&pool))
+            .collect();
+
+        let writer = domain.state().start_writer().unwrap();
+        for (key, mut account) in delegators.clone() {
+            let epoch = account.pool.epoch().unwrap();
+            account.pool.replace(PoolDelegation::NotDelegated, epoch);
+            account.retired_pool = Some(pool);
+            writer.write_entity_typed(&key, &account).unwrap();
+        }
+        writer.commit().unwrap();
+
+        delegators.into_iter().map(|(key, _)| key).collect()
+    }
+
+    /// A retirement clears the delegations to the pool, as the ledger
+    /// POOLREAP rule does: the pool lists no delegators and has no live
+    /// stake, and its former delegators show no pool.
+    #[tokio::test]
+    async fn a_retired_pool_keeps_no_delegators() {
+        let delegated = retired_pool_app(2, |_, _, _| ());
+        let pool_id = delegated.vectors().pool_id.clone();
+        let delegators_path = format!("/pools/{pool_id}/delegators");
+
+        let (status, bytes) = delegated.get_bytes(&delegators_path).await;
+        assert_eq!(status, StatusCode::OK);
+        let before: Vec<PoolDelegatorsInner> = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            !before.is_empty(),
+            "the synthetic chain delegates to the pool"
+        );
+
+        let mut cleared = Vec::new();
+        let app = retired_pool_app(2, |domain, pool, _| {
+            cleared = clear_delegations(domain, pool);
+        });
+        assert_eq!(cleared.len(), before.len());
+
+        let (status, bytes) = app.get_bytes(&delegators_path).await;
+        assert_eq!(status, StatusCode::OK);
+        let after: Vec<PoolDelegatorsInner> = serde_json::from_slice(&bytes).unwrap();
+        assert!(after.is_empty());
+
+        let (status, bytes) = app.get_bytes(&format!("/pools/{pool_id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        let pool: Pool = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(pool.live_delegators, 0.0);
+        assert_eq!(pool.live_stake, "0");
+        assert_eq!(pool.live_pledge, "0");
+
+        for delegator in &before {
+            let (status, bytes) = app
+                .get_bytes(&format!("/accounts/{}", delegator.address))
+                .await;
+            assert_eq!(status, StatusCode::OK);
+            let account: AccountContent = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(account.pool_id, None, "{}", delegator.address);
+            assert!(!account.active, "{}", delegator.address);
+        }
     }
 }

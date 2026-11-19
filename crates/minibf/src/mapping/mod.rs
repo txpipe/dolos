@@ -1,10 +1,9 @@
 use axum::{http::StatusCode, Json};
-use itertools::Itertools;
 use num_bigint::BigInt;
 use num_rational::BigRational;
 use num_traits::ToPrimitive;
 use pallas::{
-    codec::minicbor,
+    codec::{minicbor, tree::fold_tree},
     crypto::hash::{Hash, Hasher},
     ledger::{
         addresses::{Address, Network, StakeAddress, StakePayload},
@@ -17,6 +16,7 @@ use pallas::{
     },
 };
 use serde::{Deserialize, Serialize};
+use std::ops::Deref;
 use std::{
     collections::{BTreeMap, HashMap},
     io,
@@ -30,6 +30,7 @@ use blockfrost_openapi::models::{
     address_content_extended::{AddressContentExtended, Type as AddressExtendedType},
     address_content_extended_amount_inner::AddressContentExtendedAmountInner,
     address_utxo_content_inner::AddressUtxoContentInner,
+    asset_utxo_content_inner::AssetUtxoContentInner,
     dreps_inner_metadata_error::{Code, DrepsInnerMetadataError},
     script_redeemers_inner::Purpose as ScriptRedeemerPurpose,
     script_utxos_inner::ScriptUtxosInner,
@@ -651,6 +652,24 @@ async fn fetch_offchain_body(
     timeout: Duration,
     max_bytes: usize,
 ) -> Result<Vec<u8>, OffchainFetchError> {
+    fetch_offchain_response(client, url, timeout, max_bytes)
+        .await
+        .map(|response| response.body)
+}
+
+/// A successful off-chain answer: its body and its `Content-Type` header, if
+/// the server sent one.
+struct OffchainResponse {
+    body: Vec<u8>,
+    content_type: Option<String>,
+}
+
+async fn fetch_offchain_response(
+    client: &reqwest::Client,
+    url: &str,
+    timeout: Duration,
+    max_bytes: usize,
+) -> Result<OffchainResponse, OffchainFetchError> {
     let url = match reqwest::Url::parse(url) {
         Ok(url) if is_public_http_url(&url) => url,
         _ => return Err(OffchainFetchError::Connection),
@@ -667,8 +686,49 @@ async fn fetch_offchain_body(
         return Err(OffchainFetchError::HttpResponse(response.status()));
     }
 
-    read_offchain_body(response, max_bytes).await
+    // a header value is bytes; decoding them as Latin-1 keeps every one
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .map(|value| {
+            value
+                .as_bytes()
+                .iter()
+                .map(|&byte| char::from(byte))
+                .collect()
+        });
+    let body = read_offchain_body(response, max_bytes).await?;
+
+    Ok(OffchainResponse { body, content_type })
 }
+
+/// The content types Blockfrost accepts for a governance anchor, matched
+/// anywhere in the header value, case-sensitively.
+const ANCHOR_CONTENT_TYPES: &[&str] = &[
+    "application/json",
+    "application/ld+json",
+    "text/plain",
+    "binary/octet-stream",
+    "application/octet-stream",
+    "application/binary",
+];
+
+/// Whether Blockfrost reads an anchor answer with this content type as JSON.
+/// A `text/html` answer passes only when its body starts with `{`, as some
+/// servers label JSON that way; an answer without the header passes too.
+fn anchor_content_type_accepted(content_type: &str, body: &[u8]) -> bool {
+    if content_type.contains("text/html") {
+        return body.trim_ascii_start().first() == Some(&b'{');
+    }
+
+    ANCHOR_CONTENT_TYPES
+        .iter()
+        .any(|accepted| content_type.contains(accepted))
+}
+
+/// The prefix Blockfrost gives every governance-anchor fetch error except a
+/// hash mismatch.
+const ANCHOR_ERROR_PREFIX: &str = "Error Offchain Voting Anchor: ";
 
 pub(crate) fn offchain_hash_mismatch_error(
     url: &str,
@@ -691,8 +751,17 @@ fn offchain_http_response_error(url: &str, status: StatusCode) -> DrepsInnerMeta
     DrepsInnerMetadataError::new(
         Code::HttpResponseError,
         format!(
-            "The server at {url} returned HTTP status {} \"{reason}\".",
+            "{ANCHOR_ERROR_PREFIX}HTTP Response error from {url} resulted in HTTP status code : {} \"{reason}\"",
             status.as_u16(),
+        ),
+    )
+}
+
+fn offchain_content_type_error(url: &str, content_type: &str) -> DrepsInnerMetadataError {
+    DrepsInnerMetadataError::new(
+        Code::HttpResponseError,
+        format!(
+            "{ANCHOR_ERROR_PREFIX}HTTP Response error from {url}: expected JSON, but got : {content_type:?}"
         ),
     )
 }
@@ -700,35 +769,41 @@ fn offchain_http_response_error(url: &str, status: StatusCode) -> DrepsInnerMeta
 pub(crate) fn offchain_connection_error(url: &str) -> DrepsInnerMetadataError {
     DrepsInnerMetadataError::new(
         Code::ConnectionError,
-        format!("The client cannot connect to {url}."),
+        format!("{ANCHOR_ERROR_PREFIX}Connection failure error when fetching metadata from {url}."),
     )
 }
 
-fn offchain_decode_error(url: &str) -> DrepsInnerMetadataError {
+fn offchain_decode_error(url: &str, error: &serde_json::Error) -> DrepsInnerMetadataError {
+    // Blockfrost prints the URL as an optional value, hence the `Just`
     DrepsInnerMetadataError::new(
         Code::DecodeError,
-        format!("The client cannot parse JSON from {url}."),
+        format!(
+            "{ANCHOR_ERROR_PREFIX}JSON decode error from when fetching metadata from Just {url} resulted in : {:?}",
+            error.to_string(),
+        ),
     )
 }
 
 fn offchain_size_error(url: &str) -> DrepsInnerMetadataError {
     DrepsInnerMetadataError::new(
         Code::SizeExceeded,
-        format!("The response from {url} is larger than {MAX_ANCHOR_METADATA_BYTES} bytes."),
+        format!(
+            "{ANCHOR_ERROR_PREFIX}Size error, fetching metadata from {url} exceeded {MAX_ANCHOR_METADATA_BYTES} bytes."
+        ),
     )
 }
 
 fn offchain_unknown_error(url: &str) -> DrepsInnerMetadataError {
     DrepsInnerMetadataError::new(
         Code::UnknownError,
-        format!("The API cannot create an HTTP client for {url}."),
+        format!("{ANCHOR_ERROR_PREFIX}The API cannot create an HTTP client for {url}."),
     )
 }
 
 fn offchain_no_gateway_error(url: &str) -> DrepsInnerMetadataError {
     DrepsInnerMetadataError::new(
         Code::UnknownError,
-        format!("The API cannot resolve {url} without an IPFS gateway."),
+        format!("{ANCHOR_ERROR_PREFIX}No IPFS gateway is configured to fetch {url}."),
     )
 }
 
@@ -858,12 +933,13 @@ pub fn anchor_metadata_from_body(
             json,
             bytes: format!("\\x{}", hex::encode(body)),
         })
-        .map_err(|_| offchain_decode_error(url))
+        .map_err(|error| offchain_decode_error(url, &error))
 }
 
 /// This function fetches one resolved candidate URL for
-/// [`anchor_offchain_body`]. The function makes sure that the body hash
-/// matches `expected_hash`.
+/// [`anchor_offchain_body`]. The function refuses a content type Blockfrost
+/// does not read as JSON, then makes sure that the body hash matches
+/// `expected_hash`.
 ///
 /// `request_url` is the URL that the function fetches. For an `ipfs://` anchor,
 /// `request_url` is a gateway URL. `original_url` is the on-chain URL. Every
@@ -874,7 +950,7 @@ async fn fetch_anchor_candidate(
     original_url: &str,
     expected_hash: &[u8],
 ) -> Result<Vec<u8>, DrepsInnerMetadataError> {
-    let body = fetch_offchain_body(
+    let OffchainResponse { body, content_type } = fetch_offchain_response(
         client,
         request_url,
         ANCHOR_FETCH_TIMEOUT,
@@ -882,6 +958,12 @@ async fn fetch_anchor_candidate(
     )
     .await
     .map_err(|error| error.into_metadata_error(original_url))?;
+
+    if let Some(content_type) = content_type {
+        if !anchor_content_type_accepted(&content_type, &body) {
+            return Err(offchain_content_type_error(original_url, &content_type));
+        }
+    }
 
     let actual_hash = Hasher::<256>::hash(body.as_ref());
 
@@ -982,6 +1064,12 @@ mod offchain_tests {
             .await
             .expect_err("The loopback URL was accepted.");
         assert_eq!(error.code, Code::ConnectionError);
+        assert_eq!(
+            error.message,
+            format!(
+                "Error Offchain Voting Anchor: Connection failure error when fetching metadata from {url}."
+            ),
+        );
         assert_eq!(
             listener
                 .accept()
@@ -1237,7 +1325,9 @@ mod offchain_tests {
                     result.err().unwrap(),
                     DrepsInnerMetadataError::new(
                         Code::SizeExceeded,
-                        format!("The response from {original_url} is larger than 3000000 bytes."),
+                        format!(
+                            "Error Offchain Voting Anchor: Size error, fetching metadata from {original_url} exceeded 3000000 bytes."
+                        ),
                     ),
                 );
             }
@@ -1258,6 +1348,213 @@ mod offchain_tests {
         server.join().expect("The test server did not stop.");
         assert_eq!(error.code, Code::HashMismatch);
         assert!(error.message.contains(original_url));
+    }
+
+    #[tokio::test]
+    async fn anchor_candidate_refuses_html_before_hashing() {
+        let body = b"<!doctype html><html></html>".to_vec();
+        let expected_hash = Hasher::<256>::hash(body.as_ref());
+        let original_url = "https://anchor.example/drep";
+
+        // a matching hash does not let an HTML answer through
+        for hash in [expected_hash.as_ref(), &[0; 32]] {
+            let (url, server) = serve_response(
+                body.clone(),
+                "200 OK",
+                "Content-Type: text/html; charset=utf-8\r\n",
+            );
+            let (client, request_url) = local_candidate_client(&url);
+
+            let error = fetch_anchor_candidate(&client, &request_url, original_url, hash)
+                .await
+                .expect_err("The HTML answer was accepted.");
+
+            server.join().unwrap();
+            assert_eq!(
+                error,
+                DrepsInnerMetadataError::new(
+                    Code::HttpResponseError,
+                    "Error Offchain Voting Anchor: HTTP Response error from https://anchor.example/drep: expected JSON, but got : \"text/html; charset=utf-8\"".to_string(),
+                ),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn anchor_candidate_refuses_other_content_types() {
+        let (url, server) = serve_response(b"{}".to_vec(), "200 OK", "Content-Type: image/png\r\n");
+        let (client, request_url) = local_candidate_client(&url);
+
+        let error =
+            fetch_anchor_candidate(&client, &request_url, "https://anchor.example/a", &[0; 32])
+                .await
+                .expect_err("The image answer was accepted.");
+
+        server.join().unwrap();
+        assert_eq!(error.code, Code::HttpResponseError);
+        assert!(error
+            .message
+            .ends_with(": expected JSON, but got : \"image/png\""));
+    }
+
+    #[tokio::test]
+    async fn anchor_candidate_refuses_html_with_braces() {
+        // a `{` inside the page is not a body that starts with one
+        let body = b"<html><style>p{color:red}</style></html>".to_vec();
+        let expected_hash = Hasher::<256>::hash(body.as_ref());
+        let (url, server) = serve_response(body, "200 OK", "Content-Type: text/html\r\n");
+        let (client, request_url) = local_candidate_client(&url);
+
+        let error = fetch_anchor_candidate(
+            &client,
+            &request_url,
+            "https://anchor.example/a",
+            expected_hash.as_ref(),
+        )
+        .await
+        .expect_err("The HTML answer was accepted.");
+
+        server.join().unwrap();
+        assert_eq!(error.code, Code::HttpResponseError);
+        assert!(error
+            .message
+            .ends_with(": expected JSON, but got : \"text/html\""));
+    }
+
+    #[tokio::test]
+    async fn anchor_candidate_matches_content_types_as_blockfrost() {
+        let body = br#"{"name":"Dolos"}"#.to_vec();
+        let expected_hash = Hasher::<256>::hash(body.as_ref());
+
+        // matching is case-sensitive, and a header byte above 0x7f is kept
+        // as its Latin-1 character rather than dropping the header
+        for (content_type, shown) in [
+            ("Application/JSON", "Application/JSON"),
+            ("text/json", "text/json"),
+            ("image/png; name=\u{e9}", "image/png; name=\u{c3}\u{a9}"),
+        ] {
+            let headers = format!("Content-Type: {content_type}\r\n");
+            let (url, server) = serve_response(body.clone(), "200 OK", &headers);
+            let (client, request_url) = local_candidate_client(&url);
+
+            let error = fetch_anchor_candidate(
+                &client,
+                &request_url,
+                "https://anchor.example/a",
+                expected_hash.as_ref(),
+            )
+            .await
+            .expect_err(content_type);
+
+            server.join().unwrap();
+            assert_eq!(error.code, Code::HttpResponseError, "{content_type}");
+            assert!(
+                error
+                    .message
+                    .ends_with(&format!(": expected JSON, but got : {shown:?}")),
+                "{}",
+                error.message,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn anchor_without_gateway_reports_no_gateway() {
+        let url = "ipfs://bafy-no-gateway";
+
+        let error = anchor_offchain_body(url, &[0; 32], &[])
+            .await
+            .expect_err("The anchor without a gateway was fetched.");
+
+        assert_eq!(
+            error,
+            DrepsInnerMetadataError::new(
+                Code::UnknownError,
+                "Error Offchain Voting Anchor: No IPFS gateway is configured to fetch ipfs://bafy-no-gateway.".to_string(),
+            ),
+        );
+    }
+
+    #[tokio::test]
+    async fn anchor_candidate_accepts_json_content_types() {
+        let body = b"  {\"name\":\"Dolos\"}".to_vec();
+        let expected_hash = Hasher::<256>::hash(body.as_ref());
+
+        for content_type in [
+            "application/json",
+            "application/ld+json; charset=utf-8",
+            "text/plain",
+            "binary/octet-stream",
+            "application/octet-stream",
+            "application/binary",
+            // HTML that is a JSON object, as some servers label it
+            "text/html",
+        ] {
+            let headers = format!("Content-Type: {content_type}\r\n");
+            let (url, server) = serve_response(body.clone(), "200 OK", &headers);
+            let (client, request_url) = local_candidate_client(&url);
+
+            let fetched = fetch_anchor_candidate(
+                &client,
+                &request_url,
+                "https://anchor.example/a",
+                expected_hash.as_ref(),
+            )
+            .await;
+
+            server.join().unwrap();
+            assert_eq!(fetched.expect(content_type), body);
+        }
+    }
+
+    #[tokio::test]
+    async fn anchor_candidate_reports_json_hash_mismatch() {
+        let body = br#"{"name":"Dolos"}"#.to_vec();
+        let actual_hash = Hasher::<256>::hash(body.as_ref());
+        let (url, server) = serve_response(body, "200 OK", "Content-Type: application/json\r\n");
+        let (client, request_url) = local_candidate_client(&url);
+        let original_url = "https://anchor.example/drep";
+
+        let error = fetch_anchor_candidate(&client, &request_url, original_url, &[0; 32])
+            .await
+            .expect_err("The hash mismatch was accepted.");
+
+        server.join().unwrap();
+        assert_eq!(
+            error,
+            DrepsInnerMetadataError::new(
+                Code::HashMismatch,
+                format!(
+                    "Hash mismatch when fetching metadata from {original_url}. Expected \"{}\" but got \"{}\".",
+                    hex::encode([0; 32]),
+                    hex::encode(actual_hash),
+                ),
+            ),
+        );
+    }
+
+    #[tokio::test]
+    async fn anchor_candidate_words_http_status_as_blockfrost() {
+        let (url, server) = serve_response(
+            b"<html></html>".to_vec(),
+            "404 Not Found",
+            "Content-Type: text/html\r\n",
+        );
+        let (client, request_url) = local_candidate_client(&url);
+        let original_url = "https://example.com/my-drep-info.json";
+
+        let error = fetch_anchor_candidate(&client, &request_url, original_url, &[0; 32])
+            .await
+            .expect_err("The 404 answer was accepted.");
+
+        server.join().unwrap();
+        assert_eq!(
+            error,
+            DrepsInnerMetadataError::new(
+                Code::HttpResponseError,
+                "Error Offchain Voting Anchor: HTTP Response error from https://example.com/my-drep-info.json resulted in HTTP status code : 404 \"Not Found\"".to_string(),
+            ),
+        );
     }
 
     #[tokio::test]
@@ -1306,6 +1603,13 @@ mod offchain_tests {
             .expect("The invalid JSON was accepted.");
         assert_eq!(error.code, Code::DecodeError);
         assert!(error.message.contains(original_url));
+        assert!(
+            error.message.starts_with(
+                "Error Offchain Voting Anchor: JSON decode error from when fetching metadata from Just ipfs://bafy-invalid-json resulted in : \""
+            ),
+            "{}",
+            error.message,
+        );
     }
 
     #[test]
@@ -1737,6 +2041,8 @@ pub struct UtxoOutputModelBuilder<'a> {
     output: MultiEraOutput<'a>,
     is_collateral: bool,
     block_data: Option<BlockRefMeta>,
+    /// The time of the creating block, for the models that report it.
+    block_time: Option<u64>,
     consumed_by_tx: Option<TxHash>,
 }
 
@@ -1751,6 +2057,7 @@ impl<'a> UtxoOutputModelBuilder<'a> {
             output,
             is_collateral: false,
             block_data: None,
+            block_time: None,
             consumed_by_tx: None,
         }
     }
@@ -1766,6 +2073,7 @@ impl<'a> UtxoOutputModelBuilder<'a> {
             output,
             is_collateral: true,
             block_data: None,
+            block_time: None,
             consumed_by_tx: None,
         }
     }
@@ -1773,6 +2081,13 @@ impl<'a> UtxoOutputModelBuilder<'a> {
     pub fn with_block_data(self, block_data: BlockRefMeta) -> Self {
         Self {
             block_data: Some(block_data),
+            ..self
+        }
+    }
+
+    pub fn with_block_time(self, block_time: u64) -> Self {
+        Self {
+            block_time: Some(block_time),
             ..self
         }
     }
@@ -1922,53 +2237,114 @@ impl<'a> IntoModel<ScriptUtxosInner> for UtxoOutputModelBuilder<'a> {
     }
 }
 
-impl IntoModel<String> for alonzo::Metadatum {
-    type SortKey = ();
+impl<'a> IntoModel<AssetUtxoContentInner> for UtxoOutputModelBuilder<'a> {
+    type SortKey = (u64, usize, u32);
 
-    fn into_model(self) -> Result<String, StatusCode> {
-        let out = match self {
-            alonzo::Metadatum::Int(x) => x.to_string(),
-            alonzo::Metadatum::Bytes(x) => format!("0x{}", hex::encode(x.as_slice())),
-            alonzo::Metadatum::Text(x) => x.to_string(),
-            alonzo::Metadatum::Array(_) => "array".to_string(),
-            alonzo::Metadatum::Map(_) => "map".to_string(),
+    fn sort_key(&self) -> Option<Self::SortKey> {
+        self.block_data
+            .as_ref()
+            .map(|data| (data.slot, data.tx_index, self.txo_ref.1))
+    }
+
+    fn into_model(self) -> Result<AssetUtxoContentInner, StatusCode> {
+        let inline_datum = self.output.datum().and_then(|x| match x {
+            DatumOption::Hash(_) => None,
+            DatumOption::Data(x) => Some(x),
+        });
+
+        let inline_datum_json = inline_datum
+            .as_ref()
+            .map(|x| PlutusDataWrapper(x.0.deref().clone()).as_value())
+            .transpose()?;
+
+        // As on the address listing, a live UTxO whose creating block the
+        // archive no longer holds (pruned history) is still listed, its block
+        // fields left empty.
+        let block_hash = self
+            .block_data
+            .as_ref()
+            .map(|b| b.hash.to_string())
+            .unwrap_or_default();
+        let block_height = self.block_data.as_ref().map_or(0, |b| b.height);
+        let block_time = self.block_time.unwrap_or_default();
+
+        let out = AssetUtxoContentInner {
+            address: self.output.address().into_model()?,
+            tx_hash: self.txo_ref.0.to_string(),
+            output_index: try_into_or_500!(self.txo_ref.1),
+            amount: self.output.value().into_model()?,
+            block: block_hash,
+            block_height: try_into_or_500!(block_height),
+            block_time: try_into_or_500!(block_time),
+            data_hash: self.output.datum().map(|x| match x {
+                DatumOption::Hash(x) => x.to_string(),
+                DatumOption::Data(x) => x.original_hash().to_string(),
+            }),
+            // re-encode the raw datum so the hex matches the on-chain bytes
+            inline_datum: inline_datum
+                .map(|x| minicbor::to_vec(&x.0))
+                .transpose()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .map(hex::encode),
+            inline_datum_json,
+            reference_script_hash: self
+                .output
+                .script_ref()
+                .map(|h| h.into_model())
+                .transpose()?,
         };
 
         Ok(out)
     }
 }
 
+/// Converts a metadatum to JSON.
+pub fn metadatum_to_json(metadatum: &alonzo::Metadatum) -> serde_json::Value {
+    fold_tree(
+        metadatum,
+        |node, children: Vec<serde_json::Value>| match node {
+            alonzo::Metadatum::Int(x) => serde_json::Number::from_i128(i128::from(*x))
+                .map(serde_json::Value::Number)
+                .unwrap_or_else(|| serde_json::Value::String(x.to_string())),
+            alonzo::Metadatum::Text(x) => serde_json::Value::String(x.clone()),
+            alonzo::Metadatum::Bytes(x) => {
+                serde_json::Value::String(format!("0x{}", hex::encode(x.as_slice())))
+            }
+            alonzo::Metadatum::Array(_) => serde_json::Value::Array(children),
+            alonzo::Metadatum::Map(_) => {
+                let mut fields = serde_json::Map::new();
+                let mut children = children.into_iter();
+
+                // children alternate key and value
+                while let (Some(key), Some(value)) = (children.next(), children.next()) {
+                    let key = match key {
+                        serde_json::Value::String(key) => key,
+                        serde_json::Value::Number(key) => key.to_string(),
+                        // a structured key becomes the word `array` or `map`
+                        other => {
+                            let word = if other.is_array() { "array" } else { "map" };
+                            direct_json::drop_value(other);
+                            word.to_string()
+                        }
+                    };
+
+                    // a repeated key keeps its last value
+                    if let Some(replaced) = fields.insert(key, value) {
+                        direct_json::drop_value(replaced);
+                    }
+                }
+
+                serde_json::Value::Object(fields)
+            }
+        },
+    )
+}
+
 impl IntoModel<serde_json::Value> for alonzo::Metadatum {
     type SortKey = ();
 
     fn into_model(self) -> Result<serde_json::Value, StatusCode> {
-        let out = match self {
-            alonzo::Metadatum::Int(x) => serde_json::Number::from_i128(x.into())
-                .map(serde_json::Value::Number)
-                .unwrap_or(serde_json::Value::String(x.to_string())),
-            alonzo::Metadatum::Text(x) => serde_json::Value::String(x.to_string()),
-            alonzo::Metadatum::Bytes(x) => {
-                let hex_str = format!("0x{}", hex::encode(x.as_slice()));
-
-                serde_json::Value::String(hex_str)
-            }
-            alonzo::Metadatum::Array(x) => {
-                let items: Vec<_> = x.into_iter().map(|x| x.into_model()).try_collect()?;
-
-                serde_json::Value::Array(items)
-            }
-            alonzo::Metadatum::Map(x) => {
-                let items: serde_json::Map<String, serde_json::Value> = x
-                    .iter()
-                    .map(|(k, v)| Ok((k.clone().into_model()?, v.clone().into_model()?)))
-                    .try_collect()
-                    .map_err(|_: StatusCode| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-                serde_json::Value::Object(items)
-            }
-        };
-
-        Ok(out)
+        Ok(metadatum_to_json(&self))
     }
 }
 
@@ -2080,6 +2456,23 @@ impl IntoModel<TxContentPoolCertsInnerRelaysInner> for alonzo::Relay {
     }
 }
 
+/// An integer as a JSON number: exact within the `i64` and `u64` ranges, and
+/// the nearest `f64` past them, the widest number `serde_json` holds here.
+fn json_integer(value: &BigInt) -> Result<serde_json::Number, StatusCode> {
+    if let Some(x) = value.to_i64() {
+        return Ok(x.into());
+    }
+
+    if let Some(x) = value.to_u64() {
+        return Ok(x.into());
+    }
+
+    value
+        .to_f64()
+        .and_then(serde_json::Number::from_f64)
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+}
+
 pub struct PlutusDataWrapper(pub PlutusData);
 impl PlutusDataWrapper {
     fn as_value(&self) -> Result<serde_json::Value, StatusCode> {
@@ -2131,37 +2524,26 @@ impl PlutusDataWrapper {
                 )])))
             }
 
-            PlutusData::BigInt(x) => match x {
-                pallas::ledger::primitives::BigInt::Int(int) => {
-                    let i = Into::<i128>::into(*int);
-                    Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
-                        "int".to_string(),
-                        serde_json::Value::Number((i as i64).into()),
-                    )])))
-                }
-                pallas::ledger::primitives::BigInt::BigUInt(bounded_bytes) => {
-                    let bigint = num_bigint::BigUint::from_bytes_be(bounded_bytes.as_slice());
-                    let number = serde_json::Number::from_f64(
-                        bigint.to_f64().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
-                    )
-                    .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-                    Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
-                        "int".to_string(),
-                        serde_json::Value::Number(number),
-                    )])))
-                }
-                pallas::ledger::primitives::BigInt::BigNInt(bounded_bytes) => {
-                    let bigint = num_bigint::BigInt::from_signed_bytes_be(bounded_bytes.as_slice());
-                    let number = serde_json::Number::from_f64(
-                        bigint.to_f64().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
-                    )
-                    .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-                    Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
-                        "int".to_string(),
-                        serde_json::Value::Number(number),
-                    )])))
-                }
-            },
+            PlutusData::BigInt(x) => {
+                let value = match x {
+                    pallas::ledger::primitives::BigInt::Int(int) => {
+                        BigInt::from(Into::<i128>::into(*int))
+                    }
+                    pallas::ledger::primitives::BigInt::BigUInt(bounded_bytes) => {
+                        BigInt::from(num_bigint::BigUint::from_bytes_be(bounded_bytes.as_slice()))
+                    }
+                    // a CBOR negative bignum (tag 3) holds n for the value -1 - n
+                    pallas::ledger::primitives::BigInt::BigNInt(bounded_bytes) => {
+                        let n = num_bigint::BigUint::from_bytes_be(bounded_bytes.as_slice());
+                        -BigInt::from(n) - 1
+                    }
+                };
+
+                Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
+                    "int".to_string(),
+                    serde_json::Value::Number(json_integer(&value)?),
+                )])))
+            }
 
             PlutusData::BoundedBytes(x) => {
                 Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
@@ -2184,6 +2566,41 @@ impl IntoModel<HashMap<String, serde_json::Value>> for PlutusDataWrapper {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{mixed_metadatum, nested_metadatum};
+
+    /// The JSON of a metadatum with every variant, structured and duplicate
+    /// keys, and an integer outside the `i64` range.
+    #[test]
+    fn metadatum_json_keeps_its_output() {
+        let json: serde_json::Value = mixed_metadatum().into_model().unwrap();
+
+        assert_eq!(
+            serde_json::to_string(&json).unwrap(),
+            r#"{"-18446744073709551616":"huge key","0x6e616d65":"-18446744073709551616","0xff00":"0xff00","7":{"y":[],"z":-3},"a":[1,"x","0x6f6b"],"array":"array key","b":"second","map":"map key"}"#
+        );
+    }
+
+    /// The converter frees what it does not keep: the JSON of a structured key
+    /// and the value that a repeated key replaces. Both hold many nesting
+    /// levels here.
+    #[test]
+    fn metadatum_json_frees_the_parts_it_drops() {
+        use pallas::codec::utils::KeyValuePairs;
+
+        let text = |x: &str| alonzo::Metadatum::Text(x.to_string());
+        let int = |x: i64| alonzo::Metadatum::Int(x.into());
+        let metadatum = alonzo::Metadatum::Map(KeyValuePairs::Def(vec![
+            (nested_metadatum(100_000), int(1)),
+            (text("a"), nested_metadatum(100_000)),
+            (text("a"), int(2)),
+        ]));
+
+        let json = metadatum_to_json(&metadatum);
+        assert_eq!(json, serde_json::json!({"array": 1, "a": 2}));
+
+        // pallas frees the metadatum itself, which is outside this test
+        std::mem::forget(metadatum);
+    }
 
     #[test]
     fn redeemer_fee_charges_ceiled_price() {
@@ -2205,5 +2622,125 @@ mod tests {
 
         // 10 * 577/10000 + 100 * 721/10000000 = 0.584... — the fee rounds up
         assert_eq!(redeemer_fee(&units, &prices).expect("fee"), 1);
+    }
+
+    fn asset_utxo_output(datum: Option<PlutusData>) -> Vec<u8> {
+        use pallas::codec::utils::{CborWrap, KeepRaw};
+        use pallas::ledger::primitives::conway::{PostAlonzoTransactionOutput, Value};
+
+        let output = PostAlonzoTransactionOutput {
+            address: vec![0x60; 29].into(),
+            value: Value::Coin(1_000_000),
+            datum_option: datum
+                .map(|datum| KeepRaw::from(DatumOption::Data(CborWrap(KeepRaw::from(datum))))),
+            script_ref: None,
+        };
+
+        minicbor::to_vec(&output).unwrap()
+    }
+
+    /// The asset UTxO model carries the block height and time and decodes the
+    /// inline datum into JSON next to its CBOR.
+    #[test]
+    fn asset_utxo_model_exposes_block_position_and_datum_json() {
+        use pallas::ledger::traverse::Era;
+
+        let datum = PlutusData::BigInt(pallas::ledger::primitives::BigInt::Int(42.into()));
+        let bytes = asset_utxo_output(Some(datum));
+        let output = MultiEraOutput::decode(Era::Conway, &bytes).unwrap();
+
+        let builder = UtxoOutputModelBuilder::from_output(Hash::from([0xaa; 32]), 3, output)
+            .with_block_data(BlockRefMeta {
+                slot: 100,
+                hash: Hash::from([0x11; 32]),
+                height: 7,
+                tx_hash: Hash::from([0xaa; 32]),
+                tx_index: 2,
+            })
+            .with_block_time(1_700_000_000);
+
+        let model: AssetUtxoContentInner = builder.into_model().unwrap();
+
+        assert_eq!(model.tx_hash, Hash::from([0xaa; 32]).to_string());
+        assert_eq!(model.output_index, 3);
+        assert_eq!(model.block, Hash::from([0x11; 32]).to_string());
+        assert_eq!(model.block_height, 7);
+        assert_eq!(model.block_time, 1_700_000_000);
+        assert_eq!(model.inline_datum.as_deref(), Some("182a"));
+        assert_eq!(
+            model.inline_datum_json,
+            Some(serde_json::json!({ "int": 42 }))
+        );
+        assert!(model.data_hash.is_some());
+        assert_eq!(model.reference_script_hash, None);
+    }
+
+    /// An output whose creating block the archive no longer holds is still a
+    /// row, its block fields left empty, as on the address listing.
+    #[test]
+    fn asset_utxo_model_without_block_data_leaves_block_fields_empty() {
+        use pallas::ledger::traverse::Era;
+
+        let bytes = asset_utxo_output(None);
+        let output = MultiEraOutput::decode(Era::Conway, &bytes).unwrap();
+        let builder = UtxoOutputModelBuilder::from_output(Hash::from([0xaa; 32]), 0, output);
+
+        let model: AssetUtxoContentInner = builder.into_model().unwrap();
+        assert_eq!(model.tx_hash, Hash::from([0xaa; 32]).to_string());
+        assert_eq!(model.block, "");
+        assert_eq!(model.block_height, 0);
+        assert_eq!(model.block_time, 0);
+    }
+
+    /// Datum integers keep their value in JSON: exact across the `i64` and
+    /// `u64` ranges, a negative bignum read as -1 minus its magnitude, and the
+    /// nearest float only past `u64`.
+    #[test]
+    fn plutus_data_integers_keep_their_value_in_json() {
+        use pallas::ledger::primitives::{BigInt as PlutusInt, BoundedBytes, Int};
+
+        let json = |x: PlutusInt| {
+            PlutusDataWrapper(PlutusData::BigInt(x))
+                .as_value()
+                .unwrap()
+                .to_string()
+        };
+        let int = |x: i128| PlutusInt::Int(Int::try_from(x).unwrap());
+        let bytes = |x: Vec<u8>| BoundedBytes::from(x);
+
+        assert_eq!(json(int(42)), r#"{"int":42}"#);
+        assert_eq!(json(int(-42)), r#"{"int":-42}"#);
+        assert_eq!(
+            json(int(9_223_372_036_854_775_808)),
+            r#"{"int":9223372036854775808}"#
+        );
+        assert_eq!(
+            json(int(u64::MAX as i128)),
+            r#"{"int":18446744073709551615}"#
+        );
+        assert_eq!(
+            json(int(i64::MIN as i128)),
+            r#"{"int":-9223372036854775808}"#
+        );
+
+        // tag 2 and tag 3 bignums
+        assert_eq!(
+            json(PlutusInt::BigUInt(bytes(vec![0x80, 0, 0, 0, 0, 0, 0, 0]))),
+            r#"{"int":9223372036854775808}"#
+        );
+        assert_eq!(
+            json(PlutusInt::BigNInt(bytes(vec![0x80]))),
+            r#"{"int":-129}"#
+        );
+        assert_eq!(
+            json(PlutusInt::BigNInt(bytes(vec![
+                0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+            ]))),
+            r#"{"int":-9223372036854775808}"#
+        );
+
+        // past `u64` only a float holds it
+        let past_u64 = json(PlutusInt::BigUInt(bytes(vec![1, 0, 0, 0, 0, 0, 0, 0, 0])));
+        assert_eq!(past_u64, r#"{"int":1.8446744073709552e+19}"#);
     }
 }

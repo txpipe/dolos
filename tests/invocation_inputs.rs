@@ -276,7 +276,7 @@ fn bootstrap_stelae_defaults_to_the_network_official_repository() {
 
     let output = proxy.run(&node, &["bootstrap", "stelae", "--insecure"], None);
 
-    assert!(!output.status.success(), "the proxy has no stele");
+    assert!(!output.status.success(), "the proxy has no snapshot");
     assert!(
         proxy
             .authorizations("/v2/cardano/preview/")
@@ -313,7 +313,7 @@ fn force_restores_with_the_credentials_it_resolved() {
         Some("token = \"one-shot\"\n"),
     );
 
-    assert!(!output.status.success(), "the proxy has no stele");
+    assert!(!output.status.success(), "the proxy has no snapshot");
     assert!(
         proxy
             .authorizations("/stelae/preview/")
@@ -341,7 +341,7 @@ fn a_custom_network_reads_the_official_registry_anonymously() {
         None,
     );
 
-    assert!(!output.status.success(), "the proxy has no stele");
+    assert!(!output.status.success(), "the proxy has no snapshot");
     assert!(proxy.requests() > 0, "the registry was never read");
     assert!(
         proxy
@@ -353,6 +353,59 @@ fn a_custom_network_reads_the_official_registry_anonymously() {
         "bootstrap stelae sent credentials for a custom network: {:?}\n{}",
         proxy.seen.lock().unwrap(),
         stderr(&output)
+    );
+}
+
+/// `bootstrap stelae --continue` over a registry record pulls the recorded
+/// epoch's tag and never `latest`, which `--point` defaults to and the soak
+/// chart passes: the restore is handed the recorded point, not only resolved
+/// with it.
+#[test]
+fn a_registry_resume_pulls_the_recorded_epoch_tag() {
+    let node = Node::new();
+    std::fs::create_dir_all(&node.config.storage.path).unwrap();
+
+    let record = dolos_snapshot::restore::SourceRecord::new(
+        &networks::PREVIEW.stelae.registry.parse().unwrap(),
+        42,
+        format!("sha256:{}", "ab".repeat(32)).parse().unwrap(),
+    )
+    .unwrap();
+    record
+        .save(&dolos_snapshot::restore::source_path_in(
+            &node.config.storage.path,
+        ))
+        .unwrap();
+
+    let proxy = Proxy::start();
+    let output = proxy.run(
+        &node,
+        &["bootstrap", "stelae", "--continue", "--insecure"],
+        None,
+    );
+
+    assert!(!output.status.success(), "the proxy has no snapshot");
+
+    let targets: Vec<String> = proxy
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|seen| seen.target.clone())
+        .collect();
+
+    assert!(
+        targets
+            .iter()
+            .any(|target| target.ends_with("/cardano/preview/dolos/manifests/epoch-42")),
+        "the recorded epoch tag was not pulled: {targets:?}\n{}",
+        stderr(&output)
+    );
+    assert!(
+        !targets
+            .iter()
+            .any(|target| target.contains("/manifests/latest")),
+        "the resume read latest: {targets:?}"
     );
 }
 

@@ -123,6 +123,26 @@ pub fn check_entity_key(kind: EntityKind, key: &[u8]) -> Result<(), ArchiveError
     Ok(())
 }
 
+/// How many of `bodies`, the blocks an archive holds at `after`'s slot in
+/// chain order, a [`ArchiveStore::truncate_front`] to `after` keeps: those
+/// through the block `after` names. A slot holds more than one only for a
+/// Byron boundary block and the main block chained onto it. A point naming no
+/// hash, or a block the slot does not hold, keeps them all.
+pub fn blocks_through(bodies: &[impl AsRef<[u8]>], after: &ChainPoint) -> usize {
+    let Some(hash) = after.hash() else {
+        return bodies.len();
+    };
+
+    if bodies.len() < 2 {
+        return bodies.len();
+    }
+
+    bodies
+        .iter()
+        .position(|body| crate::wal::block_hash(body.as_ref()) == Some(hash))
+        .map_or(bodies.len(), |at| at + 1)
+}
+
 /// Iterator used by backends that do not implement
 /// [`ArchiveStore::iter_archive_tags`].
 ///
@@ -227,7 +247,7 @@ pub trait ArchiveWriter: Send + Sync + 'static {
     /// Record in the entity index the slot an entity was first seen at.
     ///
     /// The seal of an immutable epoch calls this, in the same commit as the
-    /// epoch's sealed logs, and a restore writes a stele's entity layers
+    /// epoch's sealed logs, and a restore writes a snapshot's entity layers
     /// through it. Nothing undoes an entry: a rollback cannot reach a sealed
     /// epoch, so neither [`ArchiveWriter::undo`] nor
     /// [`ArchiveWriter::undo_index`] touches the index. Writing an entry again
@@ -243,6 +263,111 @@ pub trait ArchiveWriter: Send + Sync + 'static {
     ) -> Result<(), ArchiveError>;
 
     fn commit(self) -> Result<(), ArchiveError>;
+}
+
+/// The writes of one restore layer whose rows arrive in ascending key order:
+/// a `blocks` layer, or one `log-*` layer.
+///
+/// A backend may write them past its journal, straight into sorted tables.
+/// Some rows can become visible before [`ArchiveIngest::finish`]; all of them
+/// are visible once it returns, and durable once [`ArchiveStore::persist`]
+/// returns after it. Rows are keyed, so writing a layer again rewrites them.
+pub trait ArchiveIngest {
+    /// Blocks in chain order.
+    fn blocks(&mut self, blocks: Vec<(ChainPoint, RawBlock)>) -> Result<(), ArchiveError>;
+
+    /// Log rows of `ns`, in key order.
+    fn logs(&mut self, ns: Namespace, rows: Vec<(LogKey, EntityValue)>)
+        -> Result<(), ArchiveError>;
+
+    /// Make every row written visible.
+    fn finish(self: Box<Self>) -> Result<(), ArchiveError>;
+}
+
+/// The batched [`ArchiveIngest`]: one writer commit per call, for a backend
+/// that writes nothing past its writer.
+pub struct BatchIngest<'a, A>(&'a A);
+
+impl<'a, A: ArchiveStore> BatchIngest<'a, A> {
+    pub fn new(store: &'a A) -> Self {
+        Self(store)
+    }
+}
+
+impl<A: ArchiveStore> ArchiveIngest for BatchIngest<'_, A> {
+    fn blocks(&mut self, blocks: Vec<(ChainPoint, RawBlock)>) -> Result<(), ArchiveError> {
+        let writer = self.0.start_writer()?;
+
+        for (point, block) in &blocks {
+            writer.apply(point, block)?;
+        }
+
+        writer.commit()
+    }
+
+    fn logs(
+        &mut self,
+        ns: Namespace,
+        rows: Vec<(LogKey, EntityValue)>,
+    ) -> Result<(), ArchiveError> {
+        let writer = self.0.start_writer()?;
+
+        for (key, value) in &rows {
+            writer.write_log(ns, key, value)?;
+        }
+
+        writer.commit()
+    }
+
+    fn finish(self: Box<Self>) -> Result<(), ArchiveError> {
+        Ok(())
+    }
+}
+
+/// Work a store runs on its own threads until [`Settling::join`].
+///
+/// Dropping it joins too, discarding the outcome, so no thread outlives the
+/// caller that started it.
+#[must_use = "the work runs until it is joined"]
+#[derive(Default)]
+pub struct Settling(Vec<std::thread::JoinHandle<Result<(), ArchiveError>>>);
+
+impl Settling {
+    /// Nothing to wait for.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    pub fn of(threads: Vec<std::thread::JoinHandle<Result<(), ArchiveError>>>) -> Self {
+        Self(threads)
+    }
+
+    /// Wait for every thread; the first error, or panic, is the outcome.
+    pub fn join(mut self) -> Result<(), ArchiveError> {
+        let mut outcome = Ok(());
+
+        for thread in std::mem::take(&mut self.0) {
+            let joined = thread.join().unwrap_or_else(|_| {
+                Err(ArchiveError::InternalError(
+                    "a settling thread panicked".into(),
+                ))
+            });
+
+            if outcome.is_ok() {
+                outcome = joined;
+            }
+        }
+
+        outcome
+    }
+}
+
+impl Drop for Settling {
+    fn drop(&mut self) {
+        for thread in self.0.drain(..) {
+            let _ = thread.join();
+        }
+    }
 }
 
 /// An iterator that supports efficient skipping without materializing items.
@@ -383,14 +508,33 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
         max_prune_index_rows: Option<u64>,
     ) -> Result<bool, ArchiveError>;
 
+    /// Drop everything the archive holds after `after`: the blocks the chain
+    /// puts after it, at its slot too, and the log rows at or past its slot.
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError>;
 
     /// Sync every write committed before this call to durable storage.
     ///
     /// When it returns `Ok`, a hard stop (power loss, `SIGKILL`) can no longer
-    /// lose a commit that returned before the call. A backend whose commits
-    /// are already durable, or that holds nothing on disk, returns `Ok`.
+    /// lose a commit, or a finished [`ArchiveIngest`], that returned before
+    /// the call. A backend whose commits are already durable, or that holds
+    /// nothing on disk, returns `Ok`.
     fn persist(&self) -> Result<(), ArchiveError>;
+
+    /// Start writing one ascending restore layer ([`ArchiveIngest`]).
+    ///
+    /// Batched unless the backend says otherwise.
+    fn start_ingest(&self) -> Result<Box<dyn ArchiveIngest + '_>, ArchiveError> {
+        Ok(Box::new(BatchIngest::new(self)))
+    }
+
+    /// Start rewriting, on the store's own threads, what ingestion left into
+    /// the layout ordinary writes settle to.
+    ///
+    /// A restore starts it after its last epoch layer and joins it before it
+    /// writes the cursor. Nothing to do unless the backend ingests.
+    fn settle_ingested(&self) -> Result<Settling, ArchiveError> {
+        Ok(Settling::none())
+    }
 
     /// Get the slot for a block by its hash (exact lookup).
     fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError>;

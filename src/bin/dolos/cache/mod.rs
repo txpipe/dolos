@@ -728,7 +728,7 @@ impl std::fmt::Display for Stats {
         writeln!(f)?;
         write!(
             f,
-            "Hit rates are not kept on disk: read them from a running node's `dolos-cache` metrics."
+            "Hit rates are not kept on disk: read them from a running node's `dolos.cache` metrics."
         )
     }
 }

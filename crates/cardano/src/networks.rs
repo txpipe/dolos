@@ -25,7 +25,7 @@ pub struct Mithril {
     pub ancillary_vkey: Option<&'static str>,
 }
 
-/// The official stele repository for a known network and the read-only user
+/// The official snapshot repository for a known network and the read-only user
 /// it is read as. The user's password is
 /// `dolos_snapshot::node::OFFICIAL_REGISTRY_PASSWORD`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

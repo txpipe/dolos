@@ -1,4 +1,4 @@
-//! Reading a stele back into an empty store set.
+//! Reading a snapshot back into an empty store set.
 //!
 //! [`crate::export`]'s inverse, and the half that closes the loop: a node with
 //! no data rebuilds itself from a directory of layers and is indistinguishable
@@ -10,15 +10,22 @@
 //! implementation preference — each step exists because of what the one before
 //! it established:
 //!
-//! 1. Read the inscription, check the profile, and refuse a stele whose
-//!    `position.network.magic` is not this node's — **before anything is
-//!    written**, because half a mainnet ledger under a preprod configuration is
-//!    not a state a node recovers from.
-//! 2. Select layers ([`plan`]) and preflight free space ([`Plan::preflight`]).
-//!    Selection is profile-side by necessity: a layer's `scope` is opaque to
-//!    the protocol, so nothing but this crate can read an epoch out of one.
+//! 1. Resolve the snapshot's chain — every inscription from the head back to
+//!    the first of its lineage, each linked by digest — check the profile, and
+//!    refuse a snapshot whose `position.network.magic` is not this node's —
+//!    **before anything is written**, because half a mainnet ledger under a
+//!    preprod configuration is not a state a node recovers from.
+//! 2. Select layers over the chain's layer set ([`plan`]) and preflight free
+//!    space ([`Plan::preflight`]). Selection is profile-side by necessity: a
+//!    layer's `scope` is opaque to the protocol, so nothing but this crate can
+//!    read an epoch out of one.
 //! 3. Per epoch: `blocks`, then the `log-{ns}` layers the epoch carries, then
 //!    its `entity-{kind}` layers, then `indexes` — all into the archive store.
+//!    A closed epoch's `blocks` may come from a second repository; see below.
+//!    The `blocks` and `log-{ns}` layers arrive in key order and go through
+//!    [`ArchiveStore::start_ingest`]; after the last epoch the archive settles
+//!    what it ingested ([`ArchiveStore::settle_ingested`]) while the tip is
+//!    restored, and the restore joins it before the cursor.
 //! 4. The state tip — every shard of every `state-{ns}` kind. Derive the
 //!    live-UTxO tags from each incoming UTxO chunk and commit them with the
 //!    set. They are never shipped — ADR-004's Amendment 2.
@@ -26,6 +33,43 @@
 //!
 //! Nothing is added for the WAL: `bootstrap::run` reseeds it from the state
 //! cursor after a Stelae restore.
+//!
+//! ## The transport reads ahead, and the restore keeps that order
+//!
+//! A registry transport downloads a layer's whole blob before it yields a
+//! record, so read one at a time a restore waits on the network once per
+//! layer. A restore therefore reads through one
+//! [`SnapshotReader::stream_layers`], opened over the layers it will drain
+//! (every layer of the plan the checkpoint has not recorded, in plan order) at
+//! its read-ahead depth `K`. A registry downloads up to `K` of them on its own
+//! runtime while the restore drains the current one; a directory, whose blobs
+//! are already local, reads each when it is taken. The restore takes each
+//! layer from the stream at its turn, refuses one that is not the layer whose
+//! turn it is, and drains it as above, so the writes, each layer's persist and
+//! record, the state tip and the cursor keep the order of steps 3 to 5. A layer
+//! whose read failed, after the transport's own retries, fails the restore at
+//! its turn, once every layer before it is recorded. The stream is dropped
+//! before the restore returns, however it returns, which cancels the reads
+//! still in flight and drops what they staged. A depth of 0 or 1 reads one
+//! layer at a time.
+//!
+//! ## Closed epochs' blocks can be in a blocks repository
+//!
+//! Decision 0080 moves the blocks of closed epochs to the
+//! `io.txpipe.cardano.blocks` profile, and a Dolos snapshot names the blocks
+//! snapshot at its own sequence in `position.blocks`. [`plan`] then takes each
+//! kept epoch's `blocks` layer from that snapshot's chain, and refuses a chain
+//! whose head is not the snapshot named, or no chain at all, before anything
+//! is written. The blocks layers are read through a second stream, bound to
+//! the blocks profile, and the two streams share the restore's read-ahead
+//! ([`ReadAhead`]). Nothing else moves: the order per epoch is the same, the
+//! tip's boundary block is still the snapshot's own and is written after the
+//! last epoch from the blocks repository, and the progress file is one file
+//! keyed by the snapshot's digest, which covers the reference.
+//!
+//! A snapshot that lists a closed epoch's `blocks` layer is refused, as no
+//! export writes one. No blocks repository is read for a snapshot that names no
+//! blocks snapshot, or when the history window keeps no epoch before the cut.
 //!
 //! ## Why `set_cursor` is the last write
 //!
@@ -42,7 +86,7 @@
 //! What it leaves is worth stating rather than discovering: an interruption
 //! anywhere in a restore leaves a node `has_existing_data()` reports as empty.
 //! A resumed restore repairs it cheaply, because the epoch layers stay
-//! checkpointed; without one the stele is restored again from the top over
+//! checkpointed; without one the snapshot is restored again from the top over
 //! keyed writes, which is a rewrite and not a duplication — the behaviour
 //! every interruption before the tip already had.
 //!
@@ -50,15 +94,15 @@
 //!
 //! [`Checkpoint`] carries the progress file. Its rule is
 //! [`stelae::plan::Resume`]'s — a layer is done when its `diffId` is recorded,
-//! which is a fact about bytes and not about the stele they were published in —
-//! and this module supplies the half the protocol cannot: **which layers may be
-//! skipped at all.**
+//! which is a fact about bytes and not about the snapshot they were published
+//! in — and this module supplies the half the protocol cannot: **which layers
+//! may be skipped at all.**
 //!
-//! Epoch layers may. They describe a closed window, so the same `diffId` in a
-//! newer inscription is the same layer. A `log-account-epochs` window settles
-//! one stele after it closes ([`crate::is_settled`]); its settled layer is
-//! new bytes under a new `diffId`, which the checkpoint has not recorded and so
-//! restores.
+//! Epoch layers may. A `diffId` names bytes, so the same `diffId` under a
+//! newer inscription is the same layer. A `log-account-epochs` window is in the
+//! tip until it settles two snapshots after it opens ([`crate::roles`]); its
+//! settled layer is new bytes under a new `diffId`, which the checkpoint has
+//! not recorded and so restores.
 //!
 //! **The state tip never may.** It is the tip: it is rewritten by every
 //! publish, and — independently of that — a tip layer's descriptor scope is
@@ -66,14 +110,6 @@
 //! distinguish one publish's tip from another's even if a caller wanted it to.
 //! So the tip's layers are never asked about and never recorded; every resumed
 //! restore writes them and derives their live-UTxO tags again.
-//!
-//! A **retained state dump** is the other side of that argument rather than an
-//! exception to it (decision 0026). Its scope is `{"epoch": E, "shard": n}`,
-//! which names the closed epoch it is the state as of, so it is checkpointable
-//! by exactly the rule the epoch layers pass. Nothing exercises that today,
-//! because no restore consumes a dump — [`Plan::state_dumps`] reports them and
-//! stops there. The rule is stated here so that the day one is consumed, the
-//! answer is already the same answer.
 //!
 //! The checkpoint lands after each epoch layer's own commit, which is possible
 //! only because the driver commits per layer. That is the ownership split
@@ -86,6 +122,7 @@
 //! ends with [`ArchiveStore::persist`] before the checkpoint records its
 //! `diffId`: anything the progress file names is on disk, and a stop between a
 //! layer's writes and its record refetches that layer rather than skipping it.
+//! An ingested layer is finished inside the same step, before that persist.
 //! The same rule holds at the end: the state and the archive are persisted
 //! after the cursor commit and before the progress file is removed, so a stop
 //! leaves a durable cursor or a progress file.
@@ -105,15 +142,17 @@
 //! segment file with nothing pointing at them. Reads go through the table, so
 //! the node is correct; the dead space is bounded by one layer and is the price
 //! of not starting over. The preflight carries no addend for it; the reason is
-//! on [`Plan::remaining_uncompressed_size`].
+//! on [`Plan::estimate`].
 //!
 //! ## Memory
 //!
 //! Nothing here holds a layer. Every layer is read through
-//! [`stelae::dir::SteleDir::stream_layer`] under [`Limits`] and drained into
-//! bounded chunks — a mainnet state shard is 402 MB and one epoch of blocks
-//! runs past a gigabyte, so [`stelae::dir::SteleDir::read_layer`] is never on
-//! this path.
+//! [`SnapshotReader::stream_layers`] under [`Limits`] and drained into bounded
+//! chunks — a mainnet state shard is 402 MB and one epoch of blocks runs past
+//! a gigabyte, so [`stelae::dir::SnapshotDir::read_layer`] is never on this
+//! path. A registry reading ahead holds at most `K` staged blobs beside the
+//! layer being drained, each a scratch file and nothing more: a layer's header
+//! is read and its decoder built only when the restore takes it.
 //!
 //! Tags are derived from the incoming UTxO chunks, without scanning the state
 //! store. Holding `iter_utxos()` open while writing tags to the same Fjall
@@ -141,7 +180,8 @@
 //! remain explicit at that boundary.
 
 use std::{
-    collections::BTreeMap,
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -149,16 +189,17 @@ use std::{
 use dolos_cardano::indexes::utxo_index_delta_from_utxo_delta;
 use dolos_core::{
     ArchiveStore, ArchiveWriter, BlockSlot, ChainPoint, EntityKind, EntityRecord, IndexRecord,
-    Namespace, StateStore, StateWriter, UtxoSetDelta,
+    Namespace, Settling, StateStore, StateWriter, UtxoSetDelta,
 };
 use stelae::{
     frame::Limits,
     inscription::{Inscription, LayerDescriptor},
     plan::{Remaining, Resume},
     progress::{Event, Observer, Outcome},
-    transport::{BlobIndex, SteleReader},
-    LayerHeader,
+    transport::{BlobIndex, LayerStream, SnapshotReader},
+    Chain, Digest, LayerHeader, LayerReader, Profile,
 };
+use stelae_blocks::{BlocksProfile, EpochScope, OrderCheck};
 use tracing::info;
 
 use crate::{
@@ -173,6 +214,10 @@ use stelae_driver::preflight;
 
 pub use stelae_driver::restore::{Budget, Checkpoint, Outlook};
 
+/// How many layers a restore reads ahead of the one it drains, unless its
+/// caller says otherwise.
+pub const DEFAULT_READ_AHEAD: usize = 8;
+
 /// This profile's restore [`Budget`].
 ///
 /// The driver deliberately gives `Budget` no default — the read limits are
@@ -182,21 +227,21 @@ pub fn default_budget() -> Budget {
     Budget {
         // The profile's ceiling, not the protocol's default: a restore that
         // read under a tighter limit than the publisher wrote under would
-        // refuse this profile's own steles.
+        // refuse this profile's own snapshots.
         limits: Limits {
             max_record: crate::MAX_RECORD,
             ..Limits::default()
         },
-        commit_records: 50_000,
-        commit_bytes: 64 * 1024 * 1024,
+        commit_records: 500_000,
+        commit_bytes: 512 * 1024 * 1024,
     }
 }
 
 /// The per-epoch layers a restore consumes, for one epoch.
 ///
 /// Every kind is optional: ADR-004 makes layers individually non-mandatory, so
-/// a ledger-only stele carrying no `blocks` is valid and restores into a node
-/// with no chain history rather than into a refusal.
+/// a ledger-only snapshot carrying no `blocks` is valid and restores into a
+/// node with no chain history rather than into a refusal.
 #[derive(Debug, Clone)]
 pub struct EpochLayers {
     pub epoch: u64,
@@ -231,14 +276,16 @@ impl EpochLayers {
 /// What a restore will consume, decided before a single byte is written.
 ///
 /// The mirror of [`crate::export::Plan`]: built up front so a report of what
-/// *would* happen and the restore itself agree by construction.
+/// *would* happen and the restore itself agree by construction. It is drawn
+/// from the snapshot's whole layer set, every inscription's `diff` up to the
+/// head and the head's `tip`.
 #[derive(Debug, Clone)]
 pub struct Plan {
-    /// Where the stele stands. Its magic has already been checked against the
-    /// node's — [`plan`] refuses a mismatch rather than recording one.
+    /// Where the snapshot stands. Its magic has already been checked against
+    /// the node's — [`plan`] refuses a mismatch rather than recording one.
     pub position: Position,
-    /// The stele's `sequence`, which for this profile is the epoch its cursor
-    /// has just entered.
+    /// The snapshot's `sequence`, which for this profile is the epoch its
+    /// cursor has just entered.
     pub sequence: u64,
     /// The epochs whose layers this restore consumes, ascending.
     pub epochs: Vec<EpochLayers>,
@@ -246,51 +293,103 @@ pub struct Plan {
     /// shards ascending inside. Namespace byte order is kind byte order, so
     /// iterating the map is iterating the inscription's own layer order.
     pub state: BTreeMap<Namespace, Vec<LayerDescriptor>>,
-    /// The retained state dumps this stele carries, by the epoch their scope
-    /// names, each shaped like [`Plan::state`] inside.
-    ///
-    /// **Reported and not consumed.** A dump is a past epoch's state, and this
-    /// restore is building a node that stands at the stele's `sequence`;
-    /// nothing in the pipeline has a use for one, so none is fetched, none is
-    /// counted against the disk preflight, and none is in [`Plan::layers`].
-    /// It is here because a stele carrying twenty of them and a stele carrying
-    /// none are different artifacts, and a plan that said nothing about the
-    /// difference would make the restore's report a poorer description of the
-    /// stele than the stele is.
-    ///
-    /// Bootstrapping *at* one of these epochs — consuming a dump as the tip —
-    /// is a later plan's, and nothing here forecloses it: `restore_state`
-    /// takes a kind and a descriptor, and a dump's are the tip's.
-    pub state_dumps: BTreeMap<u64, BTreeMap<Namespace, Vec<LayerDescriptor>>>,
-    /// Epochs the stele carries and the history window excludes.
+    /// Epochs the snapshot carries and the history window excludes.
     pub skipped_epochs: usize,
     /// Layers of a kind this build does not implement, which it skips rather
     /// than refuses — see [`unknown_layers`].
     ///
-    /// Empty for every stele this profile publishes today, and reported rather
-    /// than silent whenever it is not: a restore that quietly dropped a layer
-    /// is a node missing data nothing downstream would notice.
+    /// Empty for every snapshot this profile publishes today, and reported
+    /// rather than silent whenever it is not: a restore that quietly
+    /// dropped a layer is a node missing data nothing downstream would
+    /// notice.
     pub skipped_unknown: Vec<LayerDescriptor>,
+    /// The `diffId`s of the selected layers whose inscription published them
+    /// under another compression than this profile's, which [`Plan::estimate`]
+    /// sizes from their declared size rather than their compressed one. Each
+    /// inscription's compression describes its own layers.
+    pub foreign_compression: BTreeSet<Digest>,
+    /// The blocks snapshot the kept epochs before the cut take their `blocks`
+    /// layer from: the digest `position.blocks` names, which [`plan`] has held
+    /// against the blocks chain it was given. `None` when the restore reads no
+    /// blocks repository.
+    pub blocks: Option<Digest>,
 }
 
-/// One retained state dump a stele carries, as a report counts it.
+/// The repository a planned layer is read from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CarriedDump {
-    /// The epoch the dump's scope names.
-    pub epoch: u64,
-    /// How many state layers it carries.
-    pub carried: usize,
+pub enum Repo {
+    /// The snapshot's own chain.
+    Dolos,
+    /// The blocks snapshot the Dolos snapshot names.
+    Blocks,
 }
 
-impl CarriedDump {
-    /// Whether the dump carries every state layer an epoch has.
-    pub fn is_whole(&self) -> bool {
-        self.carried == crate::state_layer_count()
+/// The blocks snapshot a restore reads, beside the Dolos snapshot: the
+/// transport and its blob index, as [`SnapshotReader::blob_index`] gave it.
+#[derive(Debug)]
+pub struct Blocks<'a, R> {
+    pub snapshot: &'a R,
+    pub index: &'a BlobIndex,
+}
+
+impl<R> Clone for Blocks<'_, R> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<R> Copy for Blocks<'_, R> {}
+
+/// How a restore that reads two repositories shares its read-ahead between
+/// their streams.
+///
+/// The two depths add up to the restore's own, so reading both never fetches
+/// more at once than one stream at that depth did. Most of a plan's layers are
+/// the snapshot's, so the blocks stream takes 2 once there are 4 to share,
+/// which keeps the next epoch's blocks downloading while this epoch's other
+/// layers drain, and reads one layer at a time below that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadAhead {
+    pub dolos: usize,
+    /// 0 when the restore reads no blocks repository.
+    pub blocks: usize,
+}
+
+impl ReadAhead {
+    pub fn split(read_ahead: usize, reads_blocks: bool) -> Self {
+        if !reads_blocks {
+            return Self {
+                dolos: read_ahead,
+                blocks: 0,
+            };
+        }
+
+        let blocks = if read_ahead >= 4 { 2 } else { 1 };
+
+        Self {
+            dolos: read_ahead.saturating_sub(blocks),
+            blocks,
+        }
     }
 
-    /// How many it would carry if it were.
-    pub fn expected() -> usize {
-        crate::state_layer_count()
+    /// Whether both streams read one layer at a time, and so hold one layer
+    /// between them: each takes its layer only once the other's is drained.
+    pub fn serial(&self) -> bool {
+        self.dolos <= 1 && self.blocks <= 1
+    }
+
+    /// How many layers the streams hold staged at once between them.
+    pub fn at_once(&self) -> usize {
+        if self.serial() {
+            return 1;
+        }
+
+        let blocks = match self.blocks {
+            0 => 0,
+            depth => Staging::at_once(depth),
+        };
+
+        Staging::at_once(self.dolos) + blocks
     }
 }
 
@@ -324,8 +423,8 @@ impl Plan {
     /// Derived here rather than in a report, because it is what an operator
     /// acts on: an epoch dropped by the history window is this node's own
     /// configuration, and a layer dropped for a kind this build does not
-    /// implement is a stele from a publisher ahead of it. Empty for every stele
-    /// this profile publishes today.
+    /// implement is a snapshot from a publisher ahead of it. Empty for every
+    /// snapshot this profile publishes today.
     pub fn skipped_kinds(&self) -> Vec<&str> {
         let mut kinds: Vec<&str> = self
             .skipped_unknown
@@ -339,35 +438,6 @@ impl Plan {
         kinds
     }
 
-    /// The retained dumps this stele carries, each with whether it is whole.
-    ///
-    /// A dump may be short of a whole epoch: only the tip is checked for
-    /// completeness — a publisher whose predecessor did not carry every shard
-    /// of an epoch warns and publishes the short dump anyway — so an epoch
-    /// that restores and an epoch missing nine of its shards would
-    /// otherwise be indistinguishable in a report, and the second is not a
-    /// repository that restores that epoch.
-    pub fn carried_dumps(&self) -> Vec<CarriedDump> {
-        self.state_dumps
-            .iter()
-            .map(|(epoch, kinds)| CarriedDump {
-                epoch: *epoch,
-                carried: kinds.values().map(Vec::len).sum(),
-            })
-            .collect()
-    }
-
-    /// The retained dumps this stele carries and this restore does not read.
-    ///
-    /// In no other iterator here: not [`Plan::layers`], not
-    /// [`Plan::uncompressed_size`], not [`Plan::remaining`]. A number an
-    /// operator reads, and nothing a byte is moved for.
-    pub fn dump_layers(&self) -> impl Iterator<Item = &LayerDescriptor> {
-        self.state_dumps
-            .values()
-            .flat_map(|kinds| kinds.values().flatten())
-    }
-
     /// Compressed bytes this restore still has to move, given what is done.
     ///
     /// The number an operator wants at the start of a resumed run, and the one
@@ -378,22 +448,43 @@ impl Plan {
     /// Numbers only. Rendering them is a caller's, and belongs with
     /// [`stelae::progress`] — the seam the export and restore commands share,
     /// and the one [`restore`] reports this run's own byte deltas through.
-    pub fn remaining<R: SteleReader>(
+    ///
+    /// Over both repositories: `blocks` sizes the layers the blocks snapshot
+    /// serves, and is needed when the plan reads one.
+    pub fn remaining<R: SnapshotReader>(
         &self,
-        stele: &R,
+        snapshot: &R,
         index: &BlobIndex,
+        blocks: Option<Blocks<'_, R>>,
         resume: &Resume,
     ) -> Result<Remaining, Error> {
-        Ok(Remaining::of(stele, index, self.remaining_layers(resume))?)
+        let dolos = Remaining::of(snapshot, index, self.remaining_in(Repo::Dolos, resume))?;
+
+        let Some(blocks) = self.paired(blocks)? else {
+            return Ok(dolos);
+        };
+
+        let more = Remaining::of(
+            blocks.snapshot,
+            blocks.index,
+            self.remaining_in(Repo::Blocks, resume),
+        )?;
+
+        Ok(Remaining {
+            layers: dolos.layers + more.layers,
+            compressed_bytes: dolos.compressed_bytes + more.compressed_bytes,
+            unsized_layers: dolos.unsized_layers + more.unsized_layers,
+            largest_compressed: dolos.largest_compressed.max(more.largest_compressed),
+        })
     }
 
     /// The layers a run with `resume` behind it still has to read: the
     /// immutable ones it has not recorded, and every tip layer.
     ///
     /// One definition for both halves of "what is left" — the compressed bytes
-    /// [`Plan::remaining`] reports and the uncompressed room
-    /// [`Plan::remaining_uncompressed_size`] demands. Two filters saying the
-    /// same thing is two places for the resume rule to drift.
+    /// [`Plan::remaining`] reports and the layers [`Plan::staging_peak`]
+    /// stages. Two filters saying the same thing is two places for the resume
+    /// rule to drift; [`Plan::estimate`] applies the same rule kind by kind.
     pub fn remaining_layers<'a>(
         &'a self,
         resume: &'a Resume,
@@ -401,6 +492,94 @@ impl Plan {
         self.immutable_layers()
             .filter(|descriptor| !resume.is_done(&descriptor.diff_id))
             .chain(self.tip_layers())
+    }
+
+    /// Whether the plan carries a `blocks` or a `log-*` layer, the layers
+    /// a restore ingests and then settles.
+    ///
+    /// Asked of the plan rather than of what this run fetched: a resume whose
+    /// earlier run stopped during the settle has nothing left to fetch.
+    pub fn ingests(&self) -> bool {
+        self.epochs
+            .iter()
+            .any(|epoch| epoch.blocks.is_some() || !epoch.logs.is_empty())
+    }
+
+    /// [`Plan::remaining_layers`], for the layers `repo` serves, in plan order.
+    pub fn remaining_in<'a>(
+        &'a self,
+        repo: Repo,
+        resume: &'a Resume,
+    ) -> impl Iterator<Item = &'a LayerDescriptor> {
+        let tip = (repo == Repo::Dolos).then(|| self.tip_layers());
+
+        self.epochs
+            .iter()
+            .flat_map(move |epoch| self.epoch_layers_in(epoch, repo))
+            .filter(|descriptor| !resume.is_done(&descriptor.diff_id))
+            .chain(tip.into_iter().flatten())
+    }
+
+    /// The repository `epoch`'s `blocks` layer is read from. Every kept epoch
+    /// before the cut reads the blocks repository once the plan reads one; the
+    /// tip's epoch, which holds the boundary block, never does.
+    pub fn blocks_repo(&self, epoch: &EpochLayers) -> Repo {
+        match self.blocks.is_some() && epoch.epoch < self.sequence {
+            true => Repo::Blocks,
+            false => Repo::Dolos,
+        }
+    }
+
+    /// `epoch`'s layers that `repo` serves, in plan order.
+    fn epoch_layers_in<'a>(
+        &'a self,
+        epoch: &'a EpochLayers,
+        repo: Repo,
+    ) -> impl Iterator<Item = &'a LayerDescriptor> {
+        let blocks = epoch
+            .blocks
+            .iter()
+            .filter(move |_| self.blocks_repo(epoch) == repo);
+
+        let others = (repo == Repo::Dolos).then(|| {
+            epoch
+                .logs
+                .values()
+                .chain(epoch.entities.values())
+                .chain(epoch.indexes.iter())
+        });
+
+        blocks.chain(others.into_iter().flatten())
+    }
+
+    /// `blocks`, when this plan reads a blocks repository, refused when it
+    /// reads one and `blocks` is `None`.
+    fn paired<'b, R>(&self, blocks: Option<Blocks<'b, R>>) -> Result<Option<Blocks<'b, R>>, Error> {
+        match (self.blocks, blocks) {
+            (None, _) => Ok(None),
+            (Some(_), Some(blocks)) => Ok(Some(blocks)),
+            (Some(reference), None) => Err(Error::BlocksMissing {
+                reference,
+                reason: "this restore was given no blocks snapshot to read them from".to_owned(),
+            }),
+        }
+    }
+
+    /// `descriptor`'s compressed size, asked of the transport `repo` names.
+    fn compressed_size<R: SnapshotReader>(
+        &self,
+        snapshot: &R,
+        index: &BlobIndex,
+        blocks: Option<Blocks<'_, R>>,
+        repo: Repo,
+        descriptor: &LayerDescriptor,
+    ) -> Result<Option<u64>, Error> {
+        match (repo, self.paired(blocks)?) {
+            (Repo::Blocks, Some(blocks)) => {
+                Ok(blocks.snapshot.compressed_size(blocks.index, descriptor)?)
+            }
+            _ => Ok(snapshot.compressed_size(index, descriptor)?),
+        }
     }
 
     /// Uncompressed bytes across the selected layers.
@@ -412,136 +591,458 @@ impl Plan {
         self.layers().map(|l| l.uncompressed_size).sum()
     }
 
-    /// Uncompressed bytes a run with `resume` behind it still has to write.
+    /// What a run with `resume` behind it will occupy on the destination
+    /// volume at its peak, sized from the snapshot's layers.
     ///
-    /// [`Plan::uncompressed_size`] made resume-aware, and the number
-    /// [`Plan::preflight`] sizes the destination on: the layers a resumed run
-    /// will actually write, which is the immutable ones the resume has not
-    /// recorded plus every tip layer. Charging a resume for layers its own
-    /// earlier attempt already committed measures it against free space those
-    /// layers consumed and then bills for them a second time, which refuses
-    /// runs that would finish.
+    /// Over the layers that run still writes, by [`Plan::remaining_layers`]'s
+    /// rule: see [`Estimate`] for what each term counts. `journals` is what the
+    /// destination stores' journals may hold between them; the transport
+    /// states each layer's compressed size, when it can.
     ///
-    /// **No addend.** A redone layer is rewritten and not appended — every
-    /// write path is keyed — with one exception, the fjall archive, which
-    /// leaves the superseded block bodies of an interrupted `blocks` layer as
-    /// dead space in its segment file. That is past spend, not future spend:
-    /// [`preflight::check`] reads free space at check time, so those bytes are
-    /// already out of what it compares against, and the layer that left them
-    /// is not recorded as done, so its full uncompressed size is charged
-    /// again.
-    pub fn remaining_uncompressed_size(&self, resume: &Resume) -> u64 {
-        self.remaining_layers(resume)
-            .map(|l| l.uncompressed_size)
-            .sum()
+    /// **No addend for a redone layer.** Every write path is keyed except the
+    /// fjall archive's block bodies, which an interrupted `blocks` layer leaves
+    /// as dead space in its segment file. That is past spend: free space is
+    /// read at check time, so those bytes are already out of it, and the layer
+    /// is not recorded as done, so it is charged again in full.
+    ///
+    /// **One exception to "still writes": the settle.** It rewrites every
+    /// ingested log layer, recorded or not, so its copy is sized over the
+    /// whole plan.
+    ///
+    /// A layer the blocks snapshot serves is sized by `blocks`.
+    pub fn estimate<R: SnapshotReader>(
+        &self,
+        snapshot: &R,
+        index: &BlobIndex,
+        blocks: Option<Blocks<'_, R>>,
+        resume: &Resume,
+        journals: u64,
+    ) -> Result<Estimate, Error> {
+        self.estimate_with(resume, journals, |repo, descriptor| {
+            self.compressed_size(snapshot, index, blocks, repo, descriptor)
+        })
+    }
+
+    /// [`Plan::estimate`] over a compressed-size lookup rather than a
+    /// transport, so the arithmetic is testable without one.
+    fn estimate_with(
+        &self,
+        resume: &Resume,
+        journals: u64,
+        mut compressed: impl FnMut(Repo, &LayerDescriptor) -> Result<Option<u64>, Error>,
+    ) -> Result<Estimate, Error> {
+        let mut estimate = Estimate {
+            journals,
+            ..Estimate::default()
+        };
+
+        let mut size =
+            |kind: OnDisk, repo: Repo, descriptor: &LayerDescriptor| -> Result<u64, Error> {
+                // The compressed factors were fitted to this profile's own level;
+                // a layer compressed otherwise is sized from what it declares.
+                let sized = match self.foreign_compression.contains(&descriptor.diff_id) {
+                    false => compressed(repo, descriptor)?,
+                    true => None,
+                };
+
+                Ok(match sized {
+                    Some(bytes) => scaled(bytes, kind.per_compressed),
+                    None => {
+                        estimate.fallback_layers += 1;
+                        scaled(descriptor.uncompressed_size, kind.per_uncompressed)
+                    }
+                })
+            };
+
+        let remaining = |descriptor: &&LayerDescriptor| !resume.is_done(&descriptor.diff_id);
+
+        let (mut blocks, mut logs, mut entities, mut indexes) = (0u64, 0u64, 0u64, 0u64);
+        let mut settled = 0u64;
+
+        for epoch in &self.epochs {
+            for descriptor in epoch.blocks.iter().filter(remaining) {
+                let repo = self.blocks_repo(epoch);
+                blocks = blocks.saturating_add(size(BLOCKS_ON_DISK, repo, descriptor)?);
+            }
+
+            for descriptor in epoch.logs.values() {
+                let bytes = size(LOGS_ON_DISK, Repo::Dolos, descriptor)?;
+
+                settled = settled.saturating_add(bytes);
+
+                if remaining(&descriptor) {
+                    logs = logs.saturating_add(bytes);
+                }
+            }
+
+            for descriptor in epoch.entities.values().filter(remaining) {
+                let bytes = size(ENTITIES_ON_DISK, Repo::Dolos, descriptor)?;
+                entities = entities.saturating_add(bytes);
+            }
+
+            for descriptor in epoch.indexes.iter().filter(remaining) {
+                let bytes = size(INDEXES_ON_DISK, Repo::Dolos, descriptor)?;
+                indexes = indexes.saturating_add(bytes);
+            }
+        }
+
+        estimate.blocks = blocks;
+        estimate.logs = logs;
+        estimate.entities = entities;
+        estimate.indexes = indexes;
+
+        estimate.state = self
+            .tip_layers()
+            .fold(0, |sum, layer| sum.saturating_add(layer.uncompressed_size));
+
+        let utxo_records = self
+            .state
+            .get(&UTXOS)
+            .into_iter()
+            .flatten()
+            .fold(0u64, |sum, layer| sum.saturating_add(layer.records));
+
+        estimate.derived_tags = utxo_records.saturating_mul(DERIVED_TAG_BYTES_PER_UTXO);
+        // The settle holds the ingested logs, uncompressed, beside their
+        // rewrite until it ends: one copy of the whole plan's logs, which
+        // overstates the ingested copy (about 66 GB on mainnet's full history
+        // to 75).
+        estimate.headroom = scaled(estimate.before_headroom(), COMPACTION_HEADROOM_PER_MILLE)
+            .saturating_add(settled);
+
+        Ok(estimate)
+    }
+
+    /// Compressed bytes a run with `resume` behind it stages at once at
+    /// `read_ahead`: per stream, its [`Staging::at_once`] largest remaining
+    /// layers at the depth [`ReadAhead`] gives it, summed.
+    ///
+    /// `None` when the transports can size none of them. Layers they cannot
+    /// size are left out, as [`Remaining`] leaves them out of its total.
+    pub fn staging_peak<R: SnapshotReader>(
+        &self,
+        snapshot: &R,
+        index: &BlobIndex,
+        blocks: Option<Blocks<'_, R>>,
+        resume: &Resume,
+        read_ahead: usize,
+    ) -> Result<Option<u64>, Error> {
+        let depths = ReadAhead::split(read_ahead, self.paired(blocks)?.is_some());
+
+        let mut streams = Vec::new();
+
+        for (repo, depth) in [(Repo::Dolos, depths.dolos), (Repo::Blocks, depths.blocks)] {
+            let mut sizes = Vec::new();
+
+            for descriptor in self.remaining_in(repo, resume) {
+                sizes.extend(self.compressed_size(snapshot, index, blocks, repo, descriptor)?);
+            }
+
+            streams.push((sizes, Staging::at_once(depth)));
+        }
+
+        if depths.serial() {
+            streams = vec![(
+                streams.into_iter().flat_map(|(sizes, _)| sizes).collect(),
+                1,
+            )];
+        }
+
+        let mut peak = None;
+
+        for (mut sizes, at_once) in streams {
+            if sizes.is_empty() {
+                continue;
+            }
+
+            sizes.sort_unstable_by(|a, b| b.cmp(a));
+
+            let staged: u64 = sizes.iter().take(at_once).sum();
+            peak = Some(peak.unwrap_or(0) + staged);
+        }
+
+        Ok(peak)
     }
 
     /// Refuse a restore that cannot fit, before it starts writing.
     ///
     /// Two needs, one policy ([`stelae_driver::preflight`]): the stores this
-    /// restore will write, and — for a transport that stages — the one
-    /// layer it holds on disk while it drains it. Both are handed to the
+    /// restore will write, and — for a transport that stages — the layers it
+    /// holds on disk at once while it drains them. Both are handed to the
     /// same check rather than compared separately, because whenever the
     /// scratch directory sits on the storage filesystem they are two claims
     /// on one pool of free bytes, and the default `<storage.path>/scratch`
     /// makes that the ordinary case.
     ///
-    /// Both needs are resume-aware, and for the same reason: what a run has to
-    /// fit is what *this* run will move, not what the plan describes. The
-    /// destination's is [`Plan::remaining_uncompressed_size`], the staging
-    /// volume's is the largest layer the caller's [`Remaining`] names.
-    ///
-    /// The destination comparison is deliberately against the *uncompressed*
-    /// size of those layers rather than against a prediction of what the
-    /// stores will occupy. It is the only number the inscription carries, it is
-    /// an underestimate for every backend (a store keeps indexes and slack of
-    /// its own), and an underestimate is the safe direction for a check whose
-    /// job is to catch the obviously-doomed run.
+    /// The destination's need is `estimate` ([`Plan::estimate`]): what the
+    /// stores will occupy at their peak, per kind from calibrated factors, the
+    /// derived tags no layer ships, the journals and compaction headroom. Not
+    /// the declared uncompressed size, which overstates history several-fold
+    /// and understates the state tip. The staging volume's need is
+    /// [`Plan::staging_peak`] of the layers still to pull. Both are
+    /// resume-aware, and what was compared is logged whatever the outcome.
     pub fn preflight(
         &self,
         path: &Path,
-        resume: &Resume,
+        estimate: &Estimate,
         staging: Option<Staging<'_>>,
     ) -> Result<(), Error> {
-        let mut needs = vec![preflight::Need::of(
-            "restoring it",
-            path,
-            self.remaining_uncompressed_size(resume),
-        )];
+        info!(
+            sequence = self.sequence,
+            blocks = estimate.blocks,
+            indexes = estimate.indexes,
+            logs = estimate.logs,
+            entities = estimate.entities,
+            state = estimate.state,
+            derived_tags = estimate.derived_tags,
+            journals = estimate.journals,
+            headroom = estimate.headroom,
+            destination = estimate.total(),
+            fallback_layers = estimate.fallback_layers,
+            staging = staging.and_then(|staging| staging.peak),
+            free = preflight::available(path),
+            "restore disk-space preflight"
+        );
+
+        let mut needs = vec![preflight::Need::of("restoring it", path, estimate.total())];
 
         if let Some(staging) = staging {
             if staging.unsized_layers > 0 {
                 tracing::warn!(
                     unsized_layers = staging.unsized_layers,
-                    "this stele's transport states no compressed size for some of the layers it \
+                    "this snapshot's transport states no compressed size for some of the layers it \
                      would pull; the staging estimate is a floor"
                 );
             }
 
+            let what = match ReadAhead::split(staging.read_ahead, staging.blocks).at_once() {
+                1 => "staging the layers it pulls, one at a time".to_owned(),
+                at_once => format!(
+                    "staging the layers it pulls, {at_once} at once at read-ahead {}",
+                    staging.read_ahead
+                ),
+            };
+
             needs.push(preflight::Need::or_unsized(
-                "staging the layers it pulls",
+                what,
                 staging.dir,
-                staging.largest_layer,
-                "this stele's transport states no compressed size for the layers it would pull",
+                staging.peak,
+                "this snapshot's transport states no compressed size for the layers it would pull",
             ));
         }
 
-        Ok(preflight::check(&needs)?)
+        preflight::check(&needs).map_err(|error| match Error::from(error) {
+            Error::NotEnoughSpace(reason) => {
+                Error::NotEnoughSpace(format!("{reason}; the destination estimate is {estimate}"))
+            }
+            other => other,
+        })
     }
 }
 
-/// Where a restore stages a pulled layer, and how big the biggest one is.
+/// What a restore will occupy on its destination volume, by term, in bytes.
 ///
-/// Absent for a directory restore, which stages nothing: a `SteleDir` reads
+/// Calibrated, not derived: the epoch kinds use per-kind factors fitted
+/// against measured mainnet restores (full history and a 10-epoch window), on
+/// the compressed size where the transport states it and the snapshot is at
+/// this profile's compression level, and on the declared uncompressed size
+/// otherwise.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Estimate {
+    pub blocks: u64,
+    pub indexes: u64,
+    pub logs: u64,
+    pub entities: u64,
+    /// The state tip's layers, at their declared uncompressed size.
+    pub state: u64,
+    /// The live-UTxO tags the restore derives and no layer ships, per
+    /// `state-utxos` record.
+    pub derived_tags: u64,
+    /// What the destination stores' journals may hold.
+    pub journals: u64,
+    /// Compaction headroom over every term above, and the ingested logs the
+    /// settle rewrites.
+    pub headroom: u64,
+    /// Epoch layers sized from their uncompressed size: no compressed size
+    /// stated, or a snapshot not at this profile's compression level.
+    pub fallback_layers: usize,
+}
+
+impl Estimate {
+    /// The destination need.
+    pub fn total(&self) -> u64 {
+        self.before_headroom().saturating_add(self.headroom)
+    }
+
+    fn before_headroom(&self) -> u64 {
+        [
+            self.blocks,
+            self.indexes,
+            self.logs,
+            self.entities,
+            self.state,
+            self.derived_tags,
+            self.journals,
+        ]
+        .into_iter()
+        .fold(0, u64::saturating_add)
+    }
+}
+
+impl std::fmt::Display for Estimate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} bytes: blocks {}, indexes {}, logs {}, entities {}, state tip {}, derived UTxO \
+             tags {}, journals {}, compaction headroom {}",
+            self.total(),
+            self.blocks,
+            self.indexes,
+            self.logs,
+            self.entities,
+            self.state,
+            self.derived_tags,
+            self.journals,
+            self.headroom,
+        )?;
+
+        if self.fallback_layers > 0 {
+            write!(
+                f,
+                " ({} layers sized from their uncompressed size)",
+                self.fallback_layers
+            )?;
+        }
+
+        Ok(())
+    }
+}
+
+/// On-disk bytes per layer byte for one epoch kind, in thousandths.
+#[derive(Debug, Clone, Copy)]
+struct OnDisk {
+    /// Per compressed byte, at this profile's compression level.
+    per_compressed: u64,
+    /// Per declared uncompressed byte: the fallback.
+    per_uncompressed: u64,
+}
+
+// Fitted against full-history and 10-epoch mainnet restores of one tip, then
+// rounded up; still to be re-validated on testnet snapshots.
+const BLOCKS_ON_DISK: OnDisk = OnDisk {
+    per_compressed: 1_800,
+    per_uncompressed: 550,
+};
+
+const INDEXES_ON_DISK: OnDisk = OnDisk {
+    per_compressed: 2_200,
+    per_uncompressed: 700,
+};
+
+const LOGS_ON_DISK: OnDisk = OnDisk {
+    per_compressed: 2_100,
+    per_uncompressed: 930,
+};
+
+const ENTITIES_ON_DISK: OnDisk = OnDisk {
+    per_compressed: 1_400,
+    per_uncompressed: 1_250,
+};
+
+/// Bytes of derived live-UTxO tags per `state-utxos` record, measured at about
+/// 306 on mainnet.
+const DERIVED_TAG_BYTES_PER_UTXO: u64 = 310;
+
+/// Headroom over the final size for compaction and the state-tip phase, in
+/// thousandths; measured peaks ran up to about 7% above it.
+const COMPACTION_HEADROOM_PER_MILLE: u64 = 75;
+
+/// `bytes` times `per_mille` thousandths, rounded up and saturating.
+fn scaled(bytes: u64, per_mille: u64) -> u64 {
+    let scaled = (u128::from(bytes) * u128::from(per_mille)).div_ceil(1_000);
+
+    u64::try_from(scaled).unwrap_or(u64::MAX)
+}
+
+/// Where a restore stages pulled layers, and how much it stages at once.
+///
+/// Absent for a directory restore, which stages nothing: a `SnapshotDir` reads
 /// its blobs where they already are. A registry restore pulls each layer to a
-/// file first, one at a time — layers are pulled, staged, drained and dropped
-/// in sequence — so the peak it has to fit is the single largest layer and not
-/// the download.
+/// file first and drops it once drained, so the peak it has to fit is the
+/// layers it holds at once ([`Staging::at_once`]) and not the download.
 #[derive(Debug, Clone, Copy)]
 pub struct Staging<'a> {
     /// The transport's scratch directory, as the operator or the default named
     /// it. Need not exist yet; the transport creates it lazily.
     pub dir: &'a Path,
-    /// The largest layer this run will stage, compressed. `None` when the
-    /// transport could size none of them, which warns rather than refuses.
-    pub largest_layer: Option<u64>,
+    /// The restore's read-ahead depth.
+    pub read_ahead: usize,
+    /// Whether the restore reads a blocks repository too, whose stream shares
+    /// `read_ahead` ([`ReadAhead`]).
+    pub blocks: bool,
+    /// What this run stages at once, compressed: [`Plan::staging_peak`].
+    /// `None` when the transport could size none of its layers, which warns
+    /// rather than refuses.
+    pub peak: Option<u64>,
     /// How many of the layers it will stage the transport could not size.
     ///
-    /// Carried beside `largest_layer` rather than folded into it: a run where
-    /// one layer is sized and another is not has a `largest_layer` that is a
-    /// floor, and a floor that says so is worth more than a `None` that
-    /// abandons the check. The count is what makes it say so.
+    /// Carried beside `peak` rather than folded into it: a run where one
+    /// layer is sized and another is not has a `peak` that is a floor, and a
+    /// floor that says so is worth more than a `None` that abandons the check.
+    /// The count is what makes it say so.
     pub unsized_layers: usize,
 }
 
-/// Read a stele's inscription and decide what restoring it into this node
-/// means.
+impl Staging<'_> {
+    /// How many layers a restore at `read_ahead` holds staged at once: the one
+    /// it drains and the ones read ahead of it.
+    pub fn at_once(read_ahead: usize) -> usize {
+        match read_ahead {
+            0 | 1 => 1,
+            depth => depth + 1,
+        }
+    }
+}
+
+/// Read a snapshot's chain and decide what restoring it into this node means.
 ///
-/// `network_magic` is the node's own, from its genesis; a stele that disagrees
-/// is refused here, which is the whole reason this function exists separately
-/// from [`restore`]. `max_history` is the rolling `history.window` in slots:
-/// epochs whose layers fall entirely below `cursor - max_history` are dropped,
-/// which is what ADR-004 replaced the old `full`/`ledger` snapshot variants
-/// with.
-pub fn plan<R: SteleReader>(
-    stele: &R,
+/// `chain` is the snapshot resolved back to the first of its lineage; its head
+/// is the inscription the operator named. `network_magic` is the node's own,
+/// from its genesis; a snapshot that disagrees is refused here, which is the
+/// whole reason this function exists separately from [`restore`].
+/// `max_history` is the rolling `history.window` in slots: epochs whose layers
+/// fall entirely below `cursor - max_history` are dropped, which is what
+/// ADR-004 replaced the old `full`/`ledger` snapshot variants with.
+///
+/// The head's `parameters` speak for the whole layer set: they gate which
+/// namespaces and entity kinds must be present, while each inscription's own
+/// map describes only the layers it lists, so a lineage continues across a
+/// namespace added along the way (`SPEC.md`, "Restore planning").
+///
+/// `blocks` is the blocks repository's chain at the snapshot's sequence, when
+/// the caller has one. It is read only when [`blocks_wanted`] names a
+/// snapshot, and then it is required and its head must be that snapshot.
+pub fn plan(
+    chain: &Chain,
+    blocks: Option<&Chain>,
     network_magic: u64,
     max_history: Option<u64>,
 ) -> Result<Plan, Error> {
-    let inscription = stele.read_inscription()?;
+    let head = chain.head();
 
     // Refuses a foreign profile and a profile major above this one — both
-    // before a store is opened. A kind this build does not define is decided a
-    // few lines down instead, where the profile can read its scope.
-    inscription.check_profile(&DolosProfile)?;
+    // before a store is opened. The walk asked the same of every inscription
+    // of the chain. A kind this build does not define is decided a few lines
+    // down instead, where the profile can read its scope.
+    head.check_profile(&DolosProfile)?;
 
     // The other half of the compatibility rule: `check_profile` decides about
-    // kinds the stele *carries*, and this decides about the ones it does not.
-    check_namespaces(&inscription)?;
-    check_entities(&inscription)?;
+    // kinds the snapshot *carries*, and this decides about the ones it does not.
+    check_namespaces(head)?;
+    check_entities(head)?;
 
-    let skipped_unknown = unknown_layers(&inscription)?;
-    let position = read_position(&inscription.position)?;
+    let mut skipped_unknown = unknown_layers(chain, &DolosProfile)?;
+    let position = read_position(&head.position)?;
 
     if position.network.magic() != network_magic {
         return Err(Error::NetworkMismatch {
@@ -550,34 +1051,205 @@ pub fn plan<R: SteleReader>(
         });
     }
 
-    let epochs = select_epochs(&inscription)?;
-    let selected = retain_history(epochs, position.point.slot(), max_history);
-    let state = select_state(&inscription)?;
+    let (mut epochs, skipped_epochs, reference) =
+        select(chain, head.sequence, &position, max_history)?;
+    let state = select_state(chain.descriptors())?;
+    let mut foreign_compression = foreign_compression_of(chain);
+
+    if let Some(reference) = reference {
+        let blocks = blocks.ok_or_else(|| Error::BlocksMissing {
+            reference,
+            reason: "this restore was given no blocks repository".to_owned(),
+        })?;
+
+        pair_blocks(&mut epochs, blocks, reference, head.sequence, network_magic)?;
+
+        skipped_unknown.extend(unknown_layers(blocks, &BlocksProfile)?);
+        foreign_compression.extend(foreign_compression_of(blocks));
+    }
 
     Ok(Plan {
-        sequence: inscription.sequence,
-        state: state.tip,
-        state_dumps: state.dumps,
-        epochs: selected.0,
-        skipped_epochs: selected.1,
+        sequence: head.sequence,
+        state,
+        epochs,
+        skipped_epochs,
         skipped_unknown,
         position,
+        foreign_compression,
+        blocks: reference,
     })
 }
 
-/// Refuse a stele that has retired a namespace this build still models.
+/// The blocks snapshot a restore of `chain` reads the closed epochs' blocks
+/// from: the one its `position.blocks` names, when the history window keeps an
+/// epoch before the cut. `None` when it reads no blocks repository.
+///
+/// What a transport asks before [`plan`], to know whether to resolve the
+/// blocks repository at all.
+pub fn blocks_wanted(chain: &Chain, max_history: Option<u64>) -> Result<Option<Digest>, Error> {
+    let head = chain.head();
+    let position = read_position(&head.position)?;
+
+    Ok(select(chain, head.sequence, &position, max_history)?.2)
+}
+
+/// The epochs a restore of `chain` keeps, how many it drops, and the blocks
+/// snapshot it reads their blocks from ([`blocks_wanted`]).
+fn select(
+    chain: &Chain,
+    sequence: u64,
+    position: &Position,
+    max_history: Option<u64>,
+) -> Result<(Vec<EpochLayers>, usize, Option<Digest>), Error> {
+    let epochs = select_epochs(chain.descriptors())?;
+
+    // A snapshot lists the boundary window's blocks alone (decision 0080, point
+    // 11); a closed epoch's are the blocks profile's.
+    if let Some(closed) = epochs
+        .iter()
+        .find(|epoch| epoch.epoch < sequence && epoch.blocks.is_some())
+    {
+        return Err(Error::malformed_inscription(
+            "layer list",
+            format!(
+                "it lists a `blocks` layer for closed epoch {}; a snapshot carries only its boundary \
+                 block, and the blocks snapshot its `position.blocks` names carries the rest. \
+                 Restore from a snapshot a current Dolos exported",
+                closed.epoch
+            ),
+        ));
+    }
+
+    let (kept, skipped) = retain_history(epochs, position.point.slot(), max_history);
+
+    let wanted = kept.iter().any(|epoch| epoch.epoch < sequence);
+    let reference = position.blocks.filter(|_| wanted);
+
+    Ok((kept, skipped, reference))
+}
+
+/// The `diffId`s of `chain`'s layers whose inscription published them under
+/// another compression than this profile's.
+fn foreign_compression_of(chain: &Chain) -> BTreeSet<Digest> {
+    chain
+        .layers()
+        .iter()
+        .filter(|layer| {
+            chain
+                .origin(layer)
+                .is_some_and(|origin| origin.compression != crate::compression())
+        })
+        .map(|layer| layer.descriptor.diff_id)
+        .collect()
+}
+
+/// Give each kept epoch before the cut its `blocks` layer from `blocks`, the
+/// blocks repository's chain, refusing a chain whose head is not `reference`.
+///
+/// The head must also stand at the snapshot's sequence and network, and every
+/// kept epoch before the cut must have its layer there, over the same slots
+/// as the snapshot's own layers of that epoch. The blocks of epochs the history
+/// window dropped are not read.
+fn pair_blocks(
+    epochs: &mut [EpochLayers],
+    blocks: &Chain,
+    reference: Digest,
+    sequence: u64,
+    network_magic: u64,
+) -> Result<(), Error> {
+    if blocks.identity() != reference {
+        return Err(Error::BlocksMismatch {
+            expected: reference,
+            found: blocks.identity(),
+        });
+    }
+
+    let head = blocks.head();
+    head.check_profile(&BlocksProfile)?;
+
+    if head.sequence != sequence {
+        return Err(Error::malformed_inscription(
+            "position.blocks",
+            format!(
+                "it names the blocks snapshot at sequence {}, not the one at this Dolos snapshot's \
+                 sequence {sequence}",
+                head.sequence
+            ),
+        ));
+    }
+
+    let found = stelae_blocks::read_position(&head.position)?.network_magic;
+
+    if found != network_magic {
+        return Err(Error::NetworkMismatch {
+            expected: network_magic,
+            found,
+        });
+    }
+
+    let mut by_epoch = BTreeMap::new();
+
+    for descriptor in blocks
+        .descriptors()
+        .filter(|descriptor| descriptor.kind == stelae_blocks::BLOCKS)
+    {
+        let scope = stelae_blocks::EpochScope::read_descriptor(network_magic, &descriptor.scope)?;
+
+        if by_epoch.insert(scope.epoch, (scope, descriptor)).is_some() {
+            return Err(Error::malformed_inscription(
+                "the blocks snapshot's layers",
+                format!("epoch {} is described twice", scope.epoch),
+            ));
+        }
+    }
+
+    for epoch in epochs.iter_mut().filter(|epoch| epoch.epoch < sequence) {
+        let Some((scope, descriptor)) = by_epoch.get(&epoch.epoch) else {
+            return Err(Error::IncompleteSnapshot(format!(
+                "the blocks snapshot {reference} holds no blocks for epoch {}",
+                epoch.epoch
+            )));
+        };
+
+        if (scope.start_slot, scope.end_slot) != (epoch.start_slot, epoch.end_slot) {
+            return Err(Error::malformed_inscription(
+                "the blocks snapshot's layers",
+                format!(
+                    "epoch {} is {}..={} in this Dolos snapshot and {}..={} in the blocks snapshot",
+                    epoch.epoch, epoch.start_slot, epoch.end_slot, scope.start_slot, scope.end_slot,
+                ),
+            ));
+        }
+
+        epoch.blocks = Some((*descriptor).clone());
+    }
+
+    Ok(())
+}
+
+/// The chain of a snapshot read through [`stelae::dir::SnapshotDir::resolve`]
+/// or [`stelae::oci::Registry::resolve`], which always hold one.
+pub(crate) fn chain_of(chain: Option<&Chain>) -> Result<&Chain, Error> {
+    chain.ok_or_else(|| {
+        Error::malformed_inscription("the snapshot", "it was read without resolving its chain")
+    })
+}
+
+/// Refuse a snapshot that has retired a namespace this build still models.
 ///
 /// The removed-kind rule (ADR-0027). `parameters.schemas` is the publisher's
 /// statement of which namespaces its profile version defines; a namespace it
 /// has retired stays in the map at [`RETIRED_SCHEMA_REV`] instead of
 /// disappearing from it. Read from this side, an entry that is missing or zero
-/// for a namespace this build models means the stele carries no records for it
-/// and never will — which is indistinguishable, layer by layer, from an epoch
-/// that genuinely had none.
+/// for a namespace this build models means the snapshot carries no records for
+/// it and never will — which is indistinguishable, layer by layer, from an
+/// epoch that genuinely had none.
 ///
 /// Only presence is judged, never the revision's *value*: a revision the reader
 /// has not seen describes bytes it can still parse and is deliberately not a
-/// gate (ADR-004). What is a gate is a namespace that is gone.
+/// gate (ADR-004). What is a gate is a namespace that is gone. The map judged
+/// is the head's, which states what the whole snapshot defines; an earlier
+/// inscription's lists only its own layers.
 ///
 /// A map that is absent or holds a value of the wrong type is a different
 /// failure and reports as one. This is the first check `plan` runs over
@@ -613,12 +1285,12 @@ fn check_namespaces(inscription: &Inscription) -> Result<(), Error> {
     Ok(())
 }
 
-/// Refuse a stele that does not declare an entity kind this build registers,
+/// Refuse a snapshot that does not declare an entity kind this build registers,
 /// or declares one at another id width.
 ///
 /// `parameters.entities` is the publisher's statement of the entity index
 /// kinds it writes. An entity layer exists only when it holds a record, so a
-/// stele whose publisher never wrote a kind looks, layer by layer, like one
+/// snapshot whose publisher never wrote a kind looks, layer by layer, like one
 /// whose epochs first saw nothing of it — and the first-seen witness reads
 /// that kind's entries. So a kind this build registers has to be declared,
 /// and at its width, before a store is opened.
@@ -658,7 +1330,8 @@ fn check_entities(inscription: &Inscription) -> Result<(), Error> {
     Ok(())
 }
 
-/// The layers this build has no kind for, once any required one has refused.
+/// The layers of the chain's layer set this build has no kind for, once any
+/// required one has refused.
 ///
 /// The profile's half of the rule decision 0026 sets. The protocol reports
 /// which layers are unknown ([`Inscription::unknown_layers`]) and interprets
@@ -667,11 +1340,17 @@ fn check_entities(inscription: &Inscription) -> Result<(), Error> {
 /// anything here looks at.
 ///
 /// Skipping is a *consumption* choice and never an integrity one. A skipped
-/// layer is still a layer of the stele: its `diffId` is still cross-checked
+/// layer is still a layer of the snapshot: its `diffId` is still cross-checked
 /// against the manifest and still covered by the inscription digest a publisher
 /// signs. What this decides is only whether its records are read into a store.
-fn unknown_layers(inscription: &Inscription) -> Result<Vec<LayerDescriptor>, Error> {
-    let unknown = inscription.unknown_layers(&DolosProfile);
+///
+/// `profile` is the chain's: this profile for the snapshot, the blocks profile
+/// for the blocks repository's chain.
+fn unknown_layers(chain: &Chain, profile: &dyn Profile) -> Result<Vec<LayerDescriptor>, Error> {
+    let unknown: Vec<&LayerDescriptor> = chain
+        .descriptors()
+        .filter(|layer| !profile.kinds().contains(&layer.kind.as_str()))
+        .collect();
 
     if let Some(required) = unknown
         .iter()
@@ -687,17 +1366,19 @@ fn unknown_layers(inscription: &Inscription) -> Result<Vec<LayerDescriptor>, Err
 }
 
 /// Group the epoch-scoped layers by the epoch their scope names.
-fn select_epochs(inscription: &Inscription) -> Result<Vec<EpochLayers>, Error> {
+fn select_epochs<'a>(
+    layers: impl IntoIterator<Item = &'a LayerDescriptor>,
+) -> Result<Vec<EpochLayers>, Error> {
     let mut by_epoch: BTreeMap<u64, EpochLayers> = BTreeMap::new();
 
-    for descriptor in &inscription.layers {
+    for descriptor in layers {
         let kind = descriptor.kind.as_str();
         let log_ns = log_ns_for(kind);
         let entity = entity_kind_for(kind);
 
-        // The tip kinds and `digests`, which are not epoch-scoped, plus any
-        // kind this build does not define — `plan` has already collected those
-        // into `Plan.skipped_unknown` and refused the required ones.
+        // The tip kinds, which are not epoch-scoped, plus any kind this build
+        // does not define — `plan` has already collected those into
+        // `Plan.skipped_unknown` and refused the required ones.
         if log_ns.is_none() && entity.is_none() && !matches!(kind, BLOCKS | INDEXES) {
             continue;
         }
@@ -717,7 +1398,7 @@ fn select_epochs(inscription: &Inscription) -> Result<Vec<EpochLayers>, Error> {
         });
 
         // One epoch, one window: two of the epoch's kinds describing the same
-        // epoch with different bounds is a stele nobody can reason about, and
+        // epoch with different bounds is a snapshot nobody can reason about, and
         // picking one of them would be this crate inventing an answer.
         if (entry.start_slot, entry.end_slot) != (start_slot, end_slot) {
             return Err(Error::malformed_inscription(
@@ -769,48 +1450,35 @@ fn select_epochs(inscription: &Inscription) -> Result<Vec<EpochLayers>, Error> {
     Ok(by_epoch.into_values().collect())
 }
 
-/// The state layers, split by the role their scope declares: the tip this
-/// restore consumes, and the retained dumps it only reports.
+/// The state tip: every state layer whose descriptor scope is `{"shard": n}`.
 ///
-/// **The split is the scope's `epoch`** and nothing else (decision 0026). A
-/// state layer whose descriptor scope is `{"shard": n}` is the tip; one whose
-/// scope is `{"epoch": E, "shard": n}` is E's dump. There is no other reading
-/// available and none is wanted: the two roles share a kind, a media type and
-/// a record codec, and the scope is the only field that tells them apart.
+/// A state layer whose scope names an epoch is a retained dump, which earlier
+/// publishers wrote beside the tip and published lineages still carry. It is
+/// skipped unread: counted with the tip it would be a duplicate shard and
+/// refuse the restore.
 ///
-/// Completeness is structural, in both dimensions — **for the tip**. Every
-/// state kind must be there, and per kind exactly the shards its
-/// spec'd count promises, empty ones included. A missing piece is a missing
-/// slice of the ledger that no later step would notice — the write path
-/// dispatches on the kind, not the shard — so it is refused rather than
-/// restored into a node whose queries quietly miss part of the state.
-///
-/// A dump is held to none of that, and deliberately. It is history rather than
-/// the ledger this node is about to run on: a stele whose predecessor could
-/// not hand over one shard of an old dump publishes the fifteen it has, and
-/// refusing the *restore* over that would trade a working node for a complete
-/// archive nobody asked this run for. What a short dump earns is a count in
-/// the report.
-fn select_state(inscription: &Inscription) -> Result<StateLayers, Error> {
+/// Completeness is structural, in both dimensions. Every state kind must be
+/// there, and per kind exactly the shards its spec'd count promises, empty
+/// ones included. A missing piece is a missing slice of the ledger that no
+/// later step would notice — the write path dispatches on the kind, not the
+/// shard — so it is refused rather than restored into a node whose queries
+/// quietly miss part of the state.
+fn select_state<'a>(
+    layers: impl IntoIterator<Item = &'a LayerDescriptor>,
+) -> Result<BTreeMap<Namespace, Vec<LayerDescriptor>>, Error> {
     let mut tip: BTreeMap<Namespace, BTreeMap<u64, LayerDescriptor>> = BTreeMap::new();
-    let mut dumps: BTreeMap<u64, BTreeMap<Namespace, BTreeMap<u64, LayerDescriptor>>> =
-        BTreeMap::new();
 
-    for descriptor in &inscription.layers {
+    for descriptor in layers {
         let Some(ns) = state_ns_for(&descriptor.kind) else {
             continue;
         };
 
-        let shard = scope_uint(descriptor, "shard")?;
+        if descriptor.scope.get("epoch").is_some() {
+            continue;
+        }
 
-        let shards = match descriptor.scope.get("epoch") {
-            Some(_) => dumps
-                .entry(scope_uint(descriptor, "epoch")?)
-                .or_default()
-                .entry(ns)
-                .or_default(),
-            None => tip.entry(ns).or_default(),
-        };
+        let shard = scope_uint(descriptor, "shard")?;
+        let shards = tip.entry(ns).or_default();
 
         if shards.insert(shard, descriptor.clone()).is_some() {
             return Err(Error::malformed_inscription(
@@ -828,38 +1496,16 @@ fn select_state(inscription: &Inscription) -> Result<StateLayers, Error> {
             .unwrap_or_default();
 
         if found != expected {
-            return Err(Error::IncompleteStele(format!(
-                "the state tip needs {kind} shards {expected:?}, and this stele carries {found:?}",
+            return Err(Error::IncompleteSnapshot(format!(
+                "the state tip needs {kind} shards {expected:?}, and this snapshot carries {found:?}",
             )));
         }
     }
 
-    Ok(StateLayers {
-        tip: flatten(tip),
-        dumps: dumps
-            .into_iter()
-            .map(|(e, kinds)| (e, flatten(kinds)))
-            .collect(),
-    })
-}
-
-/// One kind's shards, ascending, once the map that kept them ordered has done
-/// its job.
-fn flatten(
-    by_ns: BTreeMap<Namespace, BTreeMap<u64, LayerDescriptor>>,
-) -> BTreeMap<Namespace, Vec<LayerDescriptor>> {
-    by_ns
+    Ok(tip
         .into_iter()
         .map(|(ns, layers)| (ns, layers.into_values().collect()))
-        .collect()
-}
-
-/// What [`select_state`] found, kept together because the two halves are one
-/// pass over one set of layers.
-#[derive(Debug)]
-struct StateLayers {
-    tip: BTreeMap<Namespace, Vec<LayerDescriptor>>,
-    dumps: BTreeMap<u64, BTreeMap<Namespace, Vec<LayerDescriptor>>>,
+        .collect())
 }
 
 /// Drop the epochs the history window puts out of reach.
@@ -905,9 +1551,8 @@ fn scope_uint(descriptor: &LayerDescriptor, field: &str) -> Result<u64, Error> {
 
 /// Name of the progress file inside a node's storage directory.
 ///
-/// PROFILE.md's, spelled exactly as it spells it. "Snapshot" is this profile's
-/// word for a stele — Dolos says `dolos snapshot`, the protocol says *stele* —
-/// which is why the name lives here and not in `stelae`, whose
+/// PROFILE.md's, spelled exactly as it spells it. The file name belongs to this
+/// profile, which is why it lives here and not in `stelae`, whose
 /// [`stelae::plan::RestoreProgress`] takes a path a caller chose.
 ///
 /// It sits inside `storage.path` so that anything clearing a node's storage
@@ -926,7 +1571,7 @@ pub struct Summary {
     pub entities: u64,
     pub utxos: u64,
 
-    /// Layers this restore read out of the stele.
+    /// Layers this restore read out of the snapshot.
     pub layers_fetched: usize,
 
     /// Layers it skipped because an earlier attempt had already committed them.
@@ -954,13 +1599,271 @@ impl Summary {
 /// Where a node with storage at `storage_path` keeps its progress file.
 ///
 /// The [`Checkpoint`] takes the path it is given — the driver never derives
-/// dolos layout — and this is where dolos derives it. The `resume` flag a
-/// checkpoint is opened with is the caller's, and the driver's
-/// ignore-unless-resuming rule is the reason `--force` is safe: clearing
-/// storage removes this file with the rest of it, and even a progress file
-/// that somehow survived its stores cannot skip layers onto empty ones.
+/// dolos layout — and this is where dolos derives it. Clearing storage removes
+/// this file with the rest of it, and a restore that doesn't resume removes it
+/// before its first write. A resume honours it whatever the stores hold, so
+/// checking that they still hold its layers is the caller's.
 pub fn progress_path_in(storage_path: &Path) -> PathBuf {
     storage_path.join(PROGRESS_FILE)
+}
+
+pub use stelae::RestoreProgress;
+
+/// Name of the source record inside a node's storage directory.
+///
+/// Beside [`PROGRESS_FILE`] and inside `storage.path` for the same reason:
+/// clearing a node's storage clears it too. The progress file's shape is
+/// protocol and names only the snapshot's digest, so where that snapshot is
+/// read from is this record's, and Dolos layout.
+pub const SOURCE_FILE: &str = ".snapshot-restore-source.json";
+
+/// Where a node with storage at `storage_path` keeps its source record.
+pub fn source_path_in(storage_path: &Path) -> PathBuf {
+    storage_path.join(SOURCE_FILE)
+}
+
+/// Which snapshot a restore in flight reads, and from where.
+///
+/// Durable before the first layer is fetched and removed after the progress
+/// file, so every progress file it leaves has one beside it. A resume reads
+/// the snapshot it names, by sequence, and only if its digest is still the one
+/// recorded.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceRecord {
+    /// The network root as a URL: `oci://HOST/PATH`, or `file://DIR` with
+    /// `DIR` absolute.
+    pub source: String,
+    /// The repository under the root the snapshot is read from.
+    pub dolos: String,
+    /// The repository under the root closed epochs' blocks are read from.
+    pub blocks: String,
+    /// The snapshot's sequence, which names its immutable tag in a registry.
+    pub sequence: u64,
+    pub inscription_digest: Digest,
+}
+
+impl SourceRecord {
+    /// The record of reading the snapshot at `sequence` from the network root
+    /// `source`, naming both of its repositories.
+    pub fn new(source: &Source, sequence: u64, inscription_digest: Digest) -> Result<Self, Error> {
+        Ok(Self {
+            source: source.to_string(),
+            dolos: source.profile(DOLOS_REPOSITORY)?.to_string(),
+            blocks: source.profile(BLOCKS_REPOSITORY)?.to_string(),
+            sequence,
+            inscription_digest,
+        })
+    }
+
+    /// The record at `path`, or `None` if there is none. A file that does not
+    /// parse is an error, as a progress file that does not parse is.
+    pub fn load(path: &Path) -> Result<Option<Self>, Error> {
+        let raw = match std::fs::read(path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(stelae::Error::Io(error).into()),
+        };
+
+        serde_json::from_slice(&raw).map(Some).map_err(|error| {
+            ResumeRefusal::Unreadable {
+                path: path.to_path_buf(),
+                reason: error.to_string(),
+            }
+            .into()
+        })
+    }
+
+    /// Write the record at `path` through a synced temporary file, a rename
+    /// and a sync of the directory, so a hard stop leaves the old file or the
+    /// new one and a resume after a power loss still finds it.
+    pub fn save(&self, path: &Path) -> Result<(), Error> {
+        use std::io::Write as _;
+
+        let staging = path.with_file_name(format!(".{SOURCE_FILE}.{}.tmp", std::process::id()));
+        let bytes = serde_json::to_vec(self).map_err(stelae::Error::Json)?;
+
+        let write = || -> std::io::Result<()> {
+            // Closed before the rename: Windows refuses to rename an open file.
+            {
+                let mut file = std::fs::File::create(&staging)?;
+                file.write_all(&bytes)?;
+                file.sync_all()?;
+            }
+
+            std::fs::rename(&staging, path)?;
+
+            sync_dir(path.parent().unwrap_or(Path::new(".")))
+        };
+
+        write().map_err(|error| stelae::Error::Io(error).into())
+    }
+
+    /// Delete the record at `path`; one that is not there is not an error.
+    pub fn remove(path: &Path) -> Result<(), Error> {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(stelae::Error::Io(error).into()),
+        }
+    }
+}
+
+/// Make a rename in `dir` durable. Windows can't open a directory to sync
+/// it, and there the rename itself is the durability point.
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    if cfg!(unix) {
+        std::fs::File::open(dir)?.sync_all()
+    } else {
+        Ok(())
+    }
+}
+
+/// What an interrupted restore left in a node's storage directory.
+#[derive(Debug, Clone, Default)]
+pub struct Unfinished {
+    pub record: Option<SourceRecord>,
+    pub progress: Option<RestoreProgress>,
+}
+
+/// Read the source record and the progress file in `storage_path`, writing
+/// nothing.
+pub fn unfinished(storage_path: &Path) -> Result<Unfinished, Error> {
+    let progress_path = progress_path_in(storage_path);
+
+    let progress = match RestoreProgress::load(&progress_path) {
+        Ok(progress) => progress,
+        Err(stelae::Error::Json(error)) => {
+            return Err(ResumeRefusal::Unreadable {
+                path: progress_path,
+                reason: error.to_string(),
+            }
+            .into())
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    Ok(Unfinished {
+        record: SourceRecord::load(&source_path_in(storage_path))?,
+        progress,
+    })
+}
+
+/// Why a restore asked to resume won't, before it writes anything.
+#[derive(Debug, thiserror::Error)]
+pub enum ResumeRefusal {
+    /// A progress file with no source record beside it, as a release that
+    /// wrote none leaves: nothing says which snapshot its layers came from.
+    #[error(
+        "the restore progress in {} has no source record beside it, so which snapshot its layers \
+         came from is unknown",
+        .storage.display()
+    )]
+    Unrecorded { storage: PathBuf },
+
+    /// A record that does not parse.
+    #[error("the restore record at {} can't be read: {reason}", .path.display())]
+    Unreadable { path: PathBuf, reason: String },
+
+    /// A source other than the recorded one.
+    #[error("the restore being resumed reads {recorded}, not {given}")]
+    OtherSource { recorded: String, given: String },
+
+    /// The recorded snapshot is not in its source any more: its tag or
+    /// directory is gone, or names another snapshot now.
+    #[error(
+        "the snapshot this restore started from ({}, epoch-{}) is no longer in {}",
+        .0.inscription_digest,
+        .0.sequence,
+        .0.source
+    )]
+    Gone(SourceRecord),
+
+    /// A progress file for another snapshot than its source record names.
+    #[error(
+        "the restore progress names snapshot {progress}, and its source record names {recorded}"
+    )]
+    Disagrees { progress: Digest, recorded: Digest },
+
+    /// A state cursor other than the snapshot's point. A restore sets the
+    /// cursor last and only to that point, so something else wrote these
+    /// stores.
+    #[error(
+        "the state's cursor is at {cursor}, not at {point} where this snapshot leaves it, so \
+         something other than the restore wrote these stores after it was interrupted"
+    )]
+    Written {
+        cursor: ChainPoint,
+        point: ChainPoint,
+    },
+}
+
+/// The record a restore that resumes against one has to match: `None` when
+/// the restore isn't resuming, records nothing, or finds no record.
+pub(crate) fn pinned(node: &Restoring<'_>) -> Result<Option<SourceRecord>, Error> {
+    match (node.resume, node.source) {
+        (true, Some(_)) => SourceRecord::load(&source_path_in(node.storage_path)),
+        _ => Ok(None),
+    }
+}
+
+/// Refuse a resume whose records do not name `reading`, the snapshot it is
+/// about to read: a progress file with no record, a record for another
+/// source or another snapshot, or a progress file the record disagrees with.
+/// With a record, a `state` cursor other than `point`, the snapshot's, is
+/// refused too.
+fn check_resume<S: StateStore>(
+    storage_path: &Path,
+    reading: &SourceRecord,
+    point: &ChainPoint,
+    state: &S,
+) -> Result<(), Error> {
+    let Unfinished { record, progress } = unfinished(storage_path)?;
+
+    let Some(record) = record else {
+        return match progress {
+            Some(_) => Err(ResumeRefusal::Unrecorded {
+                storage: storage_path.to_path_buf(),
+            }
+            .into()),
+            None => Ok(()),
+        };
+    };
+
+    fn read_from(record: &SourceRecord) -> (&str, &str, &str) {
+        (&record.source, &record.dolos, &record.blocks)
+    }
+
+    if read_from(&record) != read_from(reading) {
+        return Err(ResumeRefusal::OtherSource {
+            recorded: record.source,
+            given: reading.source.clone(),
+        }
+        .into());
+    }
+
+    if record.inscription_digest != reading.inscription_digest {
+        return Err(ResumeRefusal::Gone(record).into());
+    }
+
+    if let Some(progress) = progress {
+        if progress.inscription_digest != record.inscription_digest {
+            return Err(ResumeRefusal::Disagrees {
+                progress: progress.inscription_digest,
+                recorded: record.inscription_digest,
+            }
+            .into());
+        }
+    }
+
+    match state.read_cursor()? {
+        Some(cursor) if cursor != *point => Err(ResumeRefusal::Written {
+            cursor,
+            point: point.clone(),
+        }
+        .into()),
+        _ => Ok(()),
+    }
 }
 
 /// The two stores a restore writes into.
@@ -980,13 +1883,14 @@ impl<'a, A, S> Target<'a, A, S> {
     }
 }
 
-/// What a node reading a stele knows about itself.
+/// What a node reading a snapshot knows about itself.
 ///
 /// Everything a restore needs that comes from *this node* rather than from the
-/// stele: the magic it refuses a foreign stele against, the history window it
-/// bothers to fetch, where its stores live, and whether the operator asked to
-/// resume. The stele supplies all the rest, which is the split that makes a
-/// restore checkable — nothing about the node is read out of the artifact.
+/// snapshot: the magic it refuses a foreign snapshot against, the history
+/// window it bothers to fetch, where its stores live, and whether the operator
+/// asked to resume. The snapshot supplies all the rest, which is the split that
+/// makes a restore checkable — nothing about the node is read out of the
+/// artifact.
 #[derive(Debug, Clone, Copy)]
 pub struct Restoring<'a> {
     /// The node's own network magic, from genesis and never from a file an
@@ -1000,8 +1904,22 @@ pub struct Restoring<'a> {
     /// Whether to honour the progress file an interrupted restore left.
     pub resume: bool,
     /// The operator explicitly accepted the risk of restoring without checking
-    /// the destination and staging volumes against the stele's declared sizes.
+    /// the destination and staging volumes against what the restore will
+    /// occupy.
     pub skip_space_check: bool,
+    /// Bytes the destination stores' journals may hold between them, which
+    /// the space preflight adds to the destination: each fjall store's
+    /// `journal_mb`, and nothing for a store that keeps no journal.
+    pub journals: u64,
+    /// How many layers to read ahead of the one being drained; 0 and 1 read
+    /// one layer at a time. [`DEFAULT_READ_AHEAD`] unless the operator says.
+    /// A transport whose blobs are local reads one at a time whatever it says.
+    pub read_ahead: usize,
+    /// The network root the snapshot is read from, for the [`SourceRecord`]:
+    /// recorded before the first layer and, on a resume, the record the
+    /// snapshot has to match. `None` records and checks nothing, so a resume
+    /// honours any progress file whatever snapshot it was written for.
+    pub source: Option<&'a Source>,
 }
 
 /// Restore `plan`'s layers into a store set.
@@ -1012,36 +1930,79 @@ pub struct Restoring<'a> {
 /// a [`Checkpoint`] opened with `resume` describes. Deciding between them is
 /// the caller's.
 ///
-/// `observer` hears about it as it happens, and is forwarded to `stele`:
+/// `observer` hears about it as it happens, and is forwarded to `snapshot`:
 /// this loop knows which layer of how many and whether the resume skipped it,
 /// while the download that dominates a registry restore is only visible to the
 /// transport. [`Observer::silent`] is what a caller with nothing to render
 /// passes, and a silent run is byte-for-byte the run this was before the seam.
+///
+/// `read_ahead` is the depth of the layer stream the transport reads ahead
+/// on, as the module documentation describes; 0 and 1 read one layer at a
+/// time.
+///
+/// `blocks` is the blocks snapshot the plan reads closed epochs' blocks from,
+/// required when it reads one. Its layers stream on their own, and the two
+/// streams share `read_ahead` ([`ReadAhead`]).
+#[allow(clippy::too_many_arguments)]
 pub fn restore<R, A, S>(
-    stele: &R,
+    snapshot: &R,
     index: &BlobIndex,
+    blocks: Option<Blocks<'_, R>>,
     plan: &Plan,
     target: Target<'_, A, S>,
     budget: Budget,
+    read_ahead: usize,
     checkpoint: &mut Checkpoint,
     observer: &Observer,
 ) -> Result<Summary, Error>
 where
-    R: SteleReader,
+    R: SnapshotReader,
     A: ArchiveStore,
     S: StateStore,
 {
     let Target { archive, state } = target;
+    let blocks = plan.paired(blocks)?;
+    let depths = ReadAhead::split(read_ahead, blocks.is_some());
+    let magic = plan.position.network.magic();
 
-    stele.observe(observer.clone());
+    snapshot.observe(observer.clone());
 
-    let reader = Reader {
-        stele,
-        index,
-        magic: plan.position.network.magic(),
-        budget,
-        observer,
+    // Exactly the layers the loop below drains from each repository, in its
+    // order: the checkpoint skips on the same `Resume`, which no record
+    // changes during the run.
+    let remaining = |repo| {
+        plan.remaining_in(repo, checkpoint.resume())
+            .cloned()
+            .collect::<Vec<_>>()
     };
+
+    // Dropped on every return, which ends the reads their streams have in
+    // flight before this function hands back.
+    let reader = Reader::new(
+        snapshot,
+        index,
+        Repo::Dolos,
+        remaining(Repo::Dolos),
+        magic,
+        budget,
+        depths.dolos,
+        observer,
+    );
+
+    let blocks_reader = blocks.map(|blocks| {
+        blocks.snapshot.observe(observer.clone());
+
+        Reader::new(
+            blocks.snapshot,
+            blocks.index,
+            Repo::Blocks,
+            remaining(Repo::Blocks),
+            magic,
+            budget,
+            depths.blocks,
+            observer,
+        )
+    });
 
     let cursor = Cursor::new(observer, plan.layers().count());
     let mut summary = Summary::default();
@@ -1056,8 +2017,13 @@ where
         if let Some(descriptor) = &epoch.blocks {
             let at = cursor.open(BLOCKS, &descriptor.scope);
 
+            let from = match (plan.blocks_repo(epoch), &blocks_reader) {
+                (Repo::Blocks, Some(blocks)) => blocks,
+                _ => &reader,
+            };
+
             let (count, outcome) = fetch_durable(checkpoint, descriptor, archive, || {
-                restore_blocks(&reader, descriptor, archive)
+                restore_blocks(from, descriptor, archive)
             })?;
 
             cursor.close(at, BLOCKS, outcome);
@@ -1104,6 +2070,13 @@ where
         }
     }
 
+    // The ingested keyspaces are rewritten while the tip, which writes only
+    // the state store, restores.
+    let settling = match plan.ingests() {
+        true => archive.settle_ingested()?,
+        false => Settling::none(),
+    };
+
     info!(
         layers = plan.tip_layers().count(),
         "restoring the state tip"
@@ -1123,6 +2096,8 @@ where
             summary.layers_fetched += 1;
         }
     }
+
+    settling.join()?;
 
     // The last write of the restore, the live-utxo dimensions above included:
     // until this commit lands `has_existing_data()` reports an empty node
@@ -1162,7 +2137,7 @@ fn fetch_durable<A: ArchiveStore>(
     })
 }
 
-/// Open, verify and read a stele into the stores, in one call.
+/// Open, verify and read a snapshot into the stores, in one call.
 ///
 /// The front door for a caller holding a source and a configuration — the
 /// bootstrap command above all — so the profile stays the only thing in the
@@ -1172,60 +2147,135 @@ fn fetch_durable<A: ArchiveStore>(
 /// cannot come to differ in anything but where the bytes came from.
 ///
 /// `scratch_dir` is the one thing they legitimately differ in, and it comes
-/// from the transport rather than from the caller: a directory stele reads its
-/// blobs where they already are and stages nothing, so it passes `None`, while
-/// a registry hands over the directory it was opened with. Asking the
+/// from the transport rather than from the caller: a directory snapshot reads
+/// its blobs where they already are and stages nothing, so it passes `None`,
+/// while a registry hands over the directory it was opened with. Asking the
 /// transport is what keeps the volume the preflight sizes and the volume the
 /// transport writes to the same volume.
-pub(crate) fn restore_stele<R, A, S>(
-    stele: &R,
+///
+/// `blocks` is the blocks repository's snapshot at the Dolos snapshot's
+/// sequence and its chain, when the transport resolved one; both repositories
+/// share the scratch directory.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn restore_snapshot<R, A, S>(
+    snapshot: &R,
+    chain: &Chain,
+    blocks: Option<(&R, &Chain)>,
     node: Restoring<'_>,
     scratch_dir: Option<&Path>,
     target: Target<'_, A, S>,
     observer: &Observer,
 ) -> Result<(Plan, Outlook, Summary), Error>
 where
-    R: SteleReader,
+    R: SnapshotReader,
     A: ArchiveStore,
     S: StateStore,
 {
-    let plan = plan(stele, node.network_magic, node.max_history)?;
+    let plan = plan(
+        chain,
+        blocks.map(|(_, chain)| chain),
+        node.network_magic,
+        node.max_history,
+    )?;
 
-    let identity = stele.read_inscription()?.digest()?;
+    let identity = chain.identity();
+
+    let record = node
+        .source
+        .map(|source| SourceRecord::new(source, plan.sequence, identity))
+        .transpose()?;
+
+    if let (true, Some(record)) = (node.resume, &record) {
+        check_resume(
+            node.storage_path,
+            record,
+            &plan.position.point,
+            target.state,
+        )?;
+    }
+
     let mut checkpoint =
         Checkpoint::open(progress_path_in(node.storage_path), identity, node.resume)?;
 
-    let index = stele.blob_index()?;
+    let index = snapshot.blob_index()?;
+
+    let blocks_index = match blocks {
+        Some((snapshot, _)) if plan.blocks.is_some() => Some((snapshot, snapshot.blob_index()?)),
+        _ => None,
+    };
+
+    let blocks = blocks_index.as_ref().map(|(snapshot, index)| Blocks {
+        snapshot: *snapshot,
+        index,
+    });
 
     let outlook = Outlook {
-        remaining: plan.remaining(stele, &index, checkpoint.resume())?,
+        remaining: plan.remaining(snapshot, &index, blocks, checkpoint.resume())?,
         inherited: checkpoint.resume().len(),
     };
 
     // Below the checkpoint rather than above it, and still ADR-004's step 2:
     // both needs are questions about what this run will actually move — the
-    // largest layer it will pull, and the layers it still has to write — so
+    // largest layers it will pull, and the layers it still has to write — so
     // neither can be asked before the resume is known. Nothing between the plan
     // and here writes — `Checkpoint::open` only reads the progress file and
-    // `blob_index` only reads the stele — so the preflight still refuses before
+    // `blob_index` only reads the snapshot — so the preflight still refuses before
     // the first byte is written, which is the whole of its promise.
-    let staging = scratch_dir.map(|dir| Staging {
-        dir,
-        largest_layer: outlook.remaining.largest_compressed,
-        unsized_layers: outlook.remaining.unsized_layers,
-    });
+    let staging = match scratch_dir {
+        Some(dir) => Some(Staging {
+            dir,
+            read_ahead: node.read_ahead,
+            blocks: blocks.is_some(),
+            peak: plan.staging_peak(
+                snapshot,
+                &index,
+                blocks,
+                checkpoint.resume(),
+                node.read_ahead,
+            )?,
+            unsized_layers: outlook.remaining.unsized_layers,
+        }),
+        None => None,
+    };
 
-    check_restore_space(&plan, node, checkpoint.resume(), staging)?;
+    check_restore_space(
+        &plan,
+        node,
+        || plan.estimate(snapshot, &index, blocks, checkpoint.resume(), node.journals),
+        staging,
+    )?;
+
+    // A restore that doesn't resume starts its progress over before it writes
+    // anything, so this run's record is never beside an earlier run's layers.
+    // The record's save syncs the directory, and with it this removal.
+    if !node.resume {
+        checkpoint.clear()?;
+    }
+
+    let record_path = source_path_in(node.storage_path);
+
+    if let Some(record) = &record {
+        record.save(&record_path)?;
+    }
 
     let summary = restore(
-        stele,
+        snapshot,
         &index,
+        blocks,
         &plan,
         target,
         default_budget(),
+        node.read_ahead,
         &mut checkpoint,
         observer,
     )?;
+
+    // After the progress file: a stop between the two leaves a record over a
+    // finished node, which a resume reads again in full, rather than progress
+    // with no record, which it refuses.
+    if record.is_some() {
+        SourceRecord::remove(&record_path)?;
+    }
 
     Ok((plan, outlook, summary))
 }
@@ -1233,27 +2283,30 @@ where
 fn check_restore_space(
     plan: &Plan,
     node: Restoring<'_>,
-    resume: &Resume,
+    estimate: impl FnOnce() -> Result<Estimate, Error>,
     staging: Option<Staging<'_>>,
 ) -> Result<(), Error> {
     if node.skip_space_check {
         tracing::warn!("skipping restore disk-space preflight by operator request");
         Ok(())
     } else {
-        plan.preflight(node.storage_path, resume, staging)
+        plan.preflight(node.storage_path, &estimate()?, staging)
     }
 }
 
-/// Restore from a stele directory.
+/// Restore from a directory holding an OCI image layout.
 ///
-/// An inscription names layers by identity, so a reader needs a map from a
-/// descriptor to the file holding it. A stele sealed by this implementation
-/// carries one — `stelae::dir::BLOB_INDEX_FILE`, the sidecar that makes a
-/// directory a degenerate registry — and `blob_index` reads it. One published
-/// before that file existed has none, and the map is rebuilt by decompressing
-/// every blob once *before* the restore decompresses the ones it wants.
+/// The snapshot read is the layout's `latest`, resolved through its chain, or
+/// the sequence a resume's source record names, refused as gone when that
+/// sequence is absent or holds another snapshot. The layout's manifests map
+/// each layer's identity to the blob holding it, as a registry's do.
+///
+/// `blocks` is the blocks repository's layout. It is read at the snapshot's
+/// sequence only when [`blocks_wanted`] names a snapshot, and a restore that
+/// needs it and has none, or finds no snapshot there, is refused.
 pub fn restore_dir<A, S>(
     root: impl Into<std::path::PathBuf>,
+    blocks: Option<&Path>,
     node: Restoring<'_>,
     target: Target<'_, A, S>,
     observer: &Observer,
@@ -1262,9 +2315,88 @@ where
     A: ArchiveStore,
     S: StateStore,
 {
-    let stele = stelae::dir::SteleDir::open(root)?;
+    let record = pinned(&node)?;
 
-    restore_stele(&stele, node, None, target, observer)
+    let layout = match stelae::dir::SnapshotDir::open(root) {
+        Ok(layout) => layout,
+        Err(error) => return Err(record.map_or(error.into(), gone)),
+    };
+
+    // A resume reads its recorded sequence, and refuses another snapshot under
+    // its tag before walking that snapshot's chain.
+    if let Some(record) = &record {
+        let head = match layout.pull_sequence(&DolosProfile, record.sequence) {
+            Ok(head) => head.read_inscription()?.digest()?,
+            Err(error) if error.is_absent() => return Err(gone(record.clone())),
+            Err(error) => return Err(error.into()),
+        };
+
+        if head != record.inscription_digest {
+            return Err(gone(record.clone()));
+        }
+    }
+
+    let resolved = match &record {
+        Some(record) => layout.resolve_sequence(&DolosProfile, record.sequence),
+        None => layout.resolve_latest(&DolosProfile),
+    };
+
+    let snapshot = match resolved {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return Err(match record {
+                Some(record) if error.is_absent() => gone(record),
+                _ => error.into(),
+            })
+        }
+    };
+
+    let chain = chain_of(snapshot.chain())?;
+
+    let blocks = match (blocks_wanted(chain, node.max_history)?, blocks) {
+        (Some(reference), Some(root)) => Some(blocks_dir(root, reference, chain.head().sequence)?),
+        // Wanted and not given: `plan` refuses it, naming the reference.
+        _ => None,
+    };
+
+    let paired = match &blocks {
+        Some(snapshot) => Some((snapshot, chain_of(snapshot.chain())?)),
+        None => None,
+    };
+
+    restore_snapshot(&snapshot, chain, paired, node, None, target, observer)
+}
+
+/// The blocks snapshot at `sequence` in the layout at `root`, resolved through
+/// its chain, or [`Error::BlocksMissing`] naming `root` when there is none.
+pub fn blocks_dir(
+    root: &Path,
+    reference: Digest,
+    sequence: u64,
+) -> Result<stelae::dir::Snapshot, Error> {
+    let missing = |reason: String| Error::BlocksMissing { reference, reason };
+
+    let layout = stelae::dir::SnapshotDir::open(root).map_err(|error| {
+        missing(format!(
+            "{} is not a blocks repository: {error}",
+            root.display()
+        ))
+    })?;
+
+    layout
+        .resolve_sequence(&BlocksProfile, sequence)
+        .map_err(|error| match error.is_absent() {
+            true => missing(format!(
+                "{} holds no blocks snapshot at epoch-{sequence}",
+                root.display()
+            )),
+            false => error.into(),
+        })
+}
+
+/// The refusal for a resume whose recorded snapshot its source no longer has.
+pub(crate) fn gone(record: SourceRecord) -> Error {
+    ResumeRefusal::Gone(record).into()
 }
 
 /// A fully resolved restore input.
@@ -1272,11 +2404,18 @@ where
 /// The repository arm holds an already-opened client, so credentials, TLS
 /// policy, staging and transport tuning have been decided before destination
 /// stores are touched.
+///
+/// Each arm may name the blocks repository beside the snapshot's, which a
+/// snapshot whose closed epochs' blocks are there needs.
 pub enum Input<'a> {
-    Directory(&'a Path),
+    Directory {
+        path: &'a Path,
+        blocks: Option<&'a Path>,
+    },
     Repository {
         repository: &'a crate::registry::SnapshotRepository,
         point: crate::registry::Point,
+        blocks: Option<&'a crate::registry::SnapshotRepository>,
     },
 }
 
@@ -1307,10 +2446,12 @@ where
     let observer = observer.unwrap_or(&silent);
 
     let (plan, outlook, summary) = match input {
-        Input::Directory(path) => restore_dir(path, node, target, observer)?,
-        Input::Repository { repository, point } => {
-            repository.restore(point, node, target, observer)?
-        }
+        Input::Directory { path, blocks } => restore_dir(path, blocks, node, target, observer)?,
+        Input::Repository {
+            repository,
+            point,
+            blocks,
+        } => repository.restore(point, blocks, node, target, observer)?,
     };
 
     Ok(RestoreOutcome {
@@ -1320,42 +2461,88 @@ where
     })
 }
 
-/// The stele a restore is reading, and the terms it reads under.
+/// The snapshot a restore is reading, and the terms it reads under.
 ///
 /// Carried as one value because every layer is read the same way, and because
-/// the alternative is threading four unchanging arguments through each of the
-/// four per-kind drivers.
-struct Reader<'a, R: SteleReader> {
-    stele: &'a R,
-    index: &'a BlobIndex,
-    /// The magic every layer's header has to name. Taken from the stele's
+/// the alternative is threading the stream and three unchanging arguments
+/// through each of the four per-kind drivers.
+struct Reader<'a, R: SnapshotReader> {
+    /// The repository the stream reads, which decides the profile its layers
+    /// are read under.
+    repo: Repo,
+    /// The magic every layer's header has to name. Taken from the snapshot's
     /// `position`, which [`plan`] has already held against the node's — so
     /// checking a layer against it checks the layer against the node.
     magic: u64,
     budget: Budget,
     observer: &'a Observer,
+    turns: RefCell<Turns<'a, R::Blob>>,
 }
 
-impl<R: SteleReader> Reader<'_, R> {
+/// The layers a restore still has to drain, and the stream they come from.
+struct Turns<'a, B: std::io::Read> {
+    /// The layers `stream` was opened over, in its order.
+    order: std::vec::IntoIter<LayerDescriptor>,
+    stream: LayerStream<'a, B>,
+}
+
+impl<'a, R: SnapshotReader> Reader<'a, R> {
+    /// A reader of `layers` from `repo`, in that order, through one stream
+    /// that reads `read_ahead` of them ahead where the transport can.
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        snapshot: &'a R,
+        index: &'a BlobIndex,
+        repo: Repo,
+        layers: Vec<LayerDescriptor>,
+        magic: u64,
+        budget: Budget,
+        read_ahead: usize,
+        observer: &'a Observer,
+    ) -> Self {
+        let profile: &'static dyn Profile = match repo {
+            Repo::Dolos => &DolosProfile,
+            Repo::Blocks => &BlocksProfile,
+        };
+
+        let stream =
+            snapshot.stream_layers(index, profile, layers.clone(), budget.limits, read_ahead);
+
+        Self {
+            repo,
+            magic,
+            budget,
+            observer,
+            turns: RefCell::new(Turns {
+                order: layers.into_iter(),
+                stream,
+            }),
+        }
+    }
+
     /// Stream one layer's records into `flush`, one bounded chunk at a time.
     ///
     /// The single read path for every kind, so the verification discipline is
-    /// stated once: the header's network magic is checked against the node's
-    /// before a record is handed out, and the layer's own `finish` — which is
-    /// what proves its identity digest, its size and its record count — runs
-    /// *before* the final chunk is written.
+    /// stated once: the layer is the stream's next ([`Reader::take`]), the
+    /// header's network magic is checked against the node's before a record
+    /// is handed out, and the layer's own `finish` — which is what proves its
+    /// identity digest, its size and its record count — runs *before* the
+    /// final chunk is written. A blocks-repository layer's header scope must
+    /// also be its descriptor's ([`check_blocks_scope`]).
     fn drain<T>(
         &self,
         descriptor: &LayerDescriptor,
-        decode: impl Fn(&[u8]) -> Result<T, Error>,
+        mut decode: impl FnMut(&[u8]) -> Result<T, Error>,
         size: impl Fn(&T) -> usize,
         mut flush: impl FnMut(Vec<T>) -> Result<(), Error>,
     ) -> Result<u64, Error> {
-        let mut layer =
-            self.stele
-                .stream_layer(self.index, &DolosProfile, descriptor, self.budget.limits)?;
+        let mut layer = self.take(descriptor)?;
 
         check_layer_magic(descriptor, layer.header(), self.magic)?;
+
+        if self.repo == Repo::Blocks {
+            check_blocks_scope(descriptor, layer.header(), self.magic)?;
+        }
 
         let mut count = 0u64;
         let mut chunk: Vec<T> = Vec::new();
@@ -1391,6 +2578,39 @@ impl<R: SteleReader> Reader<'_, R> {
         }
 
         Ok(count)
+    }
+
+    /// Take `descriptor`'s layer from the stream, refusing it unless its turn
+    /// has come.
+    ///
+    /// The stream hands layers back in the order it was opened over, that of
+    /// [`Plan::remaining_layers`], and the restore loop drains them in its
+    /// own. Were the two to drift, the next reader would hold another layer's
+    /// records, so the order is checked here rather than trusted.
+    fn take(&self, descriptor: &LayerDescriptor) -> Result<LayerReader<R::Blob>, Error> {
+        let mut turns = self.turns.borrow_mut();
+
+        let out_of_turn = |reason: String| Error::LayerOutOfTurn {
+            kind: descriptor.kind.clone(),
+            scope: descriptor.scope.to_string(),
+            reason,
+        };
+
+        match turns.order.next() {
+            Some(next) if next.diff_id == descriptor.diff_id => {}
+            Some(next) => {
+                return Err(out_of_turn(format!(
+                    "the {} layer at {} is next",
+                    next.kind, next.scope
+                )))
+            }
+            None => return Err(out_of_turn("no layer is left to read".into())),
+        }
+
+        match turns.stream.next() {
+            Some(layer) => Ok(layer?),
+            None => Err(out_of_turn("the layer stream has already ended".into())),
+        }
     }
 }
 
@@ -1431,59 +2651,135 @@ fn check_layer_magic(
     Ok(())
 }
 
-/// One epoch's blocks, appended to the archive in stream order.
-fn restore_blocks<R: SteleReader, A: ArchiveStore>(
+/// A blocks-repository layer whose header scope is not its descriptor's,
+/// refused before its records reach a store, as the blocks profile's reader
+/// rule asks. [`plan`] held the descriptor's bounds against the snapshot's
+/// epoch; the header is in the blob alone.
+fn check_blocks_scope(
+    descriptor: &LayerDescriptor,
+    header: &LayerHeader,
+    magic: u64,
+) -> Result<(), Error> {
+    let found = EpochScope::read_header(header.scope.as_bytes())?;
+
+    if found != EpochScope::read_descriptor(magic, &descriptor.scope)? {
+        return Err(stelae::Error::LayerMismatch {
+            kind: descriptor.kind.clone(),
+            reason: format!(
+                "header scope {found:?} disagrees with descriptor scope {}",
+                descriptor.scope
+            ),
+        }
+        .into());
+    }
+
+    Ok(())
+}
+
+/// One epoch's blocks, appended to the archive in stream order: a layer of
+/// this profile's, or a closed epoch's from the blocks repository, read with
+/// that profile's decoder. Both carry each block's slot, hash and body.
+///
+/// A blocks-repository layer is also held to that profile's record rules:
+/// every block inside the layer's epoch, and no slot going backwards.
+///
+/// Through [`ArchiveStore::start_ingest`], as the layer arrives in slot order;
+/// finished before the layer's persist. An equal slot (a Byron repeat) passes
+/// the blocks profile's order rule and ends the ingest's run.
+fn restore_blocks<R: SnapshotReader, A: ArchiveStore>(
     reader: &Reader<'_, R>,
     descriptor: &LayerDescriptor,
     archive: &A,
 ) -> Result<u64, Error> {
-    reader.drain(
+    let mut rules = match reader.repo {
+        Repo::Dolos => None,
+        Repo::Blocks => Some((
+            EpochScope::read_descriptor(reader.magic, &descriptor.scope)?,
+            OrderCheck::default(),
+        )),
+    };
+
+    let decode = move |bytes: &[u8]| {
+        let Some((scope, order)) = &mut rules else {
+            return blocks::decode(bytes);
+        };
+
+        let block = stelae_blocks::record::decode(bytes)?;
+
+        if !scope.covers(block.slot) {
+            return Err(stelae_blocks::Error::OutsideEpoch {
+                slot: block.slot,
+                epoch: scope.epoch,
+                start_slot: scope.start_slot,
+                end_slot: scope.end_slot,
+            }
+            .into());
+        }
+
+        order.check(block.slot)?;
+
+        Ok(blocks::BlockRecord::new(
+            block.slot,
+            block.hash.into(),
+            block.body,
+        ))
+    };
+
+    let mut ingest = archive.start_ingest()?;
+
+    let count = reader.drain(
         descriptor,
-        blocks::decode,
+        decode,
         |record| record.body.len(),
         |chunk| {
-            let writer = archive.start_writer()?;
+            let blocks = chunk
+                .into_iter()
+                .map(|record| {
+                    let point = ChainPoint::Specific(record.slot, record.hash);
 
-            for record in chunk {
-                let point = ChainPoint::Specific(record.slot, record.hash);
+                    (point, Arc::new(record.body))
+                })
+                .collect();
 
-                writer.apply(&point, &Arc::new(record.body))?;
-            }
-
-            writer.commit()?;
-
-            Ok(())
+            Ok(ingest.blocks(blocks)?)
         },
-    )
+    )?;
+
+    ingest.finish()?;
+
+    Ok(count)
 }
 
 /// One epoch's ledger logs for one namespace.
 ///
 /// `ns` comes from the layer's kind, not from its records — the split moved it
 /// there — so a layer restores into exactly the namespace the inscription said
-/// it holds.
-fn restore_logs<R: SteleReader, A: ArchiveStore>(
+/// it holds. Ingested as the blocks are: the layer arrives in key order.
+fn restore_logs<R: SnapshotReader, A: ArchiveStore>(
     reader: &Reader<'_, R>,
     descriptor: &LayerDescriptor,
     archive: &A,
     ns: Namespace,
 ) -> Result<u64, Error> {
-    reader.drain(
+    let mut ingest = archive.start_ingest()?;
+
+    let count = reader.drain(
         descriptor,
         |bytes: &[u8]| logs::decode(ns, bytes),
         |record| record.key.as_ref().len() + record.value.len(),
         |chunk| {
-            let writer = archive.start_writer()?;
+            let rows = chunk
+                .into_iter()
+                .map(|record| (record.key, record.value))
+                .collect();
 
-            for record in chunk {
-                writer.write_log(ns, &record.key, &record.value)?;
-            }
-
-            writer.commit()?;
-
-            Ok(())
+            Ok(ingest.logs(ns, rows)?)
         },
-    )
+    )?;
+
+    ingest.finish()?;
+
+    Ok(count)
 }
 
 /// One epoch's entity index entries for one kind, written through
@@ -1492,7 +2788,7 @@ fn restore_logs<R: SteleReader, A: ArchiveStore>(
 /// `kind` comes from the layer's kind, as a log layer's namespace does, and
 /// the codec holds every id to its width. An entry is keyed by its id, so a
 /// redone layer rewrites the entries it wrote before.
-fn restore_entities<R: SteleReader, A: ArchiveStore>(
+fn restore_entities<R: SnapshotReader, A: ArchiveStore>(
     reader: &Reader<'_, R>,
     descriptor: &LayerDescriptor,
     archive: &A,
@@ -1527,7 +2823,7 @@ fn restore_entities<R: SteleReader, A: ArchiveStore>(
 ///
 /// The records go into the archive, beside the blocks they project — the same
 /// store `restore_blocks` wrote the epoch's `blocks` layer into.
-fn restore_indexes<R: SteleReader, A: ArchiveStore>(
+fn restore_indexes<R: SnapshotReader, A: ArchiveStore>(
     reader: &Reader<'_, R>,
     descriptor: &LayerDescriptor,
     archive: &A,
@@ -1557,7 +2853,7 @@ fn restore_indexes<R: SteleReader, A: ArchiveStore>(
 /// Returns the entities and the UTxOs it wrote, separately, because they are
 /// the two halves the cross-check compares and a layer that restored one and
 /// silently dropped the other would still add up.
-fn restore_state<R: SteleReader, S: StateStore>(
+fn restore_state<R: SnapshotReader, S: StateStore>(
     reader: &Reader<'_, R>,
     descriptor: &LayerDescriptor,
     state: &S,
@@ -1608,8 +2904,8 @@ fn restore_state<R: SteleReader, S: StateStore>(
 /// Where a `--source` points.
 ///
 /// The scheme is what selects a restore path, which is why this is parsed
-/// rather than sniffed: a directory that happens to look like a stele and a URL
-/// that says it is one are different claims, and only the second is the
+/// rather than sniffed: a directory that happens to look like a snapshot and a
+/// URL that says it is one are different claims, and only the second is the
 /// operator's.
 ///
 /// Parsed by a command's argument parser rather than inside its body, so an
@@ -1617,12 +2913,54 @@ fn restore_state<R: SteleReader, S: StateStore>(
 /// that decide what to do with existing data are handled a layer above, and a
 /// source rejected any later would have cost the operator the node they still
 /// had.
+///
+/// A source names a network root, and each profile's repository is under it
+/// ([`Source::profile`]): `oci://HOST/PATH` holds `PATH/dolos` and
+/// `PATH/blocks`, and `file://DIR` holds `DIR/dolos` and `DIR/blocks`, each an
+/// OCI image layout.
 #[derive(Debug, Clone)]
 pub enum Source {
-    /// A stele directory on this filesystem.
+    /// A network root directory on this filesystem.
     Dir(std::path::PathBuf),
-    /// A stele repository in an OCI registry.
+    /// A network root in an OCI registry.
     Repo(crate::registry::Repository),
+}
+
+/// The repository under a network root that holds this profile's snapshots.
+pub const DOLOS_REPOSITORY: &str = "dolos";
+
+/// The repository under a network root that holds the blocks profile's
+/// snapshots.
+pub const BLOCKS_REPOSITORY: &str = "blocks";
+
+impl Source {
+    /// The repository `name` under this network root: `PATH/name` in a
+    /// registry ([`profile_repository`]), the subdirectory `name` on disk.
+    pub fn profile(&self, name: &str) -> Result<Self, Error> {
+        match self {
+            Self::Dir(dir) => Ok(Self::Dir(dir.join(name))),
+            Self::Repo(root) => Ok(Self::Repo(profile_repository(root, name)?)),
+        }
+    }
+}
+
+/// The repository `name` under the registry path `root`, refused when the
+/// path it makes is not a valid repository name.
+pub fn profile_repository(
+    root: &crate::registry::Repository,
+    name: &str,
+) -> Result<crate::registry::Repository, Error> {
+    Ok(format!("{root}/{name}").parse()?)
+}
+
+/// The URL [`FromStr`](std::str::FromStr) reads back.
+impl std::fmt::Display for Source {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dir(dir) => write!(f, "file://{}", dir.display()),
+            Self::Repo(repo) => write!(f, "{repo}"),
+        }
+    }
 }
 
 impl std::str::FromStr for Source {
@@ -1651,7 +2989,7 @@ impl std::str::FromStr for Source {
         }
 
         Err(format!(
-            "{raw:?} is not a stele source; it is `file://DIR` or `{SCHEME}HOST/PATH`",
+            "{raw:?} is not a snapshot source; it is `file://DIR` or `{SCHEME}HOST/PATH`",
         ))
     }
 }
@@ -1665,9 +3003,9 @@ mod source_tests {
     #[test]
     fn a_file_source_names_a_directory() {
         for (raw, expected) in [
-            ("file:///var/lib/dolos/stele", "/var/lib/dolos/stele"),
-            ("file://stele", "stele"),
-            ("file://./stele", "./stele"),
+            ("file:///var/lib/dolos/snapshot", "/var/lib/dolos/snapshot"),
+            ("file://snapshot", "snapshot"),
+            ("file://./snapshot", "./snapshot"),
         ] {
             let Source::Dir(dir) = raw.parse::<Source>().unwrap() else {
                 panic!("{raw:?} did not parse as a directory");
@@ -1690,6 +3028,44 @@ mod source_tests {
         assert_eq!(repo.repository(), "txpipe/dolos-snapshots/mainnet");
     }
 
+    /// A network root names each profile's repository under it, in a
+    /// registry and on disk alike.
+    #[test]
+    fn a_source_names_the_repositories_under_its_root() {
+        use super::{BLOCKS_REPOSITORY, DOLOS_REPOSITORY};
+
+        let root: Source = "oci://oci.stelae.store/cardano/mainnet".parse().unwrap();
+
+        assert_eq!(
+            root.profile(DOLOS_REPOSITORY).unwrap().to_string(),
+            "oci://oci.stelae.store/cardano/mainnet/dolos"
+        );
+        assert_eq!(
+            root.profile(BLOCKS_REPOSITORY).unwrap().to_string(),
+            "oci://oci.stelae.store/cardano/mainnet/blocks"
+        );
+
+        let root: Source = "file:///srv/preview".parse().unwrap();
+
+        let Source::Dir(blocks) = root.profile(BLOCKS_REPOSITORY).unwrap() else {
+            panic!("a directory root named a repository");
+        };
+        assert_eq!(blocks, PathBuf::from("/srv/preview/blocks"));
+    }
+
+    /// The record names the root and both repositories under it.
+    #[test]
+    fn a_source_record_names_both_repositories() {
+        let root: Source = "oci://127.0.0.1:5000/cardano/preview".parse().unwrap();
+
+        let record =
+            super::SourceRecord::new(&root, 7, stelae::Digest::from_bytes([7; 32])).unwrap();
+
+        assert_eq!(record.source, "oci://127.0.0.1:5000/cardano/preview");
+        assert_eq!(record.dolos, "oci://127.0.0.1:5000/cardano/preview/dolos");
+        assert_eq!(record.blocks, "oci://127.0.0.1:5000/cardano/preview/blocks");
+    }
+
     /// A source a restore cannot use is refused by the parse, not carried to
     /// the registry — the whole reason `--source` is a parsed type, and what
     /// makes the refusal land before `--force` clears anything.
@@ -1702,7 +3078,7 @@ mod source_tests {
     fn an_unusable_source_is_refused() {
         for raw in [
             "https://example.invalid/snapshot", // not a scheme this understands
-            "/var/lib/dolos/stele",             // a path is not a URL
+            "/var/lib/dolos/snapshot",          // a path is not a URL
             "file://",
             "",
             // And a repository the transport refuses is refused here too,
@@ -1721,7 +3097,7 @@ mod tests {
     use stelae::{inscription::LayerDescriptor, Digest, RestoreProgress};
 
     use super::*;
-    use crate::{DIGESTS, MAINNET_MAGIC};
+    use crate::MAINNET_MAGIC;
 
     fn descriptor(kind: &str, scope: serde_json::Value, byte: u8) -> LayerDescriptor {
         LayerDescriptor {
@@ -1754,14 +3130,245 @@ mod tests {
                 &crate::Network::for_magic(MAINNET_MAGIC),
                 &ChainPoint::Specific(250, [0x0b; 32].into()),
                 2,
+                None,
             )
             .unwrap(),
-            crate::parameters(&Default::default()),
+            crate::parameters(),
             crate::compression(),
         );
 
-        inscription.layers = layers;
+        inscription.tip = layers;
         inscription
+    }
+
+    /// `snapshot` as the whole of its lineage.
+    fn alone(snapshot: Inscription) -> Chain {
+        Chain::walk(&DolosProfile, snapshot, |_| Ok(None)).unwrap()
+    }
+
+    fn state_of(
+        snapshot: &Inscription,
+    ) -> Result<BTreeMap<Namespace, Vec<LayerDescriptor>>, Error> {
+        select_state(snapshot.layers())
+    }
+
+    fn epochs_of(snapshot: &Inscription) -> Result<Vec<EpochLayers>, Error> {
+        select_epochs(snapshot.layers())
+    }
+
+    fn unknown_of(snapshot: &Inscription) -> Result<Vec<LayerDescriptor>, Error> {
+        unknown_layers(&alone(snapshot.clone()), &DolosProfile)
+    }
+
+    /// A blocks snapshot at `sequence` on `magic`, as the whole of its lineage,
+    /// with a `blocks` layer for each `(epoch, start_slot, end_slot)`.
+    fn blocks_chain(magic: u64, sequence: u64, epochs: &[(u64, u64, u64)]) -> Chain {
+        Chain::walk(&BlocksProfile, blocks_head(magic, sequence, epochs), |_| {
+            Ok(None)
+        })
+        .unwrap()
+    }
+
+    /// The inscription of [`blocks_chain`].
+    fn blocks_head(magic: u64, sequence: u64, epochs: &[(u64, u64, u64)]) -> Inscription {
+        let mut head = Inscription::new(
+            &BlocksProfile,
+            sequence,
+            stelae_blocks::position(&stelae_blocks::Position {
+                network_magic: magic,
+                epoch: sequence,
+            }),
+            stelae_blocks::parameters(),
+            stelae_blocks::compression(),
+        );
+
+        head.diff = epochs
+            .iter()
+            .zip(0xb0u8..)
+            .map(|((epoch, start, end), byte)| LayerDescriptor {
+                kind: stelae_blocks::BLOCKS.to_owned(),
+                media_type: stelae_blocks::BLOCKS_MEDIA_TYPE.to_owned(),
+                diff_id: Digest::from_bytes([byte; 32]),
+                records: 1,
+                uncompressed_size: 100,
+                scope: json!({"epoch": epoch, "startSlot": start, "endSlot": end}),
+            })
+            .collect();
+
+        head
+    }
+
+    /// A snapshot's kept epochs at sequence 2: 0 and 1 closed, 100 slots each,
+    /// and the cut's, none of them with a `blocks` layer yet.
+    fn kept_epochs() -> Vec<EpochLayers> {
+        (0..3)
+            .map(|epoch| EpochLayers {
+                epoch,
+                start_slot: epoch * 100,
+                end_slot: epoch * 100 + 99,
+                blocks: None,
+                logs: BTreeMap::new(),
+                entities: BTreeMap::new(),
+                indexes: Some(epoch_descriptor(INDEXES, epoch, epoch as u8)),
+            })
+            .collect()
+    }
+
+    /// Each closed epoch takes its layer from the blocks snapshot, and the
+    /// cut's epoch none. A blocks snapshot that does not fit the Dolos snapshot
+    /// is refused: another one, another network or sequence, a kept epoch
+    /// it lacks or holds over other slots, and an epoch it lists twice.
+    #[test]
+    fn a_blocks_snapshot_that_does_not_fit_the_dolos_snapshot_is_refused() {
+        let closed = [(0, 0, 99), (1, 100, 199)];
+
+        let pair = |blocks: &Chain| {
+            let mut epochs = kept_epochs();
+            pair_blocks(&mut epochs, blocks, blocks.identity(), 2, MAINNET_MAGIC).map(|()| epochs)
+        };
+
+        let fits = blocks_chain(MAINNET_MAGIC, 2, &closed);
+        let taken: Vec<Option<Digest>> = pair(&fits)
+            .unwrap()
+            .iter()
+            .map(|epoch| epoch.blocks.as_ref().map(|layer| layer.diff_id))
+            .collect();
+        let listed: Vec<Option<Digest>> = fits.descriptors().map(|l| Some(l.diff_id)).collect();
+        assert_eq!(taken, [listed, vec![None]].concat());
+
+        let mut epochs = kept_epochs();
+        let other = Digest::from_bytes([0xee; 32]);
+        let err = pair_blocks(&mut epochs, &fits, other, 2, MAINNET_MAGIC).unwrap_err();
+        assert!(
+            matches!(err, Error::BlocksMismatch { expected, .. } if expected == other),
+            "{err:?}"
+        );
+
+        let refused = |blocks: Chain| pair(&blocks).unwrap_err();
+
+        let err = refused(blocks_chain(1, 2, &closed));
+        assert!(
+            matches!(err, Error::NetworkMismatch { found: 1, .. }),
+            "{err:?}"
+        );
+
+        let err = refused(blocks_chain(
+            MAINNET_MAGIC,
+            3,
+            &[(0, 0, 99), (1, 100, 199), (2, 200, 299)],
+        ));
+        assert!(
+            matches!(&err, Error::MalformedInscription { field, .. } if field == "position.blocks"),
+            "{err:?}"
+        );
+
+        let err = refused(blocks_chain(MAINNET_MAGIC, 2, &[(0, 0, 99)]));
+        assert!(matches!(err, Error::IncompleteSnapshot(_)), "{err:?}");
+
+        let err = refused(blocks_chain(MAINNET_MAGIC, 2, &[(0, 0, 99), (1, 100, 198)]));
+        assert!(
+            err.to_string().contains("100..=199 in this Dolos snapshot"),
+            "{err}"
+        );
+
+        let err = refused(blocks_chain(
+            MAINNET_MAGIC,
+            2,
+            &[(0, 0, 99), (1, 100, 199), (1, 100, 198)],
+        ));
+        assert!(err.to_string().contains("described twice"), "{err}");
+    }
+
+    /// A plan reading a blocks snapshot sizes each closed epoch's `blocks`
+    /// layer through that snapshot's transport and the cut's through the
+    /// snapshot's, in the space estimate and in what is left to download. A
+    /// blocks inscription compressed at another level has its layers
+    /// estimated from what they declare.
+    #[test]
+    fn a_blocks_snapshot_is_sized_through_its_own_transport() {
+        let closed = [(0, 0, 99), (1, 100, 199), (2, 200, 299)];
+
+        let mut head = blocks_head(MAINNET_MAGIC, 3, &closed);
+        head.compression.level = 3;
+        let blocks = Chain::walk(&BlocksProfile, head, |_| Ok(None)).unwrap();
+
+        let mut snapshot = inscription(state_layers());
+        snapshot.position = crate::position(
+            &crate::Network::for_magic(MAINNET_MAGIC),
+            &ChainPoint::Specific(350, [0x0b; 32].into()),
+            3,
+            Some(&blocks.identity()),
+        )
+        .unwrap();
+        snapshot.diff = (0..4)
+            .map(|epoch| epoch_descriptor(INDEXES, epoch, 0xd0 + epoch as u8))
+            .chain([epoch_descriptor(BLOCKS, 3, 0xe3)])
+            .collect();
+
+        let mut plan = plan(&alone(snapshot), Some(&blocks), MAINNET_MAGIC, None).unwrap();
+        assert_eq!(plan.blocks, Some(blocks.identity()));
+        assert_eq!(
+            plan.foreign_compression,
+            blocks.descriptors().map(|layer| layer.diff_id).collect()
+        );
+
+        let lookup = |repo: Repo, _: &LayerDescriptor| {
+            Ok(Some(match repo {
+                Repo::Blocks => 1_000_000,
+                Repo::Dolos => 1_000,
+            }))
+        };
+        let own = scaled(1_000, BLOCKS_ON_DISK.per_compressed);
+
+        let elsewhere = plan.estimate_with(&Resume::none(), 0, lookup).unwrap();
+        assert_eq!(
+            elsewhere.blocks,
+            3 * scaled(100, BLOCKS_ON_DISK.per_uncompressed) + own
+        );
+        assert_eq!(elsewhere.fallback_layers, 3);
+
+        plan.foreign_compression.clear();
+
+        let sized = plan.estimate_with(&Resume::none(), 0, lookup).unwrap();
+        assert_eq!(
+            sized.blocks,
+            3 * scaled(1_000_000, BLOCKS_ON_DISK.per_compressed) + own
+        );
+        assert_eq!(sized.fallback_layers, 0);
+
+        // What is left to download adds both transports up, and its largest
+        // layer is the blocks snapshot's. The tip is stated by neither.
+        let snapshot = Stated((0xd0..=0xd3).chain([0xe3]).map(|b| (b, 1_000)).collect());
+        let blocks = Stated((0xb0..=0xb2).map(|b| (b, 1_000_000)).collect());
+        let index: BlobIndex = std::iter::empty().collect();
+        let pair = Blocks {
+            snapshot: &blocks,
+            index: &index,
+        };
+
+        let left = plan
+            .remaining(&snapshot, &index, Some(pair), &Resume::none())
+            .unwrap();
+
+        assert_eq!(left.layers, plan.layers().count());
+        assert_eq!(left.compressed_bytes, 3 * 1_000_000 + 5 * 1_000);
+        assert_eq!(left.largest_compressed, Some(1_000_000));
+        assert_eq!(left.unsized_layers, plan.tip_layers().count());
+
+        // A blocks-snapshot layer its transport cannot size is counted as
+        // unsized beside the tip, and adds nothing to the bytes.
+        let partial = Stated((0xb0..=0xb1).map(|b| (b, 1_000_000)).collect());
+        let pair = Blocks {
+            snapshot: &partial,
+            index: &index,
+        };
+
+        let short = plan
+            .remaining(&snapshot, &index, Some(pair), &Resume::none())
+            .unwrap();
+
+        assert_eq!(short.compressed_bytes, 2 * 1_000_000 + 5 * 1_000);
+        assert_eq!(short.unsized_layers, plan.tip_layers().count() + 1);
     }
 
     /// Every state layer a complete tip carries: each kind, shards ascending.
@@ -1797,7 +3404,7 @@ mod tests {
     /// a complete tip selects into.
     #[test]
     fn the_state_tip_requires_every_kind_and_every_shard() {
-        let selected = select_state(&inscription(state_layers())).unwrap().tip;
+        let selected = state_of(&inscription(state_layers())).unwrap();
 
         assert_eq!(selected.len(), STATE_KINDS.len(), "one entry per kind");
 
@@ -1820,8 +3427,8 @@ mod tests {
             .unwrap();
         short.remove(dropped);
 
-        let err = select_state(&inscription(short)).unwrap_err();
-        assert!(matches!(err, Error::IncompleteStele(_)), "{err:?}");
+        let err = state_of(&inscription(short)).unwrap_err();
+        assert!(matches!(err, Error::IncompleteSnapshot(_)), "{err:?}");
 
         // An absent kind: tip completeness is every kind, not "what's there".
         let absent: Vec<LayerDescriptor> = state_layers()
@@ -1829,96 +3436,52 @@ mod tests {
             .filter(|layer| layer.kind != "state-epochs")
             .collect();
 
-        let err = select_state(&inscription(absent)).unwrap_err();
-        assert!(matches!(err, Error::IncompleteStele(_)), "{err:?}");
+        let err = state_of(&inscription(absent)).unwrap_err();
+        assert!(matches!(err, Error::IncompleteSnapshot(_)), "{err:?}");
         assert!(err.to_string().contains("state-epochs"), "{err}");
 
         // A shard past a single-blob kind's count.
         let mut oversharded = state_layers();
         oversharded.push(descriptor("state-pools", json!({"shard": 1}), 0xfe));
 
-        let err = select_state(&inscription(oversharded)).unwrap_err();
-        assert!(matches!(err, Error::IncompleteStele(_)), "{err:?}");
+        let err = state_of(&inscription(oversharded)).unwrap_err();
+        assert!(matches!(err, Error::IncompleteSnapshot(_)), "{err:?}");
 
         // One shard described twice.
         let mut doubled = state_layers();
         doubled.push(descriptor("state-utxos", json!({"shard": 0}), 0xff));
 
-        let err = select_state(&inscription(doubled)).unwrap_err();
+        let err = state_of(&inscription(doubled)).unwrap_err();
         assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
     }
 
-    /// Done criterion 3, planning half: a dump is partitioned out of the tip
-    /// by its scope, and it is completeness's business only for the tip.
+    /// A state layer whose scope names an epoch stays out of the tip, whole
+    /// or short, including one at the snapshot's own epoch.
     #[test]
-    fn a_dumps_scope_puts_it_beside_the_tip_and_not_in_it() {
+    fn a_dump_is_skipped_rather_than_read_as_the_tip() {
+        let mut short = dump_layers(1, 0xc0);
+        short.retain(|layer| !(layer.kind == "state-utxos" && layer.scope["shard"] == 15));
+
         let mut layers = state_layers();
-        layers.extend(dump_layers(2, 0x80));
-        layers.extend(dump_layers(1, 0xc0));
+        layers.extend(dump_layers(3, 0x80));
+        layers.extend(short);
 
-        let selected = select_state(&inscription(layers)).unwrap();
+        let tip = state_of(&inscription(layers)).unwrap();
+        let plain = state_of(&inscription(state_layers())).unwrap();
 
-        // The tip is what it was: the dumps did not join it, and did not
-        // displace a shard of it.
-        assert_eq!(selected.tip.len(), STATE_KINDS.len());
-        for (kind, ns, shards, _) in STATE_KINDS {
-            assert_eq!(selected.tip[ns].len(), shards as usize, "{kind}");
-            for layer in &selected.tip[ns] {
-                assert!(layer.scope.get("epoch").is_none(), "{kind}");
+        assert_eq!(tip, plain);
+
+        // The order earlier publishers listed a kind's layers in: its dumps
+        // by ascending epoch, then its tip. Each dump comes before the tip
+        // shard it shares a shard number with.
+        let mut published = Vec::new();
+        for (kind, ..) in STATE_KINDS {
+            for layers in [dump_layers(1, 0xc0), dump_layers(3, 0x80), state_layers()] {
+                published.extend(layers.into_iter().filter(|layer| layer.kind == kind));
             }
         }
 
-        // Ascending epoch, whatever order the document listed them in.
-        assert_eq!(
-            selected.dumps.keys().copied().collect::<Vec<_>>(),
-            vec![1, 2]
-        );
-
-        for (epoch, kinds) in &selected.dumps {
-            assert_eq!(kinds.len(), STATE_KINDS.len(), "epoch {epoch}");
-
-            for (kind, ns, shards, _) in STATE_KINDS {
-                assert_eq!(kinds[ns].len(), shards as usize, "{kind} at {epoch}");
-
-                for (shard, layer) in kinds[ns].iter().enumerate() {
-                    assert_eq!(layer.scope["epoch"], *epoch, "{kind}");
-                    assert_eq!(layer.scope["shard"], shard as u64, "{kind}");
-                }
-            }
-        }
-    }
-
-    /// A dump the predecessor could only hand over in part is history this
-    /// stele carries less of — never a reason to refuse the node the tip would
-    /// have built.
-    #[test]
-    fn a_short_dump_is_carried_rather_than_refused() {
-        let mut dump = dump_layers(2, 0x80);
-        dump.retain(|layer| !(layer.kind == "state-utxos" && layer.scope["shard"] == 15));
-
-        let mut layers = state_layers();
-        layers.extend(dump);
-
-        let selected = select_state(&inscription(layers)).unwrap();
-
-        assert_eq!(selected.dumps[&2]["utxos"].len(), 15);
-        assert_eq!(selected.tip["utxos"].len(), 16);
-    }
-
-    /// One shard of one epoch, once — the same refusal the tip gets, keyed on
-    /// the whole scope so a dump and the tip cannot collide with each other.
-    #[test]
-    fn one_dump_shard_described_twice_is_refused() {
-        let mut layers = state_layers();
-        layers.extend(dump_layers(2, 0x80));
-        layers.push(descriptor(
-            "state-utxos",
-            json!({"epoch": 2, "shard": 0}),
-            0x7f,
-        ));
-
-        let err = select_state(&inscription(layers)).unwrap_err();
-        assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
+        assert_eq!(state_of(&inscription(published)).unwrap(), plain);
     }
 
     #[test]
@@ -1931,7 +3494,7 @@ mod tests {
             epoch_descriptor(INDEXES, 1, 4),
         ];
 
-        let epochs = select_epochs(&inscription(layers)).unwrap();
+        let epochs = epochs_of(&inscription(layers)).unwrap();
 
         assert_eq!(epochs.len(), 2);
 
@@ -1958,7 +3521,7 @@ mod tests {
             epoch_descriptor(BLOCKS, 0, 2),
         ];
 
-        let err = select_epochs(&inscription(doubled)).unwrap_err();
+        let err = epochs_of(&inscription(doubled)).unwrap_err();
         assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
 
         // And so is one epoch carrying two different slot windows.
@@ -1969,7 +3532,7 @@ mod tests {
             2,
         ));
 
-        let err = select_epochs(&inscription(disagreeing)).unwrap_err();
+        let err = epochs_of(&inscription(disagreeing)).unwrap_err();
         assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
     }
 
@@ -1977,7 +3540,7 @@ mod tests {
     fn a_scope_without_an_epoch_is_refused() {
         let nonsense = vec![descriptor(BLOCKS, json!({"shard": 0}), 1)];
 
-        let err = select_epochs(&inscription(nonsense)).unwrap_err();
+        let err = epochs_of(&inscription(nonsense)).unwrap_err();
         assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
     }
 
@@ -2029,18 +3592,19 @@ mod tests {
         layers.push(epoch_descriptor(BLOCKS, 0, 0xa0));
         layers.push(epoch_descriptor(BLOCKS, 2, 0xa2));
 
-        let stele = inscription(layers);
-        let epochs = select_epochs(&stele).unwrap();
+        let snapshot = inscription(layers);
+        let epochs = epochs_of(&snapshot).unwrap();
         let (epochs, skipped) = retain_history(epochs, 250, Some(100));
 
         let plan = Plan {
-            position: read_position(&stele.position).unwrap(),
-            sequence: stele.sequence,
+            position: read_position(&snapshot.position).unwrap(),
+            sequence: snapshot.sequence,
             epochs,
-            state: select_state(&stele).unwrap().tip,
-            state_dumps: BTreeMap::new(),
+            state: state_of(&snapshot).unwrap(),
             skipped_epochs: skipped,
             skipped_unknown: Vec::new(),
+            foreign_compression: BTreeSet::new(),
+            blocks: None,
         };
 
         let tip = crate::state_layer_count() as u64;
@@ -2048,15 +3612,15 @@ mod tests {
         assert_eq!(plan.skipped_epochs, 1);
         assert_eq!(plan.layers().count() as u64, tip + 1);
         assert_eq!(plan.uncompressed_size(), (tip + 1) * 100);
-        assert!(plan.uncompressed_size() < stele.uncompressed_size());
+        assert!(plan.uncompressed_size() < snapshot.uncompressed_size());
     }
 
-    /// A node asked to restore another chain's stele stops before it opens a
+    /// A node asked to restore another chain's snapshot stops before it opens a
     /// store, not after it has written half a ledger.
     #[test]
     fn a_foreign_network_is_refused_by_the_plan() {
-        let stele = inscription(state_layers());
-        let position = read_position(&stele.position).unwrap();
+        let snapshot = inscription(state_layers());
+        let position = read_position(&snapshot.position).unwrap();
 
         assert_eq!(position.network.magic(), MAINNET_MAGIC);
 
@@ -2094,10 +3658,10 @@ mod tests {
         );
     }
 
-    /// Every scope shape leads with the magic, so one reader covers all three.
+    /// Every scope shape leads with the magic, so one reader covers both.
     #[test]
     fn the_magic_check_reads_every_scope_shape() {
-        use crate::{DigestsScope, EpochScope, Scope as _, StateScope};
+        use crate::{EpochScope, Scope as _, StateScope};
 
         let shapes: Vec<(&str, stelae::CanonicalCbor)> = vec![
             (
@@ -2114,16 +3678,6 @@ mod tests {
             (
                 crate::state_kind_for(UTXOS).unwrap(),
                 StateScope::tip(MAINNET_MAGIC, 1, 9).header().unwrap(),
-            ),
-            (
-                DIGESTS,
-                DigestsScope {
-                    network_magic: MAINNET_MAGIC,
-                    epoch: 1,
-                    last_immutable: 42,
-                }
-                .header()
-                .unwrap(),
             ),
         ];
 
@@ -2148,8 +3702,8 @@ mod tests {
         layers.push(descriptor("log-votes", json!({"epoch": 0}), 0xb0));
         layers.push(descriptor("state-treasury", json!({"epoch": 0}), 0xb1));
 
-        let stele = inscription(layers);
-        let skipped = unknown_layers(&stele).unwrap();
+        let snapshot = inscription(layers);
+        let skipped = unknown_of(&snapshot).unwrap();
 
         assert_eq!(
             skipped
@@ -2163,15 +3717,14 @@ mod tests {
         // namespace for is skipped like any other unknown kind, and the tip is
         // still complete, because completeness is counted over the kinds this
         // profile defines rather than over the state layers present.
-        assert_eq!(select_state(&stele).unwrap().tip.len(), STATE_KINDS.len());
+        assert_eq!(state_of(&snapshot).unwrap().len(), STATE_KINDS.len());
 
-        // And a stele written by a publisher this build keeps up with skips
+        // And a snapshot written by a publisher this build keeps up with skips
         // nothing at all.
         let mut known = state_layers();
         known.push(epoch_descriptor(BLOCKS, 0, 0xa0));
-        known.push(descriptor(DIGESTS, json!({"lastImmutable": 4}), 0xa1));
 
-        assert!(unknown_layers(&inscription(known)).unwrap().is_empty());
+        assert!(unknown_of(&inscription(known)).unwrap().is_empty());
     }
 
     /// The one unknown kind a restore refuses.
@@ -2184,7 +3737,7 @@ mod tests {
             0xb0,
         ));
 
-        let err = unknown_layers(&inscription(layers)).unwrap_err();
+        let err = unknown_of(&inscription(layers)).unwrap_err();
 
         let Error::RequiredUnknownLayer { kind, scope } = &err else {
             panic!("{err:?}");
@@ -2199,7 +3752,7 @@ mod tests {
             let mut layers = state_layers();
             layers.push(descriptor("log-votes", json!({"required": benign}), 0xb0));
 
-            assert_eq!(unknown_layers(&inscription(layers)).unwrap().len(), 1);
+            assert_eq!(unknown_of(&inscription(layers)).unwrap().len(), 1);
         }
     }
 
@@ -2207,9 +3760,9 @@ mod tests {
     /// this build models that the publisher has retired.
     ///
     /// There is no layer to mark, because the whole point is that there is no
-    /// layer. What the stele says instead is `schemas.{ns} = 0`, and a reader
-    /// that still models the namespace refuses on it rather than restoring a
-    /// history it would report as empty.
+    /// layer. What the snapshot says instead is `schemas.{ns} = 0`, and a
+    /// reader that still models the namespace refuses on it rather than
+    /// restoring a history it would report as empty.
     #[test]
     fn a_retired_namespace_refuses_the_restore() {
         let retired = NAMESPACES[0];
@@ -2234,12 +3787,8 @@ mod tests {
         let mut bare = inscription(vec![]);
         bare.parameters["schemas"][retired] = json!(RETIRED_SCHEMA_REV);
 
-        let temp = tempfile::tempdir().unwrap();
-        let stele = stelae::dir::SteleDir::create(temp.path()).unwrap();
-        stelae::SteleWriter::seal(&stele, &DolosProfile, &bare).unwrap();
-
         assert!(matches!(
-            plan(&stele, MAINNET_MAGIC, None),
+            plan(&alone(bare), None, MAINNET_MAGIC, None),
             Err(Error::RetiredNamespace { namespace }) if namespace == retired
         ));
     }
@@ -2330,7 +3879,7 @@ mod tests {
         check_entities(&inscription(state_layers())).unwrap();
     }
 
-    /// A stele that does not declare a kind this build indexes is refused
+    /// A snapshot that does not declare a kind this build indexes is refused
     /// naming the kind: its entity layers being absent would read as epochs
     /// that first saw nothing.
     #[test]
@@ -2348,7 +3897,7 @@ mod tests {
             Err(Error::UndeclaredEntityKind { kind: refused }) if refused == kind.name()
         ));
 
-        // A stele without the map declares no kind at all.
+        // A snapshot without the map declares no kind at all.
         let mut undeclared = inscription(state_layers());
         undeclared
             .parameters
@@ -2365,12 +3914,8 @@ mod tests {
         let mut bare = inscription(vec![]);
         bare.parameters.as_object_mut().unwrap().remove("entities");
 
-        let temp = tempfile::tempdir().unwrap();
-        let stele = stelae::dir::SteleDir::create(temp.path()).unwrap();
-        stelae::SteleWriter::seal(&stele, &DolosProfile, &bare).unwrap();
-
         assert!(matches!(
-            plan(&stele, MAINNET_MAGIC, None),
+            plan(&alone(bare), None, MAINNET_MAGIC, None),
             Err(Error::UndeclaredEntityKind { .. })
         ));
     }
@@ -2434,7 +3979,7 @@ mod tests {
             epoch_descriptor(script_layer, 5, 3),
         ];
 
-        let epochs = select_epochs(&inscription(layers)).unwrap();
+        let epochs = epochs_of(&inscription(layers)).unwrap();
 
         assert_eq!(epochs.len(), 2);
         assert_eq!(
@@ -2452,8 +3997,27 @@ mod tests {
             epoch_descriptor(asset_layer, 4, 2),
         ];
 
-        let err = select_epochs(&inscription(twice)).unwrap_err();
+        let err = epochs_of(&inscription(twice)).unwrap_err();
         assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
+    }
+
+    /// A plan over `snapshot`'s epochs and tip, every epoch kept.
+    fn plan_of(snapshot: &Inscription) -> Plan {
+        Plan {
+            position: read_position(&snapshot.position).unwrap(),
+            sequence: snapshot.sequence,
+            epochs: epochs_of(snapshot).unwrap(),
+            state: state_of(snapshot).unwrap(),
+            skipped_epochs: 0,
+            skipped_unknown: Vec::new(),
+            foreign_compression: BTreeSet::new(),
+            blocks: None,
+        }
+    }
+
+    /// An estimate with no compressed sizes and no journals.
+    fn declared_only(plan: &Plan, resume: &Resume) -> Estimate {
+        plan.estimate_with(resume, 0, |_, _| Ok(None)).unwrap()
     }
 
     /// The preflight is a refusal for a doomed run, not a promise about a
@@ -2463,23 +4027,16 @@ mod tests {
     fn the_preflight_refuses_what_cannot_fit() {
         let temp = tempfile::tempdir().unwrap();
 
-        let mut plan = Plan {
-            position: read_position(&inscription(vec![]).position).unwrap(),
-            sequence: 3,
-            epochs: Vec::new(),
-            state: select_state(&inscription(state_layers())).unwrap().tip,
-            state_dumps: BTreeMap::new(),
-            skipped_epochs: 0,
-            skipped_unknown: Vec::new(),
-        };
+        let mut plan = plan_of(&inscription(state_layers()));
+        let estimate = declared_only(&plan, &Resume::none());
 
-        plan.preflight(temp.path(), &Resume::none(), None).unwrap();
+        plan.preflight(temp.path(), &estimate, None).unwrap();
 
         // A directory that does not exist yet is measured through its parent,
         // which is the shape a fresh node's storage path has.
         plan.preflight(
             &temp.path().join("not").join("created").join("yet"),
-            &Resume::none(),
+            &estimate,
             None,
         )
         .unwrap();
@@ -2490,10 +4047,18 @@ mod tests {
             descriptor.uncompressed_size = u64::MAX / tip;
         }
 
-        let err = plan
-            .preflight(temp.path(), &Resume::none(), None)
-            .unwrap_err();
-        assert!(matches!(err, Error::NotEnoughSpace(_)), "{err:?}");
+        let estimate = declared_only(&plan, &Resume::none());
+
+        let err = plan.preflight(temp.path(), &estimate, None).unwrap_err();
+
+        // The refusal names what was compared, term by term.
+        let Error::NotEnoughSpace(message) = err else {
+            panic!("{err:?}");
+        };
+        assert!(
+            message.contains(&format!("the destination estimate is {estimate}")),
+            "{message}"
+        );
 
         check_restore_space(
             &plan,
@@ -2503,8 +4068,11 @@ mod tests {
                 storage_path: temp.path(),
                 resume: false,
                 skip_space_check: true,
+                journals: 0,
+                read_ahead: DEFAULT_READ_AHEAD,
+                source: None,
             },
-            &Resume::none(),
+            || panic!("a skipped check estimates nothing"),
             None,
         )
         .unwrap();
@@ -2526,17 +4094,7 @@ mod tests {
         layers.push(epoch_descriptor(BLOCKS, 1, 0xa1));
         layers.push(epoch_descriptor(BLOCKS, 2, 0xa2));
 
-        let stele = inscription(layers);
-
-        let mut plan = Plan {
-            position: read_position(&stele.position).unwrap(),
-            sequence: stele.sequence,
-            epochs: select_epochs(&stele).unwrap(),
-            state: select_state(&stele).unwrap().tip,
-            state_dumps: BTreeMap::new(),
-            skipped_epochs: 0,
-            skipped_unknown: Vec::new(),
-        };
+        let mut plan = plan_of(&inscription(layers));
 
         // Epochs 0 and 1 are each larger than any volume; epoch 2 and the tip
         // keep their hundred bytes. So the whole plan cannot fit anywhere, and
@@ -2557,40 +4115,341 @@ mod tests {
 
         let tip = crate::state_layer_count() as u64;
 
-        // An empty resume asks for exactly what it asked for before there was
-        // a resume at all.
-        assert_eq!(
-            plan.remaining_uncompressed_size(&Resume::none()),
-            plan.uncompressed_size()
-        );
-
-        let err = plan
-            .preflight(temp.path(), &Resume::none(), None)
-            .unwrap_err();
+        let whole = declared_only(&plan, &Resume::none());
+        let err = plan.preflight(temp.path(), &whole, None).unwrap_err();
         assert!(matches!(err, Error::NotEnoughSpace(_)), "{err:?}");
 
         // Both impossible epochs committed: what is left is epoch 2 and the
         // tip, and the run proceeds on a volume that could never have held the
-        // whole stele.
+        // whole snapshot.
         let resume = blocks_of(0..2);
+        let left = declared_only(&plan, &resume);
+        assert_eq!(left.blocks, scaled(100, BLOCKS_ON_DISK.per_uncompressed));
         assert_eq!(
-            plan.remaining_uncompressed_size(&resume),
-            (tip + 1) * 100,
+            left.state,
+            tip * 100,
             "the tip is always redone and is always charged"
         );
-        plan.preflight(temp.path(), &resume, None).unwrap();
+        plan.preflight(temp.path(), &left, None).unwrap();
 
         // One of them committed: the other is still ahead of this run, and it
         // is still refused. Subtracting too much is the dangerous direction.
-        let err = plan
-            .preflight(temp.path(), &blocks_of(0..1), None)
-            .unwrap_err();
+        let one = declared_only(&plan, &blocks_of(0..1));
+        let err = plan.preflight(temp.path(), &one, None).unwrap_err();
         assert!(matches!(err, Error::NotEnoughSpace(_)), "{err:?}");
 
         // Every epoch committed leaves the tip, which no resume ever skips.
+        let none_left = declared_only(&plan, &blocks_of(0..3));
+        assert_eq!(none_left.blocks, 0);
+        assert_eq!(none_left.state, tip * 100);
+    }
+
+    /// The estimate is the documented sum, term by term: compressed factors
+    /// where a size is stated, uncompressed factors where it is not or the
+    /// snapshot is at another level, the tip at its declared size plus the tags
+    /// per UTxO record, the journals, and the headroom over all of it.
+    #[test]
+    fn the_estimate_is_the_hand_computed_sum() {
+        let (entity_kind, _) = ENTITY_KINDS[0];
+
+        let sized = |kind: &str, epoch: u64, byte: u8, uncompressed: u64| LayerDescriptor {
+            uncompressed_size: uncompressed,
+            ..epoch_descriptor(kind, epoch, byte)
+        };
+
+        let mut layers = state_layers();
+        layers.extend([
+            sized(BLOCKS, 0, 0xa0, 10_000),
+            sized("log-pool-epochs", 0, 0xa1, 4_000),
+            sized(entity_kind, 0, 0xa2, 1_000),
+            sized(INDEXES, 0, 0xa3, 3_000),
+            // Stated without a compressed size.
+            sized(BLOCKS, 1, 0xb0, 20_000),
+            // Recorded by the resume below, so never charged.
+            sized(BLOCKS, 2, 0xc0, 1_000_000),
+        ]);
+
+        let utxo_shards = STATE_KINDS
+            .iter()
+            .find(|(_, ns, _, _)| *ns == UTXOS)
+            .map(|(_, _, shards, _)| u64::from(*shards))
+            .unwrap();
+
+        for layer in layers
+            .iter_mut()
+            .filter(|l| state_ns_for(&l.kind) == Some(UTXOS))
+        {
+            layer.records = 1_000;
+        }
+
+        let mut plan = plan_of(&inscription(layers));
+
+        let compressed: BTreeMap<u8, u64> = [
+            (0xa0, 2_000),
+            (0xa1, 1_000),
+            (0xa2, 500),
+            (0xa3, 1_000),
+            (0xc0, 1),
+        ]
+        .into();
+        let asked = std::cell::Cell::new(0);
+        let lookup = |_: Repo, descriptor: &LayerDescriptor| {
+            asked.set(asked.get() + 1);
+            Ok(compressed.get(&descriptor.diff_id.as_bytes()[0]).copied())
+        };
+
+        let mut progress = RestoreProgress::new(Digest::from_bytes([0xdd; 32]));
+        progress.record(Digest::from_bytes([0xc0; 32]));
+        let resume = Resume::from_progress(Some(&progress));
+
+        let tip = crate::state_layer_count() as u64;
+        let state = tip * 100;
+        let derived_tags = utxo_shards * 1_000 * 310;
+        let journals = 1 << 20;
+
+        let at_level = plan.estimate_with(&resume, journals, lookup).unwrap();
+
+        let terms = 3_600 + 11_000 + 2_200 + 2_100 + 700 + state + derived_tags + journals;
+        // And the settle's copy of the logs.
+        let headroom = (terms * 75).div_ceil(1_000) + 2_100;
         assert_eq!(
-            plan.remaining_uncompressed_size(&blocks_of(0..3)),
-            tip * 100
+            at_level,
+            Estimate {
+                blocks: 3_600 + 11_000,
+                indexes: 2_200,
+                logs: 2_100,
+                entities: 700,
+                state,
+                derived_tags,
+                journals,
+                headroom,
+                fallback_layers: 1,
+            }
+        );
+        assert_eq!(at_level.total(), terms + headroom);
+        assert_eq!(asked.get(), 5, "the recorded layer is never sized");
+
+        // A resume past the log layer writes no logs, but the settle still
+        // rewrites them: its copy stays in the headroom.
+        progress.record(Digest::from_bytes([0xa1; 32]));
+        let past_logs = Resume::from_progress(Some(&progress));
+        asked.set(0);
+
+        let resumed = plan.estimate_with(&past_logs, journals, lookup).unwrap();
+
+        let resumed_terms = terms - 2_100;
+        assert_eq!(resumed.logs, 0);
+        assert_eq!(
+            resumed.headroom,
+            (resumed_terms * 75).div_ceil(1_000) + 2_100
+        );
+        assert_eq!(
+            asked.get(),
+            5,
+            "the recorded log layer is sized for the settle"
+        );
+
+        // Another level: every epoch layer falls back, and the transport is
+        // never asked.
+        plan.foreign_compression = plan.layers().map(|layer| layer.diff_id).collect();
+        asked.set(0);
+
+        let elsewhere = plan.estimate_with(&resume, journals, lookup).unwrap();
+
+        let terms = 5_500 + 11_000 + 2_100 + 3_720 + 1_250 + state + derived_tags + journals;
+        assert_eq!(elsewhere.blocks, 5_500 + 11_000);
+        assert_eq!(elsewhere.indexes, 2_100);
+        assert_eq!(elsewhere.logs, 3_720);
+        assert_eq!(elsewhere.entities, 1_250);
+        assert_eq!(elsewhere.fallback_layers, 5);
+        assert_eq!(
+            elsewhere.total(),
+            terms + (terms * 75).div_ceil(1_000) + 3_720
+        );
+        assert_eq!(asked.get(), 0);
+    }
+
+    /// A snapshot that states each layer's compressed size from a table keyed
+    /// by the first byte of its diff id, and is asked nothing else.
+    struct Stated(BTreeMap<u8, u64>);
+
+    impl SnapshotReader for Stated {
+        type Blob = std::io::Empty;
+
+        fn read_inscription(&self) -> Result<Inscription, stelae::Error> {
+            unreachable!("an estimate reads no inscription")
+        }
+
+        fn blob_index(&self) -> Result<BlobIndex, stelae::Error> {
+            unreachable!("an estimate reads no blob index")
+        }
+
+        fn compressed_size(
+            &self,
+            _: &BlobIndex,
+            descriptor: &LayerDescriptor,
+        ) -> Result<Option<u64>, stelae::Error> {
+            Ok(self.0.get(&descriptor.diff_id.as_bytes()[0]).copied())
+        }
+
+        fn stream_layer(
+            &self,
+            _: &BlobIndex,
+            _: &dyn stelae::profile::Profile,
+            _: &LayerDescriptor,
+            _: Limits,
+        ) -> Result<LayerReader<Self::Blob>, stelae::Error> {
+            unreachable!("an estimate streams no layer")
+        }
+    }
+
+    /// The estimate sizes each epoch layer from the compressed size the
+    /// transport states for it, and falls back only where none is stated. It
+    /// charges nothing for a layer the resume records, and charges the journals
+    /// it is handed as given.
+    #[test]
+    fn the_estimate_sizes_layers_from_the_transport() {
+        let (entity_kind, _) = ENTITY_KINDS[0];
+
+        let sized = |kind: &str, epoch: u64, byte: u8, uncompressed: u64| LayerDescriptor {
+            uncompressed_size: uncompressed,
+            ..epoch_descriptor(kind, epoch, byte)
+        };
+
+        let mut layers = state_layers();
+        layers.extend([
+            sized(BLOCKS, 0, 0xa0, 10_000),
+            sized("log-pool-epochs", 0, 0xa1, 4_000),
+            sized(entity_kind, 0, 0xa2, 1_000),
+            sized(INDEXES, 0, 0xa3, 3_000),
+            // Stated without a compressed size.
+            sized(BLOCKS, 1, 0xb0, 20_000),
+            // Recorded by the resume below, so never charged.
+            sized(BLOCKS, 2, 0xc0, 1_000_000),
+        ]);
+
+        let plan = plan_of(&inscription(layers));
+        let snapshot = Stated(
+            [
+                (0xa0, 2_000),
+                (0xa1, 1_000),
+                (0xa2, 500),
+                (0xa3, 1_000),
+                (0xc0, 500_000),
+            ]
+            .into(),
+        );
+        let index: BlobIndex = std::iter::empty().collect();
+
+        let mut progress = RestoreProgress::new(Digest::from_bytes([0xdd; 32]));
+        progress.record(Digest::from_bytes([0xc0; 32]));
+        let resume = Resume::from_progress(Some(&progress));
+
+        let estimate = plan
+            .estimate(&snapshot, &index, None, &resume, 1 << 20)
+            .unwrap();
+
+        assert_eq!(estimate.journals, 1 << 20);
+        assert_eq!(estimate.blocks, 3_600 + 11_000);
+        assert_eq!(estimate.indexes, 2_200);
+        assert_eq!(estimate.logs, 2_100);
+        assert_eq!(estimate.entities, 700);
+        assert_eq!(estimate.fallback_layers, 1);
+    }
+
+    /// The factors against the restores they were fitted to: mainnet at epoch
+    /// 666, full history and a 10-epoch rolling window, as per-kind declared
+    /// and compressed sizes. The estimate plus one staged layer (what those
+    /// runs staged) covers each measured peak plus staging, and stays within
+    /// a fifth of it on full history once the settle's copy of the ingested
+    /// logs, measured at 66 GB there, is added to the peak.
+    #[test]
+    fn the_estimate_covers_the_measured_mainnet_restores() {
+        const GIB: f64 = (1u64 << 30) as f64;
+        const STAGED: u64 = 507_016_167; // the snapshot's largest compressed layer
+        const TIP_UNCOMPRESSED: u64 = 2_884_489_232;
+        const TIP_UTXO_RECORDS: u64 = 10_850_435;
+        const JOURNALS: u64 = 2 * (512 << 20);
+
+        struct Run {
+            // (uncompressed, compressed) per kind.
+            blocks: (u64, u64),
+            indexes: (u64, u64),
+            logs: (u64, u64),
+            entities: (u64, u64),
+            // Peak on disk, and that plus staging, in GiB.
+            peak: f64,
+            peak_and_staging: f64,
+        }
+
+        let full = Run {
+            blocks: (233_781_288_667, 58_613_985_987),
+            indexes: (73_465_292_183, 18_751_443_803),
+            logs: (95_241_902_989, 35_937_513_226),
+            entities: (682_193_394, 603_288_293),
+            peak: 197.70,
+            peak_and_staging: 198.17,
+        };
+
+        let rolling = Run {
+            blocks: (2_581_200_339, 872_178_058),
+            indexes: (908_087_152, 291_623_701),
+            logs: (1_502_982_184, 661_579_814),
+            entities: (2_740_726, 2_463_471),
+            peak: 10.60,
+            peak_and_staging: 11.07,
+        };
+
+        let estimate = |run: &Run| {
+            let (entity_kind, _) = ENTITY_KINDS[0];
+            let mut compressed = BTreeMap::new();
+
+            let mut layers: Vec<LayerDescriptor> = [
+                (BLOCKS, run.blocks, 0xa0),
+                ("log-pool-epochs", run.logs, 0xa1),
+                (entity_kind, run.entities, 0xa2),
+                (INDEXES, run.indexes, 0xa3),
+            ]
+            .into_iter()
+            .map(|(kind, (uncompressed, packed), byte)| {
+                compressed.insert(byte, packed);
+                LayerDescriptor {
+                    uncompressed_size: uncompressed,
+                    ..epoch_descriptor(kind, 0, byte)
+                }
+            })
+            .collect();
+
+            // The tip, its whole declared size on one UTxO shard.
+            let mut tip = state_layers();
+            for layer in &mut tip {
+                let utxos = state_ns_for(&layer.kind) == Some(UTXOS) && layer.scope["shard"] == 0;
+                layer.uncompressed_size = if utxos { TIP_UNCOMPRESSED } else { 0 };
+                layer.records = if utxos { TIP_UTXO_RECORDS } else { 0 };
+            }
+            layers.extend(tip);
+
+            plan_of(&inscription(layers))
+                .estimate_with(&Resume::none(), JOURNALS, |_, descriptor| {
+                    Ok(compressed.get(&descriptor.diff_id.as_bytes()[0]).copied())
+                })
+                .unwrap()
+        };
+
+        for (name, run) in [("full", &full), ("rolling", &rolling)] {
+            let destination = estimate(run).total() as f64 / GIB;
+            let checked = destination + STAGED as f64 / GIB;
+
+            assert!(destination >= run.peak, "{name}: {destination} GiB");
+            assert!(checked >= run.peak_and_staging, "{name}: {checked} GiB");
+        }
+
+        const SETTLED_COPY: f64 = 66e9 / GIB;
+
+        let checked = (estimate(&full).total() + STAGED) as f64 / GIB;
+        assert!(
+            checked <= (full.peak_and_staging + SETTLED_COPY) * 1.2,
+            "full: {checked} GiB"
         );
     }
 
@@ -2607,46 +4466,148 @@ mod tests {
         let scratch = temp.path().join("scratch");
 
         let plan = Plan {
-            position: read_position(&inscription(vec![]).position).unwrap(),
-            sequence: 3,
-            epochs: Vec::new(),
             state: BTreeMap::new(),
-            state_dumps: BTreeMap::new(),
-            skipped_epochs: 0,
-            skipped_unknown: Vec::new(),
+            ..plan_of(&inscription(state_layers()))
         };
 
-        let staging = |largest_layer, unsized_layers| {
+        let staging = |read_ahead, peak, unsized_layers| {
             plan.preflight(
                 temp.path(),
-                &Resume::none(),
+                &Estimate::default(),
                 Some(Staging {
                     dir: &scratch,
-                    largest_layer,
+                    read_ahead,
+                    blocks: false,
+                    peak,
                     unsized_layers,
                 }),
             )
         };
 
-        staging(Some(0), 0).unwrap();
+        staging(1, Some(0), 0).unwrap();
 
         // Nothing could size the layers, so nothing refuses: what cannot be
         // measured warns and proceeds. Nor does a partial sizing, where the
         // number is a floor and the warning says so.
-        staging(None, 3).unwrap();
-        staging(Some(0), 1).unwrap();
+        staging(1, None, 3).unwrap();
+        staging(1, Some(0), 1).unwrap();
 
-        let err = staging(Some(u64::MAX), 0).unwrap_err();
+        let refusal = |read_ahead| {
+            let err = staging(read_ahead, Some(u64::MAX), 0).unwrap_err();
 
-        let Error::NotEnoughSpace(message) = &err else {
-            panic!("{err:?}");
+            let Error::NotEnoughSpace(message) = err else {
+                panic!("{err:?}");
+            };
+
+            assert!(
+                message.contains(&scratch.display().to_string()),
+                "{message}"
+            );
+            assert!(message.contains("short"), "{message}");
+
+            message
         };
 
-        assert!(message.contains("staging the layers it pulls"), "{message}");
+        let serial = refusal(1);
         assert!(
-            message.contains(&scratch.display().to_string()),
-            "{message}"
+            serial.contains("staging the layers it pulls, one at a time"),
+            "{serial}"
         );
-        assert!(message.contains("short"), "{message}");
+
+        let ahead = refusal(DEFAULT_READ_AHEAD);
+        assert!(
+            ahead.contains("staging the layers it pulls, 9 at once at read-ahead 8"),
+            "{ahead}"
+        );
+    }
+
+    #[test]
+    fn a_restore_stages_the_layer_it_drains_and_its_read_ahead() {
+        assert_eq!(Staging::at_once(0), 1);
+        assert_eq!(Staging::at_once(1), 1);
+        assert_eq!(Staging::at_once(2), 3);
+        assert_eq!(Staging::at_once(DEFAULT_READ_AHEAD), 9);
+    }
+
+    /// A snapshot none of whose layers opens: each read fails naming the layer
+    /// it was asked for, and nothing else is ever asked of it.
+    struct Unopenable;
+
+    impl SnapshotReader for Unopenable {
+        type Blob = std::io::Empty;
+
+        fn read_inscription(&self) -> Result<Inscription, stelae::Error> {
+            unreachable!("a reader reads no inscription")
+        }
+
+        fn blob_index(&self) -> Result<BlobIndex, stelae::Error> {
+            unreachable!("a reader reads no blob index")
+        }
+
+        fn compressed_size(
+            &self,
+            _: &BlobIndex,
+            _: &LayerDescriptor,
+        ) -> Result<Option<u64>, stelae::Error> {
+            unreachable!("a reader sizes no layer")
+        }
+
+        fn stream_layer(
+            &self,
+            _: &BlobIndex,
+            _: &dyn stelae::profile::Profile,
+            descriptor: &LayerDescriptor,
+            _: Limits,
+        ) -> Result<LayerReader<Self::Blob>, stelae::Error> {
+            Err(stelae::Error::Io(std::io::Error::other(format!(
+                "read {}",
+                descriptor.diff_id
+            ))))
+        }
+    }
+
+    #[test]
+    fn a_layer_is_taken_from_the_stream_only_at_its_turn() {
+        let blocks = epoch_descriptor(BLOCKS, 1, 1);
+        let indexes = epoch_descriptor(INDEXES, 1, 2);
+        let index: BlobIndex = std::iter::empty().collect();
+        let observer = Observer::silent();
+
+        let reader = |layers: &[LayerDescriptor]| {
+            Reader::new(
+                &Unopenable,
+                &index,
+                Repo::Dolos,
+                layers.to_vec(),
+                MAINNET_MAGIC,
+                default_budget(),
+                DEFAULT_READ_AHEAD,
+                &observer,
+            )
+        };
+
+        let out_of_turn = |err: Error| match err {
+            Error::LayerOutOfTurn { kind, reason, .. } => (kind, reason),
+            other => panic!("{other:?}"),
+        };
+
+        let both = [blocks.clone(), indexes.clone()];
+
+        // Its turn has come: the stream reads it, and its error is the take's.
+        let err = reader(&both).take(&blocks).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&format!("read {}", blocks.diff_id)),
+            "{err}"
+        );
+
+        // Its turn has not: refused before the stream reads anything.
+        let (kind, reason) = out_of_turn(reader(&both).take(&indexes).unwrap_err());
+        assert_eq!(kind, INDEXES);
+        assert!(reason.contains("the blocks layer at"), "{reason}");
+
+        // No turn is left.
+        let (_, reason) = out_of_turn(reader(&[]).take(&blocks).unwrap_err());
+        assert!(reason.contains("no layer is left"), "{reason}");
     }
 }

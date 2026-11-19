@@ -27,7 +27,7 @@ Dolos keeps its data in distinct stores, each serving a specific purpose:
 - **Database**: `<storage.path>/wal`
 
 ### CacheStore
-- **Purpose**: Disposable answers derived from the other stores (decision 0059); it is outside the WAL, steles and restore, and deleting it changes no answer
+- **Purpose**: Disposable answers derived from the other stores (decision 0059); it is outside the WAL, Stelae snapshots and restore, and deleting it changes no answer
 - **Contents**: Byte entries by namespace and key; a namespace carries a format version, a validity model (immutable or tip-scoped) and an admission cost
 - **Traits**: `CacheStore`, implemented by `TieredCache` over the builtin memory tier and a `CacheDiskTier`
 - **Database**: `<storage.path>/cache/cache.redb`, a Redb file of immutable entries within `storage.cache.disk_mb`; writes skip the fsync and the flush at shutdown makes them durable; a file Redb finds corrupt, cut short, or laid out by another release is recreated empty, and any other open failure is an error
@@ -40,7 +40,7 @@ the store that holds what it projects:
 - the entity index maps an entity's id to the slot it was first seen at, for the `EntityKind`s the chain declares (Cardano: `dolos_cardano::indexes::entities`); it lives in the `ArchiveStore` (`ArchiveStore::entity_slots`, batched), written through `ArchiveWriter::write_entity` by the seal of an immutable epoch with the epoch's sealed logs, swept by a prune and never undone (decision 0064)
 
 ### Store identity
-Every on-disk state and archive store records the compatibility identifier it was created under (the current entry of `dolos_core::compat::SUPPORTED_CONTRACTS`): under the key `identity` in `state-cursor`, and in the archive's `archive-meta` keyspace. The adapters' `open_fjall` constructors (`src/adapters/storage.rs`) are the one gate: a supported identity opens, an empty store without one records the current identity before its first write, and a store holding data without one, or recording an unsupported one, is refused with `IncompatibleStore`. Nothing in the configuration enters the check. The WAL keeps its own version; the mempool and cache are outside it.
+Every on-disk state and archive store records the compatibility identifier it was created under (the current entry of `dolos_core::compat::SUPPORTED_CONTRACTS`) and the internal format it was written in (`dolos_core::compat::STORE_FORMAT`, a big-endian `u32`), in one batch: under the keys `identity` and `format` in `state-cursor`, and in the archive's `archive-meta` keyspace. The adapters' `open_fjall` constructors (`src/adapters/storage.rs`, `admit`) are the one gate: a supported identity in a format no newer than `STORE_FORMAT` opens, an empty store without an identity records the current identity and format before its first write, and a store holding data without an identity, recording an unsupported one, recording no format or a newer one, is refused with `IncompatibleStore`. Nothing in the configuration enters the check. The WAL keeps its own version; the mempool and cache are outside it.
 
 ### Database File Organization
 
@@ -50,7 +50,7 @@ Every on-disk state and archive store records the compatibility identifier it wa
 ├── state    # Ledger state database
 ├── archive  # Archive index plus flat block segment files
 ├── cache    # Disposable cache entries (cache.redb)
-└── scratch  # not a store: stele layers staged in flight by a registry transfer
+└── scratch  # not a store: snapshot layers staged in flight by a registry transfer
 ```
 
 The persistent WAL and the cache's disk tier use Redb, while state and archive use separate Fjall databases with independent cache and durability configuration. Builtin memory stores serve ephemeral nodes, tooling, and tests.
@@ -376,5 +376,14 @@ All agents working on this repository must verify their modifications by running
 - Code should follow existing Rust conventions and patterns established in the codebase
 - New implementations should follow the trait-based architecture patterns
 - Storage implementations that share a trait should maintain the same observable contract across backends
+
+### Changelog
+
+Never edit `CHANGELOG.md` by hand, in any pull request. It is generated at release time by
+[git-cliff](https://git-cliff.org) (`cliff.toml`) from the conventional-commit titles on
+`main`, so a change reaches the changelog through its commit or squash title: a `feat`/`fix`/…
+type, an optional scope, and `!` for a breaking change. Put the release-note wording in that
+title and, if it needs more, in the pull request body. If a branch already edits
+`CHANGELOG.md`, drop that edit rather than resolving a conflict in it.
 
 These verification steps ensure code quality, maintain consistency across storage backends, and prevent introducing technical debt into the codebase.

@@ -9,6 +9,7 @@
 
 mod fault_registry;
 mod node;
+mod paired;
 mod watcher;
 
 use std::{sync::Arc, time::Instant};
@@ -29,6 +30,9 @@ use watcher::Watcher;
 
 const REPOSITORY: &str = "dolos/faults";
 
+/// Where the blocks snapshot the published snapshot names lives.
+const BLOCKS_REPOSITORY: &str = "dolos/faults-blocks";
+
 /// Install `ring` as the process-default crypto provider, which `stelae::oci`
 /// asks of whatever process opens a `Registry`.
 fn install_crypto_provider() {
@@ -41,34 +45,46 @@ fn install_crypto_provider() {
     });
 }
 
-/// A node's stores, published once into `registry`.
+/// A node's stores, published once into `registry`, the closed epoch's blocks
+/// beside the snapshot in [`BLOCKS_REPOSITORY`].
 fn published(
     registry: &FaultRegistry,
     scratch: &std::path::Path,
 ) -> (ToyDomain<MemoryStores>, u64) {
     let domain = harness::<MemoryStores>();
     let magic = u64::from(domain.genesis().network_magic());
-    let plan = plan_at_boundary(&domain, 1, Default::default());
+    let plan = plan_at_boundary(&domain, 1);
 
-    registry::publish(
-        registry::Publishing::new(&opened(registry, scratch)),
+    let root = tempfile::tempdir().unwrap();
+    dolos_snapshot::export::publish(
+        root.path(),
         &plan,
         domain.archive(),
         domain.state(),
-        None,
         &Observer::silent(),
     )
     .unwrap();
+
+    paired::pair(
+        root.path(),
+        &opened(registry, scratch),
+        &opened_at(registry, scratch, BLOCKS_REPOSITORY),
+    );
 
     (domain, magic)
 }
 
 /// The repository opened as `dolos bootstrap stelae` opens it.
 fn opened(registry: &FaultRegistry, scratch: &std::path::Path) -> Registry {
+    opened_at(registry, scratch, REPOSITORY)
+}
+
+/// The repository `name`, opened the same way.
+fn opened_at(registry: &FaultRegistry, scratch: &std::path::Path, name: &str) -> Registry {
     install_crypto_provider();
 
     registry::open(
-        &registry.repository(REPOSITORY),
+        &registry.repository(name),
         true,
         Auth::default(),
         scratch.to_path_buf(),
@@ -84,11 +100,14 @@ fn restoring(storage: &std::path::Path, magic: u64) -> restore::Restoring<'_> {
         storage_path: storage,
         resume: false,
         skip_space_check: false,
+        journals: 0,
+        read_ahead: restore::DEFAULT_READ_AHEAD,
+        source: None,
     }
 }
 
 fn restore_into(
-    source: &Registry,
+    (source, blocks): (&Registry, &Registry),
     blank: &Blank<MemoryStores>,
     storage: &std::path::Path,
     magic: u64,
@@ -97,6 +116,7 @@ fn restore_into(
     registry::restore_registry(
         source,
         Point::Latest,
+        Some(blocks),
         restoring(storage, magic),
         restore::Target::new(&blank.archive, blank.state()),
         observer,
@@ -124,7 +144,10 @@ fn a_restore_survives_a_layer_cut_off_mid_transfer() {
 
     let started = Instant::now();
     let summary = restore_into(
-        &opened(&registry, scratch.path()),
+        (
+            &opened(&registry, scratch.path()),
+            &opened_at(&registry, scratch.path(), BLOCKS_REPOSITORY),
+        ),
         &blank,
         storage.path(),
         magic,
@@ -173,22 +196,31 @@ fn an_exhausted_layer_read_names_the_blob_and_the_attempts() {
     let cut = registry.largest_layer();
     registry.cut_always(&cut);
 
-    let source = Registry::open(
-        &registry.repository(REPOSITORY),
-        Options {
-            insecure: true,
-            scratch_dir: Some(scratch.path().to_path_buf()),
-            read_delay: std::time::Duration::from_millis(1),
-            ..Options::default()
-        },
-    )
-    .unwrap();
+    let quick = |name| {
+        Registry::open(
+            &registry.repository(name),
+            Options {
+                insecure: true,
+                scratch_dir: Some(scratch.path().to_path_buf()),
+                read_delay: std::time::Duration::from_millis(1),
+                ..Options::default()
+            },
+        )
+        .unwrap()
+    };
+    let (source, blocks) = (quick(REPOSITORY), quick(BLOCKS_REPOSITORY));
 
     let blank = Blank::<MemoryStores>::open();
     let storage = tempfile::tempdir().unwrap();
 
-    let error = restore_into(&source, &blank, storage.path(), magic, &Observer::silent())
-        .expect_err("a layer that never arrives whole cannot be restored");
+    let error = restore_into(
+        (&source, &blocks),
+        &blank,
+        storage.path(),
+        magic,
+        &Observer::silent(),
+    )
+    .expect_err("a layer that never arrives whole cannot be restored");
 
     assert!(
         matches!(
@@ -221,8 +253,8 @@ fn an_exhausted_layer_read_names_the_blob_and_the_attempts() {
 /// Restore with `fault` armed, and return what the observer saw retried.
 ///
 /// The reads before the first layer (the manifest and the config blob) run
-/// before the restore has a stele to watch, so this is what shows the
-/// observer is attached to the registry, not only to the stele it yields.
+/// before the restore has a snapshot to watch, so this is what shows the
+/// observer is attached to the registry, not only to the snapshot it yields.
 fn retries_seen_with(fault: impl FnOnce(&FaultRegistry)) -> (FaultRegistry, usize) {
     let registry = FaultRegistry::spawn();
     let scratch = tempfile::tempdir().unwrap();
@@ -235,7 +267,10 @@ fn retries_seen_with(fault: impl FnOnce(&FaultRegistry)) -> (FaultRegistry, usiz
     let watcher = Arc::new(Watcher::default());
 
     let summary = restore_into(
-        &opened(&registry, scratch.path()),
+        (
+            &opened(&registry, scratch.path()),
+            &opened_at(&registry, scratch.path(), BLOCKS_REPOSITORY),
+        ),
         &blank,
         storage.path(),
         magic,
@@ -278,10 +313,60 @@ fn a_retried_manifest_read_is_announced() {
         registry.fail_next_manifest(1);
     });
 
+    // The diff manifest twice, then the tip manifest beside it, then the
+    // blocks snapshot's, which has no tip.
     assert_eq!(
         registry.manifest_gets() - published.get(),
-        2,
-        "the manifest is fetched twice"
+        4,
+        "the diff manifest is fetched twice"
     );
     assert_eq!(retries, 1, "the manifest retry reaches the observer");
+}
+
+/// A resume whose recorded snapshot the registry won't serve is refused as gone
+/// only when the registry says the tag is absent. Any other failure, here a
+/// refused read, is reported as itself, since starting over with `--force`
+/// is not the fix for it.
+#[test]
+fn a_recorded_resume_is_gone_only_when_its_tag_is_absent() {
+    let registry = FaultRegistry::spawn();
+    let scratch = tempfile::tempdir().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let source = restore::Source::Repo(registry.repository(REPOSITORY));
+
+    restore::SourceRecord::new(&source, 7, stelae::Digest::from_bytes([7; 32]))
+        .unwrap()
+        .save(&restore::source_path_in(storage.path()))
+        .unwrap();
+
+    let resume = || {
+        let blank = Blank::<MemoryStores>::open();
+
+        registry::restore_registry(
+            &opened(&registry, scratch.path()),
+            Point::Epoch(7),
+            None,
+            restore::Restoring {
+                resume: true,
+                source: Some(&source),
+                ..restoring(storage.path(), 0)
+            },
+            restore::Target::new(&blank.archive, blank.state()),
+            &Observer::silent(),
+        )
+        .unwrap_err()
+    };
+
+    // Nothing is published, so the registry answers the tag is unknown.
+    let error = resume();
+    assert!(
+        matches!(error, Error::Resume(restore::ResumeRefusal::Gone(_))),
+        "{error:?}"
+    );
+
+    registry.deny_next_manifest(1);
+
+    let error = resume();
+    assert!(!matches!(error, Error::Resume(_)), "{error:?}");
+    assert!(error.to_string().contains("denied"), "{error}");
 }

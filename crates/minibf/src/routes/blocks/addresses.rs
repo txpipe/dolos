@@ -46,7 +46,7 @@ where
     let builder = builder.collect_touched_addresses_with(|tx| {
         let mut addresses = BTreeSet::new();
 
-        for_each_touched_output(&mut resolver, tx, |output| {
+        for_each_touched_output(&mut resolver, tx, |output, _| {
             let address = output
                 .address()
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

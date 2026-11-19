@@ -46,7 +46,9 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use pallas::ledger::traverse::MultiEraBlock;
 
-use crate::archive::{check_entity_key, ArchiveError, ArchiveStore, ArchiveWriter, Skippable};
+use crate::archive::{
+    blocks_through, check_entity_key, ArchiveError, ArchiveStore, ArchiveWriter, Skippable,
+};
 use crate::indexes::{
     key_hash, ArchiveIndexDelta, EntityKind, EntityRecord, ExactKind, ExactRecord, IndexRecord,
     KeyHash, TagDimension, TagRecord, MAX_EXACT_KEY_LEN,
@@ -705,16 +707,22 @@ impl ArchiveStore for MemoryArchiveStore {
 
     /// Drop everything the archive holds after `after`.
     ///
-    /// The cut is by slot: the block at `after`'s slot survives (including a
-    /// second block sharing that slot), while log rows *at* the slot go with
-    /// the cut — the boundary the disk backends draw by comparing full log
-    /// keys against the bare 8-byte slot prefix.
+    /// Blocks are cut at `after` itself: at a slot holding more than one, the
+    /// ones the chain puts after it go. Log rows *at* the slot go with the
+    /// cut — the boundary the disk backends draw by comparing full log keys
+    /// against the bare 8-byte slot prefix.
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError> {
         let slot = after.slot();
 
         let mut tables = self.tables.write().map_err(|_| poisoned())?;
 
         tables.blocks.retain(|s, _| *s <= slot);
+
+        if let Some(bodies) = tables.blocks.get_mut(&slot) {
+            let kept = blocks_through(bodies, after);
+            bodies.truncate(kept);
+        }
+
         tables.logs.retain(|(_, key), _| log_slot(key) < slot);
 
         Ok(())

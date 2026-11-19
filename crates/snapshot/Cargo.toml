@@ -6,11 +6,12 @@ edition.workspace = true
 
 # This crate is the *profile* half of the Stelae boundary: it depends on the
 # stelae crates and on `dolos-*`, never the other way around — structural now
-# that the protocol lives in its own repository. This is the workspace's one
+# that the protocol lives in its own repository. This is the workspace's
 # pin point: the CLI and root lib reach protocol and driver types through
 # this crate's re-exports, and both crates move here together to one
 # immutable stelae reference: a release tag or, between releases, a commit
-# `rev` (they version in lockstep; never pin a branch). See
+# `rev` (they version in lockstep; never pin a branch). The root crate's
+# dev-dependencies repeat the reference for its tests and move with it. See
 # adrs/004_stelae_snapshots.md, "Code layout".
 [dependencies]
 # The protocol crates keep their own default-off `oci` feature for third
@@ -18,10 +19,17 @@ edition.workspace = true
 # it turns the transport on unconditionally rather than forwarding a feature
 # nothing in dolos ever left off.
 #
-# Pinned at 7b18c6f, the stelae main commit after v0.5.2 that retries failed
-# and truncated registry reads (txpipe/stelae#23).
-stelae = { git = "https://github.com/txpipe/stelae", rev = "7b18c6f3e3166cef48d5c569b5908f85a82dd1e8", features = ["oci"] }
-stelae-driver = { git = "https://github.com/txpipe/stelae", rev = "7b18c6f3e3166cef48d5c569b5908f85a82dd1e8", features = ["oci"] }
+# Pinned at b2735ed, the stelae main commit that holds a repository in a
+# directory as an OCI image layout (txpipe/stelae#36), over the diff chain:
+# inscriptions listing their own layers in `diff` and `tip`, linked by
+# `previous`. It also holds the blocks profile and its plain writer
+# (txpipe/stelae#29).
+stelae = { git = "https://github.com/txpipe/stelae", rev = "b2735ed829cbafdc57273a42871510aa564b00b3", features = ["oci"] }
+stelae-driver = { git = "https://github.com/txpipe/stelae", rev = "b2735ed829cbafdc57273a42871510aa564b00b3", features = ["oci"] }
+# The `io.txpipe.cardano.blocks` profile, which a restore reads the closed
+# epochs' blocks through. Without its `hardano` feature, so pallas-hardano
+# does not come with it.
+stelae-blocks = { git = "https://github.com/txpipe/stelae", rev = "b2735ed829cbafdc57273a42871510aa564b00b3" }
 dolos-core = { path = "../core" }
 dolos-cardano = { path = "../cardano" }
 

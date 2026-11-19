@@ -10,7 +10,7 @@ use dolos_core::{Domain, Tag};
 use crate::{
     error::Error,
     pagination::{Pagination, PaginationParameters},
-    routes::utxos::UtxoWalk,
+    utxos::UtxoWalk,
     Facade,
 };
 
@@ -59,13 +59,9 @@ where
         let asset = crate::mapping::assets::decode_asset_subject(&asset)?;
         let asset_tag = Tag::new(utxo_dimensions::ASSET, asset.clone());
 
-        let (smaller, walked, other) = crate::routes::utxos::smaller_tag(
-            &domain,
-            asset_tag,
-            address_tag.clone(),
-            &pagination.order,
-        )
-        .await?;
+        let (smaller, walked, other) =
+            crate::utxos::smaller_tag(&domain, asset_tag, address_tag.clone(), &pagination.order)
+                .await?;
 
         if smaller.is_empty() && walked.dimension == utxo_dimensions::ASSET {
             if is_asset_in_chain(&domain, &asset).await? {
@@ -81,14 +77,13 @@ where
         }
     };
 
-    let (utxos, matched) =
-        crate::routes::utxos::load_filtered_page(&domain, walk, &pagination).await?;
+    let (utxos, matched) = crate::utxos::load_filtered_page(&domain, walk, &pagination).await?;
 
     // `lovelace` on an address that holds UTxOs, all with assets, is an empty
     // page; an address that holds none of an asset is checked like an unknown
     // one.
     let no_rows = if lovelace {
-        utxos.is_empty() && crate::routes::utxos::tag_is_empty(&domain, &address_tag).await?
+        utxos.is_empty() && crate::utxos::tag_is_empty(&domain, &address_tag).await?
     } else {
         !matched
     };

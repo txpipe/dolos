@@ -100,6 +100,15 @@ pub struct TxStatus {
     pub confirmed_at: Option<ChainPoint>,
 }
 
+/// How many transactions a [`MempoolStore`] holds, by umbrella stage.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MempoolCount {
+    /// In the pending queue.
+    pub pending: usize,
+    /// In any inflight sub-stage: Propagated, Acknowledged or Confirmed.
+    pub inflight: usize,
+}
+
 pub struct MempoolPage {
     pub items: Vec<MempoolTx>,
     pub next_cursor: Option<u64>,
@@ -181,6 +190,10 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
     /// Returns all transactions from the pending queue in insertion order.
     /// Does not remove them.
     fn peek_pending(&self) -> Vec<MempoolTx>;
+
+    /// The number of pending and of inflight transactions, counted without
+    /// reading or cloning them.
+    fn count(&self) -> MempoolCount;
 
     /// Moves matching transactions from pending to the inflight table
     /// (initial sub-stage: `Propagated`).
@@ -477,6 +490,10 @@ mod tests {
 
         fn peek_pending(&self) -> Vec<MempoolTx> {
             vec![]
+        }
+
+        fn count(&self) -> MempoolCount {
+            MempoolCount::default()
         }
 
         fn mark_inflight(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {

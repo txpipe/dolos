@@ -2,16 +2,16 @@
 //!
 //! Four properties, in increasing order of what they cost to check:
 //!
-//! 1. **The skeleton is pinned.** An export over the smallest store set a stele
-//!    can be cut from — an era, a cursor, and the two empty blocks that show
-//!    the cursor is its epoch's first — produces a document with no ledger
-//!    content in it, so the golden below is a function of literals only: the
-//!    network table, the `sequence`/`position`/`parameters` shapes, the order
-//!    the layers are listed in, and every layer's header and scope encoding. A
-//!    ledger change cannot move it, which is what makes it a golden rather than
-//!    a value that gets re-pinned as a matter of routine.
-//! 2. **A live node exports a complete stele.** Built by the harness domain
-//!    from synthetic blocks, read back through `SteleDir`, verified clean.
+//! 1. **The skeleton is pinned.** An export over the smallest store set a
+//!    snapshot can be cut from — an era, a cursor, and the two empty blocks
+//!    that show the cursor is its epoch's first — produces a document with no
+//!    ledger content in it, so the golden below is a function of literals only:
+//!    the network table, the `sequence`/`position`/`parameters` shapes, the
+//!    order the layers are listed in, and every layer's header and scope
+//!    encoding. A ledger change cannot move it, which is what makes it a golden
+//!    rather than a value that gets re-pinned as a matter of routine.
+//! 2. **A live node exports a complete snapshot.** Built by the harness domain
+//!    from synthetic blocks, read back through `SnapshotDir`, verified clean.
 //! 3. **Read-back equality.** Every layer, decoded through its own codec, is
 //!    what walking the store yields — compared against an expectation that is
 //!    *sorted independently* rather than produced by the same registry walk the
@@ -20,11 +20,11 @@
 //!    stores and to the builtin memory stores publish the same inscription
 //!    digest. This is the claim ADR-004 rests on and the first place it is
 //!    measured rather than asserted.
-//! 5. **A stele can be reproduced without being stored.** The discarding writer
-//!    walks the same stores and produces the same canonical document, byte for
-//!    byte, as the publish that wrote one to disk — which is what `dolos
-//!    snapshot digest` is, and what makes an independent verifier possible at
-//!    all.
+//! 5. **A snapshot can be reproduced without being stored.** The discarding
+//!    writer walks the same stores and produces the same canonical document,
+//!    byte for byte, as the publish that wrote one to disk — which is what
+//!    `dolos snapshot digest` is, and what makes an independent verifier
+//!    possible at all.
 
 mod common;
 mod node;
@@ -57,28 +57,34 @@ use dolos_snapshot::{
     export::{self, EpochWindow, Plan, Predecessor as _},
     facade::{Selection, SnapshotSource as _, StoreSnapshot},
     layers::{blocks, entities, indexes, logs, state},
-    state_layer_count, state_ns_for, DolosProfile, Network, RetainedEpochs, BLOCKS, ENTITY_KINDS,
-    INDEXES, LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
+    state_layer_count, state_ns_for, DolosProfile, Network, BLOCKS, ENTITY_KINDS, INDEXES,
+    LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
 };
 use dolos_testing::{
     blocks::make_conway_block_with_prev,
     toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores},
 };
 use node::{
-    account_layer, export_plan, export_to, extend_archive_past_cursor, harness, plan_at_boundary,
-    plan_for, settled, stake_only, step_past_boundary, write_account_row,
+    account_layer, export_layout, export_plan, export_to, extend_archive_past_cursor, harness,
+    plan_at_boundary, plan_for, settled, stake_only, step_past_boundary, write_account_row,
 };
 use stelae::{
-    dir::SteleDir,
+    dir::SnapshotDir,
     progress::{Observer, Outcome},
-    Discarding, SteleReader,
+    Discarding, SnapshotReader,
 };
 
 use watcher::Watcher;
 
+/// The `diffId` of the skeleton's boundary block layer, as the export that
+/// still listed every epoch's blocks wrote it. Only the closed epochs' blocks
+/// left the snapshot; this layer's kind, scope and codec did not move.
+const BOUNDARY_BLOCKS: &str =
+    "sha256:8013ed25e0a7280f0cb5e9fdcf70a8b3218356b27d25852566fed6515b85b894";
+
 /// The identity of an export over the skeleton store set.
 const GOLDEN_SKELETON: &str =
-    "sha256:ed7236c56ff338c81e1703e5f85afc1dc97270e0e6df2e0c97aca442352f06a4";
+    "sha256:a729d2938cf32b7a45756a02723e70744e36e16358168d3b7f45c4ee5ad861d8";
 
 /// Where the skeleton fixture stands: on the first block of epoch 2 under
 /// [`skeleton_summary`], after fifty empty slots, so the export covers three
@@ -101,6 +107,10 @@ fn skeleton_summary() -> ChainSummary {
 
     chain
 }
+
+/// Half a skeleton epoch: the seal at a boundary writes the epoch two before
+/// it.
+const SKELETON_MUTABLE_SLOTS: u64 = 50;
 
 fn skeleton_era() -> EraState {
     EraState {
@@ -157,7 +167,7 @@ fn skeleton_state() -> MemoryStateStore {
     state
 }
 
-/// The smallest store set a stele can be cut from: an era, a cursor, and the
+/// The smallest store set a snapshot can be cut from: an era, a cursor, and the
 /// two blocks that show the cursor is the first of its epoch.
 fn skeleton_stores() -> (MemoryArchiveStore, MemoryStateStore) {
     let archive = with_skeleton_blocks(MemoryArchiveStore::new(
@@ -177,7 +187,7 @@ fn skeleton_stores() -> (MemoryArchiveStore, MemoryStateStore) {
 #[test]
 fn a_bare_boundary_exports_the_pinned_skeleton() {
     let temp = tempfile::tempdir().unwrap();
-    let stele = SteleDir::create(temp.path()).unwrap();
+    let snapshot = SnapshotDir::create(temp.path()).unwrap();
 
     let (archive, state) = skeleton_stores();
 
@@ -185,26 +195,34 @@ fn a_bare_boundary_exports_the_pinned_skeleton() {
         &skeleton_summary(),
         Network::for_magic(dolos_snapshot::MAINNET_MAGIC),
         skeleton_point(),
-        Default::default(),
+        SKELETON_MUTABLE_SLOTS,
     )
     .unwrap();
 
     let inscription = export::export(
-        &stele,
+        &snapshot,
         &plan,
         &archive,
         &state,
-        None,
         &export::First,
         &Observer::silent(),
     )
     .unwrap();
 
-    // Three epochs of blocks and indexes, then every state layer. No
-    // `digests` layer: nothing supplies one — and **no log layers at all**,
-    // which is the omit-if-empty rule seen from the other side: a store with no
-    // logs in it publishes no layer claiming there are none.
-    assert_eq!(inscription.layers.len(), 3 * 2 + state_layer_count());
+    // A lineage's first snapshot: the two closed epochs' indexes in its diff, the
+    // boundary window's blocks and indexes and every state layer in its tip,
+    // and **no log layers at all**, which is the omit-if-empty rule seen from
+    // the other side: a store with no logs in it publishes no layer claiming
+    // there are none. The closed epochs' blocks are the blocks profile's.
+    assert_eq!(inscription.previous, None);
+    assert_eq!(inscription.diff.len(), 2);
+    assert_eq!(inscription.tip.len(), 2 + state_layer_count());
+
+    let blocks: Vec<_> = inscription.layers_of_kind(BLOCKS).collect();
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0].scope["epoch"], 2);
+    assert_eq!(blocks[0].diff_id.to_string(), BOUNDARY_BLOCKS);
+    assert_eq!(inscription.tip[0], *blocks[0]);
 
     for (kind, _) in LOG_KINDS {
         assert_eq!(
@@ -219,9 +237,8 @@ fn a_bare_boundary_exports_the_pinned_skeleton() {
 
     assert_eq!(inscription.digest().unwrap().to_string(), GOLDEN_SKELETON);
 
-    // And the directory it wrote is a stele by the protocol's own reckoning.
-    let reopened = SteleDir::open(temp.path()).unwrap();
-    let read = reopened.read_inscription().unwrap();
+    // And the directory it wrote is a snapshot by the protocol's own reckoning.
+    let read = common::resolve(temp.path()).read_inscription().unwrap();
 
     assert_eq!(read, inscription);
     read.check_profile(&DolosProfile).unwrap();
@@ -237,7 +254,7 @@ fn a_bare_boundary_exports_the_pinned_skeleton() {
 #[test]
 fn a_log_under_an_uncovered_namespace_fails_the_export() {
     let temp = tempfile::tempdir().unwrap();
-    let stele = SteleDir::create(temp.path()).unwrap();
+    let snapshot = SnapshotDir::create(temp.path()).unwrap();
 
     let state = skeleton_state();
 
@@ -264,16 +281,15 @@ fn a_log_under_an_uncovered_namespace_fails_the_export() {
         &skeleton_summary(),
         Network::for_magic(dolos_snapshot::MAINNET_MAGIC),
         skeleton_point(),
-        Default::default(),
+        SKELETON_MUTABLE_SLOTS,
     )
     .unwrap();
 
     let err = export::export(
-        &stele,
+        &snapshot,
         &plan,
         &archive,
         &state,
-        None,
         &export::First,
         &Observer::silent(),
     )
@@ -296,7 +312,7 @@ fn an_unnamed_network_renders_from_its_magic() {
         &skeleton_summary(),
         Network::for_magic(42),
         skeleton_point(),
-        Default::default(),
+        SKELETON_MUTABLE_SLOTS,
     )
     .unwrap();
 
@@ -306,13 +322,51 @@ fn an_unnamed_network_renders_from_its_magic() {
     assert_eq!(position["network"]["name"], "testnet-42");
 }
 
+/// A blocks reference for the tests that name one.
+fn some_blocks() -> stelae::Digest {
+    format!("sha256:{}", "ab".repeat(32)).parse().unwrap()
+}
+
 // --------------------------------------------------------------------------
-// 2. A complete stele from a live store set
+// 2. A complete snapshot from a live store set
 // --------------------------------------------------------------------------
+
+/// The reference a plan takes with `with_blocks` is the one its snapshot names,
+/// and an export into a network root writes no blocks snapshot of its own for
+/// it; a plan without one, exported alone, publishes the position it always
+/// did.
+#[test]
+fn a_plan_naming_its_blocks_publishes_them_in_position() {
+    let domain: ToyDomain = harness();
+    let (with_root, without_root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+
+    let with = export_plan(
+        with_root.path(),
+        &domain,
+        &plan_for(&domain).with_blocks(some_blocks()),
+    );
+    let without = export_layout(without_root.path(), &domain, &plan_for(&domain));
+
+    assert!(with.sequence > 0, "the fixture closes no epoch");
+    assert_eq!(node::blocks(with_root.path()), None);
+
+    let read = dolos_snapshot::read_position(&with.position).unwrap();
+    assert_eq!(read.blocks, Some(some_blocks()));
+
+    assert!(
+        without.position.get("blocks").is_none(),
+        "{}",
+        without.position
+    );
+
+    let mut stripped = with.position.clone();
+    stripped.as_object_mut().unwrap().remove("blocks");
+    assert_eq!(stripped, without.position);
+}
 
 /// Done criterion 1.
 #[test]
-fn a_harness_domain_exports_a_complete_stele() {
+fn a_harness_domain_exports_a_complete_snapshot() {
     let domain: ToyDomain = harness();
     let plan = plan_for(&domain);
 
@@ -328,8 +382,8 @@ fn a_harness_domain_exports_a_complete_stele() {
     inscription.validate().unwrap();
     inscription.check_profile(&DolosProfile).unwrap();
 
-    // Every kind but the log kinds and `digests`, which have no source in this
-    // slice. The state kinds are all here, seeded or not: a namespace the
+    // Every kind but the log kinds, which have no source in this slice. The
+    // state kinds are all here, seeded or not: a namespace the
     // harness never wrote still publishes its shards, empty.
     for kind in [BLOCKS, INDEXES]
         .into_iter()
@@ -351,17 +405,13 @@ fn a_harness_domain_exports_a_complete_stele() {
         .collect();
 
     assert_eq!(carried, ["log-account-epochs", "log-epochs"]);
-    assert_eq!(
-        inscription.layers_of_kind(dolos_snapshot::DIGESTS).count(),
-        0
-    );
 
     // The whole directory verifies: every blob hashes to its own name and
     // decompresses to a layer the inscription points at.
-    let stele = SteleDir::open(temp.path()).unwrap();
-    let index = stele.blob_index().unwrap();
+    let snapshot = node::resolved(temp.path());
+    let index = snapshot.blob_index().unwrap();
 
-    for descriptor in &inscription.layers {
+    for descriptor in inscription.layers() {
         assert!(
             index.blob_for(&descriptor.diff_id).is_some(),
             "layer {:?} has no blob",
@@ -388,21 +438,50 @@ fn every_layer_reads_back_as_the_store_yields_it() {
     let temp = tempfile::tempdir().unwrap();
     let inscription = export_to(temp.path(), &domain);
 
-    let stele = SteleDir::open(temp.path()).unwrap();
-    let index = stele.blob_index().unwrap();
+    let snapshot = node::resolved(temp.path());
+    let index = snapshot.blob_index().unwrap();
 
     let windows: Vec<EpochWindow> = plan.epochs.clone();
 
     // --- blocks -----------------------------------------------------------
+    //
+    // The Dolos snapshot carries the boundary window's; the blocks snapshot beside
+    // it every closed epoch's, under the blocks profile.
+    let (boundary, closed) = windows.split_last().unwrap();
     let written: Vec<_> = inscription.layers_of_kind(BLOCKS).collect();
-    assert_eq!(written.len(), windows.len());
+    assert_eq!(written.len(), 1);
+
+    let found: Vec<blocks::BlockRecord> = read_both_ways(&snapshot, &index, written[0])
+        .iter()
+        .map(|raw| blocks::decode(raw).unwrap())
+        .collect();
+
+    assert_eq!(found, expected_blocks(&domain, boundary), "the boundary");
+    assert!(!found.is_empty(), "the boundary window has no block");
+
+    let blocks_snapshot = node::resolved_blocks(temp.path()).unwrap();
+    let blocks_index = blocks_snapshot.blob_index().unwrap();
+    let blocks_layers: Vec<_> = blocks_snapshot
+        .chain()
+        .unwrap()
+        .descriptors()
+        .cloned()
+        .collect();
+    assert_eq!(blocks_layers.len(), closed.len());
 
     let mut any_blocks = false;
 
-    for (descriptor, window) in written.iter().zip(&windows) {
-        let found: Vec<blocks::BlockRecord> = read_both_ways(&stele, &index, descriptor)
-            .iter()
-            .map(|raw| blocks::decode(raw).unwrap())
+    for (descriptor, window) in blocks_layers.iter().zip(closed) {
+        assert_eq!(descriptor.scope["epoch"], window.epoch);
+
+        let found: Vec<blocks::BlockRecord> = blocks_snapshot
+            .read_layer(&blocks_index, &stelae_blocks::BlocksProfile, descriptor)
+            .unwrap()
+            .records()
+            .map(|raw| {
+                let record = stelae_blocks::record::decode(raw.unwrap()).unwrap();
+                blocks::BlockRecord::new(record.slot, record.hash.into(), record.body)
+            })
             .collect();
 
         any_blocks |= !found.is_empty();
@@ -415,7 +494,7 @@ fn every_layer_reads_back_as_the_store_yields_it() {
         );
     }
 
-    assert!(any_blocks, "the fixture archived no blocks");
+    assert!(any_blocks, "the fixture archived no closed epoch's blocks");
 
     // --- logs -------------------------------------------------------------
     //
@@ -441,7 +520,7 @@ fn every_layer_reads_back_as_the_store_yields_it() {
         for (descriptor, window) in written.iter().zip(&populated) {
             assert_eq!(descriptor.scope["epoch"], window.epoch, "{kind}");
 
-            let found: Vec<logs::LogRecord> = read_both_ways(&stele, &index, descriptor)
+            let found: Vec<logs::LogRecord> = read_both_ways(&snapshot, &index, descriptor)
                 .iter()
                 .map(|raw| logs::decode(ns, raw).unwrap())
                 .collect();
@@ -470,7 +549,7 @@ fn every_layer_reads_back_as_the_store_yields_it() {
     let mut exact = 0usize;
 
     for (descriptor, window) in written.iter().zip(&windows) {
-        let found: Vec<IndexRecord> = read_both_ways(&stele, &index, descriptor)
+        let found: Vec<IndexRecord> = read_both_ways(&snapshot, &index, descriptor)
             .iter()
             .map(|raw| indexes::decode(raw).unwrap())
             .collect();
@@ -513,7 +592,7 @@ fn every_layer_reads_back_as_the_store_yields_it() {
         for (shard, descriptor) in written.iter().enumerate() {
             assert_eq!(descriptor.scope["shard"], shard, "{kind}");
 
-            let found: Vec<state::StateRecord> = read_both_ways(&stele, &index, descriptor)
+            let found: Vec<state::StateRecord> = read_both_ways(&snapshot, &index, descriptor)
                 .iter()
                 .map(|raw| state::decode(ns, raw).unwrap())
                 .collect();
@@ -576,15 +655,15 @@ fn accounts_export_into_the_shard_of_their_hash() {
     let temp = tempfile::tempdir().unwrap();
     let inscription = export_to(temp.path(), &domain);
 
-    let stele = SteleDir::open(temp.path()).unwrap();
-    let index = stele.blob_index().unwrap();
+    let snapshot = node::resolved(temp.path());
+    let index = snapshot.blob_index().unwrap();
 
     let mut found: BTreeMap<Vec<u8>, u8> = BTreeMap::new();
 
     for descriptor in inscription.layers_of_kind("state-accounts") {
         let shard = descriptor.scope["shard"].as_u64().unwrap() as u8;
 
-        for raw in read_both_ways(&stele, &index, descriptor) {
+        for raw in read_both_ways(&snapshot, &index, descriptor) {
             let record = state::decode(AccountState::NS, &raw).unwrap();
             found.insert(record.key, shard);
         }
@@ -724,31 +803,24 @@ fn expected_state<B: ToyStores>(
 #[test]
 fn both_backends_publish_the_same_inscription() {
     // At the live cursor, which is what a publisher actually stands at, and
-    // then over a plan that cuts a retained dump. The second is not a separate
-    // property: a dump is written by teeing the tip's own sink, so a backend
-    // whose walk order differed would produce two divergent descriptors from
-    // one divergent walk, and the check that catches it has to be run against
-    // a stele that carries them. The harness ledger sits inside epoch 0 and
-    // epoch 0 may not be retained, so the dump-carrying plan stands at the
-    // epoch-1 boundary — see `plan_at_boundary`.
+    // then at the epoch-1 boundary — see `plan_at_boundary`.
     same_inscription_from_both_backends(None);
-    same_inscription_from_both_backends(Some((1, RetainedEpochs::new(vec![1]).unwrap())));
+    same_inscription_from_both_backends(Some(1));
 }
 
-/// The plan the comparison is run over: the live cursor, or a boundary point
-/// with a retained list.
+/// The plan the comparison is run over: the live cursor, or a boundary point.
 ///
 /// A free function rather than a closure because the two domains are two
 /// types — the whole point of the comparison — and a closure cannot be generic
 /// over them.
-fn plan_of<B: ToyStores>(domain: &ToyDomain<B>, at: &Option<(u64, RetainedEpochs)>) -> Plan {
+fn plan_of<B: ToyStores>(domain: &ToyDomain<B>, at: &Option<u64>) -> Plan {
     match at {
-        Some((epoch, retained)) => plan_at_boundary(domain, *epoch, retained.clone()),
+        Some(epoch) => plan_at_boundary(domain, *epoch),
         None => plan_for(domain),
     }
 }
 
-fn same_inscription_from_both_backends(at: Option<(u64, RetainedEpochs)>) {
+fn same_inscription_from_both_backends(at: Option<u64>) {
     let memory: ToyDomain<MemoryStores> = harness();
     let fjall: ToyDomain<FjallStores> = harness();
 
@@ -767,12 +839,12 @@ fn same_inscription_from_both_backends(at: Option<(u64, RetainedEpochs)>) {
     // Compared layer by layer first, so a divergence names the kind and the
     // scope it happened in rather than only moving the final digest.
     assert_eq!(
-        from_memory.layers.len(),
-        from_fjall.layers.len(),
+        (from_memory.diff.len(), from_memory.tip.len()),
+        (from_fjall.diff.len(), from_fjall.tip.len()),
         "different layer counts"
     );
 
-    for (left, right) in from_memory.layers.iter().zip(&from_fjall.layers) {
+    for (left, right) in from_memory.layers().zip(from_fjall.layers()) {
         assert_eq!(
             (&left.kind, &left.scope, left.records, left.diff_id),
             (&right.kind, &right.scope, right.records, right.diff_id),
@@ -789,22 +861,20 @@ fn same_inscription_from_both_backends(at: Option<(u64, RetainedEpochs)>) {
         "the two backends do not publish the same identity"
     );
 
-    // Same document on disk, and the same blobs behind it.
-    assert_eq!(
-        std::fs::read(memory_root.path().join("inscription.json")).unwrap(),
-        std::fs::read(fjall_root.path().join("inscription.json")).unwrap(),
-    );
+    // Same manifests on disk, the blocks snapshot's among them, and the same
+    // blobs behind them.
+    for repository in [export::DOLOS_REPOSITORY, export::BLOCKS_REPOSITORY] {
+        assert_eq!(
+            std::fs::read(memory_root.path().join(repository).join("index.json")).unwrap(),
+            std::fs::read(fjall_root.path().join(repository).join("index.json")).unwrap(),
+            "{repository}"
+        );
+    }
 
-    let left = SteleDir::open(memory_root.path())
-        .unwrap()
-        .blob_index()
-        .unwrap();
-    let right = SteleDir::open(fjall_root.path())
-        .unwrap()
-        .blob_index()
-        .unwrap();
+    let left = node::resolved(memory_root.path()).blob_index().unwrap();
+    let right = node::resolved(fjall_root.path()).blob_index().unwrap();
 
-    for descriptor in &from_memory.layers {
+    for descriptor in from_memory.layers() {
         assert_eq!(
             left.blob_for(&descriptor.diff_id),
             right.blob_for(&descriptor.diff_id),
@@ -819,16 +889,15 @@ fn same_inscription_from_both_backends(at: Option<(u64, RetainedEpochs)>) {
 ///
 /// One backend, one seeding, three walks: strictly serial (one producer, no
 /// threads at all), the default pool, and a pool wider than the job list is
-/// deep. Each runs over a plan that cuts a retained dump — so the tee through
-/// `carry_again` is in the mix. Byte-identical inscriptions and blobs, or the
-/// pool moved something it promised only to reschedule.
+/// deep, each over a plan standing at an epoch boundary. Byte-identical
+/// inscriptions and blobs, or the pool moved something it promised only to
+/// reschedule.
 #[test]
 fn a_pooled_production_is_byte_identical_to_the_serial_walk() {
     let domain: ToyDomain = harness();
-    let retained = RetainedEpochs::new(vec![1]).unwrap();
 
     let pool_of = |producers: usize| {
-        plan_at_boundary(&domain, 1, retained.clone()).with_producers(export::Producers::new(
+        plan_at_boundary(&domain, 1).with_producers(export::Producers::new(
             std::num::NonZeroUsize::new(producers).unwrap(),
         ))
     };
@@ -843,7 +912,7 @@ fn a_pooled_production_is_byte_identical_to_the_serial_walk() {
 
     // Compared layer by layer first, so a divergence names the kind and the
     // scope it happened in rather than only moving the final digest.
-    for (left, right) in serial.layers.iter().zip(&pooled.layers) {
+    for (left, right) in serial.layers().zip(pooled.layers()) {
         assert_eq!(
             (&left.kind, &left.scope, left.records, left.diff_id),
             (&right.kind, &right.scope, right.records, right.diff_id),
@@ -857,22 +926,16 @@ fn a_pooled_production_is_byte_identical_to_the_serial_walk() {
     assert_eq!(serial, wide);
     assert_eq!(serial.digest().unwrap(), pooled.digest().unwrap());
 
-    // Same document on disk, and the same blobs behind it.
+    // Same manifests on disk, and the same blobs behind them.
     assert_eq!(
-        std::fs::read(serial_root.path().join("inscription.json")).unwrap(),
-        std::fs::read(pooled_root.path().join("inscription.json")).unwrap(),
+        std::fs::read(node::dolos(serial_root.path()).join("index.json")).unwrap(),
+        std::fs::read(node::dolos(pooled_root.path()).join("index.json")).unwrap(),
     );
 
-    let left = SteleDir::open(serial_root.path())
-        .unwrap()
-        .blob_index()
-        .unwrap();
-    let right = SteleDir::open(pooled_root.path())
-        .unwrap()
-        .blob_index()
-        .unwrap();
+    let left = node::resolved(serial_root.path()).blob_index().unwrap();
+    let right = node::resolved(pooled_root.path()).blob_index().unwrap();
 
-    for descriptor in &serial.layers {
+    for descriptor in serial.layers() {
         assert_eq!(
             left.blob_for(&descriptor.diff_id),
             right.blob_for(&descriptor.diff_id),
@@ -886,15 +949,14 @@ fn a_pooled_production_is_byte_identical_to_the_serial_walk() {
 /// A transport that refuses to open a sink for one kind, for the test below.
 ///
 /// The directory twin of `tests/publish.rs`'s `Interrupted`: everything else
-/// goes straight through, and `carry_again`'s default body is right here
-/// because a directory's is the default.
+/// goes straight through.
 struct DyingAt<'a> {
-    inner: &'a SteleDir,
+    inner: &'a SnapshotDir,
     kind: &'static str,
 }
 
-impl stelae::SteleWriter for DyingAt<'_> {
-    type Sink = <SteleDir as stelae::SteleWriter>::Sink;
+impl stelae::SnapshotWriter for DyingAt<'_> {
+    type Sink = <SnapshotDir as stelae::SnapshotWriter>::Sink;
 
     fn layer_sink(
         &self,
@@ -931,9 +993,9 @@ fn a_failing_producer_fails_the_pooled_export() {
     let domain: ToyDomain = harness();
 
     let root = tempfile::tempdir().unwrap();
-    let stele = SteleDir::create(root.path()).unwrap();
+    let snapshot = SnapshotDir::create(root.path()).unwrap();
     let dying = DyingAt {
-        inner: &stele,
+        inner: &snapshot,
         kind: BLOCKS,
     };
 
@@ -946,7 +1008,6 @@ fn a_failing_producer_fails_the_pooled_export() {
         &plan,
         domain.archive(),
         domain.state(),
-        None,
         &export::First,
         &Observer::silent(),
     )
@@ -958,372 +1019,119 @@ fn a_failing_producer_fails_the_pooled_export() {
     );
 }
 
-/// The dumps a stele carries, by the epoch their scope names.
-fn dumps_in(
-    inscription: &stelae::inscription::Inscription,
-) -> BTreeMap<u64, Vec<&stelae::inscription::LayerDescriptor>> {
-    let mut by_epoch: BTreeMap<u64, Vec<_>> = BTreeMap::new();
-
-    for layer in &inscription.layers {
-        if state_ns_for(&layer.kind).is_none() {
-            continue;
-        }
-
-        if let Some(epoch) = layer.scope.get("epoch").and_then(serde_json::Value::as_u64) {
-            by_epoch.entry(epoch).or_default().push(layer);
-        }
-    }
-
-    by_epoch
-}
-
-/// Done criterion 1, the half that needs no registry: at the publish that cuts
-/// it, a retained dump **is** the tip — one blob, two descriptors.
-///
-/// The property the whole family's riskiest code exists to hold. It is checked
-/// three ways, because two of them can be true while the third is not: the
-/// descriptors agree on identity and disagree only in scope; the directory
-/// holds exactly as many blobs as there are distinct `diffId`s, so nothing was
-/// written twice; and the pair appears in the document in the order decision
-/// 0026 fixes — dumps ascending epoch, then the tip, shards ascending inside
-/// each.
+/// A publish at a boundary writes each state shard once, under the tip's
+/// scope: the state layers are exactly the tip's, in `STATE_KINDS` order and
+/// ascending shard within a kind, and none of their scopes names an epoch.
 #[test]
-fn a_dump_cut_at_the_sequence_is_the_tips_own_blob() {
+fn a_publish_writes_each_state_shard_once_as_the_tip() {
     let domain: ToyDomain<MemoryStores> = harness();
     let temp = tempfile::tempdir().unwrap();
 
-    let plan = plan_at_boundary(&domain, 1, RetainedEpochs::new(vec![1]).unwrap());
+    let plan = plan_at_boundary(&domain, 2);
     let inscription = export_plan(temp.path(), &domain, &plan);
 
-    let dumps = dumps_in(&inscription);
-    assert_eq!(dumps.keys().copied().collect::<Vec<_>>(), vec![1]);
-    assert_eq!(dumps[&1].len(), state_layer_count());
-
-    // One blob, two descriptors: same identity, same records, same size, and a
-    // scope that differs in exactly the epoch.
-    for dump in &dumps[&1] {
-        let shard = dump.scope["shard"].as_u64().unwrap();
-
-        let tip = inscription
-            .layers
-            .iter()
-            .find(|layer| {
-                layer.kind == dump.kind && layer.scope == serde_json::json!({"shard": shard})
-            })
-            .unwrap_or_else(|| panic!("no tip layer for {} shard {shard}", dump.kind));
-
-        assert_eq!(dump.diff_id, tip.diff_id, "{}", dump.kind);
-        assert_eq!(dump.records, tip.records, "{}", dump.kind);
-        assert_eq!(
-            dump.uncompressed_size, tip.uncompressed_size,
-            "{}",
-            dump.kind
-        );
-        assert_eq!(dump.media_type, tip.media_type, "{}", dump.kind);
-        assert_eq!(dump.scope, serde_json::json!({"epoch": 1, "shard": shard}));
-    }
-
-    // And the bytes were written once. A directory names its blobs by content,
-    // so two descriptors over one `diffId` are one file — the count of blobs is
-    // the count of *distinct* identities and not of layers.
-    let identities: std::collections::BTreeSet<_> = inscription
-        .layers
-        .iter()
-        .map(|layer| layer.diff_id)
-        .collect();
-
-    let index = SteleDir::open(temp.path()).unwrap().blob_index().unwrap();
-
-    assert_eq!(index.len(), identities.len());
-    assert_eq!(
-        inscription.layers.len(),
-        identities.len() + state_layer_count(),
-        "every dump shares its blob with the tip shard it was cut from",
-    );
-
-    // Per kind: the dump's shards ascending, then the tip's.
     let mut expected: Vec<(String, serde_json::Value)> = Vec::new();
 
     for (kind, _, shards, _) in STATE_KINDS {
-        for shard in 0..shards {
-            expected.push((
-                kind.to_owned(),
-                serde_json::json!({"epoch": 1, "shard": shard}),
-            ));
-        }
         for shard in 0..shards {
             expected.push((kind.to_owned(), serde_json::json!({"shard": shard})));
         }
     }
 
     let found: Vec<(String, serde_json::Value)> = inscription
-        .layers
+        .tip
         .iter()
         .filter(|layer| state_ns_for(&layer.kind).is_some())
         .map(|layer| (layer.kind.clone(), layer.scope.clone()))
         .collect();
 
-    assert_eq!(found, expected, "the state layers are out of order");
-}
+    assert_eq!(found.len(), state_layer_count());
+    assert_eq!(found, expected);
 
-/// Done criterion 2: the retained list is **signed input**.
-///
-/// Two publishers over one ledger, standing at one point, differing in nothing
-/// but their configuration, publish different documents — and the difference is
-/// legible in `parameters` rather than buried in a layer. That is what makes a
-/// publisher running the wrong list eject itself from co-signing instead of
-/// quietly attesting a different history.
-#[test]
-fn two_publishers_with_different_retained_lists_do_not_agree() {
-    let domain: ToyDomain<MemoryStores> = harness();
-
-    let publish = |retained: RetainedEpochs| {
-        let temp = tempfile::tempdir().unwrap();
-        let plan = plan_at_boundary(&domain, 2, retained);
-
-        (export_plan(temp.path(), &domain, &plan), temp)
-    };
-
-    let (none, _a) = publish(RetainedEpochs::default());
-    let (one, _b) = publish(RetainedEpochs::new(vec![2]).unwrap());
-    let (two, _c) = publish(RetainedEpochs::new(vec![1, 2]).unwrap());
-
-    assert_eq!(none.parameters["stateEpochs"], serde_json::json!([]));
-    assert_eq!(one.parameters["stateEpochs"], serde_json::json!([2]));
-    assert_eq!(two.parameters["stateEpochs"], serde_json::json!([1, 2]));
-
-    // Different parameters, therefore different identities — the divergence a
-    // co-signer sees.
-    let digests: std::collections::BTreeSet<_> = [&none, &one, &two]
-        .into_iter()
-        .map(|inscription| inscription.digest().unwrap())
+    // The parameters name no epoch: what they hold is code, not choice.
+    let keys: Vec<&str> = inscription
+        .parameters
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
         .collect();
-
-    assert_eq!(digests.len(), 3, "two lists produced one identity");
-
-    // The parameters are the *only* thing that moved between the first two: the
-    // second carries a dump, the first does not, so the diff an operator reads
-    // is one field and one layer set rather than a document they have to
-    // compare by hand.
-    for (left, right) in [(&none, &one), (&none, &two), (&one, &two)] {
-        assert_eq!(left.position, right.position);
-        assert_eq!(left.compression, right.compression);
-        assert_ne!(left.parameters, right.parameters);
-    }
+    assert_eq!(keys, ["entities", "indexKeyHash", "schemas", "shards"]);
 }
 
-/// A retained epoch below the sequence that no predecessor can hand over is a
-/// warning and a shorter stele — never a failed publish.
+/// A predecessor as a registry's chained publish is one: the link to the
+/// snapshot before, and the layers an interrupted attempt of the same publish
+/// recorded.
 ///
-/// Producing a past epoch's dump is a backfill run's job: this publish's stores
-/// hold the tip, and the state as of an epoch it has moved past is not in them
-/// to be written. The publish that discovers this is the ordinary case for
-/// every publisher that adopts the list before it has backfilled, so it stands.
-#[test]
-fn a_past_dump_no_predecessor_carries_is_skipped_and_the_publish_stands() {
-    let domain: ToyDomain<MemoryStores> = harness();
-    let temp = tempfile::tempdir().unwrap();
-
-    // `First` has nothing to inherit, which is exactly the adopt-miss.
-    let plan = plan_at_boundary(&domain, 2, RetainedEpochs::new(vec![1, 2]).unwrap());
-    let inscription = export_plan(temp.path(), &domain, &plan);
-
-    let dumps = dumps_in(&inscription);
-
-    assert_eq!(
-        dumps.keys().copied().collect::<Vec<_>>(),
-        vec![2],
-        "epoch 1's dump has no source in these stores and had to be skipped",
-    );
-    assert_eq!(dumps[&2].len(), state_layer_count());
-
-    // The list is still what it was configured to be: a skipped dump does not
-    // rewrite the signed input, or two publishers with the same configuration
-    // and different backfill states would stop agreeing on their parameters.
-    assert_eq!(
-        inscription.parameters["stateEpochs"],
-        serde_json::json!([1, 2])
-    );
-
-    // And the stele is whole otherwise.
-    assert_eq!(
-        inscription
-            .layers
-            .iter()
-            .filter(
-                |layer| state_ns_for(&layer.kind).is_some() && layer.scope.get("epoch").is_none()
-            )
-            .count(),
-        state_layer_count(),
-    );
-}
-
-/// What a reproduction can and cannot check about a stele carrying dumps.
-///
-/// Two cases with opposite answers, and the boundary between them is the whole
-/// of what `verify --reproduce` promises once dumps exist:
-///
-/// - the dump **at** the stele's own sequence is cut from the tip by the walk,
-///   so a reproduction rebuilds it out of the stores like every other layer and
-///   a divergence in it would be caught;
-/// - a dump for an epoch **below** the sequence cannot be rebuilt by anything
-///   standing at the tip — that epoch's state is not in these stores — so it is
-///   carried forward from the document under verification and taken on trust,
-///   in the same category `history` is already in.
-///
-/// A reproduction that insisted on building the second would report a
-/// divergence on every stele carrying any state history at all, which is not
-/// strictness but an unusable check.
-#[test]
-fn a_reproduction_rebuilds_the_dump_it_cuts_and_trusts_the_ones_it_inherits() {
-    let domain: ToyDomain<MemoryStores> = harness();
-    let retained = || RetainedEpochs::new(vec![1]).unwrap();
-
-    // The publish that cuts epoch 1's dump, and its reproduction.
-    let cutting = plan_at_boundary(&domain, 1, retained());
-    let temp = tempfile::tempdir().unwrap();
-    let cut = export_plan(temp.path(), &domain, &cutting);
-
-    let reproduced =
-        export::verify_reproduction(&cut, &cutting, domain.archive(), domain.state(), None)
-            .unwrap();
-
-    assert_eq!(reproduced, cut);
-    assert_eq!(dumps_in(&reproduced)[&1].len(), state_layer_count());
-
-    // And it really was rebuilt rather than copied: a reproduction chained the
-    // same way but with nothing to inherit from produces the same document.
-    let from_nothing = export::reproduce(
-        &cutting,
-        domain.archive(),
-        domain.state(),
-        None,
-        &export::First,
-    )
-    .unwrap();
-
-    assert_eq!(from_nothing.layers, cut.layers);
-
-    // The publish that inherits it. Built through `Following`, which is the
-    // predecessor a verifier chaining from a canonical document holds.
-    let following_plan = plan_at_boundary(&domain, 2, retained());
-    let canonical = cut.canonicalize().unwrap();
-
-    let followed = export::reproduce(
-        &following_plan,
-        domain.archive(),
-        domain.state(),
-        None,
-        &export::Following::read(&canonical, &following_plan).unwrap(),
-    )
-    .unwrap();
-
-    // Epoch 1's dump rode across, descriptor for descriptor.
-    assert_eq!(dumps_in(&followed)[&1], dumps_in(&cut)[&1]);
-
-    // And verifying that document reproduces it — which is the case that would
-    // fail outright if an inherited dump had to be rebuilt from these stores.
-    let verified = export::verify_reproduction(
-        &followed,
-        &following_plan,
-        domain.archive(),
-        domain.state(),
-        None,
-    )
-    .unwrap();
-
-    assert_eq!(verified, followed);
-}
-
-/// A predecessor that lends every inheritable layer of an earlier stele, as a
-/// registry's chained publish does from a manifest or a resumption record, and
-/// counts what it is asked for and what it lends.
+/// It records and offers what the driver does: a layer the profile places in
+/// `diff` at the attempt's sequence goes in, and comes out where it is in
+/// `diff` at the sequence being published. Counts what it is asked for, what
+/// it lends and what lands.
 struct Lending {
-    history: Vec<stelae::inscription::HistoryEntry>,
-    layers: Vec<stelae::inscription::LayerDescriptor>,
+    previous: Option<stelae::inscription::Link>,
+    sequence: u64,
+    recorded: Vec<stelae::inscription::LayerDescriptor>,
     asked: std::sync::Mutex<Vec<(String, u64)>>,
     lent: AtomicUsize,
     landed: std::sync::Mutex<Vec<stelae::inscription::LayerDescriptor>>,
 }
 
 impl Lending {
-    /// A publish of `plan` chained onto `predecessor`, lending its layers.
+    /// A publish of `plan` chained onto `predecessor`, with nothing recorded.
     fn following(predecessor: &stelae::inscription::Inscription, plan: &Plan) -> Self {
         let canonical = predecessor.canonicalize().unwrap();
         let following = export::Following::read(&canonical, plan).unwrap();
 
-        Self::with_history(following.history().to_vec(), predecessor)
+        Self::linked(following.previous(), plan)
     }
 
-    /// A first publish resuming from a record of `interrupted`'s layers: no
-    /// history, and the layers to lend.
-    fn resuming(interrupted: &stelae::inscription::Inscription) -> Self {
-        Self::with_history(vec![], interrupted)
+    /// A publish of `plan` that starts its lineage, with nothing recorded.
+    fn first(plan: &Plan) -> Self {
+        Self::linked(None, plan)
     }
 
-    fn with_history(
-        history: Vec<stelae::inscription::HistoryEntry>,
-        lender: &stelae::inscription::Inscription,
-    ) -> Self {
+    fn linked(previous: Option<stelae::inscription::Link>, plan: &Plan) -> Self {
         Self {
-            history,
-            layers: lender.layers.clone(),
+            previous,
+            sequence: plan.sequence,
+            recorded: Vec::new(),
             asked: Default::default(),
             lent: AtomicUsize::new(0),
             landed: Default::default(),
         }
     }
 
-    fn find(
-        &self,
-        kind: &str,
-        scope: &serde_json::Value,
-    ) -> Option<stelae::inscription::LayerDescriptor> {
-        self.layers
-            .iter()
-            .find(|layer| layer.kind == kind && &layer.scope == scope)
-            .filter(|_| dolos_snapshot::is_inheritable(kind, scope))
+    /// The record an attempt that wrote `interrupted`'s layers left: the ones
+    /// in its diff.
+    fn recording(mut self, interrupted: &stelae::inscription::Inscription) -> Self {
+        self.recorded = interrupted
+            .layers()
+            .filter(|layer| role(layer, interrupted.sequence) == stelae_driver::Role::Diff)
             .cloned()
+            .collect();
+        self
     }
 
-    /// The windows a `log-account-epochs` layer was asked for.
-    fn account_windows(&self) -> Vec<u64> {
-        self.asked
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(kind, _)| kind == "log-account-epochs")
-            .map(|(_, epoch)| *epoch)
-            .collect()
-    }
-
-    /// The forecast for `plan` against `domain`'s stores is what the export
-    /// through this predecessor, `exported`, built and lent.
-    fn forecast_matches(
-        &self,
-        plan: &Plan,
-        domain: &ToyDomain<MemoryStores>,
-        exported: &stelae::inscription::Inscription,
-    ) {
-        let forecast = export::forecast(plan, domain.archive(), self, None).unwrap();
-        let lent = self.lent.load(Ordering::Relaxed);
-
-        assert_eq!(
-            forecast,
-            export::Forecast {
-                layers_built: exported.layers.len() - lent,
-                layers_reused: lent,
-            }
-        );
+    fn lent(&self) -> usize {
+        self.lent.load(Ordering::Relaxed)
     }
 }
 
+/// The array the profile places `layer` in at `sequence`.
+fn role(layer: &stelae::inscription::LayerDescriptor, sequence: u64) -> stelae_driver::Role {
+    use stelae_driver::DriverProfile as _;
+
+    DolosProfile
+        .role(&layer.kind, &layer.scope, sequence)
+        .unwrap()
+}
+
 impl export::Predecessor for Lending {
-    fn history(&self) -> &[stelae::inscription::HistoryEntry] {
-        &self.history
+    fn previous(&self) -> Option<stelae::inscription::Link> {
+        self.previous
     }
 
-    fn adopt(
+    fn resume(
         &self,
         kind: &str,
         scope: &serde_json::Value,
@@ -1332,19 +1140,17 @@ impl export::Predecessor for Lending {
             self.asked.lock().unwrap().push((kind.to_owned(), epoch));
         }
 
-        let found = self.find(kind, scope);
+        let found = self
+            .recorded
+            .iter()
+            .find(|layer| layer.kind == kind && &layer.scope == scope)
+            .filter(|layer| role(layer, self.sequence) == stelae_driver::Role::Diff)
+            .cloned();
+
         self.lent
             .fetch_add(usize::from(found.is_some()), Ordering::Relaxed);
 
         Ok(found)
-    }
-
-    fn carried_forward(
-        &self,
-        kind: &str,
-        scope: &serde_json::Value,
-    ) -> Result<bool, stelae_driver::Error> {
-        Ok(self.find(kind, scope).is_some())
     }
 
     fn landed(
@@ -1361,209 +1167,299 @@ fn reproduce_fresh(
     plan: &Plan,
     domain: &ToyDomain<MemoryStores>,
 ) -> stelae::inscription::Inscription {
-    export::reproduce(plan, domain.archive(), domain.state(), None, &export::First).unwrap()
+    export::reproduce(plan, domain.archive(), domain.state(), &export::First).unwrap()
 }
 
-/// Finding 1 of the QA review of dolos#1499: a stele cut at 2 carries window
-/// 1's account rows as ESTART wrote them, stake leg alone; the EWRAP closing 2
-/// rewrites them in full before 3 is cut. The publish at 3 builds that window's
-/// layer from the stores rather than adopt the stale one, and still adopts
-/// window 0's, so a chained publish equals one with nothing to inherit, and
-/// its forecast counts what it then builds and lends.
+/// A layer by kind and scope, the identity a chain holds once.
+fn by_key<'a>(
+    layers: impl IntoIterator<Item = &'a stelae::inscription::LayerDescriptor>,
+) -> BTreeMap<(String, String), stelae::inscription::LayerDescriptor> {
+    layers
+        .into_iter()
+        .map(|layer| ((layer.kind.clone(), layer.scope.to_string()), layer.clone()))
+        .collect()
+}
+
+/// The kind and window of each layer in `layers`, in order.
+fn windows<'a>(
+    layers: impl IntoIterator<Item = &'a stelae::inscription::LayerDescriptor>,
+) -> Vec<(String, u64)> {
+    layers
+        .into_iter()
+        .filter_map(|layer| {
+            let epoch = layer.scope.get("epoch")?.as_u64()?;
+            Some((layer.kind.clone(), epoch))
+        })
+        .collect()
+}
+
+/// A snapshot cut at 2 carries window 1's account rows in its tip, as ESTART
+/// wrote them; the EWRAP closing 2 rewrites them before 3 is cut. The snapshot
+/// at 3 links to 2 and lists in its diff what becomes final at 3, window 1's
+/// rewritten rows among it, and nothing an earlier diff listed. Its chain is
+/// the layer set a lineage started at 3 lists.
 #[test]
-fn a_chained_publish_rebuilds_the_account_rows_ewrap_rewrote() {
+fn a_chained_export_lists_what_becomes_final_at_its_sequence() {
     let domain: ToyDomain<MemoryStores> = harness();
 
     write_account_row(&domain, 1, stake_only());
 
-    let cut_at_2 = plan_at_boundary(&domain, 2, RetainedEpochs::default());
+    let cut_at_2 = plan_at_boundary(&domain, 2);
     let predecessor = reproduce_fresh(&cut_at_2, &domain);
 
     write_account_row(&domain, 1, settled());
 
-    let cut_at_3 = plan_at_boundary(&domain, 3, RetainedEpochs::default());
+    let cut_at_3 = plan_at_boundary(&domain, 3);
     let lending = Lending::following(&predecessor, &cut_at_3);
 
-    let chained =
-        export::reproduce(&cut_at_3, domain.archive(), domain.state(), None, &lending).unwrap();
-
-    assert_eq!(chained.layers, reproduce_fresh(&cut_at_3, &domain).layers);
-
-    // Window 1 really changed, and window 0 really was lent.
-    assert_ne!(account_layer(&chained, 1), account_layer(&predecessor, 1));
-    assert_eq!(account_layer(&chained, 0), account_layer(&predecessor, 0));
-
-    assert_eq!(lending.account_windows(), vec![0]);
-    let asked = lending.asked.lock().unwrap().clone();
-    assert!(asked.contains(&("log-epochs".to_owned(), 1)), "{asked:?}");
-
-    lending.forecast_matches(&cut_at_3, &domain, &chained);
-}
-
-/// Finding A of the second QA review of dolos#1499: a first publish
-/// interrupted at 2 recorded window 1's stake-only account rows, and its retry
-/// at 4, past the boundary that settled them, has only that record to lend
-/// from. A record does not say when it built a layer, so the retry builds every
-/// account window from its stores and still takes every other kind.
-#[test]
-fn a_resumed_first_publish_builds_every_account_window() {
-    let domain: ToyDomain<MemoryStores> = harness();
-
-    write_account_row(&domain, 1, stake_only());
-
-    let cut_at_2 = plan_at_boundary(&domain, 2, RetainedEpochs::default());
-    let interrupted = reproduce_fresh(&cut_at_2, &domain);
-
-    write_account_row(&domain, 1, settled());
-
-    let cut_at_4 = plan_at_boundary(&domain, 4, RetainedEpochs::default());
-    let resuming = Lending::resuming(&interrupted);
-
-    let resumed =
-        export::reproduce(&cut_at_4, domain.archive(), domain.state(), None, &resuming).unwrap();
-
-    assert_eq!(resumed.layers, reproduce_fresh(&cut_at_4, &domain).layers);
-    assert_ne!(account_layer(&resumed, 1), account_layer(&interrupted, 1));
-
-    assert!(resuming.account_windows().is_empty());
-    let asked = resuming.asked.lock().unwrap().clone();
-    assert!(asked.contains(&("blocks".to_owned(), 1)), "{asked:?}");
-    assert!(resuming.lent.load(Ordering::Relaxed) > 0);
-
-    resuming.forecast_matches(&cut_at_4, &domain, &resumed);
-}
-
-/// Finding E of the third QA review of dolos#1499: a host's publish at 2 was
-/// interrupted after it recorded window 1's stake-only account rows. Another
-/// host published 2, then 3 restricted to fewer epochs, so the manifest at 3
-/// lacks window 1. The first host's publish at 4 finds window 1 settled and the
-/// manifest silent, and the record would lend the stale layer. Held to the
-/// manifest, it builds the window from its stores instead.
-#[test]
-fn a_record_never_supplies_an_account_window_the_manifest_lacks() {
-    let domain: ToyDomain<MemoryStores> = harness();
-
-    write_account_row(&domain, 1, stake_only());
-
-    let cut_at_2 = plan_at_boundary(&domain, 2, RetainedEpochs::default());
-    let interrupted = reproduce_fresh(&cut_at_2, &domain);
-
-    write_account_row(&domain, 1, settled());
-
-    let cut_at_3 = plan_at_boundary(&domain, 3, RetainedEpochs::default());
-    let mut restricted = reproduce_fresh(&cut_at_3, &domain);
-    let window_1 = account_layer(&restricted, 1);
-    restricted.layers.retain(|layer| *layer != window_1);
-
-    let cut_at_4 = plan_at_boundary(&domain, 4, RetainedEpochs::default());
-    let lending_record = || {
-        let mut lending = Lending::following(&restricted, &cut_at_4);
-        lending.layers.push(account_layer(&interrupted, 1));
-        lending
-    };
-
-    // Without the manifest's word, the record's stake-only rows ride along.
-    let unheld = export::reproduce(
-        &cut_at_4,
-        domain.archive(),
-        domain.state(),
-        None,
-        &lending_record(),
-    )
-    .unwrap();
-    assert_eq!(account_layer(&unheld, 1), account_layer(&interrupted, 1));
-
-    let settling = export::Settling::new(lending_record(), Some(&restricted)).unwrap();
-    let held =
-        export::reproduce(&cut_at_4, domain.archive(), domain.state(), None, &settling).unwrap();
-
-    assert_eq!(held.layers, reproduce_fresh(&cut_at_4, &domain).layers);
-    assert_eq!(account_layer(&held, 1), window_1);
-
-    // Window 0 is in the manifest and still lent; window 1 never reached the
-    // record's lender.
-    assert_eq!(settling.inner().account_windows(), vec![0]);
-
-    let forecast = export::forecast(&cut_at_4, domain.archive(), &settling, None).unwrap();
-    let lent = settling.inner().lent.load(Ordering::Relaxed);
+    let chained = export::reproduce(&cut_at_3, domain.archive(), domain.state(), &lending).unwrap();
 
     assert_eq!(
-        forecast,
-        export::Forecast {
-            layers_built: held.layers.len() - lent,
-            layers_reused: lent,
-        }
+        chained.previous,
+        Some(stelae::inscription::Link {
+            sequence: 2,
+            inscription_digest: predecessor.digest().unwrap(),
+        })
+    );
+
+    assert_eq!(
+        windows(&chained.diff),
+        [
+            (INDEXES.to_owned(), 2),
+            ("log-account-epochs".to_owned(), 1),
+        ],
+        "the diff at 3: the window 3 closes and the rows settled at 3"
+    );
+    assert_eq!(
+        chained
+            .layers_of_kind(BLOCKS)
+            .map(|layer| &layer.scope["epoch"])
+            .collect::<Vec<_>>(),
+        [3],
+        "the boundary window's blocks, in the tip, and no closed epoch's"
+    );
+
+    // The tip at 2 held window 1's rows as ESTART wrote them, the diff at 3 as
+    // EWRAP rewrote them.
+    let held = |layers: &[stelae::inscription::LayerDescriptor]| {
+        layers
+            .iter()
+            .find(|layer| layer.kind == "log-account-epochs" && layer.scope["epoch"] == 1)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(held(&predecessor.tip), account_layer(&predecessor, 1));
+    assert_ne!(held(&chained.diff).diff_id, held(&predecessor.tip).diff_id);
+
+    let listed_before = by_key(&predecessor.diff);
+    assert!(
+        chained.layers().all(
+            |layer| !listed_before.contains_key(&(layer.kind.clone(), layer.scope.to_string()))
+        ),
+        "the snapshot at 3 lists a layer the diff at 2 already did"
+    );
+
+    let chain = stelae::Chain::walk(&DolosProfile, chained.clone(), |link| {
+        Ok((link.sequence == 2).then(|| predecessor.clone()))
+    })
+    .unwrap();
+
+    let fresh = reproduce_fresh(&cut_at_3, &domain);
+
+    assert_eq!(fresh.previous, None);
+    assert_eq!(by_key(chain.descriptors()), by_key(fresh.layers()));
+    assert_eq!(chained.tip, fresh.tip);
+
+    // Nothing was recorded, so nothing was lent.
+    assert_eq!(lending.lent(), 0);
+    let asked = lending.asked.lock().unwrap().clone();
+    assert!(asked.contains(&(INDEXES.to_owned(), 2)), "{asked:?}");
+    assert!(!asked.contains(&(INDEXES.to_owned(), 1)), "{asked:?}");
+    assert!(
+        !asked.iter().any(|(kind, _)| kind == BLOCKS),
+        "a tip layer is asked for: {asked:?}"
     );
 }
 
-/// Finding H of the fourth QA review of dolos#1499: the settling wrapper hands
-/// every layer that lands to the predecessor it wraps, which is where a
-/// registry publish writes its resumption record.
+/// A first snapshot lists in its diff every layer final by its cut, and in its
+/// tip what is true only there.
 #[test]
-fn a_settling_predecessor_passes_each_landed_layer_on() {
+fn a_lineage_start_lists_everything_final_by_its_cut() {
     let domain: ToyDomain<MemoryStores> = harness();
 
-    let cut_at_2 = plan_at_boundary(&domain, 2, RetainedEpochs::default());
-    let predecessor = reproduce_fresh(&cut_at_2, &domain);
+    write_account_row(&domain, 1, settled());
 
-    let cut_at_3 = plan_at_boundary(&domain, 3, RetainedEpochs::default());
-    let landed = |predecessor: &dyn export::Predecessor| {
-        export::reproduce(
-            &cut_at_3,
-            domain.archive(),
-            domain.state(),
-            None,
-            predecessor,
-        )
-        .unwrap()
-    };
+    let first = reproduce_fresh(&plan_at_boundary(&domain, 3), &domain);
 
-    let bare = Lending::following(&predecessor, &cut_at_3);
-    landed(&bare);
+    assert_eq!(first.previous, None);
 
-    let settling = export::Settling::new(
-        Lending::following(&predecessor, &cut_at_3),
-        Some(&predecessor),
-    )
-    .unwrap();
-    landed(&settling);
+    let diff = windows(&first.diff);
+    let tip = windows(&first.tip);
 
-    let sorted = |lending: &Lending| {
-        let mut layers = lending.landed.lock().unwrap().clone();
-        layers.sort_by_key(|layer| (layer.kind.clone(), layer.scope.to_string()));
-        layers
-    };
+    for epoch in 0..3 {
+        assert!(!diff.contains(&(BLOCKS.to_owned(), epoch)), "{diff:?}");
+        assert!(diff.contains(&(INDEXES.to_owned(), epoch)), "{diff:?}");
+    }
 
-    assert!(!sorted(&bare).is_empty());
-    assert_eq!(sorted(settling.inner()), sorted(&bare));
+    // Window 0's rows settled at 2 and window 1's at 3.
+    assert!(
+        diff.contains(&("log-account-epochs".to_owned(), 0)),
+        "{diff:?}"
+    );
+    assert!(
+        diff.contains(&("log-account-epochs".to_owned(), 1)),
+        "{diff:?}"
+    );
+
+    assert_eq!(
+        windows(&first.tip),
+        [(BLOCKS.to_owned(), 3), (INDEXES.to_owned(), 3)],
+        "{tip:?}"
+    );
+    assert_eq!(
+        first.tip.len(),
+        2 + state_layer_count(),
+        "the boundary window's dense layers and the state"
+    );
 }
 
-/// Finding C of the second QA review of dolos#1499: the forecast asks the
-/// settling rule too. The predecessor at 2 holds window 1's stake-only account
-/// rows, and these stores, cut at 3, hold none there, so the publish writes no
-/// such layer and the forecast counts none.
+/// An attempt at 3 that was interrupted recorded its diff. The retry takes
+/// those layers rather than build them, builds its tip, and writes the same
+/// snapshot.
 #[test]
-fn a_forecast_counts_no_unsettled_account_window_the_stores_lack() {
+fn a_resumed_export_takes_the_diff_an_interrupted_attempt_recorded() {
+    let domain: ToyDomain<MemoryStores> = harness();
+
+    let cut_at_2 = plan_at_boundary(&domain, 2);
+    let predecessor = reproduce_fresh(&cut_at_2, &domain);
+
+    let cut_at_3 = plan_at_boundary(&domain, 3);
+    let interrupted = export::reproduce(
+        &cut_at_3,
+        domain.archive(),
+        domain.state(),
+        &Lending::following(&predecessor, &cut_at_3),
+    )
+    .unwrap();
+
+    let resuming = Lending::following(&predecessor, &cut_at_3).recording(&interrupted);
+    let resumed =
+        export::reproduce(&cut_at_3, domain.archive(), domain.state(), &resuming).unwrap();
+
+    assert_eq!(resumed, interrupted);
+    assert!(!interrupted.diff.is_empty());
+    assert_eq!(
+        resuming.lent(),
+        interrupted.diff.len(),
+        "every diff layer is resumed"
+    );
+}
+
+/// A first publish interrupted at 2 recorded only its diff: window 1's
+/// stake-only account rows were its tip, and no record holds a tip. Its retry
+/// at 4, past the boundary that settled them, takes the recorded closed
+/// windows and builds window 1's rows from its stores.
+#[test]
+fn a_retry_at_a_later_sequence_builds_what_settled_since() {
+    let domain: ToyDomain<MemoryStores> = harness();
+
+    write_account_row(&domain, 1, stake_only());
+
+    let cut_at_2 = plan_at_boundary(&domain, 2);
+    let interrupted = reproduce_fresh(&cut_at_2, &domain);
+
+    write_account_row(&domain, 1, settled());
+
+    let cut_at_4 = plan_at_boundary(&domain, 4);
+    let resuming = Lending::first(&cut_at_4).recording(&interrupted);
+
+    assert!(
+        !resuming
+            .recorded
+            .iter()
+            .any(|layer| layer.kind == "log-account-epochs" && layer.scope["epoch"] == 1),
+        "a record holds the tip's account rows"
+    );
+
+    let resumed =
+        export::reproduce(&cut_at_4, domain.archive(), domain.state(), &resuming).unwrap();
+
+    assert_eq!(resumed, reproduce_fresh(&cut_at_4, &domain));
+    assert_ne!(account_layer(&resumed, 1), account_layer(&interrupted, 1));
+    assert!(resuming.lent() > 0);
+
+    let asked = resuming.asked.lock().unwrap().clone();
+    assert!(asked.contains(&(INDEXES.to_owned(), 1)), "{asked:?}");
+}
+
+/// Every epoch layer an export builds lands once, in either array, and the
+/// state is never offered: it is the tip, and a restart rebuilds it.
+#[test]
+fn every_epoch_layer_an_export_builds_lands_once() {
+    let domain: ToyDomain<MemoryStores> = harness();
+
+    let cut_at_2 = plan_at_boundary(&domain, 2);
+    let predecessor = reproduce_fresh(&cut_at_2, &domain);
+
+    let cut_at_3 = plan_at_boundary(&domain, 3);
+    let lending = Lending::following(&predecessor, &cut_at_3);
+    let chained = export::reproduce(&cut_at_3, domain.archive(), domain.state(), &lending).unwrap();
+
+    let mut landed = lending.landed.lock().unwrap().clone();
+    landed.sort_by_key(|layer| (layer.kind.clone(), layer.scope.to_string()));
+
+    let mut epoch_layers: Vec<_> = chained
+        .layers()
+        .filter(|layer| state_ns_for(&layer.kind).is_none())
+        .cloned()
+        .collect();
+    epoch_layers.sort_by_key(|layer| (layer.kind.clone(), layer.scope.to_string()));
+
+    assert!(!landed.is_empty());
+    assert_eq!(landed, epoch_layers);
+}
+
+/// The forecast counts the layers the export then lists, by the same listing:
+/// with a predecessor whose tip held window 1's account rows and stores that
+/// hold none there, the export writes no such layer and the forecast counts
+/// none.
+#[test]
+fn a_forecast_counts_what_the_export_lists() {
     let source: ToyDomain<MemoryStores> = harness();
 
     write_account_row(&source, 1, stake_only());
 
-    let cut_at_2 = plan_at_boundary(&source, 2, RetainedEpochs::default());
+    let cut_at_2 = plan_at_boundary(&source, 2);
     let predecessor = reproduce_fresh(&cut_at_2, &source);
 
-    let domain: ToyDomain<MemoryStores> = harness();
-    let cut_at_3 = plan_at_boundary(&domain, 3, RetainedEpochs::default());
-    let lending = Lending::following(&predecessor, &cut_at_3);
+    assert!(windows(&predecessor.tip).contains(&("log-account-epochs".to_owned(), 1)));
 
-    let chained =
-        export::reproduce(&cut_at_3, domain.archive(), domain.state(), None, &lending).unwrap();
+    for (domain, holds_window_1) in [(source, true), (harness(), false)] {
+        let cut_at_3 = plan_at_boundary(&domain, 3);
+        let lending = Lending::following(&predecessor, &cut_at_3);
+        let chained =
+            export::reproduce(&cut_at_3, domain.archive(), domain.state(), &lending).unwrap();
 
-    assert!(!chained.layers.iter().any(|layer| {
-        layer.kind == "log-account-epochs"
-            && layer.scope.get("epoch").and_then(serde_json::Value::as_u64) == Some(1)
-    }));
+        assert_eq!(
+            windows(&chained.diff).contains(&("log-account-epochs".to_owned(), 1)),
+            holds_window_1
+        );
 
-    lending.forecast_matches(&cut_at_3, &domain, &chained);
+        let summary = dolos_cardano::eras::load_chain_summary_from_state(domain.state()).unwrap();
+        let forecast = export::forecast(
+            &cut_at_3,
+            &cut_at_3.listing(&summary, &lending),
+            domain.archive(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            forecast,
+            export::Forecast {
+                layers_built: chained.layers().count(),
+            }
+        );
+    }
 }
 
 /// The whole skeleton document, so a change to a key spelling, a scope shape or
@@ -1573,12 +1469,16 @@ fn a_forecast_counts_no_unsettled_account_window_the_stores_lack() {
 /// JCS sorts object keys, so the layout is the protocol's; every string in it
 /// is this profile's.
 const CANONICAL_SKELETON: &str = concat!(
-    r#"{"compression":{"algo":"zstd","level":9},"history":[],"layers":["#,
-    r#"{"diffId":"sha256:922ee4d9b71402ecba461e7b11a76ff61354d2a0be45bb040e5e2ccb80ccb5a1","kind":"blocks","mediaType":"application/vnd.dolos.stelae.blocks.v1+zstd","records":1,"scope":{"endSlot":99,"epoch":0,"startSlot":0},"uncompressedSize":43},"#,
-    r#"{"diffId":"sha256:c0dba8cfa17803797dc39470fa963f21e19e61a534fdea1c480f4160000f4b6d","kind":"blocks","mediaType":"application/vnd.dolos.stelae.blocks.v1+zstd","records":2,"scope":{"endSlot":199,"epoch":1,"startSlot":100},"uncompressedSize":144},"#,
-    r#"{"diffId":"sha256:8013ed25e0a7280f0cb5e9fdcf70a8b3218356b27d25852566fed6515b85b894","kind":"blocks","mediaType":"application/vnd.dolos.stelae.blocks.v1+zstd","records":2,"scope":{"endSlot":250,"epoch":2,"startSlot":200},"uncompressedSize":177},"#,
+    r#"{"compression":{"algo":"zstd","level":9},"diff":["#,
     r#"{"diffId":"sha256:0517f93e76f9fe6059bcde6218af5c90f51020af09890c5e3a05cc8f3a32e447","kind":"indexes","mediaType":"application/vnd.dolos.stelae.indexes.v1+zstd","records":1,"scope":{"endSlot":99,"epoch":0,"startSlot":0},"uncompressedSize":44},"#,
-    r#"{"diffId":"sha256:b64ae324280c4335089cdf9918ac0596fe7f429dbf5a54c2fd2d44f25280b935","kind":"indexes","mediaType":"application/vnd.dolos.stelae.indexes.v1+zstd","records":1,"scope":{"endSlot":199,"epoch":1,"startSlot":100},"uncompressedSize":45},"#,
+    r#"{"diffId":"sha256:b64ae324280c4335089cdf9918ac0596fe7f429dbf5a54c2fd2d44f25280b935","kind":"indexes","mediaType":"application/vnd.dolos.stelae.indexes.v1+zstd","records":1,"scope":{"endSlot":199,"epoch":1,"startSlot":100},"uncompressedSize":45}"#,
+    r#"],"parameters":{"#,
+    r#""entities":{"asset":32,"script":28,"stake":29},"#,
+    r#""indexKeyHash":"xxh3-64","#,
+    r#""schemas":{"account-address-epochs":1,"account-addresses":1,"account-epochs":1,"account-history":1,"account-stats":1,"accounts":1,"address-stats":1,"asset-mint-chunks":1,"asset-mints":1,"datums":1,"drep-epochs":1,"drep-observations":1,"dreps":1,"epochs":1,"eras":1,"first-mint-chunks":1,"first-mints":1,"first-script-chunks":1,"first-scripts":1,"gov":1,"metadata-labels":1,"payment-address-epochs":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"policy-first-mint-chunks":1,"pool-epochs":1,"pools":1,"proposals":1,"utxos":1},"#,
+    r#""shards":{"account-addresses":1,"account-history":1,"account-stats":1,"accounts":16,"address-stats":1,"asset-mints":1,"datums":16,"drep-observations":1,"dreps":1,"epochs":1,"eras":1,"first-mints":1,"first-scripts":1,"gov":1,"metadata-labels":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"pools":1,"proposals":1,"utxos":16}"#,
+    r#"},"position":{"epoch":2,"network":{"magic":764824073,"name":"mainnet"},"point":{"hash":"018f99053185b9f7bae6fad0b8aa50710ebc131352dbb47f32d5030622bf51df","slot":250}},"profile":{"name":"io.txpipe.dolos.cardano","version":1},"schema":1,"sequence":2,"tip":["#,
+    r#"{"diffId":"sha256:8013ed25e0a7280f0cb5e9fdcf70a8b3218356b27d25852566fed6515b85b894","kind":"blocks","mediaType":"application/vnd.dolos.stelae.blocks.v1+zstd","records":2,"scope":{"endSlot":250,"epoch":2,"startSlot":200},"uncompressedSize":177},"#,
     r#"{"diffId":"sha256:a76e2bb47934f8473a232a31da4930db8d50ce90a4cab2c232fc032644fff62e","kind":"indexes","mediaType":"application/vnd.dolos.stelae.indexes.v1+zstd","records":1,"scope":{"endSlot":250,"epoch":2,"startSlot":200},"uncompressedSize":45},"#,
     r#"{"diffId":"sha256:8da91bb0d7584079f11981e96d72bc9fd638b339a93ae5cd01fe42eaf6cb204f","kind":"state-account-addresses","mediaType":"application/vnd.dolos.stelae.state-account-addresses.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":58},"#,
     r#"{"diffId":"sha256:211a38851621f1de268f9f4cd0f9a07f7409fc387ed34525756e299f821cb790","kind":"state-account-history","mediaType":"application/vnd.dolos.stelae.state-account-history.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":56},"#,
@@ -1647,17 +1547,11 @@ const CANONICAL_SKELETON: &str = concat!(
     r#"{"diffId":"sha256:4145245584090ba5ec600cc41743036cd02580999490cd38e94ccb47e713f529","kind":"state-utxos","mediaType":"application/vnd.dolos.stelae.state-utxos.v1+zstd","records":1,"scope":{"shard":13},"uncompressedSize":46},"#,
     r#"{"diffId":"sha256:fa3101937f3491ae614180384787cfeb1d2ffb7e522c4c731b60208472573917","kind":"state-utxos","mediaType":"application/vnd.dolos.stelae.state-utxos.v1+zstd","records":1,"scope":{"shard":14},"uncompressedSize":46},"#,
     r#"{"diffId":"sha256:e59d8b7ec7144216a9caab188b2de8d09d98c7c419e228a41131722796b81711","kind":"state-utxos","mediaType":"application/vnd.dolos.stelae.state-utxos.v1+zstd","records":1,"scope":{"shard":15},"uncompressedSize":46}"#,
-    r#"],"parameters":{"#,
-    r#""entities":{"asset":32,"script":28,"stake":29},"#,
-    r#""indexKeyHash":"xxh3-64","#,
-    r#""schemas":{"account-address-epochs":1,"account-addresses":1,"account-epochs":1,"account-history":1,"account-stats":1,"accounts":1,"address-stats":1,"asset-mint-chunks":1,"asset-mints":1,"datums":1,"drep-epochs":1,"drep-observations":1,"dreps":1,"epochs":1,"eras":1,"first-mint-chunks":1,"first-mints":1,"first-script-chunks":1,"first-scripts":1,"gov":1,"metadata-labels":1,"payment-address-epochs":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"policy-first-mint-chunks":1,"pool-epochs":1,"pools":1,"proposals":1,"utxos":1},"#,
-    r#""shards":{"account-addresses":1,"account-history":1,"account-stats":1,"accounts":16,"address-stats":1,"asset-mints":1,"datums":16,"drep-observations":1,"dreps":1,"epochs":1,"eras":1,"first-mints":1,"first-scripts":1,"gov":1,"metadata-labels":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"pools":1,"proposals":1,"utxos":16},"#,
-    r#""stateEpochs":[]"#,
-    r#"},"position":{"epoch":2,"network":{"magic":764824073,"name":"mainnet"},"point":{"hash":"018f99053185b9f7bae6fad0b8aa50710ebc131352dbb47f32d5030622bf51df","slot":250}},"profile":{"name":"io.txpipe.dolos.cardano","version":1},"schema":1,"sequence":2}"#,
+    r#"]}"#,
 );
 
 // --------------------------------------------------------------------------
-// 5. A stele reproduced without being stored
+// 5. A snapshot reproduced without being stored
 // --------------------------------------------------------------------------
 
 /// The check that the discarding writer is *faithful* rather than merely fast,
@@ -1680,20 +1574,19 @@ fn a_discarding_export_reproduces_what_a_publish_stores() {
     let plan = plan_for(&domain);
 
     let temp = tempfile::tempdir().unwrap();
-    let stored = export_to(temp.path(), &domain);
+    let stored = export_layout(temp.path(), &domain, &plan);
 
     let reproduced = export::export(
         &Discarding,
         &plan,
         domain.archive(),
         domain.state(),
-        None,
         &export::First,
         &Observer::silent(),
     )
     .unwrap();
 
-    // Non-trivial: a stele of empty layers would compare equal for the wrong
+    // Non-trivial: a snapshot of empty layers would compare equal for the wrong
     // reason.
     assert!(
         stored.uncompressed_size() > 1024,
@@ -1707,14 +1600,14 @@ fn a_discarding_export_reproduces_what_a_publish_stores() {
 
     assert_eq!(reproduced.digest().unwrap(), stored.digest().unwrap());
 
-    // Nothing was written on the reproduction's behalf: the only stele on disk
+    // Nothing was written on the reproduction's behalf: the only snapshot on disk
     // is the one the directory export made, and it holds exactly its own
-    // blobs.
+    // blobs, its inscription and its two manifests.
     let blobs = std::fs::read_dir(temp.path().join("blobs").join("sha256"))
         .unwrap()
         .count();
 
-    assert_eq!(blobs, distinct_layers(&stored));
+    assert_eq!(blobs, distinct_layers(&stored) + 3);
 }
 
 /// A tip whose bookkeeping shows a boundary pass in flight is refused before a
@@ -1742,14 +1635,13 @@ fn a_tip_with_unfinished_bookkeeping_is_refused_before_a_layer() {
     let refusal = || {
         let watcher = Arc::new(Watcher::default());
         let temp = tempfile::tempdir().unwrap();
-        let stele = SteleDir::create(temp.path()).unwrap();
+        let snapshot = SnapshotDir::create(temp.path()).unwrap();
 
         let refused = export::export(
-            &stele,
+            &snapshot,
             &plan,
             domain.archive(),
             domain.state(),
-            None,
             &export::First,
             &watcher.observer(),
         );
@@ -1830,15 +1722,14 @@ fn every_path_refuses_a_cursor_past_the_boundary_before_a_layer() {
 
     let temp = tempfile::tempdir().unwrap();
     let watcher = Arc::new(Watcher::default());
-    let stele = SteleDir::create(temp.path().join("export")).unwrap();
+    let snapshot = SnapshotDir::create(temp.path().join("export")).unwrap();
 
     assert_eq!(
         reason(export::export(
-            &stele,
+            &snapshot,
             &plan,
             domain.archive(),
             domain.state(),
-            None,
             &export::First,
             &watcher.observer(),
         )),
@@ -1854,13 +1745,16 @@ fn every_path_refuses_a_cursor_past_the_boundary_before_a_layer() {
             &plan,
             domain.archive(),
             domain.state(),
-            None,
             &Observer::silent(),
         )),
         expected
     );
 
-    for root in [temp.path().join("export"), directory.clone()] {
+    for root in [
+        temp.path().join("export"),
+        directory.join(export::DOLOS_REPOSITORY),
+        directory.join(export::BLOCKS_REPOSITORY),
+    ] {
         let blobs = root.join("blobs").join("sha256");
 
         assert!(
@@ -1875,7 +1769,6 @@ fn every_path_refuses_a_cursor_past_the_boundary_before_a_layer() {
             &plan,
             domain.archive(),
             domain.state(),
-            None,
             &export::First,
         )),
         expected
@@ -1897,12 +1790,15 @@ fn every_path_refuses_a_cursor_past_the_boundary_before_a_layer() {
             &plan,
             domain.archive(),
             domain.state(),
-            None,
         )),
         expected
     );
 
-    let source = StoreSnapshot::new(domain.archive(), domain.state());
+    let source = StoreSnapshot::new(
+        domain.archive(),
+        domain.state(),
+        dolos_cardano::mutable_slots(&domain.genesis()),
+    );
 
     assert_eq!(reason(source.boundary(&plan)), expected);
     assert_eq!(
@@ -1932,14 +1828,13 @@ fn a_plan_the_stores_have_moved_past_is_refused_before_a_layer() {
 
     let watcher = Arc::new(Watcher::default());
     let temp = tempfile::tempdir().unwrap();
-    let stele = SteleDir::create(temp.path()).unwrap();
+    let snapshot = SnapshotDir::create(temp.path()).unwrap();
 
     let refused = export::export(
-        &stele,
+        &snapshot,
         &plan,
         domain.archive(),
         domain.state(),
-        None,
         &export::First,
         &watcher.observer(),
     );
@@ -1961,7 +1856,7 @@ fn a_plan_the_stores_have_moved_past_is_refused_before_a_layer() {
 
 /// An archive that runs past a boundary state, as `data rebuild
 /// --stop-epoch` over a synced archive leaves one, is refused before a layer:
-/// the blocks after the cursor wrote log and index rows inside the stele's
+/// the blocks after the cursor wrote log and index rows inside the snapshot's
 /// windows. A plan at the archive's tip is refused for the state it does not
 /// describe.
 #[test]
@@ -1990,14 +1885,13 @@ fn an_archive_past_a_boundary_state_is_refused_before_a_layer() {
     ] {
         let watcher = Arc::new(Watcher::default());
         let temp = tempfile::tempdir().unwrap();
-        let stele = SteleDir::create(temp.path()).unwrap();
+        let snapshot = SnapshotDir::create(temp.path()).unwrap();
 
         let refused = export::export(
-            &stele,
+            &snapshot,
             &plan,
             domain.archive(),
             domain.state(),
-            None,
             &export::First,
             &watcher.observer(),
         );
@@ -2013,10 +1907,10 @@ fn an_archive_past_a_boundary_state_is_refused_before_a_layer() {
     }
 }
 
-/// Log rows keyed past the cursor stay out of the stele: the last window ends
-/// at the cursor's slot whatever the log tables hold beyond it.
+/// Log rows keyed past the cursor stay out of the snapshot: the last window
+/// ends at the cursor's slot whatever the log tables hold beyond it.
 #[test]
-fn log_rows_past_the_cursor_stay_out_of_the_stele() {
+fn log_rows_past_the_cursor_stay_out_of_the_snapshot() {
     let domain: ToyDomain = harness();
 
     let cursor = domain.state().read_cursor().unwrap().unwrap();
@@ -2039,7 +1933,7 @@ fn log_rows_past_the_cursor_stay_out_of_the_stele() {
 
     let bare: ToyDomain = harness();
     let temp = tempfile::tempdir().unwrap();
-    assert_eq!(published.layers, export_to(temp.path(), &bare).layers);
+    assert_eq!(published, export_to(temp.path(), &bare));
 }
 
 /// A block after the cursor's at the cursor's own slot, as a Byron main block
@@ -2070,14 +1964,13 @@ fn a_block_beside_the_cursor_at_its_slot_is_refused_before_a_layer() {
 
     let watcher = Arc::new(Watcher::default());
     let temp = tempfile::tempdir().unwrap();
-    let stele = SteleDir::create(temp.path()).unwrap();
+    let snapshot = SnapshotDir::create(temp.path()).unwrap();
 
     let refused = export::export(
-        &stele,
+        &snapshot,
         &plan,
         domain.archive(),
         domain.state(),
-        None,
         &export::First,
         &watcher.observer(),
     );
@@ -2092,77 +1985,11 @@ fn a_block_beside_the_cursor_at_its_slot_is_refused_before_a_layer() {
     assert_eq!(watcher.layers(), 0, "a refused export announced a layer");
 }
 
-/// A verifier checking a *different* stele than the one published is the
-/// failure `--epochs` exists to prevent, so the two commands share one range
-/// type and one restriction.
-///
-/// The restriction goes through `Plan::restrict_epochs` on both sides here for
-/// the same reason: a reproduction over a narrower selection is a different
-/// document, and it has to be the *same* different document.
-#[test]
-fn a_restricted_reproduction_matches_the_same_restricted_publish() {
-    let domain: ToyDomain = harness();
-    let plan = plan_for(&domain).restrict_epochs(Some(2), None);
-
-    assert!(
-        plan.epochs.is_empty(),
-        "the harness stands on the epoch-1 boundary; selecting above it selects nothing"
-    );
-
-    let temp = tempfile::tempdir().unwrap();
-
-    let stored = export::publish(
-        temp.path(),
-        &plan,
-        domain.archive(),
-        domain.state(),
-        None,
-        &Observer::silent(),
-    )
-    .unwrap();
-
-    let reproduced = export::export(
-        &Discarding,
-        &plan,
-        domain.archive(),
-        domain.state(),
-        None,
-        &export::First,
-        &Observer::silent(),
-    )
-    .unwrap();
-
-    // The state tip alone, which is a legitimate publish and the narrowest one
-    // there is.
-    assert_eq!(stored.layers.len(), state_layer_count());
-
-    assert_eq!(
-        stored.canonicalize().unwrap(),
-        reproduced.canonicalize().unwrap()
-    );
-
-    // And it is genuinely a different stele from the unrestricted one, so the
-    // equality above is not the equality of two full exports.
-    let whole = export::export(
-        &Discarding,
-        &plan_for(&domain),
-        domain.archive(),
-        domain.state(),
-        None,
-        &export::First,
-        &Observer::silent(),
-    )
-    .unwrap();
-
-    assert_ne!(whole.digest().unwrap(), reproduced.digest().unwrap());
-}
-
-/// How many blobs a stele's layers occupy: distinct `diffId`s, because two
+/// How many blobs a snapshot's layers occupy: distinct `diffId`s, because two
 /// layers with identical content are one content-addressed file.
 fn distinct_layers(inscription: &stelae::Inscription) -> usize {
     inscription
-        .layers
-        .iter()
+        .layers()
         .map(|layer| layer.diff_id)
         .collect::<std::collections::BTreeSet<_>>()
         .len()
@@ -2177,9 +2004,9 @@ fn distinct_layers(inscription: &stelae::Inscription) -> usize {
 /// counts agreeing and not a recording compared with itself.
 ///
 /// A directory is the interesting transport for this half precisely because it
-/// implements none of the byte reporting: `SteleDir` inherits the default no-op
-/// attach, so what comes back here is exactly the profile driver's own stream,
-/// with nothing from a transport mixed into it.
+/// implements none of the byte reporting: `SnapshotDir` inherits the default
+/// no-op attach, so what comes back here is exactly the profile driver's own
+/// stream, with nothing from a transport mixed into it.
 #[test]
 fn a_directory_publish_reports_every_layer_and_record() {
     let domain: ToyDomain = harness();
@@ -2193,18 +2020,17 @@ fn a_directory_publish_reports_every_layer_and_record() {
         &plan,
         domain.archive(),
         domain.state(),
-        None,
         &watcher.observer(),
     )
     .unwrap();
 
-    watcher.assert_well_formed(inscription.layers.len());
+    watcher.assert_well_formed(inscription.layers().count());
 
-    // A directory publish has no predecessor to inherit from and no registry to
-    // find a blob already in, so every layer is built.
+    // A directory publish resumes nothing and finds no blob already in a
+    // registry, so every layer is built.
     assert_eq!(
         watcher.ended(Outcome::Transferred),
-        inscription.layers.len(),
+        inscription.layers().count(),
         "every layer of a directory publish is built"
     );
     assert_eq!(watcher.ended(Outcome::Inherited), 0);
@@ -2212,11 +2038,7 @@ fn a_directory_publish_reports_every_layer_and_record() {
 
     // One header record per layer is the protocol's, written by `open_layer`
     // before the driver has a record of its own to write.
-    let content: u64 = inscription
-        .layers
-        .iter()
-        .map(|layer| layer.records - 1)
-        .sum();
+    let content: u64 = inscription.layers().map(|layer| layer.records - 1).sum();
 
     assert!(
         content > 0,
@@ -2257,7 +2079,6 @@ fn a_silent_publish_writes_exactly_what_a_watched_one_does() {
         &plan,
         domain.archive(),
         domain.state(),
-        None,
         &watcher.observer(),
     )
     .unwrap();
@@ -2267,7 +2088,6 @@ fn a_silent_publish_writes_exactly_what_a_watched_one_does() {
         &plan,
         domain.archive(),
         domain.state(),
-        None,
         &Observer::silent(),
     )
     .unwrap();
@@ -2537,44 +2357,39 @@ fn index_across_the_skeleton() -> MemoryArchiveStore {
 }
 
 /// One export of N epochs stages them from one tag and one exact traversal,
-/// counted rather than inspected, and a window the plan restricts away stays
-/// out of the document.
+/// counted rather than inspected.
 #[test]
 fn an_export_costs_one_index_traversal_however_many_epochs_it_covers() {
-    for (first, windows) in [(None, 3usize), (Some(2), 1)] {
-        let temp = tempfile::tempdir().unwrap();
-        let stele = SteleDir::create(temp.path()).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let snapshot = SnapshotDir::create(temp.path()).unwrap();
 
-        let state = skeleton_state();
-        let archive = Counted::new(with_skeleton_blocks(index_across_the_skeleton()));
+    let state = skeleton_state();
+    let archive = Counted::new(with_skeleton_blocks(index_across_the_skeleton()));
 
-        let plan = Plan::new(
-            &skeleton_summary(),
-            Network::for_magic(dolos_snapshot::MAINNET_MAGIC),
-            skeleton_point(),
-            Default::default(),
-        )
-        .unwrap()
-        .restrict_epochs(first, None);
+    let plan = Plan::new(
+        &skeleton_summary(),
+        Network::for_magic(dolos_snapshot::MAINNET_MAGIC),
+        skeleton_point(),
+        SKELETON_MUTABLE_SLOTS,
+    )
+    .unwrap();
 
-        let watcher = Arc::new(Watcher::default());
+    let watcher = Arc::new(Watcher::default());
 
-        let inscription = export::export(
-            &stele,
-            &plan,
-            &archive,
-            &state,
-            None,
-            &export::First,
-            &watcher.observer(),
-        )
-        .unwrap();
+    let inscription = export::export(
+        &snapshot,
+        &plan,
+        &archive,
+        &state,
+        &export::First,
+        &watcher.observer(),
+    )
+    .unwrap();
 
-        watcher.assert_well_formed(inscription.layers.len());
+    watcher.assert_well_formed(inscription.layers().count());
 
-        assert_eq!(archive.traversals(), (1, 1), "{windows} windows");
-        assert_eq!(inscription.layers_of_kind(INDEXES).count(), windows);
-    }
+    assert_eq!(archive.traversals(), (1, 1));
+    assert_eq!(inscription.layers_of_kind(INDEXES).count(), 3);
 }
 
 // --------------------------------------------------------------------------
@@ -2609,46 +2424,56 @@ fn entities_across_the_skeleton() -> MemoryArchiveStore {
     store
 }
 
+/// The skeleton's plan with no stability window, so each boundary seals the
+/// epoch before it: windows 0 and 1 are sealed at 2, and the boundary window
+/// waits for 3.
 fn skeleton_plan() -> Plan {
     Plan::new(
         &skeleton_summary(),
         Network::for_magic(dolos_snapshot::MAINNET_MAGIC),
         skeleton_point(),
-        Default::default(),
+        0,
     )
     .unwrap()
 }
 
-/// An entity layer exists for a window exactly when its kind has an entry
-/// first seen in it, holds that window's entries in id order, and carries
-/// nothing past the cursor.
+/// An entity layer exists for a sealed window exactly when its kind has an
+/// entry first seen in it, holds that window's entries in id order, and
+/// carries nothing of a window not yet sealed or past the cursor.
 #[test]
 fn entity_layers_exist_only_where_an_entity_was_first_seen() {
     let temp = tempfile::tempdir().unwrap();
-    let stele = SteleDir::create(temp.path()).unwrap();
+    let snapshot = SnapshotDir::create(temp.path()).unwrap();
 
     let archive = with_skeleton_blocks(entities_across_the_skeleton());
     let state = skeleton_state();
     let plan = skeleton_plan();
 
     let inscription = export::export(
-        &stele,
+        &snapshot,
         &plan,
         &archive,
         &state,
-        None,
         &export::First,
         &Observer::silent(),
     )
     .unwrap();
 
     assert_eq!(
-        inscription.layers.len(),
-        3 * 2 + 3 + state_layer_count(),
-        "three windows of blocks and indexes, three entity layers and the tip"
+        inscription.layers().count(),
+        1 + 3 + 2 + state_layer_count(),
+        "the boundary window's blocks, three windows of indexes, two entity layers and the state"
+    );
+    assert!(
+        inscription
+            .tip
+            .iter()
+            .all(|layer| !layer.kind.starts_with("entity-")),
+        "an entity layer has no tip form"
     );
 
-    let index = stele.blob_index().unwrap();
+    let snapshot = common::resolve(temp.path());
+    let index = snapshot.blob_index().unwrap();
     let (asset_layer, asset) = ENTITY_KINDS[0];
     let (script_layer, script) = ENTITY_KINDS[1];
 
@@ -2662,7 +2487,7 @@ fn entity_layers_exist_only_where_an_entity_was_first_seen() {
                 );
 
                 let epoch = descriptor.scope["epoch"].as_u64().unwrap();
-                let records = read_both_ways(&stele, &index, descriptor)
+                let records = read_both_ways(&snapshot, &index, descriptor)
                     .iter()
                     .map(|bytes| entities::decode(entity, bytes).unwrap())
                     .collect();
@@ -2678,10 +2503,7 @@ fn entity_layers_exist_only_where_an_entity_was_first_seen() {
 
     assert_eq!(
         read(asset_layer, asset),
-        [
-            (0, vec![entry(asset, 0x01, 50), entry(asset, 0x03, 10)]),
-            (2, vec![entry(asset, 0x02, 220)]),
-        ]
+        [(0, vec![entry(asset, 0x01, 50), entry(asset, 0x03, 10)])]
     );
     assert_eq!(
         read(script_layer, script),
@@ -2690,12 +2512,11 @@ fn entity_layers_exist_only_where_an_entity_was_first_seen() {
 
     // Kind-major after the logs, ascending epoch within a kind.
     let kinds: Vec<&str> = inscription
-        .layers
-        .iter()
+        .layers()
         .map(|layer| layer.kind.as_str())
         .filter(|kind| kind.starts_with("entity-"))
         .collect();
-    assert_eq!(kinds, [asset_layer, asset_layer, script_layer]);
+    assert_eq!(kinds, [asset_layer, script_layer]);
 
     // The parameters declare every kind the publisher writes, layers or not.
     assert_eq!(
@@ -2718,13 +2539,12 @@ fn export_entities(previous: &dyn export::Predecessor) -> (usize, Vec<u8>) {
         &plan,
         &archive,
         &state,
-        None,
         previous,
         &watcher.observer(),
     )
     .unwrap();
 
-    watcher.assert_well_formed(inscription.layers.len());
+    watcher.assert_well_formed(inscription.layers().count());
 
     (
         archive.entity_traversals(),
@@ -2741,31 +2561,26 @@ fn every_entity_kind_shares_one_traversal_with_no_presence_scan() {
     assert_eq!(traversals, 1);
 }
 
-/// A closed window's entity layer is inherited per `(kind, scope)` like every
-/// immutable epoch layer: a publish whose predecessor carries every entity
-/// layer builds none. It still scans the index once, because no predecessor can
-/// say a window without a layer holds nothing.
+/// A sealed window's entity layer an interrupted attempt recorded is resumed
+/// and not rebuilt. The export still scans the index once, because no record
+/// can say a window without a layer holds nothing.
 #[test]
-fn an_entity_layer_a_predecessor_carries_is_inherited_and_not_rebuilt() {
-    let temp = tempfile::tempdir().unwrap();
-    let stele = SteleDir::create(temp.path()).unwrap();
-
+fn an_entity_layer_a_record_holds_is_resumed_and_not_rebuilt() {
     let archive = with_skeleton_blocks(entities_across_the_skeleton());
     let state = skeleton_state();
     let plan = skeleton_plan();
 
     let first = export::export(
-        &stele,
+        &Discarding,
         &plan,
         &archive,
         &state,
-        None,
         &export::First,
         &Observer::silent(),
     )
     .unwrap();
 
-    let lending = Lending::resuming(&first);
+    let lending = Lending::first(&plan).recording(&first);
     let (traversals, document) = export_entities(&lending);
 
     assert_eq!(traversals, 1);
@@ -2774,7 +2589,7 @@ fn an_entity_layer_a_predecessor_carries_is_inherited_and_not_rebuilt() {
         String::from_utf8(first.canonicalize().unwrap()).unwrap()
     );
 
-    let lent: Vec<(String, u64)> = lending
+    let asked: Vec<(String, u64)> = lending
         .asked
         .lock()
         .unwrap()
@@ -2783,91 +2598,61 @@ fn an_entity_layer_a_predecessor_carries_is_inherited_and_not_rebuilt() {
         .cloned()
         .collect();
 
-    // Asked for every window of every kind, the empty ones included: a
-    // predecessor could carry a layer this store no longer has entries for.
-    assert_eq!(lent.len(), 3 * ENTITY_KINDS.len());
+    // Asked for every sealed window of every kind, the empty ones included,
+    // and for no window the boundary has not sealed.
+    assert_eq!(asked.len(), 2 * ENTITY_KINDS.len());
+    assert!(asked.iter().all(|(_, epoch)| *epoch < 2), "{asked:?}");
+    assert_eq!(
+        lending.lent(),
+        first.diff.len(),
+        "every diff layer is resumed"
+    );
 }
 
-/// Finding T1 of the first QA review of dolos#1511: a dry run counts the
-/// entity layers a publish builds and the ones it inherits, so the forecast
-/// and the publish that follows it agree.
+/// A dry run counts the entity layers a publish lists, so the forecast and the
+/// publish that follows it agree, whatever a record lets it resume.
 #[test]
-fn the_forecast_counts_the_entity_layers_a_publish_builds_and_inherits() {
-    let temp = tempfile::tempdir().unwrap();
-    let stele = SteleDir::create(temp.path()).unwrap();
-
+fn the_forecast_counts_the_entity_layers_a_publish_lists() {
     let archive = with_skeleton_blocks(entities_across_the_skeleton());
     let state = skeleton_state();
     let plan = skeleton_plan();
+    let summary = skeleton_summary();
 
     let first = export::export(
-        &stele,
+        &Discarding,
         &plan,
         &archive,
         &state,
-        None,
         &export::First,
         &Observer::silent(),
     )
     .unwrap();
 
     assert_eq!(
-        export::forecast(&plan, &archive, &export::First, None).unwrap(),
+        export::forecast(&plan, &plan.listing(&summary, &export::First), &archive).unwrap(),
         export::Forecast {
-            layers_built: first.layers.len(),
-            layers_reused: 0,
+            layers_built: first.layers().count(),
         }
     );
 
-    let lending = Lending::resuming(&first);
+    let lending = Lending::first(&plan).recording(&first);
 
-    let carried = export::export(
+    let resumed = export::export(
         &Discarding,
         &plan,
         &archive,
         &state,
-        None,
         &lending,
         &Observer::silent(),
     )
     .unwrap();
 
-    let lent = lending.lent.load(Ordering::Relaxed);
-
+    assert!(lending.lent() > 0);
+    assert_eq!(resumed, first);
     assert_eq!(
-        export::forecast(&plan, &archive, &lending, None).unwrap(),
+        export::forecast(&plan, &plan.listing(&summary, &lending), &archive).unwrap(),
         export::Forecast {
-            layers_built: carried.layers.len() - lent,
-            layers_reused: lent,
-        }
-    );
-
-    // A layer the predecessor carries counts where this store holds no entry
-    // for it, as the publish adopts it.
-    let bare = with_skeleton_blocks(MemoryArchiveStore::new(
-        dolos_cardano::model::build_log_schema(),
-    ));
-    let lender = Lending::resuming(&first);
-
-    let adopted = export::export(
-        &Discarding,
-        &plan,
-        &bare,
-        &state,
-        None,
-        &lender,
-        &Observer::silent(),
-    )
-    .unwrap();
-
-    let lent = lender.lent.load(Ordering::Relaxed);
-
-    assert_eq!(adopted.layers.len(), first.layers.len());
-    assert_eq!(
-        export::forecast(&plan, &bare, &lender, None).unwrap(),
-        export::Forecast {
-            layers_built: adopted.layers.len() - lent,
-            layers_reused: lent,
+            layers_built: resumed.layers().count(),
         }
     );
 }
@@ -2877,25 +2662,92 @@ fn the_forecast_counts_the_entity_layers_a_publish_builds_and_inherits() {
 #[test]
 fn the_headless_facade_plans_encodes_and_reproduces_one_document() {
     let domain: ToyDomain = harness();
-    let source = StoreSnapshot::new(domain.archive(), domain.state());
+    let source = StoreSnapshot::new(
+        domain.archive(),
+        domain.state(),
+        dolos_cardano::mutable_slots(&domain.genesis()),
+    );
     let plan = source
         .selected_plan(
             u64::from(domain.genesis().network_magic()),
-            RetainedEpochs::default(),
             Selection::default(),
         )
         .unwrap();
 
     let destination = tempfile::tempdir().unwrap();
-    let stele = destination.path().join("stele");
+    let snapshot = destination.path().join("snapshot");
     let inscription = source
-        .publish_directory(&stele, &plan, &Observer::silent())
+        .publish_directory(&snapshot, &plan, &Observer::silent())
         .unwrap();
     let reproduced = source.verify_reproduction(&inscription, &plan).unwrap();
-    let document = source.digest_document(&plan, &export::First).unwrap();
+
+    // The directory's blocks snapshot is the one the Dolos snapshot names, and a
+    // digest takes it as the host's plan would.
+    let blocks = node::resolved_blocks(&snapshot).unwrap();
+    let named = blocks.read_inscription().unwrap().digest().unwrap();
+    assert_eq!(
+        dolos_snapshot::read_position(&inscription.position)
+            .unwrap()
+            .blocks,
+        Some(named)
+    );
+
+    let document = source
+        .digest_document(&plan.clone().with_blocks(named), &export::First)
+        .unwrap();
 
     assert_eq!(reproduced.canonicalize().unwrap(), document.canonical);
     assert_eq!(inscription.digest().unwrap(), document.identity);
+}
+
+/// A verifier that names its own blocks snapshot holds the published snapshot
+/// to it: the published `position.blocks` is taken only when the plan names
+/// none.
+#[test]
+fn a_verifiers_own_blocks_reference_is_held_against_the_published_one() {
+    let domain: ToyDomain = harness();
+    let source = StoreSnapshot::new(
+        domain.archive(),
+        domain.state(),
+        dolos_cardano::mutable_slots(&domain.genesis()),
+    );
+    let plan = source
+        .selected_plan(
+            u64::from(domain.genesis().network_magic()),
+            Selection::default(),
+        )
+        .unwrap();
+
+    let destination = tempfile::tempdir().unwrap();
+    let snapshot = destination.path().join("snapshot");
+    let inscription = source
+        .publish_directory(&snapshot, &plan, &Observer::silent())
+        .unwrap();
+    let named = node::resolved_blocks(&snapshot)
+        .unwrap()
+        .read_inscription()
+        .unwrap()
+        .digest()
+        .unwrap();
+
+    assert_ne!(some_blocks(), named);
+    assert_eq!(
+        source
+            .verify_reproduction(&inscription, &plan.clone().with_blocks(named))
+            .unwrap()
+            .digest()
+            .unwrap(),
+        inscription.digest().unwrap()
+    );
+
+    let refused = source
+        .verify_reproduction(&inscription, &plan.clone().with_blocks(some_blocks()))
+        .unwrap_err();
+
+    assert!(
+        matches!(refused, dolos_snapshot::Error::ReproductionMismatch { .. }),
+        "{refused:?}"
+    );
 }
 
 /// The index staging engine: one tag, one exact and one shared entity
@@ -2913,7 +2765,7 @@ mod index_staging {
     use dolos_testing::blocks::{byron_ebb_slot, make_byron_ebb, BYRON_EPOCH_LENGTH};
     use stelae::{
         frame::CanonicalCbor, inscription::LayerDescriptor, DiscardingSink, RecordSink,
-        SteleWriter as _, WrittenLayer,
+        SnapshotWriter as _, WrittenLayer,
     };
 
     use super::*;
@@ -3138,7 +2990,6 @@ mod index_staging {
                 &skeleton_plan(),
                 &archive,
                 &skeleton_state(),
-                None,
                 &export::First,
                 &Observer::silent(),
             )
@@ -3164,8 +3015,7 @@ mod index_staging {
             for family in families {
                 for epoch in [0, 1] {
                     let exported = inscription
-                        .layers
-                        .iter()
+                        .layers()
                         .find(|layer| {
                             layer.kind == family.kind().unwrap() && layer.scope["epoch"] == epoch
                         })
@@ -3179,8 +3029,7 @@ mod index_staging {
         }
     }
 
-    /// Inherited and unselected epochs get no run, and their records reach no
-    /// neighbour.
+    /// Unrequested epochs get no run, and their records reach no neighbour.
     #[test]
     fn only_the_requested_epochs_are_staged() {
         let (store, frontier) = staging_archive(EPOCHS);
@@ -3953,7 +3802,7 @@ mod index_staging {
         }
     }
 
-    impl stelae::SteleWriter for Sinks {
+    impl stelae::SnapshotWriter for Sinks {
         type Sink = Live;
 
         fn layer_sink(
@@ -4063,6 +3912,12 @@ mod boundary_preparation {
 
     impl Chain {
         fn new(shape: Shape) -> Self {
+            Self::numbered_from(shape, 0)
+        }
+
+        /// A chain whose first block is numbered `number` and names no previous
+        /// block, as the synthetic chains start at #1.
+        fn numbered_from(shape: Shape, number: u64) -> Self {
             let epoch_length = match shape {
                 Shape::Shelley => 100,
                 Shape::Byron => dolos_testing::blocks::BYRON_EPOCH_LENGTH,
@@ -4091,7 +3946,7 @@ mod boundary_preparation {
                 )),
                 state: MemoryStateStore::new(),
                 tip: None,
-                number: 0,
+                number,
                 epoch: 0,
                 boundary_delta: None,
             };
@@ -4327,20 +4182,24 @@ mod boundary_preparation {
             self.write_state(3);
         }
 
-        fn plan(&self, retained: &[u64]) -> Plan {
+        fn plan(&self) -> Plan {
             Plan::new(
                 &self.summary,
                 Network::for_magic(MAINNET_MAGIC),
                 self.tip.clone().unwrap(),
-                RetainedEpochs::new(retained.to_vec()).unwrap(),
+                self.mutable,
             )
             .unwrap()
         }
 
-        fn prepare(&self, store: &Store, retained: &[u64]) -> Result<Bundle, Error> {
+        fn prepare(&self, store: &Store) -> Result<Bundle, Error> {
+            self.prepare_plan(store, &self.plan())
+        }
+
+        fn prepare_plan(&self, store: &Store, plan: &Plan) -> Result<Bundle, Error> {
             prepare::prepare(
                 store,
-                &self.plan(retained),
+                plan,
                 &self.archive,
                 &self.state,
                 &Request {
@@ -4371,18 +4230,12 @@ mod boundary_preparation {
         }
 
         /// The ordinary export of the stores as they stand.
-        fn export(
-            &self,
-            root: &Path,
-            retained: &[u64],
-            previous: &dyn export::Predecessor,
-        ) -> Inscription {
+        fn export(&self, root: &Path, previous: &dyn export::Predecessor) -> Inscription {
             export::export(
-                &SteleDir::create(root).unwrap(),
-                &self.plan(retained),
+                &SnapshotDir::create(root).unwrap(),
+                &self.plan(),
                 &self.archive,
                 &self.state,
-                None,
                 previous,
                 &Observer::silent(),
             )
@@ -4398,7 +4251,7 @@ mod boundary_preparation {
             previous: &dyn export::Predecessor,
         ) -> Result<Inscription, Error> {
             prepare::finalize(
-                &SteleDir::create(root).unwrap(),
+                &SnapshotDir::create(root).unwrap(),
                 &Finalizing {
                     store,
                     bundle,
@@ -4406,7 +4259,6 @@ mod boundary_preparation {
                     producers: export::Producers::DEFAULT,
                 },
                 &self.archive,
-                None,
                 previous,
                 &Observer::silent(),
             )
@@ -4430,7 +4282,7 @@ mod boundary_preparation {
 
     /// The canonical document, layer by layer first so a failure names one,
     /// and every compressed blob.
-    fn assert_same_stele(
+    fn assert_same_snapshot(
         frozen: (&Path, &Inscription),
         finalized: (&Path, &Inscription),
         at: &str,
@@ -4439,17 +4291,28 @@ mod boundary_preparation {
             format!("{} {} {}", layer.kind, layer.scope, layer.diff_id)
         };
 
-        assert_eq!(
-            frozen.1.layers.iter().map(key).collect::<Vec<_>>(),
-            finalized.1.layers.iter().map(key).collect::<Vec<_>>(),
-            "{at}"
-        );
+        for (frozen, finalized) in [
+            (&frozen.1.diff, &finalized.1.diff),
+            (&frozen.1.tip, &finalized.1.tip),
+        ] {
+            assert_eq!(
+                frozen.iter().map(key).collect::<Vec<_>>(),
+                finalized.iter().map(key).collect::<Vec<_>>(),
+                "{at}"
+            );
+        }
         assert_eq!(
             frozen.1.canonicalize().unwrap(),
             finalized.1.canonicalize().unwrap(),
             "{at}"
         );
         assert_eq!(blobs(frozen.0), blobs(finalized.0), "{at}");
+    }
+
+    /// Whether the layout at `root` tags no snapshot: a refused finalize seals
+    /// nothing.
+    fn sealed_nothing(root: &Path) -> bool {
+        SnapshotDir::open(root).unwrap().tags().unwrap().is_empty()
     }
 
     fn preparation_refusal<T: std::fmt::Debug>(result: Result<T, Error>) -> Refusal {
@@ -4471,18 +4334,19 @@ mod boundary_preparation {
 
     /// Done-when 1: prepare, advance and stage once, then every publication is
     /// byte-equal to the ordinary export of the store frozen at its boundary.
+    /// The batch starts a lineage, and each later publication follows the one
+    /// before it.
     #[test]
     fn a_prepared_boundary_finishes_as_the_store_frozen_there() {
         for shape in [Shape::Shelley, Shape::Byron] {
-            let retained = [3];
             let (root, stage_root) = (tempdir(), tempdir());
             let store = store(root.path());
             let mut chain = Chain::new(shape);
             let mut bundles = Vec::new();
 
-            for boundary in [2, 3, 5] {
+            for boundary in [2, 3, 4, 5] {
                 chain.advance_to(boundary);
-                bundles.push(chain.prepare(&store, &retained).unwrap());
+                bundles.push(chain.prepare(&store).unwrap());
             }
 
             assert_eq!(
@@ -4507,27 +4371,31 @@ mod boundary_preparation {
                 "{shape:?}: one traversal per family for the whole batch",
             );
 
+            let mut previous: Option<Inscription> = None;
+
             for bundle in &bundles {
+                let plan = bundle.plan();
+                let following = || match &previous {
+                    Some(previous) => Lending::following(previous, &plan),
+                    None => Lending::first(&plan),
+                };
+
                 let frozen_root = tempdir();
                 let frozen_chain = Chain::at(shape, bundle.sequence());
-                let frozen = frozen_chain.export(frozen_root.path(), &retained, &export::First);
+                let frozen = frozen_chain.export(frozen_root.path(), &following());
 
                 let finished_root = tempdir();
                 let finished = chain
-                    .finalize(
-                        finished_root.path(),
-                        &store,
-                        bundle,
-                        &staged,
-                        &export::First,
-                    )
+                    .finalize(finished_root.path(), &store, bundle, &staged, &following())
                     .unwrap();
 
-                assert_same_stele(
+                assert_same_snapshot(
                     (frozen_root.path(), &frozen),
                     (finished_root.path(), &finished),
                     &format!("{shape:?} at {}", bundle.sequence()),
                 );
+
+                previous = Some(finished);
             }
 
             assert_eq!(
@@ -4541,25 +4409,23 @@ mod boundary_preparation {
         }
     }
 
-    /// The same equality for a contiguous chain of publications, each following
-    /// the real document before it: history, inheritance and settlement land
-    /// only at finalization, and a window the first predecessor carries is
-    /// never staged.
+    /// The same equality for a batch whose first publication follows a snapshot
+    /// already published: the link and the diff land only at finalization, and
+    /// a window an earlier diff listed is never staged.
     #[test]
     fn a_chained_batch_matches_the_chained_exports() {
         for shape in [Shape::Shelley, Shape::Byron] {
-            let retained = [3];
             let (root, stage_root, seed_root) = (tempdir(), tempdir(), tempdir());
             let store = store(root.path());
 
-            let seed = Chain::at(shape, 1).export(seed_root.path(), &retained, &export::First);
+            let seed = Chain::at(shape, 1).export(seed_root.path(), &export::First);
 
             let mut chain = Chain::at(shape, 2);
             let mut bundles = Vec::new();
 
             for boundary in [2, 3, 4] {
                 chain.advance_to(boundary);
-                bundles.push(chain.prepare(&store, &retained).unwrap());
+                bundles.push(chain.prepare(&store).unwrap());
             }
 
             let lending = Lending::following(&seed, &bundles[0].plan());
@@ -4568,9 +4434,15 @@ mod boundary_preparation {
             assert_eq!(
                 staged.records(Family::Indexes, 0),
                 None,
-                "{shape:?}: the first predecessor carries window 0",
+                "{shape:?}: the seed's diff lists window 0",
             );
-            assert!(staged.records(Family::Indexes, 1).is_some(), "{shape:?}");
+
+            for window in 1..4 {
+                assert!(
+                    staged.records(Family::Indexes, window).is_some(),
+                    "{shape:?}: window {window}"
+                );
+            }
 
             let mut frozen_previous = seed.clone();
             let mut finished_previous = seed.clone();
@@ -4582,7 +4454,6 @@ mod boundary_preparation {
                 let frozen_root = tempdir();
                 let frozen = Chain::at(shape, bundle.sequence()).export(
                     frozen_root.path(),
-                    &retained,
                     &Lending::following(&frozen_previous, &plan),
                 );
 
@@ -4597,12 +4468,15 @@ mod boundary_preparation {
                     )
                     .unwrap();
 
-                assert_same_stele(
+                assert_same_snapshot(
                     (frozen_root.path(), &frozen),
                     (finished_root.path(), &finished),
                     &at,
                 );
-                assert_eq!(finished.history.len(), frozen_previous.history.len() + 1);
+                assert_eq!(
+                    finished.previous.map(|link| link.inscription_digest),
+                    Some(finished_previous.digest().unwrap())
+                );
 
                 frozen_previous = frozen;
                 finished_previous = finished;
@@ -4637,8 +4511,8 @@ mod boundary_preparation {
             2
         );
 
-        let before = frozen.export(at_two.path(), &[], &export::First);
-        let after = later.export(at_six.path(), &[], &export::First);
+        let before = frozen.export(at_two.path(), &export::First);
+        let after = later.export(at_six.path(), &export::First);
 
         assert!(
             layer_of(&before, "log-first-script-chunks", 1).is_none()
@@ -4663,14 +4537,14 @@ mod boundary_preparation {
         assert_eq!(tail.records, 2);
     }
 
-    /// A retained dump at its boundary is the tip's blob under two descriptors,
-    /// whether cut from the stores or from a bundle.
+    /// A bundle finalizes into the tip's state layers alone, one per shard, as
+    /// an export from the stores does.
     #[test]
-    fn a_due_dump_is_the_captured_tip() {
+    fn a_bundle_finalizes_each_state_shard_once() {
         let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 3);
-        let bundle = chain.prepare(&store, &[3]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(4);
 
@@ -4689,16 +4563,20 @@ mod boundary_preparation {
             )
             .unwrap();
 
-        let dumps: Vec<_> = dumps_in(&finished, 3);
+        let state: Vec<_> = finished
+            .layers()
+            .filter(|layer| state_ns_for(&layer.kind).is_some())
+            .collect();
 
-        assert_eq!(dumps.len(), state_layer_count());
+        assert_eq!(state.len(), state_layer_count());
+        assert!(state.iter().all(|layer| layer.scope.get("epoch").is_none()));
         assert_eq!(
             bundle
                 .layers()
                 .filter(|layer| state_ns_for(&layer.kind).is_some())
                 .count(),
             state_layer_count(),
-            "the bundle holds one payload per shard, not two"
+            "the bundle holds one payload per shard"
         );
     }
 
@@ -4711,13 +4589,13 @@ mod boundary_preparation {
             let chain = Chain::at(shape, 2);
             let (delta_root, traversal_root) = (tempdir(), tempdir());
 
-            let from_delta = chain.prepare(&store(delta_root.path()), &[]).unwrap();
+            let from_delta = chain.prepare(&store(delta_root.path())).unwrap();
 
             assert_eq!(chain.archive.traversals(), (0, 0), "{shape:?}");
 
             let from_traversal = prepare::prepare(
                 &store(traversal_root.path()),
-                &chain.plan(&[]),
+                &chain.plan(),
                 &chain.archive,
                 &chain.state,
                 &Request {
@@ -4749,7 +4627,7 @@ mod boundary_preparation {
 
         let refused = prepare::prepare(
             &store,
-            &chain.plan(&[]),
+            &chain.plan(),
             &chain.archive,
             &chain.state,
             &Request {
@@ -4775,7 +4653,7 @@ mod boundary_preparation {
 
         chain.finish_epoch();
 
-        let refused = chain.prepare(&store(root.path()), &[]).unwrap_err();
+        let refused = chain.prepare(&store(root.path())).unwrap_err();
 
         assert!(matches!(refused, Error::NotABoundary { .. }), "{refused:?}");
     }
@@ -4791,7 +4669,7 @@ mod boundary_preparation {
 
         let refused = prepare::prepare(
             &store,
-            &chain.plan(&[]),
+            &chain.plan(),
             &Counted::failing(chain.archive.inner.clone(), Traversal::Logs, 1),
             &chain.state,
             &Request {
@@ -4813,8 +4691,8 @@ mod boundary_preparation {
         fs::write(root.path().join("bundles/2.json.partial"), b"{").unwrap();
         assert!(store.sequences().unwrap().is_empty());
 
-        let retried = chain.prepare(&store, &[]).unwrap();
-        let clean = chain.prepare(&self::store(clean_root.path()), &[]).unwrap();
+        let retried = chain.prepare(&store).unwrap();
+        let clean = chain.prepare(&self::store(clean_root.path())).unwrap();
 
         assert_eq!(
             retried.layers().collect::<Vec<_>>(),
@@ -4830,7 +4708,7 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
         let blob = root.path().join("blobs/sha256");
 
         chain.advance_to(3);
@@ -4878,7 +4756,7 @@ mod boundary_preparation {
             preparation_refusal(refused),
             Refusal::Corrupt { sequence: 2, .. }
         ),);
-        assert!(!finished_root.path().join("inscription.json").exists());
+        assert!(sealed_nothing(finished_root.path()));
 
         fs::write(&path, &original).unwrap();
         store.load(2).unwrap();
@@ -4891,7 +4769,7 @@ mod boundary_preparation {
         let store = store(root.path());
         let chain = Chain::at(Shape::Shelley, 2);
 
-        chain.prepare(&store, &[]).unwrap();
+        chain.prepare(&store).unwrap();
 
         let path = root.path().join("bundles/2.json");
         let original = fs::read_to_string(&path).unwrap();
@@ -4908,7 +4786,7 @@ mod boundary_preparation {
                 Refusal::Corrupt { sequence: 2, .. }
             ));
             assert!(
-                chain.prepare(&store, &[]).is_err(),
+                chain.prepare(&store).is_err(),
                 "a damaged bundle is not silently captured over"
             );
             assert!(
@@ -4920,7 +4798,7 @@ mod boundary_preparation {
         store.release(2).unwrap();
         assert!(blobs(root.path()).is_empty());
 
-        chain.prepare(&store, &[]).unwrap();
+        chain.prepare(&store).unwrap();
         store.load(2).unwrap();
     }
 
@@ -4942,25 +4820,61 @@ mod boundary_preparation {
         .unwrap();
     }
 
-    /// Another build's format is refused on its own account.
+    /// Another build's format is refused on its own account: format 3, whose
+    /// manifest named a slot the archive had to keep, and a later one.
     #[test]
     fn a_manifest_of_another_format_is_refused() {
+        assert_eq!(prepare::BUNDLE_FORMAT, 4);
+
+        for format in [3, 5] {
+            let root = tempdir();
+            let store = store(root.path());
+
+            Chain::at(Shape::Shelley, 2).prepare(&store).unwrap();
+
+            store.load(2).unwrap();
+            rewrite_manifest(&root.path().join("bundles/2.json"), |manifest| {
+                manifest.replace("\"format\":4", &format!("\"format\":{format}"))
+            });
+
+            let reason = match preparation_refusal(store.load(2)) {
+                Refusal::Corrupt { reason, .. } => reason,
+                other => panic!("{other:?}"),
+            };
+
+            assert!(reason.contains(&format!("format {format}")), "{reason}");
+        }
+    }
+
+    /// A format-1 bundle, which carried the retained list in its identity, is
+    /// refused rather than read as current: the field this build no longer
+    /// reads breaks the checksum, and the format is not this build's either.
+    #[test]
+    fn a_format_1_manifest_with_a_retained_list_is_refused() {
         let root = tempdir();
         let store = store(root.path());
+        let chain = Chain::at(Shape::Shelley, 2);
 
-        Chain::at(Shape::Shelley, 2).prepare(&store, &[]).unwrap();
+        chain.prepare(&store).unwrap();
 
         store.load(2).unwrap();
         rewrite_manifest(&root.path().join("bundles/2.json"), |manifest| {
-            manifest.replace("\"format\":1", "\"format\":2")
+            manifest
+                .replace(
+                    &format!("\"format\":{}", prepare::BUNDLE_FORMAT),
+                    "\"format\":1",
+                )
+                .replace("\"windows\":", "\"retained\":[1],\"windows\":")
         });
 
-        let reason = match preparation_refusal(store.load(2)) {
-            Refusal::Corrupt { reason, .. } => reason,
-            other => panic!("{other:?}"),
-        };
-
-        assert!(reason.contains("format 2"), "{reason}");
+        assert!(matches!(
+            preparation_refusal(store.load(2)),
+            Refusal::Corrupt { sequence: 2, .. }
+        ));
+        assert!(
+            chain.prepare(&store).is_err(),
+            "an old bundle is not silently captured over"
+        );
     }
 
     /// A manifest's claims about a payload are held against the payload as it
@@ -4970,7 +4884,7 @@ mod boundary_preparation {
         let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(3);
 
@@ -5007,7 +4921,7 @@ mod boundary_preparation {
             preparation_refusal(refused),
             Refusal::Corrupt { sequence: 2, .. }
         ));
-        assert!(!finished_root.path().join("inscription.json").exists());
+        assert!(sealed_nothing(finished_root.path()));
     }
 
     /// The window before the boundary is captured even under a seal that would
@@ -5021,7 +4935,7 @@ mod boundary_preparation {
 
         let bundle = prepare::prepare(
             &store,
-            &chain.plan(&[]),
+            &chain.plan(),
             &chain.archive,
             &chain.state,
             &Request {
@@ -5044,7 +4958,7 @@ mod boundary_preparation {
         let root = tempdir();
         let store = store(root.path());
 
-        Chain::at(Shape::Shelley, 2).prepare(&store, &[]).unwrap();
+        Chain::at(Shape::Shelley, 2).prepare(&store).unwrap();
 
         fs::rename(
             root.path().join("bundles/2.json"),
@@ -5064,21 +4978,21 @@ mod boundary_preparation {
         let root = tempdir();
         let store = store(root.path());
         let chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
         let held = fs::read(root.path().join("bundles/2.json")).unwrap();
 
         // The same request over the same stores is the same bundle, and the
         // walk that establishes it writes nothing.
-        let same = chain.prepare(&store, &[]).unwrap();
+        let same = chain.prepare(&store).unwrap();
         assert_eq!(
             same.layers().collect::<Vec<_>>(),
             bundle.layers().collect::<Vec<_>>()
         );
 
-        // Another retained list, another contract, another block at the boundary.
+        // Another contract.
         let contract = prepare::prepare(
             &store,
-            &chain.plan(&[]),
+            &chain.plan(),
             &chain.archive,
             &chain.state,
             &Request {
@@ -5090,13 +5004,89 @@ mod boundary_preparation {
         );
 
         assert!(matches!(
-            preparation_refusal(chain.prepare(&store, &[1])),
-            Refusal::SourceMismatch { sequence: 2, .. }
-        ));
-        assert!(matches!(
             preparation_refusal(contract),
             Refusal::SourceMismatch { sequence: 2, .. }
         ));
+
+        assert_eq!(fs::read(root.path().join("bundles/2.json")).unwrap(), held);
+    }
+
+    /// The blocks reference a boundary is prepared with reaches its
+    /// publication: the bundle carries it to finalization, through a reload.
+    #[test]
+    fn a_prepared_boundary_keeps_its_blocks_reference() {
+        let (root, stage_root, frozen_root, finished_root) =
+            (tempdir(), tempdir(), tempdir(), tempdir());
+        let store = store(root.path());
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let plan = chain.plan().with_blocks(some_blocks());
+
+        let bundle = chain.prepare_plan(&store, &plan).unwrap();
+        assert_eq!(store.load(2).unwrap().plan().blocks, Some(some_blocks()));
+
+        let frozen = export::export(
+            &SnapshotDir::create(frozen_root.path()).unwrap(),
+            &plan,
+            &chain.archive,
+            &chain.state,
+            &export::First,
+            &Observer::silent(),
+        )
+        .unwrap();
+
+        chain.advance_to(3);
+
+        let staged = chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &export::First,
+        );
+        let finished = chain
+            .finalize(
+                finished_root.path(),
+                &store,
+                &bundle,
+                &staged,
+                &export::First,
+            )
+            .unwrap();
+
+        let read = dolos_snapshot::read_position(&finished.position).unwrap();
+        assert_eq!(read.blocks, Some(some_blocks()));
+
+        assert_same_snapshot(
+            (frozen_root.path(), &frozen),
+            (finished_root.path(), &finished),
+            "with a blocks reference",
+        );
+    }
+
+    /// A bundle is prepared for one blocks reference, and one prepared
+    /// without any keeps the manifest it always had.
+    #[test]
+    fn another_blocks_reference_is_another_bundle() {
+        let root = tempdir();
+        let store = store(root.path());
+        let chain = Chain::at(Shape::Shelley, 2);
+
+        chain.prepare(&store).unwrap();
+
+        let held = fs::read(root.path().join("bundles/2.json")).unwrap();
+        let sealed: serde_json::Value = serde_json::from_slice(&held).unwrap();
+        assert!(
+            sealed["manifest"]["identity"].get("blocks").is_none(),
+            "{}",
+            sealed["manifest"]["identity"]
+        );
+
+        let refused = chain.prepare_plan(&store, &chain.plan().with_blocks(some_blocks()));
+
+        match preparation_refusal(refused) {
+            Refusal::SourceMismatch { sequence: 2, what } => {
+                assert!(what.contains("blocks reference"), "{what}")
+            }
+            other => panic!("{other:?}"),
+        }
 
         assert_eq!(fs::read(root.path().join("bundles/2.json")).unwrap(), held);
     }
@@ -5108,7 +5098,7 @@ mod boundary_preparation {
         let (root, stage_root, other_stage_root) = (tempdir(), tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(3);
 
@@ -5122,7 +5112,7 @@ mod boundary_preparation {
         let other = Chain::at(Shape::Byron, 3);
         let finished_root = tempdir();
         let refused = prepare::finalize(
-            &SteleDir::create(finished_root.path()).unwrap(),
+            &SnapshotDir::create(finished_root.path()).unwrap(),
             &Finalizing {
                 store: &store,
                 bundle: &bundle,
@@ -5130,7 +5120,6 @@ mod boundary_preparation {
                 producers: export::Producers::DEFAULT,
             },
             &other.archive,
-            None,
             &export::First,
             &Observer::silent(),
         );
@@ -5184,11 +5173,11 @@ mod boundary_preparation {
         let other = self::store(other_root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
         let delta = chain.boundary_delta.clone().unwrap();
-        let first = chain.prepare(&store, &[]).unwrap();
+        let first = chain.prepare(&store).unwrap();
 
         let foreign = prepare::prepare(
             &other,
-            &chain.plan(&[]),
+            &chain.plan(),
             &chain.archive,
             &chain.state,
             &Request {
@@ -5224,14 +5213,14 @@ mod boundary_preparation {
         ));
     }
 
-    /// A window nothing staged and no predecessor carries fails loudly, rather
-    /// than leaving its layer out of the document.
+    /// A listed window nothing staged and no record resumes fails loudly,
+    /// rather than leaving its layer out of the document.
     #[test]
-    fn a_window_neither_staged_nor_inherited_fails() {
+    fn a_window_neither_staged_nor_resumed_fails() {
         let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(3);
 
@@ -5266,7 +5255,7 @@ mod boundary_preparation {
             ),
             "{refused:?}"
         );
-        assert!(!finished_root.path().join("inscription.json").exists());
+        assert!(sealed_nothing(finished_root.path()));
     }
 
     /// A batch needs its stages' frontier past every boundary it finishes.
@@ -5275,7 +5264,7 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let early = chain.prepare(&store, &[]).unwrap();
+        let early = chain.prepare(&store).unwrap();
         let staged = chain.stage(
             stage_root.path(),
             std::slice::from_ref(&early),
@@ -5284,7 +5273,7 @@ mod boundary_preparation {
 
         chain.advance_to(3);
 
-        let later = chain.prepare(&store, &[]).unwrap();
+        let later = chain.prepare(&store).unwrap();
         let refused = chain.finalize(tempdir().path(), &store, &later, &staged, &export::First);
 
         assert!(matches!(
@@ -5293,16 +5282,14 @@ mod boundary_preparation {
         ));
     }
 
-    /// The archive still has to reach back as far as finalization reads it.
+    /// The archive still has to start at the chain's origin, since
+    /// finalization reads closed windows from it.
     #[test]
-    fn an_archive_pruned_past_the_horizon_is_refused() {
+    fn an_archive_pruned_since_preparation_is_refused() {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 3);
-        let bundle = chain.prepare(&store, &[]).unwrap();
-
-        // Epoch 0's first block.
-        assert_eq!(bundle.horizon(), Some(10));
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(4);
 
@@ -5329,7 +5316,7 @@ mod boundary_preparation {
         writer.commit().unwrap();
 
         let refused = prepare::finalize(
-            &SteleDir::create(tempdir().path()).unwrap(),
+            &SnapshotDir::create(tempdir().path()).unwrap(),
             &Finalizing {
                 store: &store,
                 bundle: &bundle,
@@ -5337,18 +5324,13 @@ mod boundary_preparation {
                 producers: export::Producers::DEFAULT,
             },
             &pruned,
-            None,
             &export::First,
             &Observer::silent(),
         );
 
         assert!(matches!(
             preparation_refusal(refused),
-            Refusal::HorizonLost {
-                sequence: 3,
-                horizon: 10,
-                ..
-            }
+            Refusal::PrunedArchive { sequence: 3, .. }
         ));
     }
 
@@ -5360,7 +5342,7 @@ mod boundary_preparation {
         let store = store(root.path());
         let chain = Chain::at(Shape::Shelley, 2);
 
-        chain.prepare(&store, &[]).unwrap();
+        chain.prepare(&store).unwrap();
 
         let foreign = Store::open(root.path(), "another").unwrap();
 
@@ -5373,7 +5355,7 @@ mod boundary_preparation {
             Refusal::ForeignOwner { sequence: 2, .. }
         ));
         assert!(matches!(
-            preparation_refusal(chain.prepare(&foreign, &[])),
+            preparation_refusal(chain.prepare(&foreign)),
             Refusal::ForeignOwner { sequence: 2, .. }
         ));
 
@@ -5387,11 +5369,11 @@ mod boundary_preparation {
         let root = tempdir();
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Byron, 5);
-        let five = chain.prepare(&store, &[]).unwrap();
+        let five = chain.prepare(&store).unwrap();
 
         chain.advance_to(6);
 
-        let six = chain.prepare(&store, &[]).unwrap();
+        let six = chain.prepare(&store).unwrap();
 
         let shared: Vec<_> = five
             .references()
@@ -5430,7 +5412,7 @@ mod boundary_preparation {
     fn a_sweep_finishes_what_a_crash_left() {
         let root = tempdir();
         let store = store(root.path());
-        let bundle = Chain::at(Shape::Shelley, 2).prepare(&store, &[]).unwrap();
+        let bundle = Chain::at(Shape::Shelley, 2).prepare(&store).unwrap();
 
         fs::write(root.path().join("blobs/sha256/orphan"), b"x").unwrap();
         fs::write(root.path().join("blobs/.staging-1-1"), b"x").unwrap();
@@ -5445,71 +5427,6 @@ mod boundary_preparation {
         store.load(2).unwrap();
     }
 
-    /// A window restricted away gets no payload and no horizon; the state tip
-    /// is the tip whatever history travels with it.
-    #[test]
-    fn a_restricted_plan_captures_only_its_windows() {
-        let (root, stage_root, frozen_root, finished_root) =
-            (tempdir(), tempdir(), tempdir(), tempdir());
-        let store = store(root.path());
-        let mut chain = Chain::at(Shape::Shelley, 4);
-        let delta = chain.boundary_delta.clone().unwrap();
-        let plan = chain.plan(&[]).restrict_epochs(Some(4), None);
-
-        let bundle = prepare::prepare(
-            &store,
-            &plan,
-            &chain.archive,
-            &chain.state,
-            &Request {
-                store_contract: CONTRACT.to_owned(),
-                mutable_slots: chain.mutable,
-                tail: IndexTail::Delta(&delta),
-            },
-            &Observer::silent(),
-        )
-        .unwrap();
-
-        assert_eq!(bundle.horizon(), None);
-
-        let frozen = export::export(
-            &SteleDir::create(frozen_root.path()).unwrap(),
-            &plan,
-            &chain.archive,
-            &chain.state,
-            None,
-            &export::First,
-            &Observer::silent(),
-        )
-        .unwrap();
-
-        chain.advance_to(5);
-
-        let staged = chain.stage(
-            stage_root.path(),
-            std::slice::from_ref(&bundle),
-            &export::First,
-        );
-
-        assert_eq!(staged.records(Family::Indexes, 3), None);
-
-        let finished = chain
-            .finalize(
-                finished_root.path(),
-                &store,
-                &bundle,
-                &staged,
-                &export::First,
-            )
-            .unwrap();
-
-        assert_same_stele(
-            (frozen_root.path(), &frozen),
-            (finished_root.path(), &finished),
-            "restricted",
-        );
-    }
-
     /// The host surface: a boundary captured, a batch staged and a document
     /// reproduced through the snapshot source alone, identical to the ordinary
     /// digest of the stores frozen there.
@@ -5519,9 +5436,9 @@ mod boundary_preparation {
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 3);
         let delta = chain.boundary_delta.clone().unwrap();
-        let plan = chain.plan(&[]);
+        let plan = chain.plan();
 
-        let source = StoreSnapshot::new(&chain.archive, &chain.state);
+        let source = StoreSnapshot::new(&chain.archive, &chain.state, chain.mutable);
         let bundle = source
             .prepare_boundary(
                 &store,
@@ -5538,7 +5455,7 @@ mod boundary_preparation {
 
         chain.advance_to(4);
 
-        let source = StoreSnapshot::new(&chain.archive, &chain.state);
+        let source = StoreSnapshot::new(&chain.archive, &chain.state, chain.mutable);
         let staged = source
             .stage_batch(
                 stage_root.path(),
@@ -5573,11 +5490,9 @@ mod boundary_preparation {
         let delta = chain.boundary_delta.clone().unwrap();
         let watcher = Arc::new(Watcher::default());
 
-        // Retained epochs due at the boundary, one it would adopt and one it
-        // cuts, are not captured: its tip is what a publication describes twice.
         let bundle = prepare::prepare(
             &store,
-            &chain.plan(&[1, 2]),
+            &chain.plan(),
             &chain.archive,
             &chain.state,
             &Request {
@@ -5598,7 +5513,7 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 3);
-        let bundle = chain.prepare(&store, &[3]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(4);
 
@@ -5618,35 +5533,16 @@ mod boundary_preparation {
                 producers: export::Producers::DEFAULT,
             },
             &chain.archive,
-            None,
             &export::First,
             &watcher.observer(),
         )
         .unwrap();
 
-        watcher.assert_well_formed(finished.layers.len());
+        watcher.assert_well_formed(finished.layers().count());
 
-        // A dump described from its tip is the same layer's records once.
-        let dumps = dumps_in(&finished, 3);
-        let content: u64 = finished
-            .layers
-            .iter()
-            .filter(|layer| !dumps.iter().any(|dump| std::ptr::eq(*dump, *layer)))
-            .map(|layer| layer.records - 1)
-            .sum();
+        let content: u64 = finished.layers().map(|layer| layer.records - 1).sum();
 
         assert_eq!(watcher.records(), content);
-    }
-
-    fn dumps_in(
-        inscription: &Inscription,
-        epoch: u64,
-    ) -> Vec<&stelae::inscription::LayerDescriptor> {
-        inscription
-            .layers
-            .iter()
-            .filter(|layer| state_ns_for(&layer.kind).is_some() && layer.scope["epoch"] == epoch)
-            .collect()
     }
 
     fn plain_request<'a>(chain: &Chain, delta: &'a ArchiveIndexDelta) -> Request<'a> {
@@ -5663,7 +5559,7 @@ mod boundary_preparation {
         let root = tempdir();
         let store = store(root.path());
 
-        Chain::at(Shape::Shelley, 2).prepare(&store, &[]).unwrap();
+        Chain::at(Shape::Shelley, 2).prepare(&store).unwrap();
         rewrite_manifest(&root.path().join("bundles/2.json"), edit);
 
         let refusal = preparation_refusal(store.load(2));
@@ -5675,8 +5571,8 @@ mod boundary_preparation {
         refusal
     }
 
-    /// Old records would land in a sealed stele under this build's labels, and
-    /// no layer header stops them.
+    /// Old records would land in a sealed snapshot under this build's labels,
+    /// and no layer header stops them.
     #[test]
     fn a_bundle_of_another_media_type_version_is_refused() {
         let refusal = load_as_another_build(|manifest| {
@@ -5712,7 +5608,7 @@ mod boundary_preparation {
 
         let bundle = prepare::prepare(
             &store,
-            &chain.plan(&[]),
+            &chain.plan(),
             &chain.archive,
             &chain.state,
             &Request {
@@ -5752,7 +5648,7 @@ mod boundary_preparation {
         let store = store(root.path());
         let first = Chain::at(Shape::Shelley, 2);
 
-        first.prepare(&store, &[]).unwrap();
+        first.prepare(&store).unwrap();
 
         let held_marker = fs::read(root.path().join("bundles/2.json")).unwrap();
         let held_blobs = blobs(root.path());
@@ -5772,7 +5668,7 @@ mod boundary_preparation {
             .unwrap();
         writer.commit().unwrap();
 
-        let what = match preparation_refusal(rebuilt.prepare(&store, &[])) {
+        let what = match preparation_refusal(rebuilt.prepare(&store)) {
             Refusal::SourceMismatch { sequence: 2, what } => what,
             other => panic!("{other:?}"),
         };
@@ -5787,8 +5683,8 @@ mod boundary_preparation {
 
         store.release(2).unwrap();
 
-        let frozen = rebuilt.export(frozen_root.path(), &[], &export::First);
-        let bundle = rebuilt.prepare(&store, &[]).unwrap();
+        let frozen = rebuilt.export(frozen_root.path(), &export::First);
+        let bundle = rebuilt.prepare(&store).unwrap();
 
         rebuilt.advance_to(3);
 
@@ -5807,7 +5703,7 @@ mod boundary_preparation {
             )
             .unwrap();
 
-        assert_same_stele(
+        assert_same_snapshot(
             (frozen_root.path(), &frozen),
             (finished_root.path(), &finished),
             "rebuilt",
@@ -5823,13 +5719,13 @@ mod boundary_preparation {
         let chain = Chain::at(Shape::Shelley, 2);
         let mut delta = chain.boundary_delta.clone().unwrap();
 
-        chain.prepare(&store, &[]).unwrap();
+        chain.prepare(&store).unwrap();
 
         delta.tx_hashes.pop();
 
         let what = match preparation_refusal(prepare::prepare(
             &store,
-            &chain.plan(&[]),
+            &chain.plan(),
             &chain.archive,
             &chain.state,
             &plain_request(&chain, &delta),
@@ -5841,16 +5737,17 @@ mod boundary_preparation {
 
         assert!(what.contains(INDEXES), "{what}");
 
+        // Window 1's closing logs, which the diff at 2 lists.
         let writer = chain.archive.start_writer().unwrap();
-        chain.log(&writer, PoolEpochLog::NS, 1, 9, 99);
+        chain.log(&writer, EpochState::NS, 1, 9, 99);
         writer.commit().unwrap();
 
-        let what = match preparation_refusal(chain.prepare(&store, &[])) {
+        let what = match preparation_refusal(chain.prepare(&store)) {
             Refusal::SourceMismatch { what, .. } => what,
             other => panic!("{other:?}"),
         };
 
-        assert!(what.contains("log-pool-epochs"), "{what}");
+        assert!(what.contains("the log-epochs layer"), "{what}");
     }
 
     /// A restart at the boundary with no delta left: the explicit traversal
@@ -5860,11 +5757,11 @@ mod boundary_preparation {
         let root = tempdir();
         let store = store(root.path());
         let chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         let again = prepare::prepare(
             &store,
-            &chain.plan(&[]),
+            &chain.plan(),
             &chain.archive,
             &chain.state,
             &Request {
@@ -5889,7 +5786,7 @@ mod boundary_preparation {
         let store = store(root.path());
         let held = Chain::at(Shape::Shelley, 2);
 
-        held.prepare(&store, &[]).unwrap();
+        held.prepare(&store).unwrap();
 
         let mut fork = Chain::new(Shape::Shelley);
         fork.number = 100;
@@ -5900,7 +5797,7 @@ mod boundary_preparation {
         assert_eq!(ours.slot(), theirs.slot());
         assert_ne!(ours.hash(), theirs.hash());
 
-        let what = match preparation_refusal(fork.prepare(&store, &[])) {
+        let what = match preparation_refusal(fork.prepare(&store)) {
             Refusal::SourceMismatch { sequence: 2, what } => what,
             other => panic!("{other:?}"),
         };
@@ -5909,13 +5806,13 @@ mod boundary_preparation {
     }
 
     #[test]
-    fn another_coverage_or_seal_is_refused() {
+    fn another_seal_is_refused() {
         let root = tempdir();
         let store = store(root.path());
         let chain = Chain::at(Shape::Shelley, 4);
         let delta = chain.boundary_delta.clone().unwrap();
 
-        chain.prepare(&store, &[]).unwrap();
+        chain.prepare(&store).unwrap();
 
         let refused = |plan: Plan, request: Request<'_>| {
             let what = match preparation_refusal(prepare::prepare(
@@ -5933,14 +5830,8 @@ mod boundary_preparation {
             what
         };
 
-        let windows = refused(
-            chain.plan(&[]).restrict_epochs(Some(4), None),
-            plain_request(&chain, &delta),
-        );
-        assert!(windows.contains("windows"), "{windows}");
-
         let sealing = refused(
-            chain.plan(&[]),
+            chain.plan(),
             Request {
                 mutable_slots: chain.mutable + 1,
                 ..plain_request(&chain, &delta)
@@ -5949,21 +5840,34 @@ mod boundary_preparation {
         assert!(sealing.contains("mutable"), "{sealing}");
     }
 
-    /// A changed retained list says so, rather than "other stores".
+    /// A changed store contract says so, rather than "other stores".
     #[test]
     fn the_refusal_names_what_differs() {
         let root = tempdir();
         let store = store(root.path());
         let chain = Chain::at(Shape::Shelley, 2);
+        let delta = chain.boundary_delta.clone().unwrap();
 
-        chain.prepare(&store, &[]).unwrap();
+        chain.prepare(&store).unwrap();
 
-        let what = match preparation_refusal(chain.prepare(&store, &[1])) {
+        let refused = prepare::prepare(
+            &store,
+            &chain.plan(),
+            &chain.archive,
+            &chain.state,
+            &Request {
+                store_contract: "another".to_owned(),
+                ..plain_request(&chain, &delta)
+            },
+            &Observer::silent(),
+        );
+
+        let what = match preparation_refusal(refused) {
             Refusal::SourceMismatch { what, .. } => what,
             other => panic!("{other:?}"),
         };
 
-        assert!(what.contains("retained"), "{what}");
+        assert!(what.contains("store contract"), "{what}");
     }
 
     fn blocks_from(chain: &Chain, from: u64) -> Vec<(ChainPoint, Vec<u8>)> {
@@ -5977,19 +5881,6 @@ mod boundary_preparation {
                 (ChainPoint::Specific(slot, hash), body.to_vec())
             })
             .collect()
-    }
-
-    fn first_block_from(chain: &Chain, from: u64) -> u64 {
-        blocks_from(chain, from)[0].0.slot()
-    }
-
-    fn last_block_to(chain: &Chain, to: u64) -> u64 {
-        blocks_from(chain, 0)
-            .iter()
-            .rev()
-            .map(|(point, _)| point.slot())
-            .find(|slot| *slot <= to)
-            .unwrap()
     }
 
     fn archive_of(
@@ -6020,7 +5911,7 @@ mod boundary_preparation {
         archive: &MemoryArchiveStore,
     ) -> Result<Inscription, Error> {
         prepare::finalize(
-            &SteleDir::create(root).unwrap(),
+            &SnapshotDir::create(root).unwrap(),
             &Finalizing {
                 store,
                 bundle,
@@ -6028,31 +5919,18 @@ mod boundary_preparation {
                 producers: export::Producers::DEFAULT,
             },
             archive,
-            None,
             &export::First,
             &Observer::silent(),
         )
     }
 
-    /// Prepare `plan`, advance, prune past a closed window and finish: closed
-    /// blocks are read from the archive, so that is `HorizonLost` and never a
-    /// stele whose closed blocks read as empty.
-    fn assert_a_prune_is_refused(mut chain: Chain, plan: Plan, prune_at_epoch: u64, horizon: u64) {
+    /// Prepare at `chain`'s boundary, advance, prune past a closed window and
+    /// finish: closed blocks are read from the archive, so that is
+    /// `PrunedArchive` and never a snapshot whose closed blocks read as empty.
+    fn assert_a_prune_is_refused(mut chain: Chain, prune_at_epoch: u64) {
         let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
         let store = store(root.path());
-        let delta = chain.boundary_delta.clone().unwrap();
-
-        let bundle = prepare::prepare(
-            &store,
-            &plan,
-            &chain.archive,
-            &chain.state,
-            &plain_request(&chain, &delta),
-            &Observer::silent(),
-        )
-        .unwrap();
-
-        assert_eq!(bundle.horizon(), Some(horizon));
+        let bundle = chain.prepare(&store).unwrap();
 
         let advance = chain.epoch + 1;
         chain.advance_to(advance);
@@ -6069,11 +5947,7 @@ mod boundary_preparation {
         assert!(
             matches!(
                 preparation_refusal(refused),
-                Refusal::HorizonLost {
-                    sequence,
-                    horizon: lost,
-                    ..
-                } if sequence == bundle.sequence() && lost == horizon
+                Refusal::PrunedArchive { sequence, .. } if sequence == bundle.sequence()
             ),
             "at {}",
             bundle.sequence()
@@ -6081,50 +5955,28 @@ mod boundary_preparation {
     }
 
     #[test]
-    fn a_restricted_plan_is_refused_past_its_closed_window() {
-        let chain = Chain::at(Shape::Shelley, 4);
-        let plan = chain.plan(&[]).restrict_epochs(Some(3), None);
-        let horizon = last_block_to(&chain, chain.start(3));
-
-        assert_a_prune_is_refused(chain, plan, 4, horizon);
+    fn a_shelley_boundary_is_refused_past_its_closed_window() {
+        assert_a_prune_is_refused(Chain::at(Shape::Shelley, 4), 4);
     }
 
     #[test]
     fn the_first_boundary_is_refused_past_its_closed_window() {
-        let chain = Chain::at(Shape::Shelley, 1);
-        let plan = chain.plan(&[]);
-        let horizon = first_block_from(&chain, chain.start(0));
-
-        assert_a_prune_is_refused(chain, plan, 1, horizon);
+        assert_a_prune_is_refused(Chain::at(Shape::Shelley, 1), 1);
     }
 
     #[test]
     fn an_early_byron_boundary_is_refused_past_its_closed_windows() {
-        let chain = Chain::at(Shape::Byron, 3);
-        let plan = chain.plan(&[]);
-
-        assert_a_prune_is_refused(chain, plan, 3, 0);
+        assert_a_prune_is_refused(Chain::at(Shape::Byron, 3), 3);
     }
 
     /// Staging reads closed windows too: a pruned archive would give it empty
     /// runs, so it is refused there, before a traversal.
     #[test]
-    fn a_batch_is_not_staged_from_an_archive_past_its_horizon() {
+    fn a_batch_is_not_staged_from_a_pruned_archive() {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 4);
-        let delta = chain.boundary_delta.clone().unwrap();
-        let plan = chain.plan(&[]).restrict_epochs(Some(3), None);
-
-        let bundle = prepare::prepare(
-            &store,
-            &plan,
-            &chain.archive,
-            &chain.state,
-            &plain_request(&chain, &delta),
-            &Observer::silent(),
-        )
-        .unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(5);
 
@@ -6140,82 +5992,234 @@ mod boundary_preparation {
 
         assert!(matches!(
             preparation_refusal(refused),
-            Refusal::HorizonLost { sequence: 4, .. }
+            Refusal::PrunedArchive { sequence: 4, .. }
         ));
     }
 
-    /// With no closed window nothing needs retaining but the boundary block,
-    /// and the publication finishes on the pruned archive. Without that block
-    /// the chain cannot be checked, which is a refusal.
+    /// Block #1 past slot 0 is what a prune that takes only block #0 leaves,
+    /// and no chain starts there. Both staging and finalization refuse it, and
+    /// the refusal names the block the archive starts at.
     #[test]
-    fn no_horizon_needs_only_the_boundary_block() {
-        let (root, stage_root, frozen_root, finished_root, gone_root) =
-            (tempdir(), tempdir(), tempdir(), tempdir(), tempdir());
+    fn losing_only_the_chains_first_block_is_refused() {
+        let (root, stage_root, restage_root, finished_root) =
+            (tempdir(), tempdir(), tempdir(), tempdir());
         let store = store(root.path());
-        let mut chain = Chain::at(Shape::Shelley, 4);
-        let delta = chain.boundary_delta.clone().unwrap();
-        let plan = chain.plan(&[]).restrict_epochs(Some(4), None);
+        let mut chain = Chain::at(Shape::Shelley, 2);
+        let bundle = chain.prepare(&store).unwrap();
+        let origin = blocks_from(&chain, 0)[0].0.slot();
 
-        let bundle = prepare::prepare(
-            &store,
-            &plan,
-            &chain.archive,
-            &chain.state,
-            &plain_request(&chain, &delta),
-            &Observer::silent(),
-        )
-        .unwrap();
-
-        assert_eq!(bundle.horizon(), None);
-
-        let frozen = export::export(
-            &SteleDir::create(frozen_root.path()).unwrap(),
-            &plan,
-            &chain.archive,
-            &chain.state,
-            None,
-            &export::First,
-            &Observer::silent(),
-        )
-        .unwrap();
-
-        let boundary = bundle.cursor().slot();
-
-        chain.advance_to(5);
+        chain.advance_to(3);
 
         let staged = chain.stage(
             stage_root.path(),
             std::slice::from_ref(&bundle),
             &export::First,
         );
+        let kept = blocks_from(&chain, origin + 1);
+        let second = kept[0].0.slot();
 
-        let finished = finalize_on(
+        assert_ne!(second, 0);
+
+        let refusal = preparation_refusal(finalize_on(
             finished_root.path(),
             &store,
             &bundle,
             &staged,
-            &pruned_archive(blocks_from(&chain, boundary)),
-        )
-        .unwrap();
+            &pruned_archive(kept.clone()),
+        ));
+        let message = refusal.to_string();
 
-        assert_same_stele(
-            (frozen_root.path(), &frozen),
-            (finished_root.path(), &finished),
-            "no horizon",
+        assert!(
+            matches!(
+                refusal,
+                Refusal::PrunedArchive { sequence: 2, first, number: 1 } if first == second
+            ),
+            "{refusal:?}"
+        );
+        assert!(
+            message.contains(&format!("block #1, slot {second}"))
+                && message.contains("full history"),
+            "{message}"
         );
 
-        let refused = finalize_on(
-            gone_root.path(),
-            &store,
-            &bundle,
-            &staged,
-            &pruned_archive(blocks_from(&chain, boundary + 1)),
+        let restaged = prepare::stage_batch(
+            restage_root.path(),
+            &pruned_archive(kept),
+            &chain.state,
+            std::slice::from_ref(&bundle),
+            &export::First,
+            Budget::new(u64::MAX),
+            &Observer::silent(),
         );
 
         assert!(matches!(
-            preparation_refusal(refused),
-            Refusal::SourceMismatch { sequence: 4, .. }
+            preparation_refusal(restaged),
+            Refusal::PrunedArchive {
+                sequence: 2,
+                number: 1,
+                ..
+            }
         ));
+    }
+
+    /// An archive whose first block is #1 past slot 0 and names no previous
+    /// block has lost nothing: it is where the chain starts, as capture holds
+    /// and the synthetic chains start. Staging and finalization take it on
+    /// both archives a publisher runs.
+    #[test]
+    fn an_archive_starting_at_block_one_with_no_predecessor_is_finished() {
+        for on_fjall in [false, true] {
+            let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
+            let store = store(root.path());
+            let mut chain = Chain::numbered_from(Shape::Shelley, 1);
+
+            chain.advance_to(2);
+
+            let (first, body) = blocks_from(&chain, 0).remove(0);
+            let block = MultiEraBlock::decode(&body).unwrap();
+
+            assert_eq!(block.number(), 1);
+            assert_ne!(first.slot(), 0);
+            assert_eq!(block.header().previous_hash(), None);
+
+            let bundle = chain.prepare(&store).unwrap();
+
+            chain.advance_to(3);
+
+            let bundles = std::slice::from_ref(&bundle);
+            let snapshot = SnapshotDir::create(finished_root.path()).unwrap();
+            let finished = if on_fjall {
+                let fjall = fjall_copy(&chain);
+                let staged = prepare::stage_batch(
+                    stage_root.path(),
+                    &fjall,
+                    &chain.state,
+                    bundles,
+                    &export::First,
+                    Budget::new(u64::MAX),
+                    &Observer::silent(),
+                )
+                .unwrap();
+
+                prepare::finalize(
+                    &snapshot,
+                    &Finalizing {
+                        store: &store,
+                        bundle: &bundle,
+                        staged: &staged,
+                        producers: export::Producers::DEFAULT,
+                    },
+                    &fjall,
+                    &export::First,
+                    &Observer::silent(),
+                )
+            } else {
+                let staged = chain.stage(stage_root.path(), bundles, &export::First);
+
+                prepare::finalize(
+                    &snapshot,
+                    &Finalizing {
+                        store: &store,
+                        bundle: &bundle,
+                        staged: &staged,
+                        producers: export::Producers::DEFAULT,
+                    },
+                    &chain.archive,
+                    &export::First,
+                    &Observer::silent(),
+                )
+            };
+
+            assert!(finished.is_ok(), "on fjall: {on_fjall}: {finished:?}");
+        }
+    }
+
+    /// A copy of `chain`'s blocks and logs, in the store a publisher prunes.
+    fn fjall_copy(chain: &Chain) -> dolos_fjall::archive::ArchiveStore {
+        let schema = dolos_cardano::model::build_log_schema();
+        let archive = dolos_fjall::archive::ArchiveStore::for_tempdir(schema.clone()).unwrap();
+        let writer = archive.start_writer().unwrap();
+
+        for (point, body) in blocks_from(chain, 0) {
+            writer.apply(&point, &Arc::new(body)).unwrap();
+        }
+
+        for (&ns, _) in schema.iter() {
+            for entry in chain.archive.iter_logs(ns, KeyRange::all()).unwrap() {
+                let (key, value) = entry.unwrap();
+
+                writer.write_log(ns, &key, &value).unwrap();
+            }
+        }
+
+        writer.commit().unwrap();
+
+        archive
+    }
+
+    /// A real `prune_history` one slot past the chain's first block, on both
+    /// archives a publisher runs, takes exactly that block.
+    #[test]
+    fn a_whole_plan_pruned_one_slot_past_the_first_block_is_refused() {
+        for on_fjall in [false, true] {
+            let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
+            let store = store(root.path());
+            let mut chain = Chain::at(Shape::Shelley, 5);
+            let bundle = chain.prepare(&store).unwrap();
+            let origin = blocks_from(&chain, 0)[0].0.slot();
+
+            chain.advance_to(6);
+
+            let staged = chain.stage(
+                stage_root.path(),
+                std::slice::from_ref(&bundle),
+                &export::First,
+            );
+            let max_slots = chain.tip.as_ref().unwrap().slot() - (origin + 1);
+            let snapshot = SnapshotDir::create(finished_root.path()).unwrap();
+            let finalizing = Finalizing {
+                store: &store,
+                bundle: &bundle,
+                staged: &staged,
+                producers: export::Producers::DEFAULT,
+            };
+
+            let refused = if on_fjall {
+                let fjall = fjall_copy(&chain);
+
+                assert!(fjall.prune_history(max_slots, None, None).unwrap());
+
+                prepare::finalize(
+                    &snapshot,
+                    &finalizing,
+                    &fjall,
+                    &export::First,
+                    &Observer::silent(),
+                )
+            } else {
+                assert!(chain.archive.prune_history(max_slots, None, None).unwrap());
+
+                prepare::finalize(
+                    &snapshot,
+                    &finalizing,
+                    &chain.archive,
+                    &export::First,
+                    &Observer::silent(),
+                )
+            };
+
+            assert!(
+                matches!(
+                    preparation_refusal(refused),
+                    Refusal::PrunedArchive {
+                        sequence: 5,
+                        number: 1,
+                        ..
+                    }
+                ),
+                "on fjall: {on_fjall}"
+            );
+        }
     }
 
     /// A delta for the main block sharing the boundary block's slot.
@@ -6240,7 +6244,7 @@ mod boundary_preparation {
 
         let refused = prepare::prepare(
             &store,
-            &chain.plan(&[]),
+            &chain.plan(),
             &chain.archive,
             &chain.state,
             &plain_request(&chain, &foreign),
@@ -6259,7 +6263,7 @@ mod boundary_preparation {
         let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
         let slot = bundle.cursor().slot();
 
         chain.advance_to(3);
@@ -6328,7 +6332,7 @@ mod boundary_preparation {
 
         let refused = prepare::prepare(
             &store,
-            &chain.plan(&[]),
+            &chain.plan(),
             &archive,
             &chain.state,
             &plain_request(&chain, chain.boundary_delta.as_ref().unwrap()),
@@ -6410,10 +6414,9 @@ mod boundary_preparation {
     fn export_under(chain: &Chain, scratch: &Path, observer: &Observer) -> Inscription {
         export::export(
             &Discarding,
-            &chain.plan(&[]).with_scratch(scratch),
+            &chain.plan().with_scratch(scratch),
             &chain.archive,
             &chain.state,
-            None,
             &export::First,
             observer,
         )
@@ -6503,7 +6506,7 @@ mod boundary_preparation {
 
         let live = export_under(&chain, scratch.path(), &Observer::new(Arc::new(progress)));
 
-        assert!(!live.layers.is_empty());
+        assert!(live.layers().next().is_some());
         assert_eq!(during.lock().unwrap().len(), 1);
         assert!(names_in(scratch.path()).is_empty());
     }
@@ -6571,11 +6574,8 @@ mod boundary_preparation {
                 .map_err(|error| error.to_string())
         };
 
-        println!("unset: {:?}", digest(&chain.plan(&[])));
-        println!(
-            "named: {:?}",
-            digest(&chain.plan(&[]).with_scratch(&scratch))
-        );
+        println!("unset: {:?}", digest(&chain.plan()));
+        println!("named: {:?}", digest(&chain.plan().with_scratch(&scratch)));
     }
 
     /// A digest spools like any export. With nowhere to do it the refusal says
@@ -6631,7 +6631,7 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(3);
 
@@ -6651,9 +6651,9 @@ mod boundary_preparation {
         assert_eq!(progress.seen.lock().unwrap().unwrap(), (0, 0, 0));
     }
 
-    /// A resumption record naming `recorded`: `carried_forward` says yes, and
-    /// `adopt` says no unless the blob is still held, the one disagreement
-    /// `Predecessor::carried_forward` documents.
+    /// A resumption record naming `recorded`, whose blob the repository may
+    /// have dropped: `resume` answers with it only while the blob is held, as
+    /// the registry's blob check does.
     struct RecordedBlob {
         inner: Lending,
         recorded: stelae::inscription::LayerDescriptor,
@@ -6661,11 +6661,11 @@ mod boundary_preparation {
     }
 
     impl export::Predecessor for RecordedBlob {
-        fn history(&self) -> &[stelae::inscription::HistoryEntry] {
-            export::Predecessor::history(&self.inner)
+        fn previous(&self) -> Option<stelae::inscription::Link> {
+            export::Predecessor::previous(&self.inner)
         }
 
-        fn adopt(
+        fn resume(
             &self,
             kind: &str,
             scope: &serde_json::Value,
@@ -6674,18 +6674,7 @@ mod boundary_preparation {
                 return Ok(Some(self.recorded.clone()));
             }
 
-            export::Predecessor::adopt(&self.inner, kind, scope)
-        }
-
-        fn carried_forward(
-            &self,
-            kind: &str,
-            scope: &serde_json::Value,
-        ) -> Result<bool, stelae_driver::Error> {
-            Ok(
-                (kind == self.recorded.kind && *scope == self.recorded.scope)
-                    || export::Predecessor::carried_forward(&self.inner, kind, scope)?,
-            )
+            export::Predecessor::resume(&self.inner, kind, scope)
         }
 
         fn landed(
@@ -6707,26 +6696,25 @@ mod boundary_preparation {
         stelae::inscription::LayerDescriptor,
     ) {
         let (seed_root, whole_root) = (tempdir(), tempdir());
-        let seed = Chain::at(Shape::Shelley, 1).export(seed_root.path(), &[], &export::First);
+        let seed = Chain::at(Shape::Shelley, 1).export(seed_root.path(), &export::First);
         let at_two = Chain::at(Shape::Shelley, 2);
-        let plan = at_two.plan(&[]);
-        let whole = at_two.export(whole_root.path(), &[], &Lending::following(&seed, &plan));
+        let plan = at_two.plan();
+        let whole = at_two.export(whole_root.path(), &Lending::following(&seed, &plan));
         let recorded = layer_of(&whole, kind, epoch).unwrap().clone();
 
         (seed, whole, recorded)
     }
 
-    /// The control: an export asks `adopt` first, so it rebuilds.
+    /// An export asks `resume` before it stages, so it rebuilds.
     #[test]
     fn an_export_rebuilds_a_dropped_recorded_blob() {
         let (seed, whole, recorded) = interrupted_at_two(INDEXES, 1);
         let chain = Chain::at(Shape::Shelley, 2);
-        let plan = chain.plan(&[]);
+        let plan = chain.plan();
         let root = tempdir();
 
         let rebuilt = chain.export(
             root.path(),
-            &[],
             &RecordedBlob {
                 inner: Lending::following(&seed, &plan),
                 recorded,
@@ -6737,15 +6725,16 @@ mod boundary_preparation {
         assert!(rebuilt.canonicalize().unwrap() == whole.canonicalize().unwrap());
     }
 
-    /// A batch leaves the window out on the forecast. Finalizing finds out, and
-    /// stages it, on every attempt and leaving nothing behind.
+    /// A batch stages a window a record names, since only the finalize's
+    /// `resume` learns whether the blob is still held. A dropped one is built
+    /// from the runs on every attempt, staging and traversing nothing more.
     #[test]
     fn a_batch_rebuilds_a_dropped_recorded_blob() {
         let (seed, whole, recorded) = interrupted_at_two(INDEXES, 1);
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
         let plan = bundle.plan();
 
         chain.advance_to(3);
@@ -6758,9 +6747,10 @@ mod boundary_preparation {
 
         let staged = chain.stage(stage_root.path(), std::slice::from_ref(&bundle), &previous);
 
-        assert_eq!(staged.records(Family::Indexes, 1), None);
+        assert!(staged.records(Family::Indexes, 1).is_some());
 
         let staged_names = names_in(stage_root.path());
+        let traversed = chain.archive.traversals();
 
         for attempt in 1..=2 {
             let finished_root = tempdir();
@@ -6778,6 +6768,8 @@ mod boundary_preparation {
                 "attempt {attempt}"
             );
         }
+
+        assert_eq!(chain.archive.traversals(), traversed);
     }
 
     /// The same for an entity window, which would otherwise go missing.
@@ -6785,17 +6777,17 @@ mod boundary_preparation {
     fn a_batch_rebuilds_a_dropped_recorded_entity_blob() {
         let (seed_root, whole_root, root, stage_root, finished_root) =
             (tempdir(), tempdir(), tempdir(), tempdir(), tempdir());
-        let seed = Chain::at(Shape::Shelley, 3).export(seed_root.path(), &[], &export::First);
+        let seed = Chain::at(Shape::Shelley, 3).export(seed_root.path(), &export::First);
         let at_four = Chain::at(Shape::Shelley, 4);
-        let plan = at_four.plan(&[]);
-        let whole = at_four.export(whole_root.path(), &[], &Lending::following(&seed, &plan));
+        let plan = at_four.plan();
+        let whole = at_four.export(whole_root.path(), &Lending::following(&seed, &plan));
         let recorded = layer_of(&whole, "entity-asset", 2).unwrap().clone();
 
         assert!(layer_of(&seed, "entity-asset", 2).is_none());
 
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 4);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
         let plan = bundle.plan();
 
         chain.advance_to(5);
@@ -6807,6 +6799,10 @@ mod boundary_preparation {
         };
 
         let staged = chain.stage(stage_root.path(), std::slice::from_ref(&bundle), &previous);
+
+        let (_, asset) = ENTITY_KINDS[0];
+        assert!(staged.records(Family::Entity(asset), 2).is_some());
+
         let finished = chain
             .finalize(finished_root.path(), &store, &bundle, &staged, &previous)
             .unwrap();
@@ -6820,13 +6816,13 @@ mod boundary_preparation {
     fn the_rest_of_a_batch_reuses_its_runs_after_a_commit() {
         let (root, stage_root, seed_root) = (tempdir(), tempdir(), tempdir());
         let store = store(root.path());
-        let seed = Chain::at(Shape::Shelley, 1).export(seed_root.path(), &[], &export::First);
+        let seed = Chain::at(Shape::Shelley, 1).export(seed_root.path(), &export::First);
         let mut chain = Chain::at(Shape::Shelley, 2);
         let mut bundles = Vec::new();
 
         for boundary in [2, 3, 4] {
             chain.advance_to(boundary);
-            bundles.push(chain.prepare(&store, &[]).unwrap());
+            bundles.push(chain.prepare(&store).unwrap());
         }
 
         let lending = Lending::following(&seed, &bundles[0].plan());
@@ -6853,11 +6849,8 @@ mod boundary_preparation {
 
         let (frozen_root, finished_root) = (tempdir(), tempdir());
         let plan = bundles[1].plan();
-        let frozen = Chain::at(Shape::Shelley, bundles[1].sequence()).export(
-            frozen_root.path(),
-            &[],
-            &Lending::following(&first, &plan),
-        );
+        let frozen = Chain::at(Shape::Shelley, bundles[1].sequence())
+            .export(frozen_root.path(), &Lending::following(&first, &plan));
         let finished = chain
             .finalize(
                 finished_root.path(),
@@ -6868,7 +6861,7 @@ mod boundary_preparation {
             )
             .unwrap();
 
-        assert_same_stele(
+        assert_same_snapshot(
             (frozen_root.path(), &frozen),
             (finished_root.path(), &finished),
             "after a restart",
@@ -6882,7 +6875,7 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
         let plan = bundle.plan();
 
         chain.advance_to(3);
@@ -6907,32 +6900,34 @@ mod boundary_preparation {
     }
 
     /// A restart wanting more than the root holds says so, in its own refusal,
-    /// and the documented recovery gives the same stele.
+    /// and the documented recovery gives the same snapshot: a batch staged to
+    /// follow a seed, restarted as the start of a lineage.
     #[test]
     fn a_restart_wanting_more_is_refused_and_a_new_root_recovers() {
-        let (seed, whole, recorded) = interrupted_at_two(INDEXES, 1);
+        let (seed_root, whole_root) = (tempdir(), tempdir());
+        let seed = Chain::at(Shape::Shelley, 1).export(seed_root.path(), &export::First);
+        let whole = Chain::at(Shape::Shelley, 2).export(whole_root.path(), &export::First);
+
         let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
         let plan = bundle.plan();
 
         chain.advance_to(3);
 
-        let previous = RecordedBlob {
-            inner: Lending::following(&seed, &plan),
-            recorded,
-            blob_held: true,
-        };
-
-        chain.stage(stage_root.path(), std::slice::from_ref(&bundle), &previous);
+        chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &Lending::following(&seed, &plan),
+        );
 
         let refused = prepare::stage_batch(
             stage_root.path(),
             &chain.archive,
             &chain.state,
             std::slice::from_ref(&bundle),
-            &Lending::following(&seed, &plan),
+            &export::First,
             Budget::new(u64::MAX),
             &Observer::silent(),
         );
@@ -6940,16 +6935,26 @@ mod boundary_preparation {
         assert!(
             matches!(
                 &refused,
-                Err(Error::Staging(staging::Refusal::Uncovered { missing, .. })) if *missing == [1]
+                Err(Error::Staging(staging::Refusal::Uncovered { missing, .. })) if *missing == [0]
             ),
             "{refused:?}"
         );
 
         fs::remove_dir_all(stage_root.path()).unwrap();
 
-        let staged = chain.stage(stage_root.path(), std::slice::from_ref(&bundle), &previous);
+        let staged = chain.stage(
+            stage_root.path(),
+            std::slice::from_ref(&bundle),
+            &export::First,
+        );
         let finished = chain
-            .finalize(finished_root.path(), &store, &bundle, &staged, &previous)
+            .finalize(
+                finished_root.path(),
+                &store,
+                &bundle,
+                &staged,
+                &export::First,
+            )
             .unwrap();
 
         assert!(finished.canonicalize().unwrap() == whole.canonicalize().unwrap());
@@ -6962,7 +6967,7 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(3);
         chain.stage(
@@ -7001,7 +7006,7 @@ mod boundary_preparation {
         let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(3);
 
@@ -7065,7 +7070,7 @@ mod boundary_preparation {
             .unwrap();
         writer.commit().unwrap();
 
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(3);
 
@@ -7123,7 +7128,7 @@ mod boundary_preparation {
         let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(3);
 
@@ -7164,7 +7169,7 @@ mod boundary_preparation {
 
         let refused = prepare::prepare(
             &store,
-            &chain.plan(&[]).with_producers(export::Producers::new(
+            &chain.plan().with_producers(export::Producers::new(
                 std::num::NonZeroUsize::new(1).unwrap(),
             )),
             &Counted::failing(chain.archive.inner.clone(), Traversal::Tags, 1),
@@ -7184,8 +7189,8 @@ mod boundary_preparation {
         );
         assert!(store.sequences().unwrap().is_empty());
 
-        let retried = chain.prepare(&store, &[]).unwrap();
-        let clean = chain.prepare(&self::store(clean_root.path()), &[]).unwrap();
+        let retried = chain.prepare(&store).unwrap();
+        let clean = chain.prepare(&self::store(clean_root.path())).unwrap();
 
         assert_eq!(
             retried.layers().collect::<Vec<_>>(),
@@ -7238,7 +7243,7 @@ mod boundary_preparation {
             (tempdir(), tempdir(), tempdir(), tempdir());
         let store = store(root.path());
         let mut first = Chain::at(Shape::Shelley, 2);
-        let bundle = first.prepare(&store, &[]).unwrap();
+        let bundle = first.prepare(&store).unwrap();
 
         first.advance_to(3);
 
@@ -7255,8 +7260,8 @@ mod boundary_preparation {
         let mut rebuilt = Chain::at(Shape::Shelley, 2);
         edit(&rebuilt);
 
-        let frozen = rebuilt.export(frozen_root.path(), &[], &export::First);
-        let bundle = rebuilt.prepare(&store, &[]).unwrap();
+        let frozen = rebuilt.export(frozen_root.path(), &export::First);
+        let bundle = rebuilt.prepare(&store).unwrap();
 
         rebuilt.advance_to(3);
 
@@ -7297,7 +7302,7 @@ mod boundary_preparation {
             )
             .unwrap();
 
-        assert_same_stele(
+        assert_same_snapshot(
             (frozen_root.path(), &frozen),
             (finished_root.path(), &finished),
             what,
@@ -7328,7 +7333,7 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.stage(
             stage_root.path(),
@@ -7336,7 +7341,7 @@ mod boundary_preparation {
             &export::First,
         );
 
-        let held = chain.prepare(&store, &[]).unwrap();
+        let held = chain.prepare(&store).unwrap();
         let restarted = chain.stage(
             stage_root.path(),
             std::slice::from_ref(&held),
@@ -7353,11 +7358,11 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let two = chain.prepare(&store, &[]).unwrap();
+        let two = chain.prepare(&store).unwrap();
 
         chain.advance_to(3);
 
-        let three = chain.prepare(&store, &[]).unwrap();
+        let three = chain.prepare(&store).unwrap();
 
         chain.stage(
             stage_root.path(),
@@ -7391,7 +7396,7 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut first = Chain::at(Shape::Shelley, 2);
-        let old = first.prepare(&store, &[]).unwrap();
+        let old = first.prepare(&store).unwrap();
 
         first.advance_to(3);
         first.stage(
@@ -7407,7 +7412,7 @@ mod boundary_preparation {
         let mut rebuilt = Chain::at(Shape::Shelley, 2);
         one_more_entity_row(&rebuilt);
 
-        let bundle = rebuilt.prepare(&store, &[]).unwrap();
+        let bundle = rebuilt.prepare(&store).unwrap();
 
         rebuilt.advance_to(3);
 
@@ -7431,515 +7436,21 @@ mod boundary_preparation {
         }
     }
 
-    // ---------- The horizon ----------
-
-    #[derive(Clone, Copy)]
-    struct PruneCase {
-        shape: Shape,
-        boundary: u64,
-        first_window: Option<u64>,
-        predecessor: Option<u64>,
-        before_staging: bool,
-        on_fjall: bool,
-        /// One more block, a slot into window 3: the nearest any can sit after
-        /// the window's first slot.
-        block_after_first_slot: bool,
-    }
-
-    impl PruneCase {
-        /// A plan restricted to 3.. at `boundary`, following nothing, staged on
-        /// the unpruned in-memory archive.
-        fn at(shape: Shape, boundary: u64) -> Self {
-            Self {
-                shape,
-                boundary,
-                first_window: Some(3),
-                predecessor: None,
-                before_staging: false,
-                on_fjall: false,
-                block_after_first_slot: false,
-            }
-        }
-    }
-
-    /// A copy of `chain`'s blocks and logs, in the store a publisher prunes.
-    fn on_fjall(chain: &Chain) -> dolos_fjall::archive::ArchiveStore {
-        let schema = dolos_cardano::model::build_log_schema();
-        let archive = dolos_fjall::archive::ArchiveStore::for_tempdir(schema.clone()).unwrap();
-        let writer = archive.start_writer().unwrap();
-
-        for (point, body) in blocks_from(chain, 0) {
-            writer.apply(&point, &Arc::new(body)).unwrap();
-        }
-
-        for (&ns, _) in schema.iter() {
-            for entry in chain.archive.iter_logs(ns, KeyRange::all()).unwrap() {
-                let (key, value) = entry.unwrap();
-
-                writer.write_log(ns, &key, &value).unwrap();
-            }
-        }
-
-        writer.commit().unwrap();
-
-        archive
-    }
-
-    /// `case`'s plan prepared, the chain advanced an epoch, a real
-    /// `prune_history` cutting at what `cut_at` picks given the horizon,
-    /// and the batch finished on what is left. What it publishes has to
-    /// equal the frozen export.
-    fn finish_on_a_prune(
-        case: PruneCase,
-        cut_at: impl Fn(&Chain, u64) -> u64,
-    ) -> Result<(), Error> {
-        let (root, stage_root, frozen_root, finished_root, seed_root) =
-            (tempdir(), tempdir(), tempdir(), tempdir(), tempdir());
-        let store = store(root.path());
-        let mut chain = Chain::at(case.shape, case.boundary);
-
-        if case.block_after_first_slot {
-            let (tip, number) = (chain.tip.clone(), chain.number);
-            let (point, body) = make_conway_block_with_prev(chain.start(3) + 1, None, number);
-
-            chain.commit_block(point, body, true, Some(number));
-            chain.tip = tip;
-        }
-
-        let delta = chain.boundary_delta.clone().unwrap();
-        let plan = chain.plan(&[]).restrict_epochs(case.first_window, None);
-
-        let seed = case.predecessor.map(|sequence| {
-            let seed_chain = Chain::at(case.shape, sequence);
-            let seed_plan = seed_chain
-                .plan(&[])
-                .restrict_epochs(case.first_window, None);
-
-            export::export(
-                &SteleDir::create(seed_root.path()).unwrap(),
-                &seed_plan,
-                &seed_chain.archive,
-                &seed_chain.state,
-                None,
-                &export::First,
-                &Observer::silent(),
-            )
-            .unwrap()
-        });
-
-        let previous = || -> Box<dyn export::Predecessor> {
-            match &seed {
-                Some(seed) => Box::new(Lending::following(seed, &plan)),
-                None => Box::new(export::First),
-            }
-        };
-
-        let frozen = export::export(
-            &SteleDir::create(frozen_root.path()).unwrap(),
-            &plan,
-            &chain.archive,
-            &chain.state,
-            None,
-            previous().as_ref(),
-            &Observer::silent(),
-        )
-        .unwrap();
-
-        let bundle = prepare::prepare(
-            &store,
-            &plan,
-            &chain.archive,
-            &chain.state,
-            &plain_request(&chain, &delta),
-            &Observer::silent(),
-        )
-        .unwrap();
-        let horizon = bundle.horizon().unwrap();
-
-        chain.advance_to(case.boundary + 1);
-
-        let tip = chain.tip.as_ref().unwrap().slot();
-        let max_slots = tip - cut_at(&chain, horizon);
-        let stele = SteleDir::create(finished_root.path()).unwrap();
-
-        let staged = (!case.before_staging).then(|| {
-            chain.stage(
-                stage_root.path(),
-                std::slice::from_ref(&bundle),
-                previous().as_ref(),
-            )
-        });
-
-        let finished = if case.on_fjall {
-            let fjall = on_fjall(&chain);
-
-            assert!(fjall.prune_history(max_slots, None, None).unwrap());
-
-            prepare::finalize(
-                &stele,
-                &Finalizing {
-                    store: &store,
-                    bundle: &bundle,
-                    staged: &staged.unwrap(),
-                    producers: export::Producers::DEFAULT,
-                },
-                &fjall,
-                None,
-                previous().as_ref(),
-                &Observer::silent(),
-            )?
-        } else {
-            assert!(chain.archive.prune_history(max_slots, None, None).unwrap());
-
-            let staged = staged.unwrap_or_else(|| {
-                chain.stage(
-                    stage_root.path(),
-                    std::slice::from_ref(&bundle),
-                    previous().as_ref(),
-                )
-            });
-
-            prepare::finalize(
-                &stele,
-                &Finalizing {
-                    store: &store,
-                    bundle: &bundle,
-                    staged: &staged,
-                    producers: export::Producers::DEFAULT,
-                },
-                &chain.archive,
-                None,
-                previous().as_ref(),
-                &Observer::silent(),
-            )?
-        };
-
-        assert_same_stele(
-            (frozen_root.path(), &frozen),
-            (finished_root.path(), &finished),
-            "pruned",
-        );
-
-        Ok(())
-    }
-
-    /// Everything strictly before the horizon is gone, which is what the
-    /// contract says pruning may do.
-    #[test]
-    fn an_archive_pruned_exactly_to_the_horizon_finishes() {
-        finish_on_a_prune(PruneCase::at(Shape::Shelley, 4), |_, horizon| horizon).unwrap();
-    }
-
-    /// Where a block does sit on the epoch's first slot, a Byron boundary
-    /// block, the same prune finishes.
-    #[test]
-    fn a_prune_to_a_block_on_the_first_slot_finishes() {
-        finish_on_a_prune(PruneCase::at(Shape::Byron, 4), |_, horizon| horizon).unwrap();
-    }
-
-    /// One block more than the horizon needs changes nothing.
-    #[test]
-    fn a_prune_short_of_the_horizon_finishes() {
-        finish_on_a_prune(PruneCase::at(Shape::Shelley, 4), |chain, _| {
-            first_block_from(chain, chain.start(2))
-        })
-        .unwrap();
-    }
-
-    /// Only the horizon's own block separates this from the case above it. The
-    /// window keeps all its blocks, but that block is what shows its logs
-    /// stayed.
-    #[test]
-    fn losing_only_the_horizons_block_is_refused() {
-        let refused = finish_on_a_prune(PruneCase::at(Shape::Shelley, 4), |_, horizon| horizon + 1);
-
-        assert!(matches!(
-            preparation_refusal(refused),
-            Refusal::HorizonLost { sequence: 4, .. }
-        ));
-    }
-
-    /// What the log cases below rest on: at boundary 5 no log layer of window 3
-    /// is captured.
+    /// At boundary 5 no log layer of window 3 is captured: closed windows
+    /// below `capture_from` are read from the archive.
     #[test]
     fn a_window_below_capture_from_leaves_its_logs_to_the_archive() {
         let root = tempdir();
         let store = store(root.path());
         let chain = Chain::at(Shape::Shelley, 5);
-        let delta = chain.boundary_delta.clone().unwrap();
-        let plan = chain.plan(&[]).restrict_epochs(Some(3), None);
 
-        prepare::prepare(
-            &store,
-            &plan,
-            &chain.archive,
-            &chain.state,
-            &plain_request(&chain, &delta),
-            &Observer::silent(),
-        )
-        .unwrap();
+        chain.prepare(&store).unwrap();
 
         let manifest: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(root.path().join("bundles/5.json")).unwrap())
                 .unwrap();
 
         assert_eq!(manifest["manifest"]["capture_from"], 4);
-    }
-
-    /// At boundary 5 window 3 sits below `capture_from`, so its logs are read
-    /// from the archive, where they key at the window's first slot, before
-    /// its first block. A prune to the horizon has to leave them.
-    #[test]
-    fn a_prune_to_the_horizon_keeps_the_logs_read_from_the_archive() {
-        finish_on_a_prune(PruneCase::at(Shape::Shelley, 5), |_, horizon| horizon).unwrap();
-    }
-
-    #[test]
-    fn a_prune_to_the_horizon_before_staging_keeps_those_logs() {
-        finish_on_a_prune(
-            PruneCase {
-                before_staging: true,
-                ..PruneCase::at(Shape::Shelley, 5)
-            },
-            |_, horizon| horizon,
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn a_fjall_prune_to_the_horizon_keeps_those_logs() {
-        finish_on_a_prune(
-            PruneCase {
-                on_fjall: true,
-                ..PruneCase::at(Shape::Shelley, 5)
-            },
-            |_, horizon| horizon,
-        )
-        .unwrap();
-    }
-
-    /// A predecessor one boundary back has not settled window 3's account rows,
-    /// so that layer still comes from the archive.
-    #[test]
-    fn a_prune_to_the_horizon_keeps_a_window_settling_under_its_predecessor() {
-        finish_on_a_prune(
-            PruneCase {
-                predecessor: Some(4),
-                ..PruneCase::at(Shape::Shelley, 5)
-            },
-            |_, horizon| horizon,
-        )
-        .unwrap();
-    }
-
-    /// Every layer of window 2 comes from the predecessor.
-    #[test]
-    fn a_prune_to_the_horizon_finishes_on_a_window_its_predecessor_carries() {
-        finish_on_a_prune(
-            PruneCase {
-                first_window: Some(2),
-                predecessor: Some(4),
-                ..PruneCase::at(Shape::Shelley, 5)
-            },
-            |_, horizon| horizon,
-        )
-        .unwrap();
-    }
-
-    /// A whole plan's horizon is the chain's first block, and a prune takes
-    /// that block whenever it takes anything: to the horizon it does
-    /// nothing, though the logs of the first window key before that block.
-    #[test]
-    fn a_whole_plan_pruned_to_its_horizon_keeps_everything() {
-        for on_fjall in [false, true] {
-            finish_on_a_prune(
-                PruneCase {
-                    first_window: None,
-                    on_fjall,
-                    ..PruneCase::at(Shape::Shelley, 5)
-                },
-                |_, horizon| horizon,
-            )
-            .unwrap();
-        }
-    }
-
-    #[test]
-    fn a_whole_plan_pruned_one_slot_past_its_horizon_is_refused() {
-        for on_fjall in [false, true] {
-            let refused = finish_on_a_prune(
-                PruneCase {
-                    first_window: None,
-                    on_fjall,
-                    ..PruneCase::at(Shape::Shelley, 5)
-                },
-                |_, horizon| horizon + 1,
-            );
-
-            assert!(matches!(
-                preparation_refusal(refused),
-                Refusal::HorizonLost { sequence: 5, .. }
-            ));
-        }
-    }
-
-    /// The cut that keeps every block of the window and loses its logs.
-    #[test]
-    fn a_cut_at_the_windows_first_block_is_refused() {
-        for on_fjall in [false, true] {
-            let refused = finish_on_a_prune(
-                PruneCase {
-                    on_fjall,
-                    ..PruneCase::at(Shape::Shelley, 5)
-                },
-                |chain, _| first_block_from(chain, chain.start(3)),
-            );
-
-            assert!(
-                matches!(
-                    preparation_refusal(refused),
-                    Refusal::HorizonLost { sequence: 5, .. }
-                ),
-                "on_fjall {on_fjall}"
-            );
-        }
-    }
-
-    /// The contract's price: this cut loses nothing, but with the horizon's
-    /// block gone nothing can tell it from the one above.
-    #[test]
-    fn a_cut_at_the_windows_first_slot_is_refused() {
-        let refused =
-            finish_on_a_prune(PruneCase::at(Shape::Shelley, 5), |chain, _| chain.start(3));
-
-        assert!(matches!(
-            preparation_refusal(refused),
-            Refusal::HorizonLost { sequence: 5, .. }
-        ));
-    }
-
-    #[test]
-    fn the_horizon_is_the_last_block_at_or_before_the_windows_first_slot() {
-        for (shape, on_first_slot) in [(Shape::Shelley, false), (Shape::Byron, true)] {
-            let root = tempdir();
-            let store = store(root.path());
-            let chain = Chain::at(shape, 5);
-            let delta = chain.boundary_delta.clone().unwrap();
-            let plan = chain.plan(&[]).restrict_epochs(Some(3), None);
-
-            let bundle = prepare::prepare(
-                &store,
-                &plan,
-                &chain.archive,
-                &chain.state,
-                &plain_request(&chain, &delta),
-                &Observer::silent(),
-            )
-            .unwrap();
-            let horizon = bundle.horizon().unwrap();
-
-            assert_eq!(horizon, last_block_to(&chain, chain.start(3)), "{shape:?}");
-            assert_eq!(horizon == chain.start(3), on_first_slot, "{shape:?}");
-        }
-    }
-
-    /// A block after the window's first slot says nothing of the logs keyed at
-    /// that slot, however close it sits, so the horizon stays before it.
-    #[test]
-    fn a_prune_to_the_horizon_keeps_the_logs_with_a_block_just_after_the_first_slot() {
-        finish_on_a_prune(
-            PruneCase {
-                block_after_first_slot: true,
-                ..PruneCase::at(Shape::Shelley, 5)
-            },
-            |chain, horizon| {
-                assert_eq!(horizon, chain.start(2) + 50);
-
-                horizon
-            },
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn a_cut_at_a_block_just_after_the_first_slot_is_refused() {
-        let refused = finish_on_a_prune(
-            PruneCase {
-                block_after_first_slot: true,
-                ..PruneCase::at(Shape::Shelley, 5)
-            },
-            |chain, _| chain.start(3) + 1,
-        );
-
-        assert!(matches!(
-            preparation_refusal(refused),
-            Refusal::HorizonLost { sequence: 5, .. }
-        ));
-    }
-
-    /// A chain's second block is no chain start once its first is gone.
-    #[test]
-    fn losing_only_the_chains_first_block_is_refused() {
-        let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
-        let store = store(root.path());
-        let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
-        let horizon = bundle.horizon().unwrap();
-
-        chain.advance_to(3);
-
-        let staged = chain.stage(
-            stage_root.path(),
-            std::slice::from_ref(&bundle),
-            &export::First,
-        );
-
-        let refused = finalize_on(
-            finished_root.path(),
-            &store,
-            &bundle,
-            &staged,
-            &pruned_archive(blocks_from(&chain, horizon + 1)),
-        );
-
-        assert!(matches!(
-            preparation_refusal(refused),
-            Refusal::HorizonLost { sequence: 2, .. }
-        ));
-    }
-
-    /// The same archive has to stage, not merely avoid `HorizonLost`.
-    #[test]
-    fn a_batch_stages_on_an_archive_pruned_exactly_to_the_horizon() {
-        let (root, stage_root) = (tempdir(), tempdir());
-        let store = store(root.path());
-        let mut chain = Chain::at(Shape::Shelley, 4);
-        let delta = chain.boundary_delta.clone().unwrap();
-        let plan = chain.plan(&[]).restrict_epochs(Some(3), None);
-
-        let bundle = prepare::prepare(
-            &store,
-            &plan,
-            &chain.archive,
-            &chain.state,
-            &plain_request(&chain, &delta),
-            &Observer::silent(),
-        )
-        .unwrap();
-        let horizon = bundle.horizon().unwrap();
-
-        chain.advance_to(5);
-
-        prepare::stage_batch(
-            stage_root.path(),
-            &pruned_archive(blocks_from(&chain, horizon)),
-            &chain.state,
-            std::slice::from_ref(&bundle),
-            &export::First,
-            Budget::new(u64::MAX),
-            &Observer::silent(),
-        )
-        .unwrap();
     }
 
     // ---------- What a sweep finds ----------
@@ -8068,10 +7579,9 @@ mod boundary_preparation {
         let chain = Chain::at(Shape::Shelley, 2);
         let refusal = export::export(
             &Discarding,
-            &chain.plan(&[]).with_scratch(&base),
+            &chain.plan().with_scratch(&base),
             &chain.archive,
             &chain.state,
-            None,
             &export::First,
             &Observer::silent(),
         )
@@ -8088,16 +7598,16 @@ mod boundary_preparation {
         );
     }
 
-    /// A window the predecessor really adopted was left out of the batch and is
-    /// not staged again: a chained finalize traverses nothing.
+    /// A window an earlier diff listed is left out of the batch, and a chained
+    /// finalize traverses nothing.
     #[test]
     fn a_chained_finalize_traverses_nothing() {
         let (root, stage_root, seed_root, finished_root) =
             (tempdir(), tempdir(), tempdir(), tempdir());
         let store = store(root.path());
-        let seed = Chain::at(Shape::Shelley, 3).export(seed_root.path(), &[], &export::First);
+        let seed = Chain::at(Shape::Shelley, 3).export(seed_root.path(), &export::First);
         let mut chain = Chain::at(Shape::Shelley, 4);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
         let plan = bundle.plan();
 
         chain.advance_to(5);
@@ -8111,7 +7621,7 @@ mod boundary_preparation {
         assert_eq!(
             staged.records(Family::Indexes, 0),
             None,
-            "window 0 is inherited"
+            "window 0 is in the seed's diff"
         );
 
         let traversed = (
@@ -8135,49 +7645,8 @@ mod boundary_preparation {
                 chain.archive.entity_traversals()
             ),
             traversed,
-            "finalizing stages nothing the predecessor adopted"
+            "finalizing stages nothing"
         );
-    }
-
-    /// A window the predecessor records and then declines is not staged
-    /// again while the batch's own runs hold it: same bytes, no traversal.
-    #[test]
-    fn a_declined_window_the_runs_hold_is_not_staged_again() {
-        let (seed, whole, recorded) = interrupted_at_two(INDEXES, 1);
-        let (root, stage_root, finished_root) = (tempdir(), tempdir(), tempdir());
-        let store = store(root.path());
-        let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
-        let plan = bundle.plan();
-
-        chain.advance_to(3);
-
-        // The batch stages window 1, and only then does the record name it.
-        let staged = chain.stage(
-            stage_root.path(),
-            std::slice::from_ref(&bundle),
-            &Lending::following(&seed, &plan),
-        );
-
-        assert!(staged.records(Family::Indexes, 1).is_some());
-
-        let traversed = chain.archive.traversals();
-        let finished = chain
-            .finalize(
-                finished_root.path(),
-                &store,
-                &bundle,
-                &staged,
-                &RecordedBlob {
-                    inner: Lending::following(&seed, &plan),
-                    recorded,
-                    blob_held: false,
-                },
-            )
-            .unwrap();
-
-        assert_eq!(chain.archive.traversals(), traversed);
-        assert!(finished.canonicalize().unwrap() == whole.canonicalize().unwrap());
     }
 
     /// Bundle 5 prepared under 150 mutable slots and bundle 6 under the chain's
@@ -8188,7 +7657,7 @@ mod boundary_preparation {
 
         let first = prepare::prepare(
             store,
-            &chain.plan(&[]),
+            &chain.plan(),
             &chain.archive,
             &chain.state,
             &Request {
@@ -8201,7 +7670,7 @@ mod boundary_preparation {
 
         chain.advance_to(6);
 
-        let second = chain.prepare(store, &[]).unwrap();
+        let second = chain.prepare(store).unwrap();
 
         chain.advance_to(frontier);
 
@@ -8242,13 +7711,13 @@ mod boundary_preparation {
         let other = self::store(other_root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
         let delta = chain.boundary_delta.clone().unwrap();
-        let first = chain.prepare(&store, &[]).unwrap();
+        let first = chain.prepare(&store).unwrap();
 
         let plan = Plan::new(
             &chain.summary,
             Network::for_magic(1),
             chain.tip.clone().unwrap(),
-            RetainedEpochs::default(),
+            chain.mutable,
         )
         .unwrap();
 
@@ -8290,7 +7759,7 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(3);
         chain.stage(
@@ -8387,7 +7856,7 @@ mod boundary_preparation {
                 let store = store(root.path());
                 let chain = Chain::at(Shape::Shelley, 4);
 
-                chain.prepare(&store, &[]).unwrap();
+                chain.prepare(&store).unwrap();
 
                 rewrite_manifest(&root.path().join("bundles/4.json"), |manifest| {
                     let key = format!("\"{field}\":");
@@ -8399,7 +7868,7 @@ mod boundary_preparation {
                 });
 
                 !matches!(
-                    chain.prepare(&store, &[]),
+                    chain.prepare(&store),
                     Err(Error::Preparation(Refusal::SourceMismatch { sequence: 4, what }))
                         if what.contains("how far the boundary sealed")
                 )
@@ -8457,7 +7926,7 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(3);
 
@@ -8487,13 +7956,13 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(3);
 
         let heard = Heard::over(&chain);
 
-        StoreSnapshot::new(&chain.archive, &chain.state)
+        StoreSnapshot::new(&chain.archive, &chain.state, chain.mutable)
             .stage_batch(
                 stage_root.path(),
                 std::slice::from_ref(&bundle),
@@ -8688,7 +8157,7 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(3);
 
@@ -8819,7 +8288,7 @@ mod boundary_preparation {
             let (root, stage_root) = (tempdir(), tempdir());
             let store = store(root.path());
             let mut chain = Chain::at(Shape::Shelley, 2);
-            let bundle = chain.prepare(&store, &[]).unwrap();
+            let bundle = chain.prepare(&store).unwrap();
 
             chain.advance_to(3);
 
@@ -8863,7 +8332,7 @@ mod boundary_preparation {
         let (root, stage_root) = (tempdir(), tempdir());
         let store = store(root.path());
         let mut chain = Chain::at(Shape::Shelley, 2);
-        let bundle = chain.prepare(&store, &[]).unwrap();
+        let bundle = chain.prepare(&store).unwrap();
 
         chain.advance_to(3);
 

@@ -14,11 +14,11 @@
 //! two reasons:
 //! - **Rollback.** A rollback cuts every log row at or after the slot it rolls
 //!   back to. It can reach the closing epoch's last blocks, but not its start.
-//! - **Steles.** A publisher carries a closed epoch's log layer forward
-//!   unchanged. The first stele that holds epoch `e` closed is the one cut at
-//!   the boundary that opens `e + 1`, after this write. A row written into an
-//!   epoch that a stele already holds closed would be missing from every stele
-//!   after it.
+//! - **Snapshots.** A publisher carries a closed epoch's log layer forward
+//!   unchanged. The first snapshot that holds epoch `e` closed is the one cut
+//!   at the boundary that opens `e + 1`, after this write. A row written into
+//!   an epoch that a snapshot already holds closed would be missing from every
+//!   snapshot after it.
 //!
 //! Readers take the state row first and the log second. An entity can leave
 //! state more than once, a pool that registers again and retires again, so

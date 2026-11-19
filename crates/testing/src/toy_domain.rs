@@ -77,6 +77,13 @@ impl dolos_core::MempoolStore for Mempool {
         self.pending.read().map(|p| p.to_vec()).unwrap_or_default()
     }
 
+    fn count(&self) -> MempoolCount {
+        MempoolCount {
+            pending: self.pending.read().map(|p| p.len()).unwrap_or(0),
+            inflight: 0,
+        }
+    }
+
     fn mark_inflight(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
         Ok(())
     }

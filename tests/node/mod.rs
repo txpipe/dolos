@@ -20,7 +20,7 @@ use dolos_core::{
     config::{CardanoConfig, ChainConfig, CustomUtxo, GenesisConfig, RootConfig},
     import::ImportExt as _,
     ArchiveStore as _, BootstrapExt as _, ChainLogic as _, ChainPoint, Domain as _, Genesis,
-    QueryLimiter, RawBlock, StateStore as _, WalStore as _, WorkUnit,
+    RawBlock, StateStore as _, WalStore as _, WorkUnit,
 };
 use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
 use pallas::ledger::traverse::MultiEraBlock;
@@ -59,7 +59,7 @@ impl Node {
         // runs against.
         let toml = format!(
             r#"
-            compatibility = "v2-alpha.2"
+            compatibility = "v2-beta.1"
 
             [chain]
             protocol = "cardano"
@@ -164,7 +164,7 @@ impl Node {
         .unwrap();
 
         let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
-        let query_limiter = QueryLimiter::new(self.config.serve.max_concurrent_queries);
+        let query_limiter = self.config.serve.query_limiter();
         let cache = dolos::storage::open_cache_store(&self.config, query_limiter.clone()).unwrap();
 
         let domain = DomainAdapter {
@@ -174,8 +174,14 @@ impl Node {
             mempool_config: self.config.mempool.clone(),
             genesis,
             chain: Arc::new(std::sync::RwLock::new(chain)),
+            storage_gauges: dolos::adapters::storage_gauges(
+                &stores.wal,
+                self.config.wal_path(),
+                &stores.archive,
+            ),
             wal: stores.wal,
             state: stores.state,
+            tip_gauges: dolos::adapters::tip_gauges(&stores.archive),
             archive: stores.archive,
             mempool: stores.mempool,
             cache,
@@ -196,7 +202,7 @@ impl Node {
     }
 
     /// Put the synced stores on the first block of epoch 1, as a
-    /// `stop_epoch` sync leaves them, so a stele can be cut from them.
+    /// `stop_epoch` sync leaves them, so a snapshot can be cut from them.
     ///
     /// Appends two empty blocks chained onto the archive's tip — the last block
     /// of epoch 0 and the first of epoch 1 — and moves the state cursor onto
@@ -205,6 +211,13 @@ impl Node {
     ///
     /// Returns the first block's parent, the evidence a plan reports.
     pub fn stand_at_boundary(&self) -> dolos_core::ChainPoint {
+        self.stand_at_boundary_of(1)
+    }
+
+    /// The same at the first block of `epoch`, chained onto the archive's tip:
+    /// after `stand_at_boundary`, `stand_at_boundary_of(2)` moves the stores
+    /// on to the next boundary, so a second snapshot can follow the first.
+    pub fn stand_at_boundary_of(&self, epoch: u64) -> dolos_core::ChainPoint {
         use dolos_cardano::pallas::ledger::traverse::MultiEraBlock;
         use dolos_core::{ArchiveStore as _, ArchiveWriter as _, StateWriter as _};
         use dolos_testing::blocks::make_conway_block_with_prev;
@@ -213,7 +226,7 @@ impl Node {
             dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&self.config).unwrap();
 
         let summary = dolos_cardano::eras::load_chain_summary_from_state(&stores.state).unwrap();
-        let start = summary.epoch_start(1);
+        let start = summary.epoch_start(epoch);
 
         let (_, tip) = stores.archive.get_tip().unwrap().unwrap();
         let tip = MultiEraBlock::decode(&tip).unwrap();
@@ -236,22 +249,22 @@ impl Node {
         last
     }
 
-    /// Write a directory stele as a restore fixture through the retained
-    /// headless profile encoder.
-    pub fn write_stele(&self, output: &std::path::Path) {
+    /// Write a network root as a restore fixture: the export's blocks
+    /// snapshot in its `blocks` directory and the snapshot naming it in
+    /// `dolos`.
+    pub fn write_snapshot(&self, output: &std::path::Path) {
         use dolos_snapshot::facade::{Selection, SnapshotSource as _, StoreSnapshot};
 
         let stores =
             dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&self.config).unwrap();
         let genesis = dolos_cardano::include::preview::load();
-        let retained = dolos_snapshot::planning::retained_epochs(&[]).unwrap();
-        let snapshot = StoreSnapshot::new(&stores.archive, &stores.state);
+        let snapshot = StoreSnapshot::new(
+            &stores.archive,
+            &stores.state,
+            dolos_cardano::mutable_slots(&genesis),
+        );
         let plan = snapshot
-            .selected_plan(
-                u64::from(genesis.network_magic()),
-                retained,
-                Selection::default(),
-            )
+            .selected_plan(u64::from(genesis.network_magic()), Selection::default())
             .unwrap();
 
         snapshot
@@ -272,7 +285,7 @@ impl Node {
         command.output().unwrap()
     }
 
-    /// The same, naming which stele in a repository to read.
+    /// The same, naming which snapshot in a repository to read.
     pub fn bootstrap_stelae_at(&self, source: &str, point: &str) -> std::process::Output {
         let mut command = self.command();
 
@@ -292,9 +305,9 @@ impl Node {
     /// `dolos bootstrap <flags>` with no subcommand and no terminal.
     ///
     /// With no subcommand, bootstrap asks which method to use — and, for a
-    /// stele, where the stele is. With no stdin the first prompt cannot be
-    /// answered, which is the cheapest stand-in for the cases that matter: a
-    /// typo, a cancel, a machine with no terminal.
+    /// snapshot, where the snapshot is. With no stdin the first prompt cannot
+    /// be answered, which is the cheapest stand-in for the cases that
+    /// matter: a typo, a cancel, a machine with no terminal.
     pub fn bootstrap_headless(&self, flags: &[&str]) -> std::process::Output {
         let mut command = self.command();
 
@@ -321,7 +334,8 @@ impl Node {
             .unwrap()
     }
 
-    fn command(&self) -> Command {
+    /// `dolos` against the node's `dolos.toml`, to run or spawn.
+    pub fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_dolos"));
 
         command.arg("--config").arg(self.config_path());
