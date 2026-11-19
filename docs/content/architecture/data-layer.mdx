@@ -33,7 +33,7 @@ Every command that opens a state or archive store checks them before anything el
 - A store recording an identity the release reads, in an internal format no newer than the release's own, opens.
 - A store with no identity that holds nothing is new: it records the current identity and internal format before its first write.
 - A store holding data but no identity, written before stores recorded one, is refused, and so is a store recording an identity the release does not read. The error names the store, its path and what it found.
-- A store recording an identity the release reads but no internal format is refused, and so is one written in a newer internal format than the release reads, by a newer Dolos. The error names both formats.
+- A store recording an identity the release reads but no internal format is refused, and so is one written in a newer internal format than the release reads, by a newer Dolos. For a newer format, the error names both formats.
 
 The configuration plays no part, so no edit to `dolos.toml` gets a refused store past the check. The remedies are the ways to get stores the release writes itself:
 
