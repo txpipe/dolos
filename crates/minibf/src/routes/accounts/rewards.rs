@@ -6,7 +6,7 @@ use axum::{
 use blockfrost_openapi::models::account_reward_content_inner::AccountRewardContentInner;
 use dolos_cardano::{
     model::{AccountState, ProposalState},
-    AccountEpochLog, PoolHash,
+    AccountEpochLog, AccountKey, ChainSummary, PoolHash,
 };
 use dolos_core::{ArchiveStore as _, Domain};
 use pallas::ledger::primitives::Epoch;
@@ -14,7 +14,7 @@ use pallas::ledger::primitives::Epoch;
 use crate::{
     error::Error,
     mapping,
-    pagination::{Pagination, PaginationParameters},
+    pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
 
@@ -75,6 +75,54 @@ fn reward_entries(
     Ok(out)
 }
 
+/// Read the two archive rows behind one reward epoch and build its entries.
+///
+/// Blockfrost reports the reward epoch as `earned_epoch`, as db-sync does.
+/// Row `e` holds the leader and member rewards for epoch `e`; row `e - 2`
+/// holds the refunds that become spendable in epoch `e`.
+fn epoch_reward_entries<D>(
+    domain: &Facade<D>,
+    summary: &ChainSummary,
+    account: &AccountKey,
+    reward_epoch: Epoch,
+) -> Result<Vec<AccountRewardContentInner>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let stake_slot = summary.epoch_start(reward_epoch);
+
+    // One call reads both rows; `read_logs_typed` returns one result per key,
+    // in key order. Before epoch 2 there is no refund row.
+    let (stake, refund) = if reward_epoch >= 2 {
+        let refund_slot = summary.epoch_start(reward_epoch - 2);
+
+        let mut rows = domain
+            .archive()
+            .read_logs_typed::<AccountEpochLog>(&[
+                (stake_slot, account.clone()),
+                (refund_slot, account.clone()),
+            ])
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let refund = rows.pop().flatten();
+        let stake = rows.pop().flatten();
+        (stake, refund)
+    } else {
+        let stake = domain
+            .archive()
+            .read_log_typed::<AccountEpochLog>(stake_slot, account)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        (stake, None)
+    };
+
+    reward_entries(reward_epoch, stake.as_ref(), refund.as_ref())
+}
+
+/// `GET /accounts/{stake_address}/rewards`, paged in Blockfrost's order.
+///
+/// Blockfrost sorts by reward epoch in the requested direction, then by reward
+/// type ascending in both directions (leader, member, refund), so `order=desc`
+/// reverses the epochs but not the entries inside one epoch.
 pub async fn by_stake_rewards<D>(
     Path(stake_address): Path<String>,
     Query(params): Query<PaginationParameters>,
@@ -100,44 +148,13 @@ where
     let mut skipped = 0;
     let skip = pagination.skip();
 
-    // Blockfrost reports the reward epoch as `earned_epoch`. The db-sync schema
-    // uses the same term. Each reward epoch uses two merged rows:
-    //
-    //   * Row `e` contains the leader and member rewards for epoch `e`.
-    //   * Row `e - 2` contains refunds that become spendable in epoch `e`.
-    //
-    // This order matches the db-sync order: leader, member, then refund.
-    for reward_epoch in 0..=epoch {
-        let stake_slot = summary.epoch_start(reward_epoch);
-
-        // This call reads both rows at the same time. `read_logs_typed`
-        // returns one result for each key, in the order of the keys. The last
-        // result is the refund row. The result before it is the stake row.
-        // Before epoch 2 there is no refund row. In that case the call reads
-        // only the stake row.
-        let (stake, refund) = if reward_epoch >= 2 {
-            let refund_slot = summary.epoch_start(reward_epoch - 2);
-
-            let mut rows = domain
-                .archive()
-                .read_logs_typed::<AccountEpochLog>(&[
-                    (stake_slot, account.clone()),
-                    (refund_slot, account.clone()),
-                ])
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-            let refund = rows.pop().flatten();
-            let stake = rows.pop().flatten();
-            (stake, refund)
-        } else {
-            let stake = domain
-                .archive()
-                .read_log_typed::<AccountEpochLog>(stake_slot, account)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            (stake, None)
+    for i in 0..=epoch {
+        let reward_epoch = match pagination.order {
+            Order::Asc => i,
+            Order::Desc => epoch - i,
         };
 
-        for item in reward_entries(reward_epoch, stake.as_ref(), refund.as_ref())? {
+        for item in epoch_reward_entries(&domain, &summary, account, reward_epoch)? {
             if skipped < skip {
                 skipped += 1;
                 continue;
@@ -241,6 +258,139 @@ mod tests {
         assert_eq!(refunds.len(), 1);
         assert_eq!(refunds[0].epoch, tip_epoch as i32);
         assert_eq!(refunds[0].amount, "500");
+    }
+
+    /// Rewards in every epoch, with two reward types in two of them: leader and
+    /// member at epoch 1, member and refund at the tip epoch.
+    fn ordering_app() -> TestApp {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+
+        TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
+            let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state())
+                .expect("era summary");
+            let tip = domain
+                .state()
+                .read_cursor()
+                .expect("cursor read failed")
+                .expect("missing tip")
+                .slot();
+            let (tip_epoch, _) = summary.slot_epoch(tip);
+            assert!(tip_epoch >= 2, "fixture tip before epoch 2");
+
+            let account = parse_account_key_param(&vectors.stake_address, Network::Testnet)
+                .expect("invalid fixture stake address");
+            let member_pool = PoolHash::from([1u8; 28]);
+            let leader_pool = PoolHash::from([2u8; 28]);
+
+            let writer = domain.archive().start_writer().expect("archive writer");
+            for epoch in 0..=tip_epoch {
+                let mut log = AccountEpochLog {
+                    pool_id: Some(member_pool),
+                    member_reward: Some(1_000 + epoch),
+                    ..Default::default()
+                };
+                if epoch == 1 {
+                    log.leader_rewards.push((leader_pool, 2_000));
+                }
+                if epoch == tip_epoch - 2 {
+                    log.deposit_refunds.push((member_pool, 500));
+                }
+                writer
+                    .write_log_typed(summary.epoch_start(epoch), &account.account, &log)
+                    .expect("reward log write failed");
+            }
+            writer.commit().expect("reward log commit failed");
+        })
+    }
+
+    async fn fetch_rewards(app: &TestApp, query: &str) -> Vec<serde_json::Value> {
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/rewards?{query}");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        serde_json::from_slice(&bytes).expect("failed to parse account rewards")
+    }
+
+    async fn fetch_paged(app: &TestApp, order: &str, count: usize) -> Vec<serde_json::Value> {
+        let mut out = Vec::new();
+        for page in 1.. {
+            let items =
+                fetch_rewards(app, &format!("order={order}&count={count}&page={page}")).await;
+            assert!(items.len() <= count);
+            let done = items.len() < count;
+            out.extend(items);
+            if done {
+                return out;
+            }
+        }
+        unreachable!()
+    }
+
+    fn summarize(items: &[serde_json::Value]) -> Vec<(u64, String)> {
+        items
+            .iter()
+            .map(|item| {
+                (
+                    item["epoch"].as_u64().expect("epoch"),
+                    item["type"].as_str().expect("type").to_string(),
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_rewards_order_desc() {
+        let app = ordering_app();
+        let tip_epoch = app.tip_epoch();
+
+        let mut expected_asc = Vec::new();
+        for epoch in 0..=tip_epoch {
+            if epoch == 1 {
+                expected_asc.push((epoch, "leader".to_string()));
+            }
+            expected_asc.push((epoch, "member".to_string()));
+            if epoch == tip_epoch {
+                expected_asc.push((epoch, "pool_deposit_refund".to_string()));
+            }
+        }
+
+        // Epochs newest first, reward types still leader, member, refund.
+        let mut expected_desc = Vec::new();
+        for epoch in (0..=tip_epoch).rev() {
+            expected_desc.extend(expected_asc.iter().filter(|(e, _)| *e == epoch).cloned());
+        }
+
+        let asc = fetch_rewards(&app, "count=100").await;
+        assert_eq!(summarize(&asc), expected_asc);
+        assert_eq!(fetch_rewards(&app, "order=asc&count=100").await, asc);
+
+        let desc = fetch_rewards(&app, "order=desc&count=100").await;
+        assert_eq!(summarize(&desc), expected_desc);
+
+        // The same entries in both orders, only the sequence differs.
+        let mut asc_sorted: Vec<_> = asc.iter().map(|v| v.to_string()).collect();
+        let mut desc_sorted: Vec<_> = desc.iter().map(|v| v.to_string()).collect();
+        asc_sorted.sort();
+        desc_sorted.sort();
+        assert_eq!(asc_sorted, desc_sorted);
+
+        // Page boundaries fall inside two-entry epochs for count 2 and 3.
+        for count in 1..=3 {
+            assert_eq!(
+                fetch_paged(&app, "asc", count).await,
+                asc,
+                "asc count={count}"
+            );
+            assert_eq!(
+                fetch_paged(&app, "desc", count).await,
+                desc,
+                "desc count={count}"
+            );
+        }
     }
 
     #[tokio::test]
