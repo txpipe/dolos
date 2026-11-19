@@ -433,9 +433,9 @@ const REDB_PAGE_SIZE: u32 = 4096;
 /// is not a whole number of pages, or records a layout redb cannot read: redb
 /// panics on all three before it reports any error. The header is read under a
 /// shared lock, which conflicts with redb's exclusive one, so a file another
-/// process holds fails as open instead.
+/// process holds fails as open instead. The lock is released before returning.
 pub(crate) fn check_layout(path: &Path) -> Result<(), redb::Error> {
-    use std::{fs::TryLockError, io::Read as _};
+    use std::fs::TryLockError;
 
     let mut file = match std::fs::File::open(path) {
         Ok(file) => file,
@@ -444,12 +444,27 @@ pub(crate) fn check_layout(path: &Path) -> Result<(), redb::Error> {
     };
 
     // a shared lock, since NFS refuses an exclusive one on a read-only handle
-    match file.try_lock_shared() {
-        Ok(()) => {}
+    let locked = match file.try_lock_shared() {
+        Ok(()) => true,
         Err(TryLockError::WouldBlock) => return Err(redb::Error::DatabaseAlreadyOpen),
-        Err(TryLockError::Error(error)) if error.kind() == std::io::ErrorKind::Unsupported => {}
+        Err(TryLockError::Error(error)) if error.kind() == std::io::ErrorKind::Unsupported => false,
         Err(TryLockError::Error(error)) => return Err(error.into()),
+    };
+
+    let checked = read_layout(&mut file);
+
+    // A child forked meanwhile holds a copy of the descriptor until it execs,
+    // and with it the lock, which would refuse redb's exclusive one.
+    if locked {
+        let _ = file.unlock();
     }
+
+    checked
+}
+
+/// [`check_layout`]'s reading of the file's length and header.
+fn read_layout(file: &mut std::fs::File) -> Result<(), redb::Error> {
+    use std::io::Read as _;
 
     let len = file.metadata()?.len();
     let mut header = [0; 32];

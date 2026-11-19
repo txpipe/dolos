@@ -274,6 +274,76 @@ fn is_empty_file(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|metadata| metadata.len() == 0)
 }
 
+/// How many of the newest entries an open decodes: those the pull stage's
+/// intersect reads at every start, an exponential crawl that reads `2^n - 1`
+/// entries for `n` candidates (five), with room for synthetic ones it skips.
+const NEWEST_DECODED: usize = 64;
+
+/// How much further from a slot each try of [`WalStore::locate_point`] looks
+/// for an entry.
+const LOCATE_STEP: u64 = 20;
+
+/// The widest window [`WalStore::locate_point`] searches, on the last of
+/// [`RedbWalStore::approximate_slot_with_retry`]'s nine tries.
+const LOCATE_REACH: u64 = LOCATE_STEP * 9;
+
+/// The entries a start replays into the other stores.
+enum Replayed {
+    Nothing,
+    /// The entries from this key on.
+    From(DbChainPoint),
+    All,
+}
+
+/// What a start replays into stores at `positions`, locating each store's
+/// start as `dolos_core::bootstrap` does: the entry nearest its slot, or
+/// every entry for a store holding nothing or with no entry near its slot.
+fn replayed(
+    table: &redb::ReadOnlyTable<DbChainPoint, DbLogValue>,
+    positions: &[Option<BlockSlot>],
+) -> Result<Replayed, redb::Error> {
+    let mut replayed = Replayed::Nothing;
+
+    for &position in positions {
+        let Some(slot) = position
+            .map(|slot| nearest(table, slot))
+            .transpose()?
+            .flatten()
+        else {
+            return Ok(Replayed::All);
+        };
+
+        let start = DbChainPoint::min_bound(slot);
+
+        replayed = match replayed {
+            Replayed::From(current) => Replayed::From(current.min(start)),
+            _ => Replayed::From(start),
+        };
+    }
+
+    Ok(replayed)
+}
+
+/// The slot of the entry nearest `slot`, as [`WalStore::locate_point`] finds
+/// it: the first of the nearest within [`LOCATE_REACH`].
+fn nearest(
+    table: &redb::ReadOnlyTable<DbChainPoint, DbLogValue>,
+    slot: BlockSlot,
+) -> Result<Option<BlockSlot>, redb::Error> {
+    let reach = slot.saturating_sub(LOCATE_REACH)..=slot.saturating_add(LOCATE_REACH);
+    let mut nearest: Option<BlockSlot> = None;
+
+    for entry in table.range(DbChainPoint::slot_range(reach))? {
+        let found = ChainPoint::from(entry?.0.value()).slot();
+
+        if nearest.is_none_or(|best| found.abs_diff(slot) < best.abs_diff(slot)) {
+            nearest = Some(found);
+        }
+    }
+
+    Ok(nearest)
+}
+
 pub struct LogIter<'a, T>(Range<'a, DbChainPoint, DbLogValue>, PhantomData<T>);
 
 impl<'a, T> From<Range<'a, DbChainPoint, DbLogValue>> for LogIter<'a, T>
@@ -372,7 +442,7 @@ where
 
     pub fn is_empty(&self) -> Result<bool, RedbWalError> {
         // "Empty" here refers to absence of WAL data entries. The metadata
-        // table is always present after `ensure_version()`, so an empty WAL
+        // table is always present after `admit()` or `memory()`, so an empty WAL
         // can still have a populated `wal_metadata` table.
         let wr = self.db.begin_read()?;
 
@@ -411,13 +481,27 @@ where
     /// refused, with one warning: the entries of a WAL recording another
     /// version, older or newer, or none, are wiped, and a file whose contents
     /// fail to decode is emptied. A lock, permission or I/O error fails, and
-    /// leaves the file as it was.
+    /// leaves the file as it was. It decodes the first entry and the newest
+    /// ones the intersect reads; [`Self::open_replaying`] adds those a
+    /// start replays into the other stores.
     pub fn open(path: impl AsRef<Path>, config: &RedbWalConfig) -> Result<Self, WalError> {
+        Self::open_replaying(path, config, &[])
+    }
+
+    /// [`Self::open`] for a start that then catches up stores at `positions`
+    /// (their slots, none for a store holding nothing) from the WAL: the
+    /// entries such a replay reads are decoded too, so one that fails resets
+    /// the WAL instead of panicking the replay.
+    pub fn open_replaying(
+        path: impl AsRef<Path>,
+        config: &RedbWalConfig,
+        positions: &[Option<BlockSlot>],
+    ) -> Result<Self, WalError> {
         let path = path.as_ref();
 
         // The store is dropped before the reset, so it no longer holds the file.
         let undecodable = match Self::open_file(path, config) {
-            Ok(out) => match out.admit(path) {
+            Ok(out) => match out.admit(path, positions) {
                 Ok(()) => return Ok(out),
                 Err(error) if is_corrupt(&error) => error,
                 Err(error) => return Err(WalError::internal(error)),
@@ -426,21 +510,24 @@ where
             Err(error) => return Err(WalError::internal(error)),
         };
 
-        warn!(
-            path = %path.display(),
-            %undecodable,
-            "the WAL fails to decode, and it is transient: resetting it empty"
-        );
-
         // Emptied in place, so a link to it and its permissions are kept.
         std::fs::OpenOptions::new()
             .write(true)
             .truncate(true)
             .open(path)
-            .map_err(WalError::internal)?;
+            .map_err(|error| {
+                let reset = format!("resetting the WAL at {}: {error}", path.display());
+                WalError::internal(std::io::Error::new(error.kind(), reset))
+            })?;
+
+        warn!(
+            path = %path.display(),
+            %undecodable,
+            "the WAL fails to decode, and it is transient: it was reset empty"
+        );
 
         let out = Self::open_file(path, config).map_err(WalError::internal)?;
-        out.admit(path).map_err(WalError::internal)?;
+        out.admit(path, positions).map_err(WalError::internal)?;
 
         Ok(out)
     }
@@ -458,7 +545,7 @@ where
         let path = path.as_ref();
 
         let unreadable = match Self::view_file(path, config) {
-            Ok(out) => match out.inspect() {
+            Ok(out) => match out.inspect(&[]) {
                 Ok(Found::Current) => return Ok(out),
                 Ok(Found::Empty) => return Self::memory(),
                 Ok(Found::OtherVersion(found)) => format!(
@@ -530,10 +617,10 @@ where
     /// and wipe the entries of one recording another version, or none. An
     /// error [`is_corrupt`] finds is on what the file holds, and
     /// [`Self::open`] resets the file for it.
-    fn admit(&self, path: &Path) -> Result<(), redb::Error> {
+    fn admit(&self, path: &Path, positions: &[Option<BlockSlot>]) -> Result<(), redb::Error> {
         self.ensure_initialized()?;
 
-        match self.inspect()? {
+        match self.inspect(positions)? {
             Found::Current => Ok(()),
             Found::Empty => {
                 info!(
@@ -543,25 +630,27 @@ where
                 self.stamp_version(CURRENT_WAL_VERSION)
             }
             Found::OtherVersion(found) => {
+                self.wipe_and_stamp(CURRENT_WAL_VERSION)?;
+
                 warn!(
                     path = %path.display(),
                     found = %recorded(found),
                     expected = CURRENT_WAL_VERSION,
-                    "the WAL records another version, and it is transient: wiping its entries"
+                    "the WAL records another version, and it is transient: its entries were wiped"
                 );
-                self.wipe_and_stamp(CURRENT_WAL_VERSION)
+
+                Ok(())
             }
         }
     }
 
     /// What the WAL holds, read without writing to it.
     ///
-    /// At the current version, the first and last entries are decoded, which
-    /// every open reads as the WAL's start and tip; one that fails is
-    /// [`redb::Error::Corrupted`]. The entries between them are decoded as
-    /// they are read, so reading the whole WAL is left to the commands that
-    /// need it.
-    fn inspect(&self) -> Result<Found, redb::Error> {
+    /// At the current version, the entries a start reads are decoded: the
+    /// first, the newest [`NEWEST_DECODED`], and those it replays into stores
+    /// at `positions` (see [`Self::open_replaying`]). One that fails is
+    /// [`redb::Error::Corrupted`]. Other entries are decoded as they are read.
+    fn inspect(&self, positions: &[Option<BlockSlot>]) -> Result<Found, redb::Error> {
         let rx = self.db.begin_read()?;
 
         let version = match rx.open_table(WAL_METADATA) {
@@ -584,9 +673,16 @@ where
             };
         }
 
-        let mut entries = table.range::<DbChainPoint>(..)?;
+        let first = table.range::<DbChainPoint>(..)?.take(1);
+        let newest = table.range::<DbChainPoint>(..)?.rev().take(NEWEST_DECODED);
 
-        for entry in [entries.next(), entries.next_back()].into_iter().flatten() {
+        let replayed = match replayed(&table, positions)? {
+            Replayed::Nothing => None,
+            Replayed::From(start) => Some(table.range(start..)?),
+            Replayed::All => Some(table.range::<DbChainPoint>(..)?),
+        };
+
+        for entry in first.chain(newest).chain(replayed.into_iter().flatten()) {
             let (point, value) = entry?;
 
             if let Err(error) = bincode::deserialize::<LogValue<T>>(&value.value()) {
@@ -1014,7 +1110,7 @@ where
 
     fn locate_point(&self, around: BlockSlot) -> Result<Option<ChainPoint>, WalError> {
         let search = |retry| {
-            let delta = 20 * retry as u64;
+            let delta = LOCATE_STEP * retry as u64;
             let start = around.saturating_sub(delta);
             let end = around.saturating_add(delta);
             start..=end
@@ -1264,7 +1360,7 @@ mod tests {
     /// and left byte-identical for the next writable open to reset.
     #[test]
     fn a_read_only_open_reads_a_wal_it_cannot_read_as_empty() {
-        let cases: [Case; 7] = [
+        let cases: [Case; 8] = [
             ("older", |path| {
                 write_raw(path, Some(CURRENT_WAL_VERSION - 1), &[decodable()])
             }),
@@ -1292,6 +1388,7 @@ mod tests {
             ("not a database", |path| {
                 std::fs::write(path, vec![0xa5; 64 * 1024]).unwrap()
             }),
+            ("cut short past its header", |path| cut(path, 4096)),
         ];
 
         for (case, write) in cases {
@@ -1434,6 +1531,56 @@ mod tests {
         }
     }
 
+    /// An entry between the ends among the newest, which the intersect reads
+    /// at every start, resets the WAL too, so reading them can't panic.
+    #[test]
+    fn an_undecodable_entry_the_intersect_reads_resets_the_wal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.redb");
+        write_raw(
+            &path,
+            Some(CURRENT_WAL_VERSION),
+            &[decodable(), undecodable(), decodable()],
+        );
+
+        let store = open_test_store(&path).unwrap();
+        assert!(store.intersect_candidates(5).unwrap().is_empty());
+        drop(store);
+
+        assert_reset_on_open(&path);
+    }
+
+    /// Past the first and the newest entries, an entry is decoded on open only
+    /// when a start replays it into a store at one of the positions: from the
+    /// entry nearest each slot, or every entry for a store holding nothing.
+    #[test]
+    fn an_open_decodes_the_entries_a_start_replays() {
+        // slots 42 to 141, the one at 52 undecodable
+        let mut values = vec![decodable(); 100];
+        values[10] = undecodable();
+
+        let cases: [(&[Option<BlockSlot>], bool); 7] = [
+            (&[], false),
+            (&[Some(60)], false),
+            (&[Some(141), Some(60)], false),
+            (&[Some(50)], true),
+            (&[Some(141), Some(52)], true),
+            (&[Some(141), None], true),
+            // no entry within reach, so the replay reads them all
+            (&[Some(141 + LOCATE_REACH + 1)], true),
+        ];
+
+        for (positions, reset) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("wal.redb");
+            write_raw(&path, Some(CURRENT_WAL_VERSION), &values);
+
+            let store =
+                TestStore::open_replaying(&path, &RedbWalConfig::default(), positions).unwrap();
+            assert_eq!(holds_no_entry(&store), reset, "{positions:?}");
+        }
+    }
+
     /// Decodable entries at the current version are kept as they are.
     #[test]
     fn decodable_entries_are_kept() {
@@ -1501,27 +1648,42 @@ mod tests {
             ("cut short past its header", |path| cut(path, 4096)),
         ];
 
-        /// A WAL holding an entry, cut to `len` bytes.
-        fn cut(path: &Path, len: u64) {
-            let store = open_test_store(path).unwrap();
-            store.append_entries(&[entry(10)]).unwrap();
-            drop(store);
-
-            let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
-            file.set_len(len).unwrap();
-        }
-
         for (case, write) in cases {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("wal.redb");
             write(&path);
 
+            #[cfg(unix)]
+            let identity = kept(&path);
+
             let store = open_test_store(&path).unwrap_or_else(|error| panic!("{case}: {error}"));
             assert!(holds_no_entry(&store), "{case}");
             drop(store);
 
+            #[cfg(unix)]
+            assert_eq!(kept(&path), identity, "{case}: the file was replaced");
+
             assert_reset_on_open(&path);
         }
+    }
+
+    /// The file's identity and mode, which a reset in place keeps.
+    #[cfg(unix)]
+    fn kept(path: &Path) -> (u64, u64, u32) {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let metadata = std::fs::metadata(path).unwrap();
+        (metadata.dev(), metadata.ino(), metadata.mode())
+    }
+
+    /// A WAL holding an entry, cut to `len` bytes.
+    fn cut(path: &Path, len: u64) {
+        let store = open_test_store(path).unwrap();
+        store.append_entries(&[entry(10)]).unwrap();
+        drop(store);
+
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_len(len).unwrap();
     }
 
     /// A WAL another handle holds fails to open on the lock, writable or
@@ -1533,6 +1695,9 @@ mod tests {
 
         let held = open_test_store(&path).unwrap();
         held.append_entries(&[entry(10)]).unwrap();
+
+        // Windows enforces redb's lock on reads too
+        #[cfg(unix)]
         let before = std::fs::read(&path).unwrap();
 
         let error = open_test_store(&path).unwrap_err();
@@ -1541,6 +1706,7 @@ mod tests {
         let error = TestStore::open_read_only(&path, &RedbWalConfig::default()).unwrap_err();
         assert!(crate::handle::is_already_open(&error), "{error}");
 
+        #[cfg(unix)]
         assert!(std::fs::read(&path).unwrap() == before, "the file changed");
         drop(held);
 
@@ -1548,37 +1714,152 @@ mod tests {
         assert_eq!(slots(&store), vec![10]);
     }
 
-    /// A WAL it may not write fails on the permission, unreadable contents
-    /// or not, and is left as it was.
+    /// A WAL it may not write, or may not read, fails on the permission,
+    /// unreadable contents or not, and is left as it was.
     #[cfg(unix)]
     #[test]
     fn a_wal_it_may_not_write_fails_and_is_kept() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let cases: [fn(&Path); 2] = [
+        let writes: [fn(&Path); 2] = [
             |path| write_raw(path, Some(CURRENT_WAL_VERSION + 1), &[decodable()]),
             |path| std::fs::write(path, vec![0xa5; 64 * 1024]).unwrap(),
         ];
 
-        for write in cases {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("wal.redb");
-            write(&path);
+        // read-only, and write-only: a reset could truncate the second
+        for mode in [0o444, 0o200] {
+            for write in writes {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("wal.redb");
+                write(&path);
 
-            let before = std::fs::read(&path).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+                let before = std::fs::read(&path).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
 
-            // root writes it regardless
-            if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
-                return;
+                // root reads and writes it regardless
+                let read = std::fs::File::open(&path).is_ok();
+                let written = std::fs::OpenOptions::new().write(true).open(&path).is_ok();
+
+                if read && written {
+                    return;
+                }
+
+                let error = open_test_store(&path).unwrap_err();
+                assert!(
+                    format!("{error:?}").contains("PermissionDenied"),
+                    "{mode:o}: {error:?}"
+                );
+
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+                assert!(
+                    std::fs::read(&path).unwrap() == before,
+                    "{mode:o}: the file changed"
+                );
+            }
+        }
+    }
+
+    /// The WARN events `run` logs on this thread, each as its fields.
+    fn warned_while(run: impl FnOnce()) -> Vec<String> {
+        #[derive(Clone, Default)]
+        struct Warned(Arc<std::sync::Mutex<Vec<String>>>);
+
+        struct Fields(String);
+
+        impl tracing::field::Visit for Fields {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0.push_str(&format!("{}={value:?} ", field.name()));
+            }
+        }
+
+        impl tracing::Subscriber for Warned {
+            fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+                *metadata.level() <= Level::WARN
             }
 
-            let error = open_test_store(&path).unwrap_err();
-            assert!(
-                format!("{error:?}").contains("PermissionDenied"),
-                "{error:?}"
-            );
-            assert!(std::fs::read(&path).unwrap() == before, "the file changed");
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+            fn event(&self, event: &tracing::Event<'_>) {
+                if *event.metadata().level() == Level::WARN {
+                    let mut fields = Fields(String::new());
+                    event.record(&mut fields);
+                    self.0.lock().unwrap().push(fields.0);
+                }
+            }
+
+            fn enter(&self, _: &tracing::span::Id) {}
+
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+
+        // A callsite caches its interest per process: with a second dispatcher
+        // alive, every one asks the thread's subscriber instead.
+        let _second = tracing::Dispatch::new(Warned::default());
+        let warned = Warned::default();
+
+        tracing::subscriber::with_default(warned.clone(), run);
+
+        let events = warned.0.lock().unwrap().clone();
+
+        events
+    }
+
+    /// A reset, writable, and a reading as empty, read-only, each log one
+    /// warning naming the WAL.
+    #[test]
+    fn each_reset_logs_one_warning_naming_the_wal() {
+        // each case with what its writable open says
+        let cases: [(Case, &str); 3] = [
+            (
+                ("newer", |path| {
+                    write_raw(path, Some(CURRENT_WAL_VERSION + 1), &[decodable()])
+                }),
+                "entries were wiped",
+            ),
+            (
+                ("undecodable", |path| {
+                    write_raw(path, Some(CURRENT_WAL_VERSION), &[undecodable()])
+                }),
+                "reset empty",
+            ),
+            (("cut short", |path| cut(path, 4096)), "reset empty"),
+        ];
+
+        for ((case, write), said) in cases {
+            for writable in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("wal.redb");
+                write(&path);
+
+                let warned = warned_while(|| {
+                    if writable {
+                        open_test_store(&path).unwrap();
+                    } else {
+                        TestStore::open_read_only(&path, &RedbWalConfig::default()).unwrap();
+                    }
+                });
+
+                // redb repairs every file it initialises, a recreated one too
+                let warned: Vec<_> = warned
+                    .into_iter()
+                    .filter(|event| !event.contains("wal db is repairing"))
+                    .collect();
+
+                let said = if writable { said } else { "reads it as empty" };
+
+                assert_eq!(warned.len(), 1, "{case} {writable}: {warned:?}");
+                assert!(warned[0].contains(said), "{case} {writable}: {warned:?}");
+                assert!(
+                    warned[0].contains(&format!("path={}", path.display())),
+                    "{case} {writable}: {warned:?}"
+                );
+            }
         }
     }
 

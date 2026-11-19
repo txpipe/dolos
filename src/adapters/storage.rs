@@ -785,16 +785,44 @@ pub fn open_wal_store<D>(config: &RootConfig) -> Result<WalStoreBackend<D>, Erro
 where
     D: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
 {
+    open_wal_replaying(config, &[])
+}
+
+/// [`open_wal_store`] for a start that then catches up stores at `positions`
+/// from the WAL (see [`replay_positions`]).
+fn open_wal_replaying<D>(
+    config: &RootConfig,
+    positions: &[Option<BlockSlot>],
+) -> Result<WalStoreBackend<D>, Error>
+where
+    D: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
+{
     match config.wal_path() {
         Some(path) => {
             ensure_store_path(&path)?;
-            redb_opened(
+            let opened = dolos_redb3::wal::RedbWalStore::open_replaying(
                 &path,
-                WalStoreBackend::open_redb(&path, &RedbWalConfig::default()),
-            )
+                &RedbWalConfig::default(),
+                positions,
+            );
+            Ok(WalStoreBackend::Redb(redb_opened(&path, opened)?))
         }
         None => Ok(WalStoreBackend::in_memory()?),
     }
+}
+
+/// The slots of the state and the archive, none for one holding nothing,
+/// from which a start catches them up from the WAL. A writable WAL open
+/// decodes the entries that replay reads. A position that fails to read is
+/// taken as none, so every entry is decoded, and left to the start to report.
+fn replay_positions(
+    state: &StateStoreBackend,
+    archive: &ArchiveStoreBackend,
+) -> [Option<BlockSlot>; 2] {
+    [
+        state.read_cursor().ok().flatten().map(|point| point.slot()),
+        archive.get_tip().ok().flatten().map(|(slot, _)| slot),
+    ]
 }
 
 /// A no-op archive when `history.mode` is `none`.
@@ -941,9 +969,10 @@ where
 {
     let state = open_state_store(config)?;
     let archive = open_archive_store(config)?;
+    let positions = replay_positions(&state, &archive);
 
     Ok(Stores {
-        wal: open_wal_store(config)?,
+        wal: open_wal_replaying(config, &positions)?,
         state,
         archive,
         mempool: open_mempool_store(config)?,
@@ -1045,9 +1074,11 @@ where
                 Access::Observe => {
                     dolos_redb3::wal::RedbWalStore::open_read_only(&path, &RedbWalConfig::default())
                 }
-                Access::Mutate => {
-                    dolos_redb3::wal::RedbWalStore::open(&path, &RedbWalConfig::default())
-                }
+                Access::Mutate => dolos_redb3::wal::RedbWalStore::open_replaying(
+                    &path,
+                    &RedbWalConfig::default(),
+                    &replay_positions(&state, &archive),
+                ),
             };
 
             WalStoreBackend::Redb(redb_existing(&path, access, opened)?)
@@ -3259,6 +3290,47 @@ mod tests {
                 Some(ChainPoint::Origin)
             );
         }
+    }
+
+    /// A writable open of the dataset decodes the WAL entries a start replays
+    /// into the state and the archive: over an archive holding nothing, every
+    /// one, so one that fails anywhere resets the WAL.
+    #[test]
+    fn opening_the_stores_decodes_the_wal_entries_a_start_replays() {
+        use dolos_redb3::{redb::TableDefinition, wal::DbChainPoint};
+
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(&temp.path().join("data"));
+        written_state(&config, current().as_deref());
+        written_archive(&config, current().as_deref());
+
+        let point = |slot| ChainPoint::Specific(slot, [1u8; 32].into());
+
+        let wal = open_wal_store::<dolos_cardano::CardanoDelta>(&config).unwrap();
+        let entries = (1..=100).map(|slot| (point(slot), LogValue::origin()));
+        wal.append_entries(entries.collect()).unwrap();
+        drop(wal);
+
+        // past the first entry and the newest ones every open decodes
+        {
+            let db = dolos_redb3::redb::Database::create(config.wal_path().unwrap()).unwrap();
+            let wx = db.begin_write().unwrap();
+            wx.open_table(TableDefinition::<DbChainPoint, Vec<u8>>::new("wal"))
+                .unwrap()
+                .insert(DbChainPoint::from(point(11)), vec![0xde, 0xad])
+                .unwrap();
+            wx.commit().unwrap();
+        }
+
+        let wal = open_wal_store::<dolos_cardano::CardanoDelta>(&config).unwrap();
+        assert!(
+            !wal.is_empty().unwrap(),
+            "an open replaying nothing reset it"
+        );
+        drop(wal);
+
+        let stores = open_data_stores::<dolos_cardano::CardanoDelta>(&config).unwrap();
+        assert!(stores.wal.is_empty().unwrap());
     }
 
     /// An observing open reads a WAL of another version as empty and leaves
