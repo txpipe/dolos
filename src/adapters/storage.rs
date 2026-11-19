@@ -812,9 +812,10 @@ where
 }
 
 /// The slots of the state and the archive, none for one holding nothing,
-/// from which a start catches them up from the WAL. A writable WAL open
-/// decodes the entries that replay reads. A position that fails to read is
-/// taken as none, so every entry is decoded, and left to the start to report.
+/// from which a start catches them up from the WAL. A WAL open, writable or
+/// read-only, decodes the entries that replay reads. A position that fails
+/// to read is taken as none, so every entry is decoded, and left to the
+/// start to report.
 fn replay_positions(
     state: &StateStoreBackend,
     archive: &ArchiveStoreBackend,
@@ -1070,14 +1071,18 @@ where
         Some(path) => {
             existing(&path)?;
 
+            let positions = replay_positions(&state, &archive);
+
             let opened = match access {
-                Access::Observe => {
-                    dolos_redb3::wal::RedbWalStore::open_read_only(&path, &RedbWalConfig::default())
-                }
+                Access::Observe => dolos_redb3::wal::RedbWalStore::open_read_only_replaying(
+                    &path,
+                    &RedbWalConfig::default(),
+                    &positions,
+                ),
                 Access::Mutate => dolos_redb3::wal::RedbWalStore::open_replaying(
                     &path,
                     &RedbWalConfig::default(),
-                    &replay_positions(&state, &archive),
+                    &positions,
                 ),
             };
 
@@ -3292,26 +3297,22 @@ mod tests {
         }
     }
 
-    /// A writable open of the dataset decodes the WAL entries a start replays
-    /// into the state and the archive: over an archive holding nothing, every
-    /// one, so one that fails anywhere resets the WAL.
-    #[test]
-    fn opening_the_stores_decodes_the_wal_entries_a_start_replays() {
+    /// A dataset this release opens, over an archive holding nothing, whose
+    /// WAL holds an entry that fails to decode where only a start's replay
+    /// reads it: past the first entry and the newest ones every open decodes.
+    fn written_with_a_wal_failing_in_the_replay(config: &RootConfig) {
         use dolos_redb3::{redb::TableDefinition, wal::DbChainPoint};
 
-        let temp = tempfile::tempdir().unwrap();
-        let config = config_over(&temp.path().join("data"));
-        written_state(&config, current().as_deref());
-        written_archive(&config, current().as_deref());
+        written_state(config, current().as_deref());
+        written_archive(config, current().as_deref());
 
         let point = |slot| ChainPoint::Specific(slot, [1u8; 32].into());
 
-        let wal = open_wal_store::<dolos_cardano::CardanoDelta>(&config).unwrap();
+        let wal = open_wal_store::<dolos_cardano::CardanoDelta>(config).unwrap();
         let entries = (1..=100).map(|slot| (point(slot), LogValue::origin()));
         wal.append_entries(entries.collect()).unwrap();
         drop(wal);
 
-        // past the first entry and the newest ones every open decodes
         {
             let db = dolos_redb3::redb::Database::create(config.wal_path().unwrap()).unwrap();
             let wx = db.begin_write().unwrap();
@@ -3322,15 +3323,106 @@ mod tests {
             wx.commit().unwrap();
         }
 
-        let wal = open_wal_store::<dolos_cardano::CardanoDelta>(&config).unwrap();
+        let wal = open_wal_store::<dolos_cardano::CardanoDelta>(config).unwrap();
         assert!(
             !wal.is_empty().unwrap(),
             "an open replaying nothing reset it"
         );
-        drop(wal);
+    }
 
-        let stores = open_data_stores::<dolos_cardano::CardanoDelta>(&config).unwrap();
-        assert!(stores.wal.is_empty().unwrap());
+    /// A writable open of the dataset decodes the WAL entries a start replays
+    /// into the state and the archive: over an archive holding nothing, every
+    /// one, so one that fails anywhere resets the WAL.
+    #[test]
+    fn opening_the_stores_decodes_the_wal_entries_a_start_replays() {
+        type Open = fn(&RootConfig) -> WalStoreBackend<dolos_cardano::CardanoDelta>;
+
+        let opens: [(&str, Open); 2] = [
+            ("open_data_stores", |config| {
+                open_data_stores(config).unwrap().wal
+            }),
+            ("open_existing_stores", |config| {
+                open_existing_stores(config, Access::Mutate).unwrap().wal
+            }),
+        ];
+
+        for (name, open) in opens {
+            let temp = tempfile::tempdir().unwrap();
+            let config = config_over(&temp.path().join("data"));
+            written_with_a_wal_failing_in_the_replay(&config);
+
+            assert!(open(&config).is_empty().unwrap(), "{name}");
+        }
+    }
+
+    /// What `run` logs at WARN from the redb stores on this thread, a line
+    /// an event.
+    fn warned_while(run: impl FnOnce()) -> Vec<String> {
+        use tracing_subscriber::{layer::SubscriberExt as _, Layer as _};
+
+        #[derive(Clone, Default)]
+        struct Logged(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+        impl std::io::Write for Logged {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let logged = Logged::default();
+        let writer = logged.clone();
+
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(move || writer.clone())
+                .with_filter(
+                    tracing_subscriber::filter::Targets::new()
+                        .with_target("dolos_redb3", tracing::Level::WARN),
+                ),
+        );
+
+        // A callsite caches its interest per process: with a second dispatcher
+        // alive, every one asks the thread's subscriber instead.
+        let _second = tracing::Dispatch::new(tracing_subscriber::registry());
+
+        tracing::subscriber::with_default(subscriber, run);
+
+        let logged = String::from_utf8(logged.0.lock().unwrap().clone()).unwrap();
+        logged.lines().map(String::from).collect()
+    }
+
+    /// An observing open decodes what a writable one does, so a recovery plan
+    /// can't panic on an entry that a start's replay would read. It reads
+    /// that WAL as empty, with one warning, and leaves it byte-identical.
+    #[test]
+    fn observing_the_stores_decodes_the_wal_entries_a_start_replays() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(&temp.path().join("data"));
+        written_with_a_wal_failing_in_the_replay(&config);
+
+        let wal = config.wal_path().unwrap();
+        let before = std::fs::read(&wal).unwrap();
+
+        let warned = warned_while(|| {
+            let stores =
+                open_existing_stores::<dolos_cardano::CardanoDelta>(&config, Access::Observe)
+                    .unwrap();
+
+            let plan =
+                dolos_core::bootstrap::recovery_plan(&stores.wal, &stores.state, &stores.archive)
+                    .unwrap();
+            assert_eq!(plan.wal, None);
+        });
+
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert!(warned[0].contains("reads it as empty"), "{warned:?}");
+        assert!(std::fs::read(&wal).unwrap() == before, "the WAL changed");
     }
 
     /// An observing open reads a WAL of another version as empty and leaves
