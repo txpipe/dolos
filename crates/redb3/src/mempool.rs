@@ -1775,6 +1775,58 @@ mod tests {
         }
 
         #[test]
+        fn a_pending_record_that_fails_to_decode_is_recreated_empty() {
+            let (_dir, path) = file();
+            holding_a_tx(&path);
+
+            let db = redb::Database::create(&path).unwrap();
+            let wx = db.begin_write().unwrap();
+            wx.open_table(raw::<DbPendingKey, DbEraCbor>(PendingTable::NAME))
+                .unwrap()
+                .insert([7; 40].as_slice(), [0xff, 0x00].as_slice())
+                .unwrap();
+            wx.commit().unwrap();
+            drop(db);
+
+            let Err(error) = RedbMempool::open_read_only(&path, &CONFIG) else {
+                panic!("a mempool with an undecodable pending record opened read-only");
+            };
+            assert!(incompatible(&error).is_some(), "{error}");
+
+            assert_eq!(pending(&path), 0);
+            assert_eq!(recorded(&path), Some(MEMPOOL_VERSION));
+        }
+
+        /// redb panics on a file shorter than the layout its header records,
+        /// or not a whole number of pages, before it reports any error.
+        #[test]
+        fn a_file_cut_short_is_recreated_empty() {
+            let (_dir, path) = file();
+            holding_a_tx(&path);
+            let len = std::fs::metadata(&path).unwrap().len();
+
+            for cut in [320, 4096, 8192, len - 1] {
+                let (_dir, path) = file();
+                holding_a_tx(&path);
+                let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+                file.set_len(cut).unwrap();
+                drop(file);
+
+                let Err(error) = RedbMempool::open_read_only(&path, &CONFIG) else {
+                    panic!("a mempool cut to {cut} bytes opened read-only");
+                };
+                assert!(
+                    incompatible(&error).is_some(),
+                    "cut to {cut} bytes: {error}"
+                );
+                assert_eq!(std::fs::metadata(&path).unwrap().len(), cut);
+
+                assert_eq!(pending(&path), 0, "cut to {cut} bytes");
+                assert_eq!(recorded(&path), Some(MEMPOOL_VERSION), "cut to {cut} bytes");
+            }
+        }
+
+        #[test]
         fn a_table_of_another_type_is_recreated_empty() {
             let (_dir, path) = file();
             holding_a_tx(&path);

@@ -18,7 +18,7 @@ use redb::{
 };
 use tracing::warn;
 
-use crate::layout::{check_layout, is_corrupt};
+use crate::layout::{check_layout, check_unheld, is_corrupt};
 
 /// The database's own page cache. It never shares one with fjall.
 const PAGE_CACHE_BYTES: usize = 32 * 1024 * 1024;
@@ -156,6 +156,24 @@ impl RedbCacheTier {
             ))),
             Err(error) => Err(CacheError::Disk(format!(
                 "creating {}: {error}",
+                path.display()
+            ))),
+        }
+    }
+
+    /// Fails as [`CacheError::InUse`] while another process holds
+    /// `<dir>/cache.redb`. Unlike [`open`](Self::open) it never creates,
+    /// resets or writes the file, so it can run before the state is admitted.
+    pub fn check_unheld(dir: impl AsRef<Path>) -> Result<(), CacheError> {
+        let path = dir.as_ref().join(FILE_NAME);
+
+        match check_unheld(&path) {
+            Ok(()) => Ok(()),
+            Err(redb::Error::DatabaseAlreadyOpen) => {
+                Err(CacheError::InUse(path.display().to_string()))
+            }
+            Err(error) => Err(CacheError::Disk(format!(
+                "opening {}: {error}",
                 path.display()
             ))),
         }
@@ -1143,6 +1161,34 @@ mod tests {
             RedbCacheTier::open(dir.path(), MIB),
             Err(CacheError::InUse(_))
         ));
+        assert!(matches!(
+            RedbCacheTier::check_unheld(dir.path()),
+            Err(CacheError::InUse(_))
+        ));
         assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn the_unheld_check_leaves_a_file_of_another_version_as_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        holding_an_entry(dir.path());
+        mark(dir.path(), Some(CACHE_FILE_VERSION + 1));
+        let path = dir.path().join(FILE_NAME);
+        let before = std::fs::read(&path).unwrap();
+
+        RedbCacheTier::check_unheld(dir.path()).unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(recorded(dir.path()), Some(CACHE_FILE_VERSION + 1));
+    }
+
+    #[test]
+    fn the_unheld_check_creates_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("cache");
+
+        RedbCacheTier::check_unheld(&missing).unwrap();
+
+        assert!(!missing.exists());
     }
 }

@@ -12,21 +12,11 @@ const REDB_PAGE_SIZE: u32 = 4096;
 /// shared lock, which conflicts with redb's exclusive one, so a file another
 /// process holds fails as open instead.
 pub(crate) fn check_layout(path: &Path) -> Result<(), redb::Error> {
-    use std::{fs::TryLockError, io::Read as _};
+    use std::io::Read as _;
 
-    let mut file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
+    let Some(mut file) = locked_shared(path)? else {
+        return Ok(());
     };
-
-    // a shared lock, since NFS refuses an exclusive one on a read-only handle
-    match file.try_lock_shared() {
-        Ok(()) => {}
-        Err(TryLockError::WouldBlock) => return Err(redb::Error::DatabaseAlreadyOpen),
-        Err(TryLockError::Error(error)) if error.kind() == std::io::ErrorKind::Unsupported => {}
-        Err(TryLockError::Error(error)) => return Err(error.into()),
-    }
 
     let len = file.metadata()?.len();
     let mut header = [0; 32];
@@ -69,6 +59,34 @@ pub(crate) fn check_layout(path: &Path) -> Result<(), redb::Error> {
     }
 
     Ok(())
+}
+
+/// Fails as open while another process holds the file at `path`, and reads
+/// or changes nothing else. A missing file is not held.
+pub(crate) fn check_unheld(path: &Path) -> Result<(), redb::Error> {
+    locked_shared(path).map(drop)
+}
+
+/// The file at `path` under a shared lock, which conflicts with redb's
+/// exclusive one, or `None` if there is no file.
+fn locked_shared(path: &Path) -> Result<Option<std::fs::File>, redb::Error> {
+    use std::fs::TryLockError;
+
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+
+    // a shared lock, since NFS refuses an exclusive one on a read-only handle
+    match file.try_lock_shared() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => return Err(redb::Error::DatabaseAlreadyOpen),
+        Err(TryLockError::Error(error)) if error.kind() == std::io::ErrorKind::Unsupported => {}
+        Err(TryLockError::Error(error)) => return Err(error.into()),
+    }
+
+    Ok(Some(file))
 }
 
 /// Whether an open failed on the file's contents rather than on access to it:

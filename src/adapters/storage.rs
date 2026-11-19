@@ -3161,12 +3161,18 @@ mod tests {
         let before = transient_bytes(&config);
 
         assert!(open_data_stores::<dolos_cardano::CardanoDelta>(&config).is_err());
-        assert_eq!(transient_bytes(&config), before);
+        assert!(transient_bytes(&config) == before);
 
         for access in [Access::Mutate, Access::Observe] {
             assert!(open_existing_stores::<dolos_cardano::CardanoDelta>(&config, access).is_err());
-            assert_eq!(transient_bytes(&config), before, "{access:?}");
+            assert!(transient_bytes(&config) == before, "{access:?}");
         }
+
+        // the node's open, which also opens the cache
+        let genesis = std::sync::Arc::new(dolos_cardano::include::preview::load());
+        let built = crate::engine::DomainBuilder::new(&config, genesis).build();
+        assert!(built.is_err(), "a domain over a refused state built");
+        assert!(transient_bytes(&config) == before, "domain build");
     }
 
     /// Observing skips a mempool of another version and keeps it; a writable
@@ -3184,7 +3190,7 @@ mod tests {
             open_existing_stores::<dolos_cardano::CardanoDelta>(&config, Access::Observe).unwrap();
         assert!(matches!(stores.mempool, MempoolBackend::Ephemeral(_)));
         drop(stores);
-        assert_eq!(transient_bytes(&config)[0], mempool);
+        assert!(transient_bytes(&config)[0] == mempool);
 
         let stores =
             open_existing_stores::<dolos_cardano::CardanoDelta>(&config, Access::Mutate).unwrap();
