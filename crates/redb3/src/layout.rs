@@ -175,4 +175,25 @@ mod tests {
             assert!(check_layout(&path).is_ok(), "{bytes:?}");
         }
     }
+
+    /// A copy of the probe's descriptor, as a child forked during the check
+    /// holds until it execs, must not keep the lock past the probe: redb's
+    /// exclusive lock would be refused.
+    #[cfg(unix)]
+    #[test]
+    fn the_probe_releases_its_lock_while_a_copy_of_its_file_lives() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("held.redb");
+        std::fs::write(&path, b"").unwrap();
+
+        let held = locked_shared(&path).unwrap().unwrap();
+        assert!(held.locked, "the file took no shared lock");
+
+        let copy = held.file.try_clone().unwrap();
+        drop(held);
+
+        let other = std::fs::File::open(&path).unwrap();
+        assert!(other.try_lock().is_ok(), "the copy kept the probe's lock");
+        drop(copy);
+    }
 }
