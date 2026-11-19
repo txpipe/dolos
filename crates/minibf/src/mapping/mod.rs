@@ -1058,9 +1058,13 @@ mod offchain_tests {
         let (metadata, error) = anchor_offchain_metadata(&url, &[0; 32], &[]).await;
 
         assert!(metadata.is_none());
+        let error = error.expect("The connection error is absent.");
+        assert_eq!(error.code, Code::ConnectionError);
         assert_eq!(
-            error.expect("The connection error is absent.").code,
-            Code::ConnectionError
+            error.message,
+            format!(
+                "Error Offchain Voting Anchor: Connection failure error when fetching metadata from {url}."
+            ),
         );
         assert_eq!(
             listener
@@ -1416,6 +1420,83 @@ mod offchain_tests {
     }
 
     #[tokio::test]
+    async fn anchor_candidate_refuses_html_with_braces() {
+        // a `{` inside the page is not a body that starts with one
+        let body = b"<html><style>p{color:red}</style></html>".to_vec();
+        let expected_hash = Hasher::<256>::hash(body.as_ref());
+        let (url, server) = serve_response(body, "200 OK", "Content-Type: text/html\r\n");
+        let (client, request_url) = local_candidate_client(&url);
+
+        let error = fetch_anchor_candidate(
+            &client,
+            &request_url,
+            "https://anchor.example/a",
+            expected_hash.as_ref(),
+        )
+        .await
+        .expect_err("The HTML answer was accepted.");
+
+        server.join().unwrap();
+        assert_eq!(error.code, Code::HttpResponseError);
+        assert!(error
+            .message
+            .ends_with(": expected JSON, but got : \"text/html\""));
+    }
+
+    #[tokio::test]
+    async fn anchor_candidate_matches_content_types_as_blockfrost() {
+        let body = br#"{"name":"Dolos"}"#.to_vec();
+        let expected_hash = Hasher::<256>::hash(body.as_ref());
+
+        // matching is case-sensitive, and a header byte above 0x7f is kept
+        // as its Latin-1 character rather than dropping the header
+        for (content_type, shown) in [
+            ("Application/JSON", "Application/JSON"),
+            ("text/json", "text/json"),
+            ("image/png; name=\u{e9}", "image/png; name=\u{c3}\u{a9}"),
+        ] {
+            let headers = format!("Content-Type: {content_type}\r\n");
+            let (url, server) = serve_response(body.clone(), "200 OK", &headers);
+            let (client, request_url) = local_candidate_client(&url);
+
+            let error = fetch_anchor_candidate(
+                &client,
+                &request_url,
+                "https://anchor.example/a",
+                expected_hash.as_ref(),
+            )
+            .await
+            .expect_err(content_type);
+
+            server.join().unwrap();
+            assert_eq!(error.code, Code::HttpResponseError, "{content_type}");
+            assert!(
+                error
+                    .message
+                    .ends_with(&format!(": expected JSON, but got : {shown:?}")),
+                "{}",
+                error.message,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn anchor_without_gateway_reports_no_gateway() {
+        let url = "ipfs://bafy-no-gateway";
+
+        let (metadata, error) = anchor_offchain_metadata(url, &[0; 32], &[]).await;
+
+        assert!(metadata.is_none());
+        assert_eq!(
+            error.expect("The no-gateway error is absent."),
+            DrepsInnerMetadataError::new(
+                Code::UnknownError,
+                "Error Offchain Voting Anchor: No IPFS gateway is configured to fetch ipfs://bafy-no-gateway.".to_string(),
+            ),
+        );
+    }
+
+    #[tokio::test]
     async fn anchor_candidate_accepts_json_content_types() {
         let body = b"  {\"name\":\"Dolos\"}".to_vec();
         let expected_hash = Hasher::<256>::hash(body.as_ref());
@@ -1424,7 +1505,9 @@ mod offchain_tests {
             "application/json",
             "application/ld+json; charset=utf-8",
             "text/plain",
+            "binary/octet-stream",
             "application/octet-stream",
+            "application/binary",
             // HTML that is a JSON object, as some servers label it
             "text/html",
         ] {
@@ -1541,6 +1624,13 @@ mod offchain_tests {
             .expect("The invalid JSON was accepted.");
         assert_eq!(error.code, Code::DecodeError);
         assert!(error.message.contains(original_url));
+        assert!(
+            error.message.starts_with(
+                "Error Offchain Voting Anchor: JSON decode error from when fetching metadata from Just ipfs://bafy-invalid-json resulted in : \""
+            ),
+            "{}",
+            error.message,
+        );
     }
 
     #[test]
