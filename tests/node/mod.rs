@@ -59,7 +59,7 @@ impl Node {
         // runs against.
         let toml = format!(
             r#"
-            compatibility = "v2-alpha.2"
+            compatibility = "v2-beta.1"
 
             [chain]
             protocol = "cardano"

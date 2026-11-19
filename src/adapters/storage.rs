@@ -25,7 +25,7 @@ use dolos_core::{
         MemoryStateWriter, NoDiskTier, NoOpArchiveStore, NoOpArchiveWriter,
     },
     cache::Cost,
-    compat::{reads_store_identity, IncompatibleStore},
+    compat::{reads_store_identity, IncompatibleStore, STORE_FORMAT},
     config::{
         Compatibility, RedbMempoolConfig, RedbStateConfig, RedbWalConfig, RootConfig,
         StateStoreConfig, StoreType,
@@ -1192,7 +1192,8 @@ fn existing(path: &Path) -> Result<(), OpenError> {
 }
 
 /// Admit a persistent store only if it records an identity this release
-/// reads, recording the current one on a new store before its first write.
+/// reads in an internal format no newer than [`STORE_FORMAT`], recording the
+/// current identity and format on a new store before its first write.
 ///
 /// A store without an identity is new while it holds nothing; holding data, a
 /// release that predates store identities wrote it. The configuration plays
@@ -1201,23 +1202,28 @@ fn admit<E>(
     store: &'static str,
     path: &Path,
     identity: Option<String>,
+    format: impl FnOnce() -> Result<Option<u32>, dolos_fjall::Error>,
     holds_data: impl FnOnce() -> Result<bool, dolos_fjall::Error>,
-    record: impl FnOnce(&str) -> Result<(), dolos_fjall::Error>,
+    record: impl FnOnce(&str, u32) -> Result<(), dolos_fjall::Error>,
 ) -> Result<(), E>
 where
     E: From<IncompatibleStore> + From<dolos_fjall::Error>,
 {
-    let found = match identity {
-        Some(found) if reads_store_identity(&found) => return Ok(()),
-        Some(found) => Some(found),
-        None if holds_data()? => None,
-        None => return Ok(record(Compatibility::current().as_str())?),
+    let (found, found_format) = match identity {
+        Some(found) if reads_store_identity(&found) => match format()? {
+            Some(format) if format <= STORE_FORMAT => return Ok(()),
+            format => (Some(found), format),
+        },
+        Some(found) => (Some(found), None),
+        None if holds_data()? => (None, None),
+        None => return Ok(record(Compatibility::current().as_str(), STORE_FORMAT)?),
     };
 
     Err(IncompatibleStore {
         store,
         path: path.to_path_buf(),
         found,
+        found_format,
     }
     .into())
 }
@@ -1539,10 +1545,11 @@ impl StateStoreBackend {
             "state",
             path,
             store.identity()?,
+            || store.format(),
             || store.holds_data(),
-            |identity| match access {
+            |identity, format| match access {
                 Access::Observe => Ok(()),
-                Access::Mutate => store.record_identity(identity),
+                Access::Mutate => store.record_identity(identity, format),
             },
         )?;
 
@@ -1577,6 +1584,15 @@ impl StateStoreBackend {
     pub fn identity(&self) -> Result<Option<String>, StateError> {
         match self {
             Self::Fjall(s) => Ok(s.identity()?),
+            Self::Redb(_) | Self::Memory(_) => Ok(None),
+        }
+    }
+
+    /// The internal format the store recorded beside its identity; `None`
+    /// for the stores that do not record one.
+    pub fn format(&self) -> Result<Option<u32>, StateError> {
+        match self {
+            Self::Fjall(s) => Ok(s.format()?),
             Self::Redb(_) | Self::Memory(_) => Ok(None),
         }
     }
@@ -1924,10 +1940,11 @@ impl ArchiveStoreBackend {
             "archive",
             path,
             store.identity()?,
+            || store.format(),
             || store.holds_data(),
-            |identity| match access {
+            |identity, format| match access {
                 Access::Observe => Ok(()),
-                Access::Mutate => store.record_identity(identity),
+                Access::Mutate => store.record_identity(identity, format),
             },
         )?;
 
@@ -2001,6 +2018,16 @@ impl ArchiveStoreBackend {
         match self {
             Self::Fjall(s) => Ok(s.identity()?),
             Self::LogsOnly(inner) => inner.identity(),
+            Self::Memory(_) | Self::EntityReads(_) | Self::NoOp(_) => Ok(None),
+        }
+    }
+
+    /// The internal format the store recorded beside its identity; `None`
+    /// for the stores that do not record one.
+    pub fn format(&self) -> Result<Option<u32>, ArchiveError> {
+        match self {
+            Self::Fjall(s) => Ok(s.format()?),
+            Self::LogsOnly(inner) => inner.format(),
             Self::Memory(_) | Self::EntityReads(_) | Self::NoOp(_) => Ok(None),
         }
     }
@@ -2809,7 +2836,7 @@ mod tests {
         let store = dolos_fjall::StateStore::open(path, dolos_fjall::Preset::Standard).unwrap();
 
         if let Some(identity) = identity {
-            store.record_identity(identity).unwrap();
+            store.record_identity(identity, STORE_FORMAT).unwrap();
         }
 
         let writer = store.start_writer().unwrap();
@@ -2838,7 +2865,7 @@ mod tests {
         .unwrap();
 
         if let Some(identity) = identity {
-            store.record_identity(identity).unwrap();
+            store.record_identity(identity, STORE_FORMAT).unwrap();
         }
 
         let writer = store.start_writer().unwrap();
@@ -2893,7 +2920,7 @@ mod tests {
             .unwrap();
 
         store
-            .record_identity(current().as_deref().unwrap())
+            .record_identity(current().as_deref().unwrap(), STORE_FORMAT)
             .unwrap();
         cursor.rotate_memtable_and_wait().unwrap();
         let keyspace = cursor.path().to_path_buf();
@@ -3021,6 +3048,8 @@ mod tests {
         let stores = open_data_stores::<dolos_cardano::CardanoDelta>(&config).unwrap();
         assert_eq!(stores.state.identity().unwrap(), current());
         assert_eq!(stores.archive.identity().unwrap(), current());
+        assert_eq!(stores.state.format().unwrap(), Some(STORE_FORMAT));
+        assert_eq!(stores.archive.format().unwrap(), Some(STORE_FORMAT));
 
         let writer = stores.state.start_writer().unwrap();
         writer.set_cursor(ChainPoint::Origin).unwrap();
@@ -3036,6 +3065,8 @@ mod tests {
         );
         assert_eq!(stores.state.identity().unwrap(), current());
         assert_eq!(stores.archive.identity().unwrap(), current());
+        assert_eq!(stores.state.format().unwrap(), Some(STORE_FORMAT));
+        assert_eq!(stores.archive.format().unwrap(), Some(STORE_FORMAT));
     }
 
     /// A store left empty by a release that recorded nothing is a new store.
@@ -3200,10 +3231,11 @@ mod tests {
         assert!(!dolos_core::MempoolStore::has_pending(reset));
     }
 
-    /// `v2-alpha.1` stores predate the freeze-hardening record layouts.
+    /// Earlier prerelease stores predate the record layouts and formats this
+    /// release reads.
     #[test]
     fn an_unsupported_identity_is_refused() {
-        for identity in ["v1", "v2-alpha.1"] {
+        for identity in ["v1", "v2-alpha.1", "v2-alpha.2"] {
             let temp = tempfile::tempdir().unwrap();
             let config = config_over(&temp.path().join("data"));
             written_state(&config, Some(identity));
@@ -3221,6 +3253,111 @@ mod tests {
         }
     }
 
+    /// Stores holding data under the current identity, in `format`, or with
+    /// no format recorded beside the identity, as a release that predates
+    /// formats wrote them.
+    fn written_in_format(config: &RootConfig, format: Option<u32>) {
+        written_state(config, None);
+        opened_archive(config, None).shutdown().unwrap();
+
+        let identity = current().unwrap();
+        let state = dolos_fjall::StateStore::open(
+            config.storage.state_path().unwrap(),
+            dolos_fjall::Preset::Standard,
+        )
+        .unwrap();
+        let archive = dolos_fjall::archive::ArchiveStore::open(
+            StateSchema::default(),
+            config.storage.archive_path().unwrap(),
+            None,
+            dolos_fjall::Preset::Standard,
+        )
+        .unwrap();
+
+        match format {
+            Some(format) => {
+                state.record_identity(&identity, format).unwrap();
+                archive.record_identity(&identity, format).unwrap();
+            }
+            None => {
+                for (db, keyspace) in [
+                    (state.database(), "state-cursor"),
+                    (archive.database(), "archive-meta"),
+                ] {
+                    let keyspace = db.keyspace(keyspace, Default::default).unwrap();
+                    keyspace.insert("identity", identity.as_bytes()).unwrap();
+                }
+            }
+        }
+
+        state.shutdown().unwrap();
+        archive.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_supported_identity_without_a_format_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(&temp.path().join("data"));
+        written_in_format(&config, None);
+
+        for refused in [
+            refusal(open_state_store(&config)),
+            refusal(open_archive_store(&config)),
+        ] {
+            let refused = refused.expect("a store without a format opened");
+            assert_eq!((refused.found, refused.found_format), (current(), None));
+        }
+
+        let message = open_state_store(&config).err().unwrap().to_string();
+        assert!(message.contains("records no internal format"), "{message}");
+        assert!(
+            message.contains("dolos bootstrap stelae --force"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_newer_format_is_refused_naming_both_formats() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(&temp.path().join("data"));
+        let newer = STORE_FORMAT + 1;
+        written_in_format(&config, Some(newer));
+
+        for refused in [
+            refusal(open_state_store(&config)),
+            refusal(open_archive_store(&config)),
+        ] {
+            let refused = refused.expect("a store in a newer format opened");
+            assert_eq!(
+                (refused.found, refused.found_format),
+                (current(), Some(newer))
+            );
+        }
+
+        let message = open_archive_store(&config).err().unwrap().to_string();
+        assert!(
+            message.contains(&format!(
+                "internal format {newer} by a newer dolos; this one reads up to {STORE_FORMAT}"
+            )),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn the_current_format_is_admitted() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(&temp.path().join("data"));
+        written_in_format(&config, Some(STORE_FORMAT));
+
+        let stores = open_data_stores::<dolos_cardano::CardanoDelta>(&config).unwrap();
+        assert_eq!(stores.state.format().unwrap(), Some(STORE_FORMAT));
+        assert_eq!(stores.archive.format().unwrap(), Some(STORE_FORMAT));
+        assert_eq!(
+            stores.state.read_cursor().unwrap(),
+            Some(ChainPoint::Origin)
+        );
+    }
+
     /// The identity is the only input: every configuration a node could be
     /// given over the same stores opens what this release wrote and refuses
     /// the rest.
@@ -3234,7 +3371,13 @@ mod tests {
             |config| config.sync.wal_path = Some("journal".into()),
         ];
 
-        for recorded in [None, Some("v1"), Some("v2-alpha.1"), current().as_deref()] {
+        for recorded in [
+            None,
+            Some("v1"),
+            Some("v2-alpha.1"),
+            Some("v2-alpha.2"),
+            current().as_deref(),
+        ] {
             let expected = match recorded {
                 Some(identity) if reads_store_identity(identity) => None,
                 _ => Some(recorded.map(str::to_string)),
@@ -3281,7 +3424,7 @@ mod tests {
         let path = config.storage.state_path().unwrap();
         let state = dolos_fjall::StateStore::open(path, dolos_fjall::Preset::Standard).unwrap();
         state
-            .record_identity(Compatibility::current().as_str())
+            .record_identity(Compatibility::current().as_str(), STORE_FORMAT)
             .unwrap();
 
         let utxo = (

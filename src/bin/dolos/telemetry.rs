@@ -281,7 +281,7 @@ mod tests {
     fn preview_config(dir: &std::path::Path, extra: &str) -> RootConfig {
         let config = format!(
             r#"
-            compatibility = "v2-alpha.2"
+            compatibility = "v2-beta.1"
 
             [chain]
             protocol = "cardano"
