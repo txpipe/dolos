@@ -1646,6 +1646,24 @@ mod tests {
         assert_replayed(&path, &[Some(51)], true);
     }
 
+    /// A start replays from the nearest entry above a store's slot too, as
+    /// [`WalStore::locate_point`] looks both ways from it.
+    #[test]
+    fn an_open_replays_from_a_nearer_entry_above() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.redb");
+
+        // 50 undecodable and older than the newest decoded, 57 nearer 60 than it
+        let newest = (60..).take(NEWEST_DECODED).map(|slot| (slot, decodable()));
+        let entries: Vec<_> = [(42, decodable()), (50, undecodable())]
+            .into_iter()
+            .chain(newest)
+            .collect();
+        write_raw_at(&path, Some(CURRENT_WAL_VERSION), &entries);
+
+        assert_replayed(&path, &[Some(57)], false);
+    }
+
     /// Open the WAL at `path` for a start replaying into stores at
     /// `positions`, read-only and then writable, and check both find it
     /// unreadable exactly when `reset`: the read-only open reads it as empty

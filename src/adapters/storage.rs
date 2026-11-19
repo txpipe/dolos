@@ -3425,6 +3425,84 @@ mod tests {
         assert!(std::fs::read(&wal).unwrap() == before, "the WAL changed");
     }
 
+    /// [`written_with_a_wal_failing_in_the_replay`], with the state's cursor,
+    /// the archive's tip, both or neither at the WAL's newest entry, as
+    /// `at_tip` says. A store there replays only the newest entries, which
+    /// decode; one at the start, or holding nothing, replays them all.
+    fn written_with_stores_at(config: &RootConfig, at_tip: (bool, bool)) {
+        written_with_a_wal_failing_in_the_replay(config);
+
+        let tip = ChainPoint::Specific(100, [1u8; 32].into());
+        let (state_at_tip, archive_at_tip) = at_tip;
+
+        if state_at_tip {
+            let path = config.storage.state_path().unwrap();
+            let store = dolos_fjall::StateStore::open(path, dolos_fjall::Preset::Standard).unwrap();
+            let writer = store.start_writer().unwrap();
+            writer.set_cursor(tip.clone()).unwrap();
+            writer.commit().unwrap();
+            store.shutdown().unwrap();
+        }
+
+        if archive_at_tip {
+            let path = config.storage.archive_path().unwrap();
+            let store = dolos_fjall::archive::ArchiveStore::open(
+                StateSchema::default(),
+                path,
+                None,
+                dolos_fjall::Preset::Standard,
+            )
+            .unwrap();
+            let writer = store.start_writer().unwrap();
+            writer
+                .apply(&tip, &std::sync::Arc::new(vec![1u8; 8]))
+                .unwrap();
+            writer.commit().unwrap();
+            store.shutdown().unwrap();
+        }
+    }
+
+    /// Each store's own position decides which WAL entries an open decodes,
+    /// writable or read-only: from the lower of the two, so a store at the
+    /// start, or holding nothing, has them all decoded, and with both at the
+    /// tip only the newest are. The WAL is reset, or read as empty, exactly
+    /// when the entry that fails is among those decoded.
+    #[test]
+    fn each_store_position_decides_the_wal_entries_an_open_decodes() {
+        type Open = fn(&RootConfig) -> WalStoreBackend<dolos_cardano::CardanoDelta>;
+
+        let opens: [(&str, Open); 3] = [
+            ("open_data_stores", |config| {
+                open_data_stores(config).unwrap().wal
+            }),
+            ("open_existing_stores Mutate", |config| {
+                open_existing_stores(config, Access::Mutate).unwrap().wal
+            }),
+            ("open_existing_stores Observe", |config| {
+                open_existing_stores(config, Access::Observe).unwrap().wal
+            }),
+        ];
+
+        // (the state at the tip, the archive at the tip), and whether the
+        // open finds the WAL unreadable
+        let cases = [
+            ((true, false), true),
+            ((false, true), true),
+            ((true, true), false),
+        ];
+
+        for (at_tip, unreadable) in cases {
+            for (name, open) in opens {
+                let temp = tempfile::tempdir().unwrap();
+                let config = config_over(&temp.path().join("data"));
+                written_with_stores_at(&config, at_tip);
+
+                let wal = open(&config);
+                assert_eq!(wal.is_empty().unwrap(), unreadable, "{name} {at_tip:?}");
+            }
+        }
+    }
+
     /// An observing open reads a WAL of another version as empty and leaves
     /// it byte-identical, for the next writable open to wipe.
     #[test]
