@@ -520,12 +520,30 @@ pub enum WalError {
     #[error("slot not found in chain {0}")]
     SlotNotFound(BlockSlot),
 
-    #[error("WAL version is incompatible: found {found}, expected {expected}")]
-    IncompatibleVersion { found: u32, expected: u32 },
+    /// A WAL this release can't read, which a writable open keeps instead of
+    /// resetting, because a store still needs a block it holds.
+    #[error(
+        "the WAL at {} is kept as it is: this release can't read it ({unreadable}), and {needed}. {}",
+        .path.display(),
+        KEPT_WAL_REMEDY
+    )]
+    Kept {
+        path: std::path::PathBuf,
+        /// Why this release can't read it.
+        unreadable: String,
+        /// Which store needs what it holds.
+        needed: String,
+    },
 
     #[error("IO error: {0}")]
     Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
+
+/// What to do about a [`WalError::Kept`] WAL.
+const KEPT_WAL_REMEDY: &str = "If another release wrote it, start that release once, so it brings \
+     the stores together and shuts down cleanly, then start this one again; otherwise rebuild the \
+     state from the archive with `dolos data rebuild`, or replace the dataset with \
+     `dolos bootstrap --force`";
 
 impl WalError {
     pub fn internal<T>(value: T) -> Self

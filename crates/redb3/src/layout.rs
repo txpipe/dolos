@@ -21,15 +21,15 @@ const HEADER_PREFIX: usize = 32;
 pub(crate) fn check_layout(path: &Path) -> Result<(), redb::Error> {
     use std::io::Read as _;
 
-    let Some(mut file) = locked_shared(path)? else {
+    let Some(mut held) = locked_shared(path)? else {
         return Ok(());
     };
 
-    let len = file.metadata()?.len();
+    let len = held.file.metadata()?.len();
     let mut header = Vec::with_capacity(HEADER_PREFIX);
 
     // redb reports a file it cannot read, or without its magic number, itself
-    if (&mut file)
+    if (&mut held.file)
         .take(HEADER_PREFIX as u64)
         .read_to_end(&mut header)
         .is_err()
@@ -85,9 +85,25 @@ pub(crate) fn check_unheld(path: &Path) -> Result<(), redb::Error> {
     locked_shared(path).map(drop)
 }
 
+/// A file under [`locked_shared`]'s lock, released when it drops: a child
+/// forked meanwhile holds a copy of the descriptor until it execs, and with
+/// it the lock, which would refuse redb's exclusive one.
+struct SharedLock {
+    file: std::fs::File,
+    locked: bool,
+}
+
+impl Drop for SharedLock {
+    fn drop(&mut self) {
+        if self.locked {
+            let _ = self.file.unlock();
+        }
+    }
+}
+
 /// The file at `path` under a shared lock, which conflicts with redb's
 /// exclusive one, or `None` if there is no file.
-fn locked_shared(path: &Path) -> Result<Option<std::fs::File>, redb::Error> {
+fn locked_shared(path: &Path) -> Result<Option<SharedLock>, redb::Error> {
     use std::fs::TryLockError;
 
     let file = match std::fs::File::open(path) {
@@ -97,14 +113,14 @@ fn locked_shared(path: &Path) -> Result<Option<std::fs::File>, redb::Error> {
     };
 
     // a shared lock, since NFS refuses an exclusive one on a read-only handle
-    match file.try_lock_shared() {
-        Ok(()) => {}
+    let locked = match file.try_lock_shared() {
+        Ok(()) => true,
         Err(TryLockError::WouldBlock) => return Err(redb::Error::DatabaseAlreadyOpen),
-        Err(TryLockError::Error(error)) if error.kind() == std::io::ErrorKind::Unsupported => {}
+        Err(TryLockError::Error(error)) if error.kind() == std::io::ErrorKind::Unsupported => false,
         Err(TryLockError::Error(error)) => return Err(error.into()),
-    }
+    };
 
-    Ok(Some(file))
+    Ok(Some(SharedLock { file, locked }))
 }
 
 /// Whether an open failed on the file's contents rather than on access to it:
@@ -158,5 +174,37 @@ mod tests {
 
             assert!(check_layout(&path).is_ok(), "{bytes:?}");
         }
+    }
+
+    /// A copy of the probe's descriptor, as a child forked during the check
+    /// holds until it execs, must not keep the lock past the probe: redb's
+    /// exclusive lock would be refused.
+    #[cfg(unix)]
+    #[test]
+    fn the_probe_releases_its_lock_while_a_copy_of_its_file_lives() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("held.redb");
+        std::fs::write(&path, b"").unwrap();
+
+        // read-write, as redb opens the file it locks exclusively
+        let other = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+
+        let held = locked_shared(&path).unwrap().unwrap();
+        assert!(held.locked, "the file took no shared lock");
+        assert!(
+            matches!(other.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+            "the probe's lock doesn't refuse an exclusive one"
+        );
+
+        let copy = held.file.try_clone().unwrap();
+        drop(held);
+
+        let locked = other.try_lock();
+        assert!(locked.is_ok(), "the copy kept the probe's lock: {locked:?}");
+        drop(copy);
     }
 }
