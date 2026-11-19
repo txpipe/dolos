@@ -710,6 +710,107 @@ fn a_peer_that_holds_none_of_the_wal_is_given_up_once_retries_run_out() {
             .contains("holds none of the WAL's recent points"),
         "{failure}"
     );
+    assert!(!failure.stranded, "{failure}");
+}
+
+/// The block at `slot` on a chain other than the peer fixture's.
+fn off_the_peer(slot: u64) -> ChainPoint {
+    make_conway_block_with_prev(slot, None, 0).0
+}
+
+/// Leave the WAL holding `points` alone, oldest first, as a reset or a
+/// bootstrap leaves it holding one.
+fn wal_holding(domain: &DomainAdapter, points: &[ChainPoint]) {
+    let (first, rest) = points.split_first().expect("a point");
+    domain.wal().reset_to(first).unwrap();
+
+    let entries = rest
+        .iter()
+        .map(|point| (point.clone(), dolos_core::LogValue::origin()))
+        .collect();
+    domain.wal().append_entries(entries).unwrap();
+}
+
+/// A WAL holding one point alone, which the peer, past it, does not hold, as
+/// after a fork dropped the block a reset WAL was seeded at: no retry can
+/// help, so the pull stage gives up at the first answer, retries left.
+#[test]
+fn a_lone_wal_point_a_peer_past_it_lacks_is_given_up_at_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, domain) = domain_over(temp.path(), no_backoff(3));
+
+    let dropped = off_the_peer(30);
+    wal_holding(&domain, std::slice::from_ref(&dropped));
+
+    let peer = peer(PeerOptions {
+        initial_blocks: 31,
+        ..Default::default()
+    });
+
+    let (progress, stages) = catch_up(&config, &peer, &domain);
+
+    assert!(stages.ended("pull"));
+    stages.teardown();
+
+    assert!(!progress.succeeded(SyncLimit::CatchUp));
+    assert_eq!(peer.intersects(), 1, "no retry");
+    assert_eq!(wal_tip(&domain), Some(dropped.clone()));
+
+    let failure = progress
+        .upstream_failure()
+        .expect("the upstream was given up");
+    assert!(failure.stranded, "{failure}");
+    assert!(!failure.refused, "{failure}");
+
+    for said in [
+        format!("the WAL holds only {dropped}, with no earlier point"),
+        format!("the peer, past it at {}, does not hold it", peer.tip()),
+    ] {
+        assert!(failure.message.contains(&said), "{said:?} in {failure}");
+    }
+}
+
+/// A peer behind the WAL's one point, or at its slot, may yet hold it, and a
+/// WAL holding more points than it offers may hold one the peer does: each is
+/// an ordinary failed intersection, retried.
+#[test]
+fn a_wal_point_the_peer_may_yet_hold_is_retried() {
+    let cases = [
+        ("a peer behind the one point", vec![off_the_peer(30)], 29),
+        ("a peer at the one point's slot", vec![off_the_peer(30)], 30),
+        (
+            "a WAL holding two points, one offered",
+            vec![off_the_peer(20), off_the_peer(30)],
+            31,
+        ),
+    ];
+
+    for (case, points, blocks) in cases {
+        let temp = tempfile::tempdir().unwrap();
+        let (config, domain) = domain_over(temp.path(), no_backoff(1));
+        wal_holding(&domain, &points);
+
+        let peer = peer(PeerOptions {
+            initial_blocks: blocks,
+            ..Default::default()
+        });
+
+        let (progress, stages) = catch_up(&config, &peer, &domain);
+
+        assert!(stages.ended("pull"), "{case}");
+        stages.teardown();
+
+        assert_eq!(peer.intersects(), 2, "{case}: one attempt and one retry");
+
+        let failure = progress.upstream_failure().expect(case);
+        assert!(!failure.stranded, "{case}: {failure}");
+        assert!(
+            failure
+                .message
+                .contains("holds none of the WAL's recent points"),
+            "{case}: {failure}"
+        );
+    }
 }
 
 #[test]

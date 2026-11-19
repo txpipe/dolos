@@ -517,6 +517,8 @@ pub fn ended_stages(pipeline: &gasket::daemon::Daemon) -> Vec<String> {
 
 /// The error for a sync whose pipeline ended on its own, said after `what`:
 /// why a stage gave up on the upstream peer, or else which stages stopped.
+/// Its help says what to do: check the peer, replace a store that can't sync
+/// on, or retry longer.
 pub fn sync_failure(
     what: &str,
     failure: Option<&dolos::sync::UpstreamFailure>,
@@ -527,6 +529,12 @@ pub fn sync_failure(
             help = "a peer refuses the handshake of a node on another network, or of one \
                     with no protocol version in common: check that `upstream.peer_address` \
                     serves the configured chain",
+            "{what}: {failure}"
+        ),
+        Some(failure) if failure.stranded => miette::miette!(
+            help = "a fork most likely dropped that block, and this store can't sync on \
+                    without it: replace its data with `dolos bootstrap --force`, after \
+                    checking that `upstream.peer_address` serves the configured chain",
             "{what}: {failure}"
         ),
         Some(failure) => miette::miette!(
@@ -651,9 +659,10 @@ mod tests {
     fn a_sync_failure_points_at_what_to_check() {
         use dolos::sync::UpstreamFailure;
 
-        let failure = |refused| UpstreamFailure {
+        let failure = |refused, stranded| UpstreamFailure {
             message: "the pull stage gave up on the upstream peer".into(),
             refused,
+            stranded,
         };
 
         let help = |failure: Option<&UpstreamFailure>| {
@@ -662,7 +671,7 @@ mod tests {
             (report.to_string(), help.unwrap_or_default())
         };
 
-        let (message, refused) = help(Some(&failure(true)));
+        let (message, refused) = help(Some(&failure(true, false)));
         assert_eq!(
             message,
             "the sync stopped: the pull stage gave up on the upstream peer"
@@ -670,8 +679,16 @@ mod tests {
         assert!(refused.contains("another network"), "{refused}");
         assert!(!refused.contains("[sync.retry]"), "{refused}");
 
-        let (_, retried) = help(Some(&failure(false)));
+        let (_, retried) = help(Some(&failure(false, false)));
         assert!(retried.starts_with("`[sync.retry]`"), "{retried}");
+
+        let (message, stranded) = help(Some(&failure(false, true)));
+        assert_eq!(
+            message,
+            "the sync stopped: the pull stage gave up on the upstream peer"
+        );
+        assert!(stranded.contains("`dolos bootstrap --force`"), "{stranded}");
+        assert!(!stranded.contains("[sync.retry]"), "{stranded}");
 
         let (message, stopped) = help(None);
         assert_eq!(message, "the sync stopped: the pull stage stopped");

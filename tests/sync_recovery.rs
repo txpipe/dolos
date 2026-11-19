@@ -1469,6 +1469,62 @@ fn a_start_stops_on_a_wal_a_store_still_needs() {
     assert!(std::fs::read(&wal).unwrap() == before, "the WAL changed");
 }
 
+/// A WAL of another version that no store needs is reset, and the start
+/// seeds it at the state cursor: one point, with none before it to roll back
+/// to. A peer past that point that doesn't hold it, as after a fork dropped
+/// the node's last block, ends `sync catchup` at its first answer, naming a
+/// forced bootstrap as the fix.
+#[test]
+#[cfg_attr(
+    feature = "debug",
+    ignore = "the debug feature's console subscriber panics a sync built without tokio_unstable"
+)]
+fn a_reset_wal_whose_point_a_fork_dropped_stops_the_sync_naming_a_forced_bootstrap() {
+    use dolos_testing::peer::{PeerFixture, PeerOptions};
+
+    let (node, blocks) = synced();
+    let tip = point(&blocks[3]);
+    stamp_wal(&node, dolos_redb3::wal::CURRENT_WAL_VERSION + 1);
+
+    // The fixture's chain has another block at every slot, and one past the
+    // node's tip.
+    let peer = PeerFixture::start(
+        "127.0.0.1:0",
+        2,
+        PeerOptions {
+            initial_blocks: tip.slot() + 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let config_path = node.config_path();
+    let mut document: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    document["upstream"] =
+        toml::from_str(&format!("peer_address = \"{}\"", peer.address())).unwrap();
+    document.as_table_mut().unwrap().insert(
+        "sync".into(),
+        toml::from_str("retry = { max_retries = 3, backoff_unit_seconds = 0 }").unwrap(),
+    );
+    std::fs::write(&config_path, toml::to_string(&document).unwrap()).unwrap();
+
+    let output = node.run(&["sync", "catchup"]);
+    let message = stderr_words(&output);
+    assert_eq!(code(&output), Some(1), "{message}");
+
+    for said in [
+        format!("the WAL holds only {tip}, with no earlier point to roll back to"),
+        format!("the peer, past it at {}, does not hold it", peer.tip()),
+        "`dolos bootstrap --force`".to_string(),
+    ] {
+        assert!(message.contains(&said), "{said:?} in {message}");
+    }
+
+    assert_eq!(peer.intersects(), 1, "no retry: {message}");
+    assert_eq!(store_positions(&node).0, Some(tip));
+}
+
 #[test]
 fn a_rollback_moves_every_store_to_the_point() {
     let (node, blocks) = synced();
