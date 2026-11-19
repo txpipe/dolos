@@ -510,7 +510,7 @@ The Blockfrost-compatible [MiniBF](../apis/minibf) endpoint.
 | `ipfs_gateways` | array of strings (URLs) | `["https://ipfs.io", "https://gateway.pinata.cloud"]` |
 | `request_timeout_seconds` | integer (seconds) | `120`; valid 1 to 3600 |
 
-- `public_url` is the URL clients reach the API at, reported by `/`.
+- `public_url` is the URL clients reach the API at, reported as `url` by `/`. Unset, `/` carries no `url`; the listen address is never reported in its place.
 - `token_registry_url` is the token registry read for off-chain asset metadata.
 - `max_scan_items` caps the items a page-based scan reads on the heavy endpoints.
 - `route_prefix` is a URL path every endpoint is served under, `/health` included; set `"/api/v0"` to match the Blockfrost server URL. It starts with `/` and names at least one segment, none of them empty; its segments use only letters, digits, `-`, `.`, `_` and `~`, and `.` and `..` segments are refused; a trailing `/` is dropped. A path outside the prefix answers like any unknown path. Unset, the endpoints are served at the root.

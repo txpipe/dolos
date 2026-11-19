@@ -909,7 +909,8 @@ pub struct MinibfConfig {
     permissive_cors: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_registry_url: Option<String>,
-    /// The URL clients reach this API at.
+    /// The URL clients reach this API at, reported as `url` by `/`. Unset,
+    /// `/` carries no `url`; the bind address is never reported instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
