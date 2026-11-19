@@ -602,6 +602,114 @@ async fn tx_cbor_batch_answers_each_distinct_hash_like_tx_cbor() {
 }
 
 #[tokio::test]
+async fn tx_cbor_batch_with_positions_preserves_order_deduplicates_and_reports_misses() {
+    let (domain, hashes) = domain_with_shared_blocks(3, 4);
+    let query = AsyncQueryFacade::new(domain);
+    let missing = TxHash::from([0xff; 32]);
+    let mut distinct: Vec<_> = hashes.iter().flatten().rev().copied().collect();
+    distinct.insert(5, missing);
+    let requested: Vec<_> = distinct.iter().chain(&distinct).copied().collect();
+
+    let batch = query.tx_cbor_batch_with_positions(requested).await.unwrap();
+
+    assert_eq!(
+        batch.iter().map(|(hash, _)| *hash).collect::<Vec<_>>(),
+        distinct
+    );
+    let config = SyntheticBlockConfig::default();
+    assert!(config.slot_step > 0);
+    for (hash, value) in batch {
+        let single = query.tx_cbor(hash.to_vec()).await.unwrap();
+        if hash == missing {
+            assert_eq!(value, None);
+            assert_eq!(single, None);
+            continue;
+        }
+        let (cbor, position) = value.unwrap();
+        let (block_index, tx_index) = hashes
+            .iter()
+            .enumerate()
+            .find_map(|(block_index, txs)| {
+                txs.iter()
+                    .position(|tx_hash| *tx_hash == hash)
+                    .map(|tx_index| (block_index, tx_index))
+            })
+            .unwrap();
+        assert_eq!(Some(cbor), single);
+        assert_eq!(
+            position,
+            UtxoPosition::of_tx(
+                config.slot + block_index as u64 * config.slot_step,
+                tx_index,
+            )
+        );
+    }
+    assert!(query
+        .tx_cbor_batch_with_positions([])
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn tx_cbor_batch_with_positions_reads_each_slot_once_without_extra_exact_lookups() {
+    let domain = measured_domain(QueryLimiter::default());
+    let hashes = load_shared_blocks(&domain, 3, 4);
+    let query = AsyncQueryFacade::new(domain.clone());
+    let reads = || {
+        domain
+            .archive()
+            .counters
+            .block_reads
+            .load(Ordering::Relaxed)
+    };
+    let requested: Vec<_> = hashes
+        .iter()
+        .flatten()
+        .chain(hashes.iter().flatten())
+        .copied()
+        .chain(absent(1))
+        .collect();
+    let before_reads = reads();
+    let before_lookups = exact_lookups(&domain);
+
+    let batch = query
+        .tx_cbor_batch_with_positions(requested.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(batch.len(), 13);
+    assert_eq!(
+        batch.iter().filter(|(_, value)| value.is_some()).count(),
+        12
+    );
+    assert_eq!(reads() - before_reads, 3);
+    assert_eq!(exact_lookups(&domain) - before_lookups, 13);
+
+    let before_reads = reads();
+    let before_lookups = exact_lookups(&domain);
+    let legacy = query.tx_cbor_batch(requested).await.unwrap();
+    assert_eq!(
+        legacy,
+        batch
+            .into_iter()
+            .map(|(hash, value)| (hash, value.map(|(cbor, _)| cbor)))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(reads() - before_reads, 3);
+    assert_eq!(exact_lookups(&domain) - before_lookups, 13);
+
+    assert!(query
+        .tx_cbor_batch_with_positions([])
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(reads() - before_reads, 3);
+    assert_eq!(exact_lookups(&domain) - before_lookups, 13);
+    assert_eq!(domain.query_limiter().in_use(), 0);
+}
+
+#[tokio::test]
 async fn tx_cbor_batch_reads_each_body_once_however_many_of_its_txs_are_asked() {
     let domain = measured_domain(QueryLimiter::default());
     let hashes = load_shared_blocks(&domain, 3, 4);
