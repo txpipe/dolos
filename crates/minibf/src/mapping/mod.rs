@@ -635,6 +635,24 @@ async fn fetch_offchain_body(
     timeout: Duration,
     max_bytes: usize,
 ) -> Result<Vec<u8>, OffchainFetchError> {
+    fetch_offchain_response(client, url, timeout, max_bytes)
+        .await
+        .map(|response| response.body)
+}
+
+/// A successful off-chain answer: its body and its `Content-Type` header, if
+/// the server sent one.
+struct OffchainResponse {
+    body: Vec<u8>,
+    content_type: Option<String>,
+}
+
+async fn fetch_offchain_response(
+    client: &reqwest::Client,
+    url: &str,
+    timeout: Duration,
+    max_bytes: usize,
+) -> Result<OffchainResponse, OffchainFetchError> {
     let url = match reqwest::Url::parse(url) {
         Ok(url) if is_public_http_url(&url) => url,
         _ => return Err(OffchainFetchError::Connection),
@@ -651,8 +669,49 @@ async fn fetch_offchain_body(
         return Err(OffchainFetchError::HttpResponse(response.status()));
     }
 
-    read_offchain_body(response, max_bytes).await
+    // a header value is bytes; decoding them as Latin-1 keeps every one
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .map(|value| {
+            value
+                .as_bytes()
+                .iter()
+                .map(|&byte| char::from(byte))
+                .collect()
+        });
+    let body = read_offchain_body(response, max_bytes).await?;
+
+    Ok(OffchainResponse { body, content_type })
 }
+
+/// The content types Blockfrost accepts for a governance anchor, matched
+/// anywhere in the header value, case-sensitively.
+const ANCHOR_CONTENT_TYPES: &[&str] = &[
+    "application/json",
+    "application/ld+json",
+    "text/plain",
+    "binary/octet-stream",
+    "application/octet-stream",
+    "application/binary",
+];
+
+/// Whether Blockfrost reads an anchor answer with this content type as JSON.
+/// A `text/html` answer passes only when its body starts with `{`, as some
+/// servers label JSON that way; an answer without the header passes too.
+fn anchor_content_type_accepted(content_type: &str, body: &[u8]) -> bool {
+    if content_type.contains("text/html") {
+        return body.trim_ascii_start().first() == Some(&b'{');
+    }
+
+    ANCHOR_CONTENT_TYPES
+        .iter()
+        .any(|accepted| content_type.contains(accepted))
+}
+
+/// The prefix Blockfrost gives every governance-anchor fetch error except a
+/// hash mismatch.
+const ANCHOR_ERROR_PREFIX: &str = "Error Offchain Voting Anchor: ";
 
 pub(crate) fn offchain_hash_mismatch_error(
     url: &str,
@@ -675,8 +734,17 @@ fn offchain_http_response_error(url: &str, status: StatusCode) -> DrepsInnerMeta
     DrepsInnerMetadataError::new(
         Code::HttpResponseError,
         format!(
-            "The server at {url} returned HTTP status {} \"{reason}\".",
+            "{ANCHOR_ERROR_PREFIX}HTTP Response error from {url} resulted in HTTP status code : {} \"{reason}\"",
             status.as_u16(),
+        ),
+    )
+}
+
+fn offchain_content_type_error(url: &str, content_type: &str) -> DrepsInnerMetadataError {
+    DrepsInnerMetadataError::new(
+        Code::HttpResponseError,
+        format!(
+            "{ANCHOR_ERROR_PREFIX}HTTP Response error from {url}: expected JSON, but got : {content_type:?}"
         ),
     )
 }
@@ -684,35 +752,41 @@ fn offchain_http_response_error(url: &str, status: StatusCode) -> DrepsInnerMeta
 fn offchain_connection_error(url: &str) -> DrepsInnerMetadataError {
     DrepsInnerMetadataError::new(
         Code::ConnectionError,
-        format!("The client cannot connect to {url}."),
+        format!("{ANCHOR_ERROR_PREFIX}Connection failure error when fetching metadata from {url}."),
     )
 }
 
-fn offchain_decode_error(url: &str) -> DrepsInnerMetadataError {
+fn offchain_decode_error(url: &str, error: &serde_json::Error) -> DrepsInnerMetadataError {
+    // Blockfrost prints the URL as an optional value, hence the `Just`
     DrepsInnerMetadataError::new(
         Code::DecodeError,
-        format!("The client cannot parse JSON from {url}."),
+        format!(
+            "{ANCHOR_ERROR_PREFIX}JSON decode error from when fetching metadata from Just {url} resulted in : {:?}",
+            error.to_string(),
+        ),
     )
 }
 
 fn offchain_size_error(url: &str) -> DrepsInnerMetadataError {
     DrepsInnerMetadataError::new(
         Code::SizeExceeded,
-        format!("The response from {url} is larger than {MAX_ANCHOR_METADATA_BYTES} bytes."),
+        format!(
+            "{ANCHOR_ERROR_PREFIX}Size error, fetching metadata from {url} exceeded {MAX_ANCHOR_METADATA_BYTES} bytes."
+        ),
     )
 }
 
 fn offchain_unknown_error(url: &str) -> DrepsInnerMetadataError {
     DrepsInnerMetadataError::new(
         Code::UnknownError,
-        format!("The API cannot create an HTTP client for {url}."),
+        format!("{ANCHOR_ERROR_PREFIX}The API cannot create an HTTP client for {url}."),
     )
 }
 
 fn offchain_no_gateway_error(url: &str) -> DrepsInnerMetadataError {
     DrepsInnerMetadataError::new(
         Code::UnknownError,
-        format!("The API cannot resolve {url} without an IPFS gateway."),
+        format!("{ANCHOR_ERROR_PREFIX}No IPFS gateway is configured to fetch {url}."),
     )
 }
 
@@ -854,12 +928,13 @@ pub fn anchor_metadata_from_body(
             json,
             bytes: format!("\\x{}", hex::encode(body)),
         })
-        .map_err(|_| offchain_decode_error(url))
+        .map_err(|error| offchain_decode_error(url, &error))
 }
 
 /// This function fetches one resolved candidate URL for
-/// [`anchor_offchain_body`]. The function makes sure that the body hash
-/// matches `expected_hash`.
+/// [`anchor_offchain_body`]. The function refuses a content type Blockfrost
+/// does not read as JSON, then makes sure that the body hash matches
+/// `expected_hash`.
 ///
 /// `request_url` is the URL that the function fetches. For an `ipfs://` anchor,
 /// `request_url` is a gateway URL. `original_url` is the on-chain URL. Every
@@ -870,7 +945,7 @@ async fn fetch_anchor_candidate(
     original_url: &str,
     expected_hash: &[u8],
 ) -> Result<Vec<u8>, DrepsInnerMetadataError> {
-    let body = fetch_offchain_body(
+    let OffchainResponse { body, content_type } = fetch_offchain_response(
         client,
         request_url,
         ANCHOR_FETCH_TIMEOUT,
@@ -878,6 +953,12 @@ async fn fetch_anchor_candidate(
     )
     .await
     .map_err(|error| error.into_metadata_error(original_url))?;
+
+    if let Some(content_type) = content_type {
+        if !anchor_content_type_accepted(&content_type, &body) {
+            return Err(offchain_content_type_error(original_url, &content_type));
+        }
+    }
 
     let actual_hash = Hasher::<256>::hash(body.as_ref());
 
@@ -977,9 +1058,13 @@ mod offchain_tests {
         let (metadata, error) = anchor_offchain_metadata(&url, &[0; 32], &[]).await;
 
         assert!(metadata.is_none());
+        let error = error.expect("The connection error is absent.");
+        assert_eq!(error.code, Code::ConnectionError);
         assert_eq!(
-            error.expect("The connection error is absent.").code,
-            Code::ConnectionError
+            error.message,
+            format!(
+                "Error Offchain Voting Anchor: Connection failure error when fetching metadata from {url}."
+            ),
         );
         assert_eq!(
             listener
@@ -1262,7 +1347,9 @@ mod offchain_tests {
                     result.err().unwrap(),
                     DrepsInnerMetadataError::new(
                         Code::SizeExceeded,
-                        format!("The response from {original_url} is larger than 3000000 bytes."),
+                        format!(
+                            "Error Offchain Voting Anchor: Size error, fetching metadata from {original_url} exceeded 3000000 bytes."
+                        ),
                     ),
                 );
             }
@@ -1283,6 +1370,212 @@ mod offchain_tests {
         server.join().expect("The test server did not stop.");
         assert_eq!(error.code, Code::HashMismatch);
         assert!(error.message.contains(original_url));
+    }
+
+    #[tokio::test]
+    async fn anchor_candidate_refuses_html_before_hashing() {
+        let body = b"<!doctype html><html></html>".to_vec();
+        let expected_hash = Hasher::<256>::hash(body.as_ref());
+        let original_url = "https://anchor.example/drep";
+
+        // a matching hash does not let an HTML answer through
+        for hash in [expected_hash.as_ref(), &[0; 32]] {
+            let (url, server) = serve_response(
+                body.clone(),
+                "200 OK",
+                "Content-Type: text/html; charset=utf-8\r\n",
+            );
+            let (client, request_url) = local_candidate_client(&url);
+
+            let error = fetch_anchor_candidate(&client, &request_url, original_url, hash)
+                .await
+                .expect_err("The HTML answer was accepted.");
+
+            server.join().unwrap();
+            assert_eq!(
+                error,
+                DrepsInnerMetadataError::new(
+                    Code::HttpResponseError,
+                    "Error Offchain Voting Anchor: HTTP Response error from https://anchor.example/drep: expected JSON, but got : \"text/html; charset=utf-8\"".to_string(),
+                ),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn anchor_candidate_refuses_other_content_types() {
+        let (url, server) = serve_response(b"{}".to_vec(), "200 OK", "Content-Type: image/png\r\n");
+        let (client, request_url) = local_candidate_client(&url);
+
+        let error =
+            fetch_anchor_candidate(&client, &request_url, "https://anchor.example/a", &[0; 32])
+                .await
+                .expect_err("The image answer was accepted.");
+
+        server.join().unwrap();
+        assert_eq!(error.code, Code::HttpResponseError);
+        assert!(error
+            .message
+            .ends_with(": expected JSON, but got : \"image/png\""));
+    }
+
+    #[tokio::test]
+    async fn anchor_candidate_refuses_html_with_braces() {
+        // a `{` inside the page is not a body that starts with one
+        let body = b"<html><style>p{color:red}</style></html>".to_vec();
+        let expected_hash = Hasher::<256>::hash(body.as_ref());
+        let (url, server) = serve_response(body, "200 OK", "Content-Type: text/html\r\n");
+        let (client, request_url) = local_candidate_client(&url);
+
+        let error = fetch_anchor_candidate(
+            &client,
+            &request_url,
+            "https://anchor.example/a",
+            expected_hash.as_ref(),
+        )
+        .await
+        .expect_err("The HTML answer was accepted.");
+
+        server.join().unwrap();
+        assert_eq!(error.code, Code::HttpResponseError);
+        assert!(error
+            .message
+            .ends_with(": expected JSON, but got : \"text/html\""));
+    }
+
+    #[tokio::test]
+    async fn anchor_candidate_matches_content_types_as_blockfrost() {
+        let body = br#"{"name":"Dolos"}"#.to_vec();
+        let expected_hash = Hasher::<256>::hash(body.as_ref());
+
+        // matching is case-sensitive, and a header byte above 0x7f is kept
+        // as its Latin-1 character rather than dropping the header
+        for (content_type, shown) in [
+            ("Application/JSON", "Application/JSON"),
+            ("text/json", "text/json"),
+            ("image/png; name=\u{e9}", "image/png; name=\u{c3}\u{a9}"),
+        ] {
+            let headers = format!("Content-Type: {content_type}\r\n");
+            let (url, server) = serve_response(body.clone(), "200 OK", &headers);
+            let (client, request_url) = local_candidate_client(&url);
+
+            let error = fetch_anchor_candidate(
+                &client,
+                &request_url,
+                "https://anchor.example/a",
+                expected_hash.as_ref(),
+            )
+            .await
+            .expect_err(content_type);
+
+            server.join().unwrap();
+            assert_eq!(error.code, Code::HttpResponseError, "{content_type}");
+            assert!(
+                error
+                    .message
+                    .ends_with(&format!(": expected JSON, but got : {shown:?}")),
+                "{}",
+                error.message,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn anchor_without_gateway_reports_no_gateway() {
+        let url = "ipfs://bafy-no-gateway";
+
+        let (metadata, error) = anchor_offchain_metadata(url, &[0; 32], &[]).await;
+
+        assert!(metadata.is_none());
+        assert_eq!(
+            error.expect("The no-gateway error is absent."),
+            DrepsInnerMetadataError::new(
+                Code::UnknownError,
+                "Error Offchain Voting Anchor: No IPFS gateway is configured to fetch ipfs://bafy-no-gateway.".to_string(),
+            ),
+        );
+    }
+
+    #[tokio::test]
+    async fn anchor_candidate_accepts_json_content_types() {
+        let body = b"  {\"name\":\"Dolos\"}".to_vec();
+        let expected_hash = Hasher::<256>::hash(body.as_ref());
+
+        for content_type in [
+            "application/json",
+            "application/ld+json; charset=utf-8",
+            "text/plain",
+            "binary/octet-stream",
+            "application/octet-stream",
+            "application/binary",
+            // HTML that is a JSON object, as some servers label it
+            "text/html",
+        ] {
+            let headers = format!("Content-Type: {content_type}\r\n");
+            let (url, server) = serve_response(body.clone(), "200 OK", &headers);
+            let (client, request_url) = local_candidate_client(&url);
+
+            let fetched = fetch_anchor_candidate(
+                &client,
+                &request_url,
+                "https://anchor.example/a",
+                expected_hash.as_ref(),
+            )
+            .await;
+
+            server.join().unwrap();
+            assert_eq!(fetched.expect(content_type), body);
+        }
+    }
+
+    #[tokio::test]
+    async fn anchor_candidate_reports_json_hash_mismatch() {
+        let body = br#"{"name":"Dolos"}"#.to_vec();
+        let actual_hash = Hasher::<256>::hash(body.as_ref());
+        let (url, server) = serve_response(body, "200 OK", "Content-Type: application/json\r\n");
+        let (client, request_url) = local_candidate_client(&url);
+        let original_url = "https://anchor.example/drep";
+
+        let error = fetch_anchor_candidate(&client, &request_url, original_url, &[0; 32])
+            .await
+            .expect_err("The hash mismatch was accepted.");
+
+        server.join().unwrap();
+        assert_eq!(
+            error,
+            DrepsInnerMetadataError::new(
+                Code::HashMismatch,
+                format!(
+                    "Hash mismatch when fetching metadata from {original_url}. Expected \"{}\" but got \"{}\".",
+                    hex::encode([0; 32]),
+                    hex::encode(actual_hash),
+                ),
+            ),
+        );
+    }
+
+    #[tokio::test]
+    async fn anchor_candidate_words_http_status_as_blockfrost() {
+        let (url, server) = serve_response(
+            b"<html></html>".to_vec(),
+            "404 Not Found",
+            "Content-Type: text/html\r\n",
+        );
+        let (client, request_url) = local_candidate_client(&url);
+        let original_url = "https://example.com/my-drep-info.json";
+
+        let error = fetch_anchor_candidate(&client, &request_url, original_url, &[0; 32])
+            .await
+            .expect_err("The 404 answer was accepted.");
+
+        server.join().unwrap();
+        assert_eq!(
+            error,
+            DrepsInnerMetadataError::new(
+                Code::HttpResponseError,
+                "Error Offchain Voting Anchor: HTTP Response error from https://example.com/my-drep-info.json resulted in HTTP status code : 404 \"Not Found\"".to_string(),
+            ),
+        );
     }
 
     #[tokio::test]
@@ -1331,6 +1624,13 @@ mod offchain_tests {
             .expect("The invalid JSON was accepted.");
         assert_eq!(error.code, Code::DecodeError);
         assert!(error.message.contains(original_url));
+        assert!(
+            error.message.starts_with(
+                "Error Offchain Voting Anchor: JSON decode error from when fetching metadata from Just ipfs://bafy-invalid-json resulted in : \""
+            ),
+            "{}",
+            error.message,
+        );
     }
 
     #[test]
