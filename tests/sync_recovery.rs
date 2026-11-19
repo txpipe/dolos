@@ -1366,6 +1366,80 @@ fn a_wal_no_store_needs_is_reset_by_recover() {
     );
 }
 
+/// A Byron boundary block and the main block sharing its slot, past the
+/// synced blocks, in the WAL, and the state at the main block, as a crash
+/// before the main block's archive commit leaves them. An archive holding
+/// only the boundary block lacks the main one at its own tip slot, so
+/// `sync recover` keeps a WAL of another version byte for byte; with both
+/// archived, it resets it and seeds it at the state cursor.
+#[test]
+fn a_wal_holding_the_block_an_archive_lacks_at_its_tip_slot_is_kept() {
+    for archived_main in [false, true] {
+        let (node, blocks) = synced();
+        let tip = point(blocks.last().unwrap());
+        let [(ebb, ebb_block), (main, main_block)] = boundary_pair(&tip, blocks.len() as u64);
+        assert_eq!(ebb.slot(), main.slot());
+
+        let entry = |block: &RawBlock| LogValue::<CardanoDelta> {
+            block: block.to_vec(),
+            delta: vec![],
+            inputs: Default::default(),
+        };
+
+        let stores = dolos::storage::open_data_stores::<CardanoDelta>(&node.config).unwrap();
+        stores
+            .wal
+            .append_entries(vec![
+                (ebb.clone(), entry(&ebb_block)),
+                (main.clone(), entry(&main_block)),
+            ])
+            .unwrap();
+
+        let writer = stores.archive.start_writer().unwrap();
+        writer.apply(&ebb, &ebb_block).unwrap();
+        if archived_main {
+            writer.apply(&main, &main_block).unwrap();
+        }
+        writer.commit().unwrap();
+
+        let writer = stores.state.start_writer().unwrap();
+        writer.set_cursor(main.clone()).unwrap();
+        writer.commit().unwrap();
+
+        stores.state.shutdown().unwrap();
+        stores.archive.shutdown().unwrap();
+        stores.wal.shutdown().unwrap();
+        drop(stores);
+
+        stamp_wal(&node, dolos_redb3::wal::CURRENT_WAL_VERSION + 1);
+        let wal = node.config.wal_path().unwrap();
+        let before = std::fs::read(&wal).unwrap();
+
+        let output = node.run(&["sync", "recover", "--format", "json"]);
+        let message = stderr_words(&output);
+
+        if archived_main {
+            assert_eq!(code(&output), Some(0), "{message}");
+            assert_eq!(json(&output)["action"], "seed_wal");
+            assert_eq!(store_positions(&node).0, Some(main));
+            continue;
+        }
+
+        assert_eq!(code(&output), Some(1), "{message}");
+
+        let lacks = format!(
+            "the archive, at slot {}, lacks the block the state applied there",
+            main.slot()
+        );
+
+        for said in ["is kept as it is", &lacks, "start that release once"] {
+            assert!(message.contains(said), "{said:?} in {message}");
+        }
+
+        assert!(std::fs::read(&wal).unwrap() == before, "the WAL changed");
+    }
+}
+
 /// A start, as `sync catchup` makes one, stops on a WAL a store still needs
 /// before it reaches for a peer, and leaves it byte for byte.
 #[test]

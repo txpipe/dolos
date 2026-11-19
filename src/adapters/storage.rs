@@ -833,11 +833,12 @@ fn replay_positions(
 /// reset would lose, so a writable open keeps a WAL holding one.
 ///
 /// A start reseeds an emptied WAL at the state cursor and syncs on from
-/// there, so the archive loses the blocks the state applied past its tip. An
-/// archive the dataset doesn't keep, or a rolling one left empty, which is
-/// whole with whatever reaches it next, needs none. A state cursor without a
-/// block hash can't be reseeded from, so it needs every block from its slot.
-/// A position that fails to read needs every block it could.
+/// there, so the archive loses the blocks the state applied past its tip, and
+/// at it the state's block, which a Byron boundary block can share a slot
+/// with. An archive the dataset doesn't keep, or a rolling one left empty,
+/// which is whole with whatever reaches it next, needs none. A state cursor
+/// without a block hash can't be reseeded from, so it needs every block from
+/// its slot. A position that fails to read needs every block it could.
 fn needed_blocks(
     config: &RootConfig,
     state: &StateStoreBackend,
@@ -874,7 +875,20 @@ fn needed_blocks(
     }
 
     let (from, by) = match archive.get_tip() {
-        Ok(Some((tip, _))) if tip >= slot => return needed,
+        Ok(Some((tip, _))) if tip > slot => return needed,
+        Ok(Some((tip, _))) if tip == slot => {
+            match archive.find_intersect(std::slice::from_ref(&cursor)) {
+                Ok(Some(_)) => return needed,
+                Ok(None) => (
+                    slot,
+                    format!("the archive, at slot {slot}, lacks the block the state applied there"),
+                ),
+                Err(error) => (
+                    slot,
+                    format!("the archive's blocks at slot {slot} fail to read ({error})"),
+                ),
+            }
+        }
         Ok(Some((tip, _))) => (
             tip.saturating_add(1),
             format!("the archive, at slot {tip}, is behind the state at slot {slot}"),
@@ -3774,14 +3788,15 @@ mod tests {
         assert!(std::fs::read(&wal).unwrap() == before, "the WAL changed");
     }
 
+    /// The point of the block [`written_at`] archives at `slot`.
     fn point_at(slot: BlockSlot) -> ChainPoint {
-        ChainPoint::Specific(slot, [1u8; 32].into())
+        dolos_testing::blocks::make_conway_block(slot).0
     }
 
     /// A dataset this release opens, its state cursor at `cursor` and its
-    /// archive's tip at slot `archive`, if any, over a WAL holding a block
-    /// at each slot from 85 to 100. With the cursor at 100 and the archive
-    /// behind, it is what a crash between their commits leaves.
+    /// archive's tip at the block at `archive`, if any, over a WAL holding a
+    /// block at each slot from 85 to 100. With the cursor at 100 and the
+    /// archive behind, it is what a crash between their commits leaves.
     fn written_at(config: &RootConfig, cursor: ChainPoint, archive: Option<BlockSlot>) {
         written_state(config, current().as_deref());
 
@@ -3799,10 +3814,9 @@ mod tests {
             let store = opened_archive(config, current().as_deref());
 
             if let Some(slot) = archive {
+                let (point, block) = dolos_testing::blocks::make_conway_block(slot);
                 let writer = store.start_writer().unwrap();
-                writer
-                    .apply(&point_at(slot), &std::sync::Arc::new(vec![1u8; 8]))
-                    .unwrap();
+                writer.apply(&point, &block).unwrap();
                 writer.commit().unwrap();
             }
 
@@ -3938,6 +3952,11 @@ mod tests {
                 "the block at slot 91",
             ),
             (
+                Some(99),
+                "the archive, at slot 99, is behind the state at slot 100",
+                "the block at slot 100",
+            ),
+            (
                 None,
                 "the archive, empty, is behind the state at slot 100",
                 "the block at slot 85",
@@ -3966,6 +3985,55 @@ mod tests {
             };
 
             assert_kept(&format!("{case} caught up"), written, &[]);
+        }
+    }
+
+    /// An archive at the state's slot can still lack the state's block, as
+    /// one holding only the boundary block of a Byron same-slot pair does,
+    /// and one whose blocks there fail to read can't say. A writable open
+    /// keeps a WAL holding a block at that slot; with the state's own block
+    /// archived there, it resets it (the caught-up case above).
+    #[test]
+    fn an_archive_at_the_state_slot_needs_the_block_it_lacks() {
+        let (other, block) = dolos_testing::blocks::make_conway_block_with_prev(100, None, 1);
+        assert_ne!(other, point_at(100));
+
+        let archived = [
+            (
+                other,
+                block,
+                "the archive, at slot 100, lacks the block the state applied there",
+            ),
+            (
+                point_at(100),
+                std::sync::Arc::new(vec![1u8; 8]),
+                "the archive's blocks at slot 100 fail to read",
+            ),
+        ];
+
+        for (case, unreadable) in UNREADABLE {
+            for (point, block, why) in &archived {
+                let written = || {
+                    let temp = tempfile::tempdir().unwrap();
+                    let config = config_over(&temp.path().join("data"));
+                    written_at(&config, point_at(100), None);
+
+                    let store = opened_archive(&config, None);
+                    let writer = store.start_writer().unwrap();
+                    writer.apply(point, block).unwrap();
+                    writer.commit().unwrap();
+                    store.shutdown().unwrap();
+
+                    unreadable(&config);
+                    (temp, config)
+                };
+
+                assert_kept(
+                    &format!("{case} {why}"),
+                    written,
+                    &[*why, "the block at slot 100"],
+                );
+            }
         }
     }
 
