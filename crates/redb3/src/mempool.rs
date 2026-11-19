@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+use std::marker::PhantomData;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use pallas::codec::minicbor::{self, Decode, Encode};
@@ -8,7 +10,8 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::{debug, warn};
 
-use crate::handle::Handle;
+use crate::handle::{is_uninitialised, needs_repair, Handle};
+use crate::layout::{check_layout, is_corrupt};
 
 use dolos_core::{
     config::RedbMempoolConfig, ChainPoint, EraCbor, MempoolCount, MempoolError, MempoolEvent,
@@ -64,6 +67,77 @@ impl From<redb::TransactionError> for RedbMempoolError {
 }
 
 const DEFAULT_CACHE_SIZE_MB: usize = 32;
+
+/// The layout of the mempool file. A file recording another, or none over
+/// transactions, is recreated empty by a writable open: the mempool is
+/// transient.
+pub const MEMPOOL_VERSION: u32 = 1;
+
+/// The file's metadata: its [`MEMPOOL_VERSION`] under [`VERSION_KEY`].
+const META: TableDefinition<&str, u32> = TableDefinition::new("meta");
+
+const VERSION_KEY: &str = "version";
+
+/// What a mempool file records in place of this release's
+/// [`MEMPOOL_VERSION`].
+#[derive(Debug)]
+pub enum FoundVersion {
+    Other(u32),
+    /// No version, over transactions a release before the marker kept.
+    Unmarked,
+    /// Contents that fail to read or decode: damage, a cut-short file, or a
+    /// layout of another release.
+    Unreadable(String),
+}
+
+impl std::fmt::Display for FoundVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Other(version) => write!(f, "version {version}"),
+            Self::Unmarked => f.write_str("no version over transactions"),
+            Self::Unreadable(error) => write!(f, "unreadable ({error})"),
+        }
+    }
+}
+
+/// A mempool file this release does not read, refused by a read-only open,
+/// which leaves it as it is.
+#[derive(Debug, Error)]
+#[error("the mempool file {} records {found}, this release writes version {MEMPOOL_VERSION}", .path.display())]
+pub struct IncompatibleMempool {
+    pub path: PathBuf,
+    pub found: FoundVersion,
+}
+
+/// The [`IncompatibleMempool`] `error` carries, if it is one.
+pub fn incompatible(error: &MempoolError) -> Option<&IncompatibleMempool> {
+    match error {
+        MempoolError::Internal(error) => error.downcast_ref(),
+        _ => None,
+    }
+}
+
+/// Whether the file at `path` is empty, as a crash during its creation
+/// leaves it: a writable open initialises it, a read-only one cannot.
+fn is_empty(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.len() == 0)
+}
+
+fn internal(error: impl std::error::Error + Send + Sync + 'static) -> MempoolError {
+    MempoolError::Internal(Box::new(error))
+}
+
+/// `error` as what the file records, when it is about the file's contents;
+/// otherwise, a lock, permission or I/O error, unchanged.
+fn unreadable(error: impl Into<redb::Error>) -> Result<FoundVersion, redb::Error> {
+    let error = error.into();
+
+    if is_corrupt(&error) {
+        Ok(FoundVersion::Unreadable(error.to_string()))
+    } else {
+        Err(error)
+    }
+}
 
 // ── Layer 1: redb key/value types ───────────────────────────────────────
 
@@ -220,6 +294,56 @@ impl redb::Value for DbEraCbor {
 
     fn type_name() -> redb::TypeName {
         redb::TypeName::new("mempool_era_cbor")
+    }
+}
+
+/// The bytes of a `T`, read without decoding them, so that a value of
+/// another layout is found rather than panicking. redb admits it for a table
+/// of `T`: it records the same type name and width.
+struct Raw<T>(PhantomData<T>);
+
+impl<T> std::fmt::Debug for Raw<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Raw")
+    }
+}
+
+impl<T: redb::Value + 'static> redb::Value for Raw<T> {
+    type SelfType<'a>
+        = &'a [u8]
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = &'a [u8]
+    where
+        Self: 'a;
+
+    fn fixed_width() -> Option<usize> {
+        T::fixed_width()
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        data
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
+        value
+    }
+
+    fn type_name() -> redb::TypeName {
+        T::type_name()
+    }
+}
+
+impl<T: redb::Key + 'static> redb::Key for Raw<T> {
+    fn compare(data1: &[u8], data2: &[u8]) -> std::cmp::Ordering {
+        T::compare(data1, data2)
     }
 }
 
@@ -461,7 +585,8 @@ impl InflightRecord {
 struct PendingTable;
 
 impl PendingTable {
-    const DEF: TableDefinition<'static, DbPendingKey, DbEraCbor> = TableDefinition::new("pending");
+    const NAME: &str = "pending";
+    const DEF: TableDefinition<'static, DbPendingKey, DbEraCbor> = TableDefinition::new(Self::NAME);
 
     fn initialize(wx: &redb::WriteTransaction) -> Result<(), RedbMempoolError> {
         wx.open_table(Self::DEF)?;
@@ -556,8 +681,9 @@ impl PendingTable {
 struct InflightTable;
 
 impl InflightTable {
+    const NAME: &str = "inflight";
     const DEF: TableDefinition<'static, DbTxHash, InflightRecord> =
-        TableDefinition::new("inflight");
+        TableDefinition::new(Self::NAME);
 
     fn initialize(wx: &redb::WriteTransaction) -> Result<(), RedbMempoolError> {
         wx.open_table(Self::DEF)?;
@@ -632,7 +758,8 @@ impl InflightTable {
 struct FinalizedTable;
 
 impl FinalizedTable {
-    const DEF: TableDefinition<'static, u64, FinalizedEntry> = TableDefinition::new("finalized");
+    const NAME: &str = "finalized";
+    const DEF: TableDefinition<'static, u64, FinalizedEntry> = TableDefinition::new(Self::NAME);
 
     fn initialize(wx: &redb::WriteTransaction) -> Result<(), RedbMempoolError> {
         wx.open_table(Self::DEF)?;
@@ -715,32 +842,98 @@ impl futures_core::Stream for RedbMempoolStream {
 }
 
 impl RedbMempool {
-    pub fn open(
-        path: impl AsRef<std::path::Path>,
+    /// Opens the mempool file at `path`, creating it if it is not there. A
+    /// file this release does not read (see [`FoundVersion`]) is deleted and
+    /// recreated empty, with one warning, dropping its transactions. A lock,
+    /// permission or I/O error is returned unchanged.
+    pub fn open(path: impl AsRef<Path>, config: &RedbMempoolConfig) -> Result<Self, MempoolError> {
+        let path = path.as_ref();
+
+        let found = match Self::create(path, config)? {
+            Ok(store) => return Ok(store),
+            Err(found) => found,
+        };
+
+        warn!(
+            path = %path.display(),
+            %found,
+            expected = MEMPOOL_VERSION,
+            "mempool file incompatible, recreating it empty"
+        );
+
+        std::fs::remove_file(path).map_err(internal)?;
+
+        match Self::create(path, config)? {
+            Ok(store) => Ok(store),
+            Err(found) => Err(internal(IncompatibleMempool {
+                path: path.to_path_buf(),
+                found,
+            })),
+        }
+    }
+
+    /// The mempool over the file at `path`, or what it records when that is
+    /// not this release's layout.
+    fn create(
+        path: &Path,
         config: &RedbMempoolConfig,
-    ) -> Result<Self, MempoolError> {
+    ) -> Result<Result<Self, FoundVersion>, MempoolError> {
+        if let Err(error) = check_layout(path) {
+            return unreadable(error).map(Err).map_err(internal);
+        }
+
         let db = redb::Database::builder()
             .set_repair_callback(|x| {
                 warn!(progress = x.progress() * 100f64, "mempool db is repairing")
             })
             .set_cache_size(1024 * 1024 * config.cache.unwrap_or(DEFAULT_CACHE_SIZE_MB))
-            .create(path)
-            .map_err(|e| MempoolError::Internal(Box::new(e)))?;
+            .create(path);
 
-        Self::from_db(Handle::Writable(db))
+        let db = match db {
+            Ok(db) => Handle::Writable(db),
+            Err(error) => return unreadable(error).map(Err).map_err(internal),
+        };
+
+        if let Err(found) = check_version(&db).map_err(internal)? {
+            return Ok(Err(found));
+        }
+
+        Self::from_db(db).map(Ok)
     }
 
     /// Open an existing mempool read-only (see [`Handle`]), without creating
-    /// its tables.
+    /// its tables. A file this release does not read is refused as
+    /// [`IncompatibleMempool`] and left as it is; one a crash left
+    /// unrepaired, or empty, keeps redb's error.
     pub fn open_read_only(
-        path: impl AsRef<std::path::Path>,
+        path: impl AsRef<Path>,
         config: &RedbMempoolConfig,
     ) -> Result<Self, MempoolError> {
-        let db = Handle::open_read_only(
+        let path = path.as_ref();
+
+        let refused = |found| {
+            internal(IncompatibleMempool {
+                path: path.to_path_buf(),
+                found,
+            })
+        };
+
+        if let Err(error) = check_layout(path) {
+            return Err(refused(unreadable(error).map_err(internal)?));
+        }
+
+        let db = match Handle::open_read_only(
             path,
             1024 * 1024 * config.cache.unwrap_or(DEFAULT_CACHE_SIZE_MB),
-        )
-        .map_err(|e| MempoolError::Internal(Box::new(e)))?;
+        ) {
+            Ok(db) => db,
+            Err(error) if needs_repair(&error) || is_uninitialised(&error) && is_empty(path) => {
+                return Err(internal(error));
+            }
+            Err(error) => return Err(refused(unreadable(error).map_err(internal)?)),
+        };
+
+        check_version(&db).map_err(internal)?.map_err(refused)?;
 
         let (updates, _) = broadcast::channel(16);
 
@@ -772,6 +965,7 @@ impl RedbMempool {
 
     fn ensure_initialized(&self) -> Result<(), RedbMempoolError> {
         let wx = self.db.begin_write()?;
+        wx.open_table(META)?.insert(VERSION_KEY, MEMPOOL_VERSION)?;
         PendingTable::initialize(&wx)?;
         InflightTable::initialize(&wx)?;
         FinalizedTable::initialize(&wx)?;
@@ -812,6 +1006,115 @@ impl RedbMempool {
         wx.commit()?;
         self.notify(tx);
         Ok(())
+    }
+}
+
+/// Whether the file records this release's [`MEMPOOL_VERSION`], or nothing
+/// over no transactions, with every live record and the ends of the finalized
+/// log decoding. The log is not read whole: it grows with every finalized
+/// transaction, and a layout change shows in any of its records.
+fn check_version(db: &Handle) -> Result<Result<(), FoundVersion>, redb::Error> {
+    let found = match check_tables(db) {
+        Ok(found) => found,
+        Err(error) => Err(unreadable(error)?),
+    };
+
+    Ok(found)
+}
+
+fn check_tables(db: &Handle) -> Result<Result<(), FoundVersion>, redb::Error> {
+    let rx = db.begin_read()?;
+
+    let recorded = match open_existing(&rx, META)? {
+        Some(meta) => meta.get(VERSION_KEY)?.map(|version| version.value()),
+        None => None,
+    };
+
+    if let Some(other) = recorded.filter(|version| *version != MEMPOOL_VERSION) {
+        return Ok(Err(FoundVersion::Other(other)));
+    }
+
+    let mut held = 0;
+
+    if let Some(pending) = open_existing(&rx, raw::<DbPendingKey, DbEraCbor>(PendingTable::NAME))? {
+        held += pending.len()?;
+
+        for entry in pending.iter()? {
+            let (_, payload) = entry?;
+            decodes::<EraCbor>("pending", payload.value())?;
+        }
+    }
+
+    if let Some(inflight) =
+        open_existing(&rx, raw::<DbTxHash, InflightRecord>(InflightTable::NAME))?
+    {
+        held += inflight.len()?;
+
+        for entry in inflight.iter()? {
+            let (_, record) = entry?;
+            let record = decodes::<InflightRecord>("inflight", record.value())?;
+            point_decodes("inflight", record.confirmed_at.as_deref())?;
+        }
+    }
+
+    if let Some(finalized) = open_existing(&rx, raw::<u64, FinalizedEntry>(FinalizedTable::NAME))? {
+        held += finalized.len()?;
+
+        for entry in [finalized.first()?, finalized.last()?]
+            .into_iter()
+            .flatten()
+        {
+            let entry = decodes::<FinalizedEntry>("finalized", entry.1.value())?;
+
+            if entry.hash.len() != 32 {
+                return Err(redb::Error::Corrupted(format!(
+                    "a finalized hash is {} bytes",
+                    entry.hash.len()
+                )));
+            }
+
+            point_decodes("finalized", entry.confirmed_at.as_deref())?;
+        }
+    }
+
+    match recorded {
+        None if held > 0 => Ok(Err(FoundVersion::Unmarked)),
+        _ => Ok(Ok(())),
+    }
+}
+
+/// The table `name` of `K` to `V`, over the raw bytes of its keys and values.
+fn raw<K: redb::Key + 'static, V: redb::Value + 'static>(
+    name: &'static str,
+) -> TableDefinition<'static, Raw<K>, Raw<V>> {
+    TableDefinition::new(name)
+}
+
+/// A table for reading, or none if no write ever created it.
+fn open_existing<K: redb::Key + 'static, V: redb::Value + 'static>(
+    rx: &redb::ReadTransaction,
+    def: TableDefinition<'_, K, V>,
+) -> Result<Option<redb::ReadOnlyTable<K, V>>, redb::Error> {
+    match rx.open_table(def) {
+        Ok(table) => Ok(Some(table)),
+        Err(redb::TableError::TableDoesNotExist(_)) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn decodes<T: for<'b> Decode<'b, ()>>(table: &str, bytes: &[u8]) -> Result<T, redb::Error> {
+    minicbor::decode(bytes).map_err(|error| {
+        redb::Error::Corrupted(format!("a {table} record fails to decode: {error}"))
+    })
+}
+
+fn point_decodes(table: &str, point: Option<&[u8]>) -> Result<(), redb::Error> {
+    match point {
+        Some(point) if point.len() != 40 => Err(redb::Error::Corrupted(format!(
+            "a {table} confirmation point is {} bytes",
+            point.len()
+        ))),
+        _ => Ok(()),
     }
 }
 
@@ -1343,5 +1646,243 @@ mod tests {
         let listing = store.peek_inflight();
         assert_eq!(listing.len(), 2);
         assert!(!listing.iter().any(|tx| tx.hash == h2));
+    }
+
+    mod versions {
+        use super::*;
+        use redb::ReadableDatabase as _;
+
+        const CONFIG: RedbMempoolConfig = RedbMempoolConfig { cache: None };
+
+        fn file() -> (tempfile::TempDir, PathBuf) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("mempool.redb");
+            (dir, path)
+        }
+
+        /// A file holding one pending transaction, as this release writes it.
+        fn holding_a_tx(path: &Path) {
+            let store = RedbMempool::open(path, &CONFIG).unwrap();
+            store.receive(test_tx(1)).unwrap();
+        }
+
+        /// Rewrites the file's marker, removing it on `None`.
+        fn mark(path: &Path, version: Option<u32>) {
+            let db = redb::Database::create(path).unwrap();
+            let wx = db.begin_write().unwrap();
+
+            match version {
+                Some(version) => {
+                    wx.open_table(META)
+                        .unwrap()
+                        .insert(VERSION_KEY, version)
+                        .unwrap();
+                }
+                None => {
+                    wx.delete_table(META).unwrap();
+                }
+            }
+
+            wx.commit().unwrap();
+        }
+
+        fn recorded(path: &Path) -> Option<u32> {
+            let db = redb::Database::create(path).unwrap();
+            let rx = db.begin_read().unwrap();
+            let meta = rx.open_table(META).unwrap();
+            let version = meta.get(VERSION_KEY).unwrap().map(|v| v.value());
+            version
+        }
+
+        fn pending(path: &Path) -> usize {
+            RedbMempool::open(path, &CONFIG)
+                .unwrap()
+                .peek_pending()
+                .len()
+        }
+
+        #[test]
+        fn a_new_file_is_stamped() {
+            let (_dir, path) = file();
+            drop(RedbMempool::open(&path, &CONFIG).unwrap());
+
+            assert_eq!(recorded(&path), Some(MEMPOOL_VERSION));
+        }
+
+        #[test]
+        fn a_file_of_this_version_keeps_its_transactions() {
+            let (_dir, path) = file();
+            holding_a_tx(&path);
+
+            assert_eq!(pending(&path), 1);
+            assert_eq!(recorded(&path), Some(MEMPOOL_VERSION));
+        }
+
+        #[test]
+        fn a_file_of_another_version_is_recreated_empty() {
+            for version in [0, MEMPOOL_VERSION + 1] {
+                let (_dir, path) = file();
+                holding_a_tx(&path);
+                mark(&path, Some(version));
+
+                assert_eq!(pending(&path), 0, "version {version}");
+                assert_eq!(recorded(&path), Some(MEMPOOL_VERSION));
+            }
+        }
+
+        #[test]
+        fn a_file_without_a_marker_over_transactions_is_recreated_empty() {
+            let (_dir, path) = file();
+            holding_a_tx(&path);
+            mark(&path, None);
+
+            assert_eq!(pending(&path), 0);
+            assert_eq!(recorded(&path), Some(MEMPOOL_VERSION));
+        }
+
+        /// As a release before the marker left an empty mempool.
+        #[test]
+        fn a_file_without_a_marker_or_transactions_is_stamped() {
+            let (_dir, path) = file();
+            drop(RedbMempool::open(&path, &CONFIG).unwrap());
+            mark(&path, None);
+
+            let store = RedbMempool::open(&path, &CONFIG).unwrap();
+            store.receive(test_tx(2)).unwrap();
+            drop(store);
+
+            assert_eq!(pending(&path), 1);
+            assert_eq!(recorded(&path), Some(MEMPOOL_VERSION));
+        }
+
+        #[test]
+        fn a_record_that_fails_to_decode_is_recreated_empty() {
+            let (_dir, path) = file();
+            holding_a_tx(&path);
+
+            let db = redb::Database::create(&path).unwrap();
+            let wx = db.begin_write().unwrap();
+            wx.open_table(raw::<DbTxHash, InflightRecord>(InflightTable::NAME))
+                .unwrap()
+                .insert([7; 32].as_slice(), [0xff, 0x00].as_slice())
+                .unwrap();
+            wx.commit().unwrap();
+            drop(db);
+
+            let store = RedbMempool::open(&path, &CONFIG).unwrap();
+            assert!(store.peek_pending().is_empty());
+            assert!(store.peek_inflight().is_empty());
+        }
+
+        #[test]
+        fn a_table_of_another_type_is_recreated_empty() {
+            let (_dir, path) = file();
+            holding_a_tx(&path);
+
+            let db = redb::Database::create(&path).unwrap();
+            let wx = db.begin_write().unwrap();
+            wx.delete_table(FinalizedTable::DEF).unwrap();
+            wx.open_table(TableDefinition::<u64, u64>::new(FinalizedTable::NAME))
+                .unwrap()
+                .insert(0, 1)
+                .unwrap();
+            wx.commit().unwrap();
+            drop(db);
+
+            assert_eq!(pending(&path), 0);
+            assert_eq!(recorded(&path), Some(MEMPOOL_VERSION));
+        }
+
+        #[test]
+        fn a_file_that_is_not_a_database_is_recreated_empty() {
+            let (_dir, path) = file();
+            std::fs::write(&path, vec![0xa5; 64 * 1024]).unwrap();
+
+            assert_eq!(pending(&path), 0);
+            assert_eq!(recorded(&path), Some(MEMPOOL_VERSION));
+        }
+
+        #[test]
+        fn a_file_held_by_another_handle_is_a_lock_error_and_kept() {
+            let (_dir, path) = file();
+            holding_a_tx(&path);
+            mark(&path, Some(MEMPOOL_VERSION + 1));
+            // the holder marks the file in use as it opens it
+            let _held = redb::Database::create(&path).unwrap();
+            let before = std::fs::read(&path).unwrap();
+
+            for opened in [
+                RedbMempool::open(&path, &CONFIG),
+                RedbMempool::open_read_only(&path, &CONFIG),
+            ] {
+                let Err(error) = opened else {
+                    panic!("a held mempool file opened");
+                };
+                assert!(crate::handle::is_already_open(&error), "{error}");
+            }
+
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_file_it_may_not_write_is_an_error_and_kept() {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let (_dir, path) = file();
+            holding_a_tx(&path);
+            mark(&path, Some(MEMPOOL_VERSION + 1));
+            let before = std::fs::read(&path).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+            // root writes it regardless
+            if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
+                return;
+            }
+
+            let Err(error) = RedbMempool::open(&path, &CONFIG) else {
+                panic!("a mempool file it may not write opened");
+            };
+            assert!(incompatible(&error).is_none(), "{error}");
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+
+        #[test]
+        fn a_read_only_open_refuses_another_version_and_keeps_it() {
+            let (_dir, path) = file();
+            holding_a_tx(&path);
+            mark(&path, Some(MEMPOOL_VERSION + 1));
+            let before = std::fs::read(&path).unwrap();
+
+            let Err(error) = RedbMempool::open_read_only(&path, &CONFIG) else {
+                panic!("a mempool file of another version opened read-only");
+            };
+            let refused = incompatible(&error).expect("not an incompatible mempool");
+            assert!(
+                matches!(refused.found, FoundVersion::Other(v) if v == MEMPOOL_VERSION + 1),
+                "{refused}"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+
+        #[test]
+        fn a_read_only_open_refuses_a_file_that_is_not_a_database() {
+            let (_dir, path) = file();
+            std::fs::write(&path, vec![0xa5; 64 * 1024]).unwrap();
+
+            let Err(error) = RedbMempool::open_read_only(&path, &CONFIG) else {
+                panic!("a file that is not a database opened read-only");
+            };
+            assert!(incompatible(&error).is_some(), "{error}");
+        }
+
+        #[test]
+        fn a_read_only_open_reads_a_file_of_this_version() {
+            let (_dir, path) = file();
+            holding_a_tx(&path);
+
+            let store = RedbMempool::open_read_only(&path, &CONFIG).unwrap();
+            assert_eq!(store.peek_pending().len(), 1);
+        }
     }
 }
