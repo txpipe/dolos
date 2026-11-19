@@ -276,7 +276,7 @@ fn observing_a_dataset_a_crash_left_is_unclean() {
 }
 
 /// A persistent mempool a crash left unrepaired is refused by observing too,
-/// before any other store is opened, so no file changes.
+/// and no file changes.
 #[test]
 fn observing_a_mempool_a_crash_left_is_unclean() {
     if let Some(config) = crashing() {

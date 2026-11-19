@@ -153,15 +153,6 @@ fn render_domain_build_error(error: DomainBuildError) -> miette::Report {
         DomainBuildError::Storage(error @ Error::InUse { .. }) => {
             miette::Report::new(storage::OpenError::from(error))
         }
-        DomainBuildError::Storage(Error::WalError(WalError::IncompatibleVersion {
-            found,
-            expected,
-        })) => miette::miette!(
-            help = format!(
-                "WAL was created by a newer dolos version (v{found}) than this binary supports (v{expected}); upgrade dolos or run `dolos bootstrap --force` to wipe storage and re-bootstrap",
-            ),
-            "incompatible WAL version: found v{found}, expected v{expected}",
-        ),
         DomainBuildError::Bootstrap(dolos_core::DomainError::InconsistentState {
             ref wal,
             ref state,

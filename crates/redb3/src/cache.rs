@@ -434,7 +434,7 @@ const REDB_PAGE_SIZE: u32 = 4096;
 /// panics on all three before it reports any error. The header is read under a
 /// shared lock, which conflicts with redb's exclusive one, so a file another
 /// process holds fails as open instead.
-fn check_layout(path: &Path) -> Result<(), redb::Error> {
+pub(crate) fn check_layout(path: &Path) -> Result<(), redb::Error> {
     use std::{fs::TryLockError, io::Read as _};
 
     let mut file = match std::fs::File::open(path) {
@@ -498,7 +498,7 @@ fn check_layout(path: &Path) -> Result<(), redb::Error> {
 /// damage, a cut-short file, or a format or table layout of another release.
 /// redb only reads the contents once it holds the file's lock, so no other
 /// process is using a file found corrupt.
-fn is_corrupt(error: &redb::Error) -> bool {
+pub(crate) fn is_corrupt(error: &redb::Error) -> bool {
     match error {
         redb::Error::Corrupted(_)
         | redb::Error::UpgradeRequired(_)

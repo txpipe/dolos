@@ -931,14 +931,21 @@ pub fn open_cache_store(config: &RootConfig, limiter: QueryLimiter) -> Result<Ca
     Ok(TieredCache::new(&config.storage.cache, disk, limiter))
 }
 
+/// Open the dataset's stores, creating those not there. State and archive
+/// are admitted first: a writable WAL open resets a WAL this release can't
+/// read, so a store this release refuses stops the open before the WAL is
+/// touched.
 pub fn open_data_stores<D>(config: &RootConfig) -> Result<Stores<D>, Error>
 where
     D: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
 {
+    let state = open_state_store(config)?;
+    let archive = open_archive_store(config)?;
+
     Ok(Stores {
         wal: open_wal_store(config)?,
-        state: open_state_store(config)?,
-        archive: open_archive_store(config)?,
+        state,
+        archive,
         mempool: open_mempool_store(config)?,
     })
 }
@@ -1018,15 +1025,18 @@ impl From<Error> for OpenError {
 /// no file of the dataset, and a redb file a crash left unrepaired, or empty,
 /// is [`OpenError::Unclean`]; it mirrors each fjall store in a folder beside
 /// it while the store lives, [`OpenError::Unviewable`] where it cannot. While
-/// the observed stores live, a writer cannot open them.
+/// the observed stores live, a writer cannot open them. State and archive
+/// are admitted before the WAL opens, as in [`open_data_stores`].
 pub fn open_existing_stores<D>(config: &RootConfig, access: Access) -> Result<Stores<D>, OpenError>
 where
     D: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
 {
     existing(&config.storage.path)?;
 
-    // The redb files first: an observing open refused for a crash-left one
-    // has then opened no fjall store.
+    let state = existing_state(config, access)?;
+
+    let archive = existing_archive(config, access)?;
+
     let wal = match config.wal_path() {
         Some(path) => {
             existing(&path)?;
@@ -1061,10 +1071,6 @@ where
         }
         None => MempoolBackend::Ephemeral(dolos_core::builtin::EphemeralMempool::new()),
     };
-
-    let state = existing_state(config, access)?;
-
-    let archive = existing_archive(config, access)?;
 
     Ok(Stores {
         wal,
@@ -3176,6 +3182,104 @@ mod tests {
         let wal = open_wal_store::<dolos_cardano::CardanoDelta>(config).unwrap();
         wal.reset_to(&ChainPoint::Origin).unwrap();
         wal.shutdown().unwrap();
+    }
+
+    /// [`written_wal`], stamped `version` instead of the one this release
+    /// reads.
+    fn written_wal_at(config: &RootConfig, version: u32) {
+        use dolos_redb3::redb::TableDefinition;
+
+        written_wal(config);
+
+        let db = dolos_redb3::redb::Database::create(config.wal_path().unwrap()).unwrap();
+        let wx = db.begin_write().unwrap();
+        wx.open_table(TableDefinition::<&str, u32>::new("wal_metadata"))
+            .unwrap()
+            .insert("version", version)
+            .unwrap();
+        wx.commit().unwrap();
+    }
+
+    /// A state or an archive this release refuses stops the open before the
+    /// WAL opens, so a WAL a writable open would wipe is left byte-identical.
+    #[test]
+    fn a_refused_store_leaves_the_wal_as_it_was() {
+        let current = current();
+        let current = current.as_deref();
+
+        for (state, archive) in [(Some("v1"), current), (current, Some("v1"))] {
+            let temp = tempfile::tempdir().unwrap();
+            let config = config_over(&temp.path().join("data"));
+            written_wal_at(&config, dolos_redb3::wal::CURRENT_WAL_VERSION - 1);
+            written_state(&config, state);
+            written_archive(&config, archive);
+
+            let wal = config.wal_path().unwrap();
+            let before = std::fs::read(&wal).unwrap();
+
+            let opened = open_data_stores::<dolos_cardano::CardanoDelta>(&config);
+            assert!(refusal(opened).is_some(), "{state:?} {archive:?}");
+            assert!(std::fs::read(&wal).unwrap() == before, "the WAL changed");
+
+            let error =
+                open_existing_stores::<dolos_cardano::CardanoDelta>(&config, Access::Mutate)
+                    .err()
+                    .unwrap();
+            assert!(
+                matches!(
+                    error,
+                    OpenError::Storage(Error::StateError(StateError::IncompatibleStore(_)))
+                        | OpenError::Storage(Error::ArchiveError(ArchiveError::IncompatibleStore(
+                            _
+                        )))
+                ),
+                "{error:?}"
+            );
+            assert!(std::fs::read(&wal).unwrap() == before, "the WAL changed");
+        }
+    }
+
+    /// Once the state and the archive are admitted, a WAL of another version,
+    /// older or newer, is wiped and the stores open.
+    #[test]
+    fn a_wal_of_another_version_is_wiped_once_the_stores_are_admitted() {
+        let reads = dolos_redb3::wal::CURRENT_WAL_VERSION;
+
+        for version in [reads - 1, reads + 1] {
+            let temp = tempfile::tempdir().unwrap();
+            let config = config_over(&temp.path().join("data"));
+            written_wal_at(&config, version);
+            written_state(&config, current().as_deref());
+            written_archive(&config, current().as_deref());
+
+            let stores = open_data_stores::<dolos_cardano::CardanoDelta>(&config).unwrap();
+            assert!(stores.wal.is_empty().unwrap(), "version {version}");
+            assert_eq!(
+                stores.state.read_cursor().unwrap(),
+                Some(ChainPoint::Origin)
+            );
+        }
+    }
+
+    /// An observing open reads a WAL of another version as empty and leaves
+    /// it byte-identical, for the next writable open to wipe.
+    #[test]
+    fn observing_a_wal_of_another_version_reads_it_as_empty() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(&temp.path().join("data"));
+        written_wal_at(&config, dolos_redb3::wal::CURRENT_WAL_VERSION + 1);
+        written_state(&config, current().as_deref());
+        written_archive(&config, current().as_deref());
+
+        let wal = config.wal_path().unwrap();
+        let before = std::fs::read(&wal).unwrap();
+
+        let stores =
+            open_existing_stores::<dolos_cardano::CardanoDelta>(&config, Access::Observe).unwrap();
+        assert!(stores.wal.find_tip().unwrap().is_none());
+        drop(stores);
+
+        assert!(std::fs::read(&wal).unwrap() == before, "the WAL changed");
     }
 
     /// Over stores this release opens, `--continue` proceeds whatever storage
