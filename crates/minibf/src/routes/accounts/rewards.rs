@@ -378,7 +378,8 @@ mod tests {
         desc_sorted.sort();
         assert_eq!(asc_sorted, desc_sorted);
 
-        // Page boundaries fall inside two-entry epochs for count 2 and 3.
+        // Count 1 splits every epoch; asc count 2 and desc count 3 split a
+        // two-entry epoch.
         for count in 1..=3 {
             assert_eq!(
                 fetch_paged(&app, "asc", count).await,
