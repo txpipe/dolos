@@ -1805,7 +1805,7 @@ mod tests {
             holding_a_tx(&path);
             let len = std::fs::metadata(&path).unwrap().len();
 
-            for cut in [320, 4096, 8192, len - 1] {
+            for cut in [16, 320, 4096, 8192, len - 1] {
                 let (_dir, path) = file();
                 holding_a_tx(&path);
                 let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
@@ -1860,7 +1860,10 @@ mod tests {
             holding_a_tx(&path);
             mark(&path, Some(MEMPOOL_VERSION + 1));
             // the holder marks the file in use as it opens it
-            let _held = redb::Database::create(&path).unwrap();
+            let held = redb::Database::create(&path).unwrap();
+            // Windows locks are mandatory: a held file cannot be read through
+            // another handle
+            #[cfg(unix)]
             let before = std::fs::read(&path).unwrap();
 
             for opened in [
@@ -1873,7 +1876,10 @@ mod tests {
                 assert!(crate::handle::is_already_open(&error), "{error}");
             }
 
+            #[cfg(unix)]
             assert_eq!(std::fs::read(&path).unwrap(), before);
+            drop(held);
+            assert_eq!(recorded(&path), Some(MEMPOOL_VERSION + 1));
         }
 
         #[cfg(unix)]

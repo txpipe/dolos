@@ -1152,9 +1152,12 @@ mod tests {
         holding_an_entry(dir.path());
         mark(dir.path(), Some(CACHE_FILE_VERSION + 1));
 
-        // the holder marks the file in use as it opens it
         let path = dir.path().join(FILE_NAME);
-        let _held = Database::create(&path).unwrap();
+        // the holder marks the file in use as it opens it
+        let held = Database::create(&path).unwrap();
+        // Windows locks are mandatory: a held file cannot be read through
+        // another handle
+        #[cfg(unix)]
         let before = std::fs::read(&path).unwrap();
 
         assert!(matches!(
@@ -1165,7 +1168,10 @@ mod tests {
             RedbCacheTier::check_unheld(dir.path()),
             Err(CacheError::InUse(_))
         ));
+        #[cfg(unix)]
         assert_eq!(std::fs::read(&path).unwrap(), before);
+        drop(held);
+        assert_eq!(recorded(dir.path()), Some(CACHE_FILE_VERSION + 1));
     }
 
     #[test]

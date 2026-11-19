@@ -6,11 +6,18 @@ use std::path::Path;
 /// redb's page size, which its header must record.
 const REDB_PAGE_SIZE: u32 = 4096;
 
-/// Fails as corrupt if the file is shorter than the layout its header records,
-/// is not a whole number of pages, or records a layout redb cannot read: redb
-/// panics on all three before it reports any error. The header is read under a
-/// shared lock, which conflicts with redb's exclusive one, so a file another
-/// process holds fails as open instead.
+/// The magic number redb writes at the start of a file it has initialised.
+const REDB_MAGIC: &[u8] = b"redb\x1a\x0a\xa9\x0d\x0a";
+
+/// The leading header bytes read here: the magic number and the layout fields.
+const HEADER_PREFIX: usize = 32;
+
+/// Fails as corrupt if the file carries redb's magic number but is cut short
+/// of its header, is shorter than the layout its header records, is not a
+/// whole number of pages, or records a layout redb cannot read: redb panics on
+/// these, or on Windows never returns, before it reports any error. The header
+/// is read under a shared lock, which conflicts with redb's exclusive one, so
+/// a file another process holds fails as open instead.
 pub(crate) fn check_layout(path: &Path) -> Result<(), redb::Error> {
     use std::io::Read as _;
 
@@ -19,11 +26,22 @@ pub(crate) fn check_layout(path: &Path) -> Result<(), redb::Error> {
     };
 
     let len = file.metadata()?.len();
-    let mut header = [0; 32];
+    let mut header = Vec::with_capacity(HEADER_PREFIX);
 
-    // redb reports a file too short for its magic number or its header itself
-    if file.read_exact(&mut header).is_err() || !header.starts_with(b"redb\x1a\x0a\xa9\x0d\x0a") {
+    // redb reports a file it cannot read, or without its magic number, itself
+    if (&mut file)
+        .take(HEADER_PREFIX as u64)
+        .read_to_end(&mut header)
+        .is_err()
+        || !header.starts_with(REDB_MAGIC)
+    {
         return Ok(());
+    }
+
+    if header.len() < HEADER_PREFIX {
+        return Err(redb::Error::Corrupted(format!(
+            "the file is {len} bytes, too short for its header"
+        )));
     }
 
     let field = |offset: usize| {
@@ -106,5 +124,39 @@ pub(crate) fn is_corrupt(error: &redb::Error) -> bool {
             std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof
         ),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_cut_short_of_its_header_is_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cut.redb");
+
+        for len in [REDB_MAGIC.len(), 16, HEADER_PREFIX - 1] {
+            let mut bytes = REDB_MAGIC.to_vec();
+            bytes.resize(len, 0);
+            std::fs::write(&path, &bytes).unwrap();
+
+            assert!(
+                matches!(check_layout(&path), Err(redb::Error::Corrupted(_))),
+                "cut to {len} bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_file_without_the_magic_number_is_left_to_redb() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("short.redb");
+
+        for bytes in [&b""[..], b"redb", &[0xa5; 16]] {
+            std::fs::write(&path, bytes).unwrap();
+
+            assert!(check_layout(&path).is_ok(), "{bytes:?}");
+        }
     }
 }
