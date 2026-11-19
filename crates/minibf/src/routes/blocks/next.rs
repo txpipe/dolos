@@ -12,8 +12,8 @@ use pallas::ledger::traverse::MultiEraBlock;
 use crate::{error::Error, pagination::PaginationParameters, Facade};
 
 use super::{
-    blocks_after, blocks_after_bound, build_block_model, count_and_page, genesis,
-    load_block_by_hash_or_number, parse_hash_or_number, tip_block,
+    blocks_after_bound, build_block_model, count_and_page, genesis, load_block_by_hash_or_number,
+    parse_hash_or_number, point_of, tip_block,
 };
 
 pub async fn by_hash_or_number_next<D>(
@@ -55,21 +55,33 @@ where
         if pagination.from() >= blocks_after_bound(curr.as_ref(), &tip, &chain) {
             Vec::new()
         } else {
-            let mut iterator = match &curr {
-                None => domain
-                    .archive()
-                    .get_range(None, None)
-                    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
-                Some(curr) => blocks_after(&domain, curr)?,
-            };
+            let point = curr.as_ref().map(point_of);
+            let (from, count) = (pagination.from(), pagination.count);
 
-            // key-only skip, no block data read
-            iterator.skip_forward(pagination.from());
+            // the walk and the reads run under the query limiter
+            domain
+                .blocking(move |domain| {
+                    let archive = domain.archive();
 
-            iterator
-                .take(pagination.count)
-                .map(|(_, body)| body)
-                .collect::<Vec<_>>()
+                    let mut iterator = match point {
+                        None => archive
+                            .get_range(None, None)
+                            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
+                        Some(point) => archive
+                            .blocks_after(&point)
+                            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+                            .ok_or(StatusCode::NOT_FOUND)?,
+                    };
+
+                    // key-only skip, no block data read
+                    iterator.skip_forward(from);
+
+                    Ok(iterator
+                        .take(count)
+                        .map(|(_, body)| body)
+                        .collect::<Vec<_>>())
+                })
+                .await?
         }
     };
 

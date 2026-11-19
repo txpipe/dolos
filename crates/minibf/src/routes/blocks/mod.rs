@@ -1,9 +1,9 @@
 use axum::http::StatusCode;
 use blockfrost_openapi::models::block_content::BlockContent;
 use dolos_cardano::ChainSummary;
-use dolos_core::{ArchiveStore, BlockBody, Domain};
+use dolos_core::{ArchiveStore, BlockBody, ChainPoint, Domain};
 use itertools::Either;
-use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraBlock};
+use pallas::ledger::traverse::MultiEraBlock;
 
 use crate::{
     error::Error,
@@ -167,132 +167,9 @@ fn main_block_at_slot<D: Domain>(
     Ok(None)
 }
 
-type ArchiveBlocks<'a, D> = <<D as Domain>::Archive as ArchiveStore>::BlockIter<'a>;
-
-fn block_hash(body: &[u8]) -> Result<Hash<32>, StatusCode> {
-    let block = MultiEraBlock::decode(body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(block.hash())
-}
-
-/// The archive's blocks after `block`, in chain order. A boundary block shares
-/// its slot with the main block after it, so the walk starts at the slot and
-/// steps over everything up to the block itself, and no further: a block the
-/// archive no longer holds at its slot, pruned or rolled back since it was
-/// read, is not found rather than searched for across the rest of the chain.
-fn blocks_after<'a, D: Domain>(
-    domain: &Facade<D>,
-    block: &MultiEraBlock,
-) -> Result<ArchiveBlocks<'a, D>, StatusCode> {
-    let mut iter = domain
-        .archive()
-        .get_range(Some(block.slot()), None)
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-
-    let hash = block.hash();
-    let mut found = false;
-
-    for (slot, body) in iter.by_ref() {
-        if slot != block.slot() {
-            break;
-        }
-
-        if block_hash(&body)? == hash {
-            found = true;
-            break;
-        }
-    }
-
-    found.then_some(iter).ok_or(StatusCode::NOT_FOUND)
-}
-
-/// The archive's blocks before `block`, in chain order, to be walked from the
-/// back. Bounded to the block's slot like [`blocks_after`].
-fn blocks_before<'a, D: Domain>(
-    domain: &Facade<D>,
-    block: &MultiEraBlock,
-) -> Result<ArchiveBlocks<'a, D>, StatusCode> {
-    let mut iter = domain
-        .archive()
-        .get_range(None, Some(block.slot() + 1))
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-
-    let hash = block.hash();
-    let mut found = false;
-
-    while let Some((slot, body)) = iter.next_back() {
-        if slot != block.slot() {
-            break;
-        }
-
-        if block_hash(&body)? == hash {
-            found = true;
-            break;
-        }
-    }
-
-    found.then_some(iter).ok_or(StatusCode::NOT_FOUND)
-}
-
-/// The first window [`next_block`] looks for a block in, in slots. Each next
-/// one is eight times as wide.
-const NEXT_BLOCK_WINDOW: u64 = 128;
-
-/// The block that follows the one with `hash` at `slot`, up to `tip_slot`.
-///
-/// The successor of the last main block of a Byron epoch is the boundary
-/// block, which the index files under no number, so the archive is read by
-/// slot: the rest of the block's own slot first, where a main block sits
-/// behind its boundary sibling, then the slots after it, a window at a time.
-/// A range read asks a store for no more than a window, whichever way the
-/// store serves its ranges. A block the archive no longer holds at its slot
-/// is not found, as in [`blocks_after`].
-fn next_block<D: Domain>(
-    domain: &Facade<D>,
-    slot: u64,
-    hash: Hash<32>,
-    tip_slot: u64,
-) -> Result<Option<BlockBody>, StatusCode> {
-    let range = |start: u64, end: u64| {
-        domain
-            .archive()
-            .get_range(Some(start), Some(end))
-            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
-    };
-
-    let mut siblings = range(slot, slot.saturating_add(1))?;
-    let mut found = false;
-
-    for (_, body) in siblings.by_ref() {
-        if block_hash(&body)? == hash {
-            found = true;
-            break;
-        }
-    }
-
-    if !found {
-        return Err(StatusCode::NOT_FOUND);
-    }
-
-    if let Some((_, body)) = siblings.next() {
-        return Ok(Some(body));
-    }
-
-    let mut start = slot.saturating_add(1);
-    let mut width = NEXT_BLOCK_WINDOW;
-
-    while start <= tip_slot {
-        let end = start.saturating_add(width);
-
-        if let Some((_, body)) = range(start, end)?.next() {
-            return Ok(Some(body));
-        }
-
-        start = end;
-        width = width.saturating_mul(8);
-    }
-
-    Ok(None)
+/// The chain point of `block`, which the archive's point-keyed reads take.
+fn point_of(block: &MultiEraBlock) -> ChainPoint {
+    ChainPoint::Specific(block.slot(), block.hash())
 }
 
 /// An upper bound on the archive's blocks after `block`, or on all of them
@@ -378,17 +255,21 @@ where
         builder = builder.with_previous(previous)?;
     }
 
-    // the last block of a Byron epoch is followed by a boundary block; the
-    // seek and the read run under the query limiter
+    // the last block of a Byron epoch is followed by a boundary block, which
+    // the index files under no number; the read runs under the query limiter
     let maybe_next = {
-        let (slot, hash) = (block.slot(), block.hash());
-        let tip_slot = MultiEraBlock::decode(tip)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .slot();
+        let point = point_of(&block);
 
         domain
-            .blocking(move |domain| next_block(&domain, slot, hash, tip_slot))
+            .blocking(move |domain| {
+                domain
+                    .archive()
+                    .block_after(&point)
+                    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+                    .ok_or(StatusCode::NOT_FOUND)
+            })
             .await?
+            .map(|(_, body)| body)
     };
 
     if let Some(next) = maybe_next.as_ref() {
@@ -644,24 +525,18 @@ mod tests {
     #[tokio::test]
     async fn walks_refuse_a_block_the_archive_lost() {
         let chain = pruned_mainnet_byron_chain(21600);
-        let facade = chain.app.facade();
+        let archive = chain.app.facade().archive().clone();
 
         let pruned = mainnet_byron_block(1);
-        let pruned = MultiEraBlock::decode(&pruned).unwrap();
+        let pruned = point_of(&MultiEraBlock::decode(&pruned).unwrap());
 
-        assert!(matches!(
-            blocks_after(&facade, &pruned),
-            Err(StatusCode::NOT_FOUND)
-        ));
-        assert!(matches!(
-            blocks_before(&facade, &pruned),
-            Err(StatusCode::NOT_FOUND)
-        ));
+        assert!(archive.blocks_after(&pruned).unwrap().is_none());
+        assert!(archive.blocks_before(&pruned).unwrap().is_none());
 
         let held = mainnet_byron_block(21601);
-        let held = MultiEraBlock::decode(&held).unwrap();
+        let held = point_of(&MultiEraBlock::decode(&held).unwrap());
 
-        assert!(blocks_after(&facade, &held).is_ok());
-        assert!(blocks_before(&facade, &held).is_ok());
+        assert!(archive.blocks_after(&held).unwrap().is_some());
+        assert!(archive.blocks_before(&held).unwrap().is_some());
     }
 }

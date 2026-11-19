@@ -4,15 +4,15 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::block_content::BlockContent;
-use dolos_core::{archive::Skippable as _, Domain};
+use dolos_core::{archive::Skippable as _, ArchiveStore as _, Domain};
 use futures::future::try_join_all;
 use pallas::ledger::traverse::MultiEraBlock;
 
 use crate::{error::Error, pagination::PaginationParameters, Facade};
 
 use super::{
-    blocks_before, blocks_before_bound, build_block_model, count_and_page, genesis,
-    load_block_by_hash_or_number, names_genesis, parse_hash_or_number, tip_block,
+    blocks_before_bound, build_block_model, count_and_page, genesis, load_block_by_hash_or_number,
+    names_genesis, parse_hash_or_number, point_of, tip_block,
 };
 
 pub async fn by_hash_or_number_previous<D>(
@@ -45,25 +45,40 @@ where
         if from >= blocks_before_bound(&block, &chain) {
             (Vec::new(), false)
         } else {
-            let mut iter = blocks_before(&domain, &block)?;
+            let point = point_of(&block);
+            let count = pagination.count;
 
-            // key-only skip; the block before the page tells whether it starts at all
-            let skipped = match from {
-                0 => None,
-                _ => {
-                    iter.skip_backward(from - 1);
-                    iter.next_back().map(|(_, body)| body)
-                }
-            };
-            let starts = from == 0 || skipped.is_some();
+            // the walk and the reads run under the query limiter
+            let (skipped, page) = domain
+                .blocking(move |domain| {
+                    let mut iter = domain
+                        .archive()
+                        .blocks_before(&point)
+                        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+                        .ok_or(StatusCode::NOT_FOUND)?;
 
-            if starts {
-                let bodies: Vec<_> = iter
-                    .rev()
-                    .take(pagination.count)
-                    .map(|(_, body)| body)
-                    .collect();
+                    // key-only skip; the block before the page tells whether
+                    // it starts at all
+                    let skipped = match from {
+                        0 => None,
+                        _ => {
+                            iter.skip_backward(from - 1);
+                            iter.next_back().map(|(_, body)| body)
+                        }
+                    };
 
+                    let page = (from == 0 || skipped.is_some()).then(|| {
+                        iter.rev()
+                            .take(count)
+                            .map(|(_, body)| body)
+                            .collect::<Vec<_>>()
+                    });
+
+                    Ok((skipped, page))
+                })
+                .await?;
+
+            if let Some(bodies) = page {
                 // a short page closes the chain only when the oldest block
                 // reached follows genesis; `sync.max_history` may have pruned
                 // the blocks before it instead
