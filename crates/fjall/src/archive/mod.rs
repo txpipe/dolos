@@ -68,7 +68,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use dolos_core::{
-    blocks_through, key_hash, ArchiveError, ArchiveIndexDelta, ArchiveIngest,
+    blocks_through, key_hash, position_in_slot, ArchiveError, ArchiveIndexDelta, ArchiveIngest,
     ArchiveStore as CoreArchiveStore, ArchiveWriter as CoreArchiveWriter, BlockBody, BlockSlot,
     ChainPoint, EntityValue, ExactKind, IndexRecord, KeyRange, LogKey, Namespace, RawBlock,
     Settling, StateSchema, TagDimension,
@@ -174,6 +174,9 @@ fn block_key_slot(key: &[u8]) -> Result<BlockSlot, ArchiveError> {
         .map(u64::from_be_bytes)
         .ok_or_else(|| ArchiveError::InternalError("malformed blocks key".to_string()))
 }
+
+/// The locations at one slot before a block, and those after it.
+type SlotSplit = (Vec<BlockLocation>, Vec<BlockLocation>);
 
 /// Fjall-based archive store.
 ///
@@ -563,6 +566,55 @@ impl ArchiveStore {
             Some(bytes) => Ok(decode_locations(&bytes).collect()),
             None => Ok(vec![]),
         }
+    }
+
+    /// The locations at `point`'s slot in chain order, split around the
+    /// block `point` names: those before it and those after it. None if the
+    /// slot does not hold it. Reads the slot's bodies to match the hash, no
+    /// others.
+    fn split_at_point(
+        &self,
+        snapshot: &Snapshot,
+        point: &ChainPoint,
+    ) -> Result<Option<SlotSplit>, ArchiveError> {
+        if point.hash().is_none() {
+            return Ok(None);
+        }
+
+        let mut locations = self.stored_locations(snapshot, point.slot())?;
+        locations.reverse();
+
+        let bodies = locations
+            .iter()
+            .map(|loc| self.flatfiles.read(loc).map_err(io_err))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let Some(at) = position_in_slot(&bodies, point) else {
+            return Ok(None);
+        };
+
+        let after = locations.split_off(at + 1);
+        locations.truncate(at);
+
+        Ok(Some((locations, after)))
+    }
+
+    /// A block walk over the `blocks` rows `range` covers, with `front` and
+    /// `back`, locations at a slot the range leaves out, walked first from
+    /// the front and from the back.
+    fn block_iter(
+        &self,
+        snapshot: &Snapshot,
+        range: (Bound<[u8; 8]>, Bound<[u8; 8]>),
+        front: VecDeque<IndexEntry>,
+        back: VecDeque<IndexEntry>,
+    ) -> Viewed<BlockIter> {
+        self.viewed(BlockIter {
+            inner: snapshot.range(&self.blocks, range),
+            front,
+            back,
+            flatfiles: self.flatfiles.clone(),
+        })
     }
 
     /// Resume one pass within a shared row budget, or finish all work when
@@ -1272,14 +1324,70 @@ impl CoreArchiveStore for ArchiveStore {
         };
 
         let snapshot = self.db.snapshot();
-        let inner = snapshot.range(&self.blocks, (start, end));
 
-        Ok(self.viewed(BlockIter {
-            inner,
-            front: VecDeque::new(),
-            back: VecDeque::new(),
-            flatfiles: self.flatfiles.clone(),
-        }))
+        Ok(self.block_iter(&snapshot, (start, end), VecDeque::new(), VecDeque::new()))
+    }
+
+    fn blocks_after<'a>(
+        &self,
+        point: &ChainPoint,
+    ) -> Result<Option<Self::BlockIter<'a>>, ArchiveError> {
+        let snapshot = self.db.snapshot();
+
+        let Some((_, after)) = self.split_at_point(&snapshot, point)? else {
+            return Ok(None);
+        };
+
+        let slot = point.slot();
+        let front = after.into_iter().map(|loc| (slot, loc)).collect();
+        let range = (Bound::Excluded(slot.to_be_bytes()), Bound::Unbounded);
+
+        Ok(Some(self.block_iter(
+            &snapshot,
+            range,
+            front,
+            VecDeque::new(),
+        )))
+    }
+
+    fn blocks_before<'a>(
+        &self,
+        point: &ChainPoint,
+    ) -> Result<Option<Self::BlockIter<'a>>, ArchiveError> {
+        let snapshot = self.db.snapshot();
+
+        let Some((before, _)) = self.split_at_point(&snapshot, point)? else {
+            return Ok(None);
+        };
+
+        let slot = point.slot();
+        let back = before.into_iter().map(|loc| (slot, loc)).collect();
+        let range = (Bound::Unbounded, Bound::Excluded(slot.to_be_bytes()));
+
+        Ok(Some(self.block_iter(
+            &snapshot,
+            range,
+            VecDeque::new(),
+            back,
+        )))
+    }
+
+    /// The walk is lazy, so only the block it yields is read past the slot.
+    fn block_after(
+        &self,
+        point: &ChainPoint,
+    ) -> Result<Option<Option<(BlockSlot, BlockBody)>>, ArchiveError> {
+        Ok(self.blocks_after(point)?.map(|mut blocks| blocks.next()))
+    }
+
+    /// The walk is lazy, so only the block it yields is read past the slot.
+    fn block_before(
+        &self,
+        point: &ChainPoint,
+    ) -> Result<Option<Option<(BlockSlot, BlockBody)>>, ArchiveError> {
+        Ok(self
+            .blocks_before(point)?
+            .map(|mut blocks| blocks.next_back()))
     }
 
     fn find_intersect(&self, intersect: &[ChainPoint]) -> Result<Option<ChainPoint>, ArchiveError> {

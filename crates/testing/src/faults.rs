@@ -527,6 +527,46 @@ impl ArchiveStore for FaultyArchiveStore {
         self.inner.get_range(from, to)
     }
 
+    fn blocks_after<'a>(
+        &self,
+        point: &ChainPoint,
+    ) -> Result<Option<Self::BlockIter<'a>>, ArchiveError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.blocks_after(point)
+    }
+
+    fn blocks_before<'a>(
+        &self,
+        point: &ChainPoint,
+    ) -> Result<Option<Self::BlockIter<'a>>, ArchiveError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.blocks_before(point)
+    }
+
+    fn block_after(
+        &self,
+        point: &ChainPoint,
+    ) -> Result<Option<Option<(BlockSlot, BlockBody)>>, ArchiveError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.block_after(point)
+    }
+
+    fn block_before(
+        &self,
+        point: &ChainPoint,
+    ) -> Result<Option<Option<(BlockSlot, BlockBody)>>, ArchiveError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.block_before(point)
+    }
+
     fn find_intersect(&self, intersect: &[ChainPoint]) -> Result<Option<ChainPoint>, ArchiveError> {
         if self.should_fault() {
             return Err(self.fault_err());

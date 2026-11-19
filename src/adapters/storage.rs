@@ -2584,6 +2584,68 @@ impl CoreArchiveStore for ArchiveStoreBackend {
         }
     }
 
+    fn blocks_after<'a>(
+        &self,
+        point: &ChainPoint,
+    ) -> Result<Option<Self::BlockIter<'a>>, ArchiveError> {
+        match self {
+            Self::Memory(s) => Ok(CoreArchiveStore::blocks_after(s, point)?
+                .map(|iter| ArchiveBlockIterBackend::Memory(Box::new(iter)))),
+            Self::LogsOnly(inner) => CoreArchiveStore::blocks_after(inner.as_ref(), point),
+            Self::Fjall(s) => Ok(CoreArchiveStore::blocks_after(s, point)?
+                .map(|iter| ArchiveBlockIterBackend::Fjall(Box::new(iter)))),
+            Self::EntityReads(_) => Ok(CoreArchiveStore::blocks_after(&NoOpArchiveStore, point)?
+                .map(ArchiveBlockIterBackend::NoOp)),
+            Self::NoOp(s) => {
+                Ok(CoreArchiveStore::blocks_after(s, point)?.map(ArchiveBlockIterBackend::NoOp))
+            }
+        }
+    }
+
+    fn blocks_before<'a>(
+        &self,
+        point: &ChainPoint,
+    ) -> Result<Option<Self::BlockIter<'a>>, ArchiveError> {
+        match self {
+            Self::Memory(s) => Ok(CoreArchiveStore::blocks_before(s, point)?
+                .map(|iter| ArchiveBlockIterBackend::Memory(Box::new(iter)))),
+            Self::LogsOnly(inner) => CoreArchiveStore::blocks_before(inner.as_ref(), point),
+            Self::Fjall(s) => Ok(CoreArchiveStore::blocks_before(s, point)?
+                .map(|iter| ArchiveBlockIterBackend::Fjall(Box::new(iter)))),
+            Self::EntityReads(_) => Ok(CoreArchiveStore::blocks_before(&NoOpArchiveStore, point)?
+                .map(ArchiveBlockIterBackend::NoOp)),
+            Self::NoOp(s) => {
+                Ok(CoreArchiveStore::blocks_before(s, point)?.map(ArchiveBlockIterBackend::NoOp))
+            }
+        }
+    }
+
+    fn block_after(
+        &self,
+        point: &ChainPoint,
+    ) -> Result<Option<Option<(BlockSlot, BlockBody)>>, ArchiveError> {
+        match self {
+            Self::Memory(s) => CoreArchiveStore::block_after(s, point),
+            Self::LogsOnly(inner) => CoreArchiveStore::block_after(inner.as_ref(), point),
+            Self::Fjall(s) => CoreArchiveStore::block_after(s, point),
+            Self::EntityReads(_) => CoreArchiveStore::block_after(&NoOpArchiveStore, point),
+            Self::NoOp(s) => CoreArchiveStore::block_after(s, point),
+        }
+    }
+
+    fn block_before(
+        &self,
+        point: &ChainPoint,
+    ) -> Result<Option<Option<(BlockSlot, BlockBody)>>, ArchiveError> {
+        match self {
+            Self::Memory(s) => CoreArchiveStore::block_before(s, point),
+            Self::LogsOnly(inner) => CoreArchiveStore::block_before(inner.as_ref(), point),
+            Self::Fjall(s) => CoreArchiveStore::block_before(s, point),
+            Self::EntityReads(_) => CoreArchiveStore::block_before(&NoOpArchiveStore, point),
+            Self::NoOp(s) => CoreArchiveStore::block_before(s, point),
+        }
+    }
+
     fn find_intersect(&self, intersect: &[ChainPoint]) -> Result<Option<ChainPoint>, ArchiveError> {
         match self {
             Self::Memory(s) => CoreArchiveStore::find_intersect(s, intersect),
