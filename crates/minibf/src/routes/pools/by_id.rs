@@ -692,7 +692,7 @@ mod tests {
     }
 
     #[test]
-    fn pool_metrics_include_retired_pool_stake_for_registered_accounts() {
+    fn pool_metrics_exclude_retired_pool_stake_for_registered_accounts() {
         let target_pool = Hash::from([1u8; 28]);
         let account = AccountState {
             registered_at: Some(1),
@@ -713,9 +713,10 @@ mod tests {
 
         let metrics = reduce_account_chunk(&[account], target_pool, &ActivePools::default());
 
-        assert_eq!(metrics.live_stake, 42);
+        assert_eq!(metrics.live_stake, 0);
+        assert_eq!(metrics.live_pledge, 0);
         assert_eq!(metrics.total_live_stake, 0);
-        assert_eq!(metrics.live_delegators, 1);
+        assert_eq!(metrics.live_delegators, 0);
     }
 
     #[tokio::test]

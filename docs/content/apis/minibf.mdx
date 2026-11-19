@@ -78,7 +78,7 @@ The `serve.minibf` section controls the options for the MiniBF endpoint that can
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming connections (`[::]` represents any IP address).
 - `permissive_cors`: allow cross-origin requests from any origin.
-- `public_url`: the URL clients reach the API at, reported by the `/` root response.
+- `public_url`: the URL clients reach the API at, reported as `url` by the `/` root response. Unset, the root response carries no `url`; the listen address is never reported in its place.
 - `token_registry_url`: token registry base URL used for off-chain asset metadata.
 - `max_scan_items`: caps page-based scans for heavy endpoints.
 - `route_prefix`: a URL path every endpoint is served under, `/health` included; set `"/api/v0"` to match the Blockfrost server URL. It starts with `/` and names at least one segment, none of them empty; its segments use only letters, digits, `-`, `.`, `_` and `~`, and `.` and `..` segments are refused; a trailing `/` is dropped. A path outside the prefix answers like any unknown path. Unset, the endpoints are served at the root.
@@ -128,7 +128,7 @@ MiniBF no longer serves a `/metrics` route. Its `dolos_slot` and `dolos_block_nu
 
 | Endpoint                                                   | Description                                              |
 | ---------------------------------------------------------- | -------------------------------------------------------- |
-| `/`                                                        | Service info (version, revision)                         |
+| `/`                                                        | Service info (`url` when `public_url` is set, `version`) |
 | `/health`                                                  | Health check                                             |
 | `/health/clock`                                            | Clock health                                             |
 | `/accounts/{stake_address}`                                | Get account information for a stake address              |
