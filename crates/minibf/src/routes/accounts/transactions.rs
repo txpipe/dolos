@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::HashMap;
 
 use axum::{
     extract::{Path, Query, State},
@@ -11,7 +11,7 @@ use dolos_cardano::{
     model::{AccountState, ProposalState},
     ChainSummary,
 };
-use dolos_core::Domain;
+use dolos_core::{Domain, UtxoPosition};
 use futures_util::StreamExt;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraTx};
 
@@ -28,24 +28,29 @@ fn account_addresses_in_tx(
     resolver: &mut InputResolver<'_>,
     account: &[u8],
     tx: &MultiEraTx<'_>,
-) -> Result<BTreeSet<String>, StatusCode> {
-    let mut addresses = BTreeSet::new();
+    position: UtxoPosition,
+) -> Result<Vec<String>, StatusCode> {
+    let mut addresses = HashMap::new();
 
-    // never stops early: every touched output that belongs to the account
-    // contributes its address to the set.
-    for_each_touched_output(resolver, tx, |output| {
+    for_each_touched_output(resolver, tx, |output, output_position| {
         let candidate = output
             .address()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         if address_belongs_to_account(&candidate, account) {
-            addresses.insert(candidate.to_string());
+            let position = output_position.in_tx(position);
+            addresses
+                .entry(candidate.to_string())
+                .and_modify(|earliest| *earliest = position.min(*earliest))
+                .or_insert(position);
         }
 
         Ok(false)
     })?;
 
-    Ok(addresses)
+    let mut addresses: Vec<_> = addresses.into_iter().collect();
+    addresses.sort_unstable_by_key(|(_, position)| *position);
+    Ok(addresses.into_iter().map(|(address, _)| address).collect())
 }
 
 async fn find_account_txs_in_block<D>(
@@ -79,7 +84,12 @@ where
             continue;
         }
 
-        let addresses = account_addresses_in_tx(&mut resolver, account, tx)?;
+        let addresses = account_addresses_in_tx(
+            &mut resolver,
+            account,
+            tx,
+            UtxoPosition::of_tx(block.slot(), idx),
+        )?;
 
         let tx_hash = hex::encode(tx.hash().as_slice());
         let block_height = block.number() as i32;
@@ -170,9 +180,192 @@ mod tests {
     use super::*;
     use crate::{
         routes::accounts::testing::*,
-        test_support::{TestApp, TestFault},
+        test_support::{stake_address_accounts, TestApp, TestFault},
     };
     use blockfrost_openapi::models::account_transactions_content_inner::AccountTransactionsContentInner;
+    use dolos_core::{ArchiveIndexDelta, ArchiveStore, ArchiveWriter, ChainPoint, TxHash};
+    use dolos_testing::blocks::make_conway_block_with_txs_at;
+    use pallas::{
+        codec::utils::{KeepRaw, NonEmptySet},
+        ledger::{
+            addresses::Address,
+            primitives::conway::{
+                PostAlonzoTransactionOutput, TransactionBody, TransactionInput, TransactionOutput,
+                Value,
+            },
+            traverse::ComputeHash,
+        },
+    };
+
+    fn output(address: &[u8]) -> TransactionOutput<'static> {
+        TransactionOutput::PostAlonzo(KeepRaw::from(PostAlonzoTransactionOutput {
+            address: address.to_vec().into(),
+            value: Value::Coin(1_000_000),
+            datum_option: None,
+            script_ref: None,
+        }))
+    }
+
+    fn tx_body(addresses: &[Vec<u8>]) -> TransactionBody<'static> {
+        TransactionBody {
+            inputs: vec![].into(),
+            outputs: addresses.iter().map(|address| output(address)).collect(),
+            fee: 200_000,
+            ttl: None,
+            certificates: None,
+            withdrawals: None,
+            auxiliary_data_hash: None,
+            validity_interval_start: None,
+            mint: None,
+            script_data_hash: None,
+            collateral: None,
+            required_signers: None,
+            network_id: None,
+            collateral_return: None,
+            total_collateral: None,
+            reference_inputs: None,
+            voting_procedures: None,
+            proposal_procedures: None,
+            treasury_value: None,
+            donation: None,
+        }
+    }
+
+    async fn assert_output_position_order(valid: bool) {
+        let app = TestApp::new();
+        let domain = app.facade();
+        let account = Address::from_bech32(&app.vectors().stake_address)
+            .unwrap()
+            .to_vec();
+        let mut addresses: Vec<_> = (0..8)
+            .map(|payment| {
+                stake_address_accounts::base(&stake_address_accounts::primary(), payment)
+            })
+            .collect();
+        addresses.sort_by_key(|address| Address::from_bytes(address).unwrap().to_string());
+        addresses.reverse();
+        let [a, b, c, d, e, f, reference_only, inactive] = addresses.as_slice() else {
+            unreachable!()
+        };
+        let input = |transaction_id: TxHash, index| TransactionInput {
+            transaction_id,
+            index,
+        };
+
+        let oldest = tx_body(&[
+            a.clone(),
+            a.clone(),
+            b.clone(),
+            reference_only.clone(),
+            inactive.clone(),
+        ]);
+        let oldest_hash = oldest.compute_hash();
+        let mut collateral_source = tx_body(std::slice::from_ref(inactive));
+        collateral_source.collateral_return = Some(output(c));
+        let collateral_hash = collateral_source.compute_hash();
+        let (_, older) = make_conway_block_with_txs_at(
+            200_000,
+            10,
+            None,
+            vec![(oldest, true), (collateral_source, false)],
+            None,
+        );
+
+        let same_block = tx_body(std::slice::from_ref(d));
+        let same_block_hash = same_block.compute_hash();
+        let consumed = vec![
+            input(same_block_hash, 0),
+            input(collateral_hash, 1),
+            input(oldest_hash, 2),
+            input(oldest_hash, 1),
+            input(oldest_hash, 0),
+            input([0xff; 32].into(), 0),
+        ];
+        let foreign = stake_address_accounts::base(&stake_address_accounts::other(), 9);
+        let mut spending = tx_body(&[e.clone(), a.clone(), f.clone(), e.clone(), foreign]);
+        spending.reference_inputs = NonEmptySet::from_vec(vec![input(oldest_hash, 3)]);
+        spending.collateral_return = Some(output(if valid { inactive } else { e }));
+        if valid {
+            spending.inputs = consumed.into();
+            spending.collateral = NonEmptySet::from_vec(vec![input(oldest_hash, 4)]);
+        } else {
+            spending.inputs = vec![input(oldest_hash, 4)].into();
+            spending.collateral = NonEmptySet::from_vec(consumed);
+        }
+        let spending_hash = spending.compute_hash().to_string();
+        let (_, current) = make_conway_block_with_txs_at(
+            200_010,
+            11,
+            None,
+            vec![(same_block, true), (spending, valid)],
+            None,
+        );
+
+        let writer = domain.archive().start_writer().unwrap();
+        for raw in [&older, &current] {
+            let block = MultiEraBlock::decode(raw).unwrap();
+            writer
+                .apply(&ChainPoint::Specific(block.slot(), block.hash()), raw)
+                .unwrap();
+            writer
+                .apply_index(&[ArchiveIndexDelta {
+                    slot: block.slot(),
+                    block_hash: block.hash().to_vec(),
+                    block_number: Some(block.number()),
+                    tx_hashes: block.txs().iter().map(|tx| tx.hash().to_vec()).collect(),
+                    tags: vec![],
+                }])
+                .unwrap();
+        }
+        writer.commit().unwrap();
+
+        let expected: Vec<_> = addresses[..if valid { 6 } else { 5 }]
+            .iter()
+            .map(|address| Address::from_bytes(address).unwrap().to_string())
+            .collect();
+        let chain = domain.get_chain_summary().unwrap();
+        let mut deps = InputDeps::default();
+        for order in [Order::Asc, Order::Desc] {
+            let pagination = Pagination {
+                order,
+                from: Some(crate::pagination::PaginationNumberAndIndex {
+                    number: 11,
+                    index: Some(1),
+                }),
+                ..Default::default()
+            };
+            let rows = find_account_txs_in_block(
+                &domain,
+                &mut deps,
+                &account,
+                &chain,
+                &pagination,
+                &current,
+            )
+            .await
+            .unwrap();
+            assert!(rows
+                .iter()
+                .all(|row| row.tx_hash == spending_hash && row.tx_index == 1));
+            let actual: Vec<_> = rows.into_iter().map(|row| row.address).collect();
+            let mut expected = expected.clone();
+            if matches!(order, Order::Desc) {
+                expected.reverse();
+            }
+            assert_eq!(actual, expected, "order={order:?}, valid={valid}");
+            assert_eq!(deps.fetches(), 4);
+        }
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_transactions_orders_addresses_by_output_position() {
+        assert_output_position_order(true).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_transactions_orders_only_consumed_and_produced_collateral() {
+        assert_output_position_order(false).await;
+    }
 
     #[tokio::test]
     async fn accounts_by_stake_transactions_happy_path() {
