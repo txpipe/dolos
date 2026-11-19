@@ -70,7 +70,7 @@ fn real_domain(dir: &Path) -> DomainAdapter {
 
     let config = format!(
         r#"
-        compatibility = "v2-alpha.2"
+        compatibility = "v2-beta.1"
 
         [chain]
         protocol = "cardano"
