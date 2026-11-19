@@ -17,8 +17,8 @@ use dolos_core::{
 };
 
 use crate::{
-    cache::{check_layout, is_corrupt},
     handle::Handle,
+    layout::{check_layout, is_corrupt},
 };
 
 #[derive(Debug, Error)]
