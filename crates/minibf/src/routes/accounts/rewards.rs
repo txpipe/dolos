@@ -378,8 +378,8 @@ mod tests {
         desc_sorted.sort();
         assert_eq!(asc_sorted, desc_sorted);
 
-        // Count 1 splits every epoch; asc count 2 and desc count 3 split a
-        // two-entry epoch.
+        // Count 1 and asc count 2 split both two-entry epochs; desc count 3
+        // splits epoch 1.
         for count in 1..=3 {
             assert_eq!(
                 fetch_paged(&app, "asc", count).await,
