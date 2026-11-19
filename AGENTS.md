@@ -319,14 +319,18 @@ This crate organization enables Dolos to serve as a lightweight, efficient Carda
 ### Code Verification Requirements
 
 The checks below are the bar every pull request must pass before it merges.
-CI runs the full suite on every pull request, so they are not the command for
-every local run.
+They are not the command for every local run.
 
 While working, run what covers your change: a package (`-p <crate>`), a test
 target (`--test <name>`), a test-name filter, or the full list when the change
 is broad (a shared trait, a dependency bump, a workspace-wide refactor). Before
-asking for review, make sure the change meets each requirement below; where it
-falls outside what you ran locally, CI holds it to the full list.
+asking for review, make sure the change meets each requirement below.
+
+CI runs the full test suite (item 3) on every pull request, and clippy on the
+root package only. It does not run the workspace-wide clippy (item 1), the
+warning-free build (item 2) or the registry restore round trip (item 4): where
+your change reaches what those cover, run them yourself, item 4 by the trigger
+given under it.
 
 1. **Clippy Linting**: Run `cargo clippy` and ensure no warnings appear
    ```bash
