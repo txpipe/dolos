@@ -97,6 +97,48 @@ fn a_v2_alpha_2_dataset_is_refused_untouched() {
     store_refused(temp.path(), &node, &before, Some("v2-alpha.2"));
 }
 
+/// A refused archive beside a state this release opens: the state passes,
+/// so the archive's own check is what refuses, and every command that
+/// reaches it, bootstrap's existing-data check among them, leaves the
+/// archive's files as they were.
+#[test]
+#[serial]
+#[cfg_attr(
+    feature = "debug",
+    ignore = "the debug feature's console subscriber panics a daemon built without tokio_unstable"
+)]
+fn a_refused_archive_beside_a_current_state_is_left_untouched() {
+    let temp = tempfile::tempdir().unwrap();
+    let node = temp.path().join("node");
+    let archive = node.join("data").join("archive");
+
+    stamped_state(&node.join("data").join("state"), SUPPORTED_CONTRACTS[0]);
+    stamped_archive(&archive, "v2-alpha.2");
+    dolos_cardano::include::preview::save(&node).unwrap();
+    std::fs::write(
+        node.join("dolos.toml"),
+        format!(
+            "compatibility = \"{}\"\n\n[chain]\nprotocol = \"cardano\"\nnetwork = \
+             \"preview\"\n\n[upstream]\npeer_address = \"unused.example:3001\"\n\n[storage]\npath \
+             = \"data\"\n",
+            SUPPORTED_CONTRACTS[0]
+        ),
+    )
+    .unwrap();
+
+    let before = files(&archive);
+
+    for args in [&["daemon"][..], &["serve"], &["bootstrap", "stelae"]] {
+        let stderr = refused(&node, args);
+        assert_contains(
+            &stderr,
+            "records the compatibility identity `v2-alpha.2`",
+            args,
+        );
+        assert_unchanged(&before, &files(&archive), args);
+    }
+}
+
 /// The fixture of `tag`, refused with its own configuration and with a
 /// current one, its files unchanged after every command.
 fn published(tag: &str) {
