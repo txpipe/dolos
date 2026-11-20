@@ -935,6 +935,7 @@ const PROBE_GAP: Duration = Duration::from_millis(50);
 /// that falls due while `path` holds the worker answers late, wherever the
 /// request does its blocking work. Returns the status of `path`.
 pub async fn health_throughout(app: &TestApp, path: &str) -> StatusCode {
+    let started = Instant::now();
     let done = std::cell::Cell::new(false);
 
     let heavy = async {
@@ -943,8 +944,10 @@ pub async fn health_throughout(app: &TestApp, path: &str) -> StatusCode {
         status
     };
 
+    // The first probe is due from the start: `path` is polled first, so work
+    // it blocks on before its first await delays that probe.
     let probes = async {
-        let mut since = Instant::now();
+        let mut since = started;
 
         loop {
             tokio::time::sleep(PROBE_GAP).await;
