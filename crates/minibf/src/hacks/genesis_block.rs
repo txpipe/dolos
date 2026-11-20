@@ -332,6 +332,26 @@ mod tests {
         assert_eq!(first.addresses.len(), txs.len());
     }
 
+    /// Mainnet funds Byron only through AVVM entries, so its outputs are the
+    /// ones that carry the AVVM amounts.
+    #[test]
+    fn mainnet_genesis_outputs_carry_the_avvm_amounts() {
+        use pallas::interop::hardano::configs::byron;
+
+        let genesis = Arc::new(dolos_cardano::include::mainnet::load());
+        assert!(genesis.byron.non_avvm_balances.is_empty());
+
+        let listing = genesis_listing(&genesis).unwrap();
+        let utxos = byron::genesis_utxos(&genesis.byron);
+        assert_eq!(utxos.len(), genesis.byron.avvm_distr.len());
+
+        for (hash, address, lovelace) in utxos {
+            let output = &listing.outputs[&hash];
+            assert_eq!(output.lovelace, lovelace, "{hash}");
+            assert_eq!(output.address, address.to_base58(), "{hash}");
+        }
+    }
+
     /// Two domains on one magic and one Shelley genesis, with different Byron
     /// funds: each gets the listing of its own.
     #[test]

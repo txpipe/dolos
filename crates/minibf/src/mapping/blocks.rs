@@ -320,10 +320,9 @@ impl<'a> IntoModel<BlockContent> for BlockModelBuilder<'a> {
                 "0" => None,
                 _ => Some(output),
             },
-            fees: match fees.as_str() {
-                "0" => None,
-                _ => Some(fees),
-            },
+            // a sum over the block's txs: none without txs, "0" when they paid
+            // nothing (Byron redemptions)
+            fees: (!block.txs().is_empty()).then_some(fees),
         };
 
         Ok(out)

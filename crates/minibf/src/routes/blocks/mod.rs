@@ -644,7 +644,7 @@ mod tests {
             assert_ne!(block.txs()[0].fee_or_compute(), paid);
             let model = byron_model(vec![funding], raw).await;
             assert_eq!(model.tx_count, 1);
-            assert_eq!(model.fees, (paid != 0).then(|| paid.to_string()));
+            assert_eq!(model.fees, Some(paid.to_string()));
         }
     }
 
@@ -717,49 +717,83 @@ mod tests {
         assert_eq!(model.fees, Some("170000".to_string()));
     }
 
-    /// Three Byron blocks, each spending an output of its own source tx.
-    fn byron_page() -> (dolos_core::BlockBody, Vec<dolos_core::BlockBody>, [u64; 3]) {
-        use crate::test_support::{byron_block, byron_tx};
+    /// A funding block, three Byron blocks each spending one output of its
+    /// one tx, and an empty block after them, for `/previous` to start from.
+    fn byron_page() -> (Vec<dolos_core::BlockBody>, [u64; 3]) {
+        use crate::test_support::{byron_block, byron_funding, byron_tx};
         use dolos_core::TxoRef;
 
         let funds = [3_000_000, 2_000_000, 4_000_000];
         let paid = [200_000, 170_807, 350_000];
+        let (funding, source) = byron_funding(&funds);
 
-        let funding = byron_block(10, funds.map(|fund| byron_tx(&[], &[fund])).to_vec());
-        let sources: Vec<_> = MultiEraBlock::decode(&funding)
-            .unwrap()
-            .txs()
-            .iter()
-            .map(|tx| tx.hash())
-            .collect();
+        let mut blocks = vec![funding];
+        blocks.extend((0..3).map(|i| {
+            let tx = byron_tx(&[TxoRef(source, i as u32)], &[funds[i] - paid[i]]);
+            byron_block(11 + i as u64, vec![tx])
+        }));
+        blocks.push(byron_block(14, vec![]));
 
-        let page = (0..3)
-            .map(|i| {
-                let tx = byron_tx(&[TxoRef(sources[i], 0)], &[funds[i] - paid[i]]);
-                byron_block(11 + i as u64, vec![tx])
-            })
-            .collect();
+        (blocks, paid)
+    }
 
-        (funding, page, paid)
+    fn block_hash(raw: &dolos_core::BlockBody) -> String {
+        MultiEraBlock::decode(raw).unwrap().hash().to_string()
     }
 
     #[tokio::test]
-    async fn byron_next_page_reports_each_blocks_paid_fees() {
-        let (funding, page, paid) = byron_page();
-        let from = MultiEraBlock::decode(&funding).unwrap().hash();
+    async fn byron_next_and_previous_pages_read_their_inputs_once() {
+        let (blocks, paid) = byron_page();
+        let paid = paid.map(|fee| Some(fee.to_string()));
 
-        let mut blocks = vec![funding];
-        blocks.extend(page.iter().cloned());
+        let from = block_hash(&blocks[0]);
+        let to = block_hash(&blocks[4]);
         let app = crate::test_support::byron_app(blocks);
 
-        let models = get_blocks(&app, &format!("/blocks/{from}/next?count=3")).await;
-        let fees: Vec<_> = models.iter().map(|model| model.fees.clone()).collect();
+        for path in [
+            format!("/blocks/{from}/next?count=3"),
+            format!("/blocks/{to}/previous?count=3"),
+        ] {
+            let before = app.facade().inner.tx_lookups();
+            let models = get_blocks(&app, &path).await;
+            let fees: Vec<_> = models.iter().map(|model| model.fees.clone()).collect();
+            assert_eq!(fees, paid, "{path}");
 
-        assert_eq!(fees, paid.map(|fee| Some(fee.to_string())));
+            // the three blocks spend one source tx: a read per block would
+            // look it up three times
+            let lookups = app.facade().inner.tx_lookups() - before;
+            assert_eq!(lookups, 1, "one batched input read for {path}");
+        }
+    }
 
-        let deps = super::fee_deps(&app.facade(), &page).await.unwrap();
-        assert_eq!(deps.fetches(), 3);
-        assert_eq!(deps.batches(), 1, "one batched read for the whole page");
+    #[tokio::test]
+    async fn later_era_blocks_read_no_inputs_for_their_fees() {
+        let app = crate::test_support::TestApp::new();
+        let facade = app.facade();
+        let blocks: Vec<_> = facade
+            .archive()
+            .get_range(None, None)
+            .unwrap()
+            .map(|(_, raw)| raw)
+            .collect();
+        assert!(blocks
+            .iter()
+            .all(|raw| MultiEraBlock::decode(raw).unwrap().era() != Era::Byron));
+        assert!(blocks.iter().any(|raw| MultiEraBlock::decode(raw)
+            .unwrap()
+            .txs()
+            .iter()
+            .any(|tx| !tx.consumes().is_empty())));
+
+        let deps = super::fee_deps(&facade, &blocks).await.unwrap();
+        assert_eq!((deps.fetches(), deps.batches()), (0, 0));
+
+        let first = block_hash(&blocks[0]);
+        let models = get_blocks(&app, &format!("/blocks/{first}/next?count=3")).await;
+        assert_eq!(models.len(), 3);
+        let (status, _) = app.get_bytes(&format!("/blocks/{first}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(facade.inner.tx_lookups(), 0);
     }
 
     #[tokio::test]

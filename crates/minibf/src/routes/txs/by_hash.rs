@@ -192,6 +192,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn later_era_tx_reads_no_inputs_for_its_fee() {
+        let app = TestApp::new();
+        let tx_hash = app.vectors().tx_hash.clone();
+
+        let parsed: TxContent = get_ok(&app, &format!("/txs/{tx_hash}")).await;
+        assert_eq!(parsed.hash, tx_hash);
+
+        // the lookup of the tx itself, none of the txs its inputs spend
+        assert_eq!(app.facade().inner.tx_lookups(), 1);
+    }
+
+    #[tokio::test]
     async fn txs_by_hash_happy_path() {
         let app = TestApp::new();
         let tx_hash = app.vectors().tx_hash.as_str();

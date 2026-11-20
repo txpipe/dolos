@@ -620,6 +620,33 @@ mod tests {
     }
 
     #[test]
+    fn byron_redemption_of_a_mainnet_avvm_output_pays_its_fee() {
+        use crate::test_support::{byron_block, byron_tx};
+        use dolos_core::TxoRef;
+        use pallas::interop::hardano::configs::byron;
+
+        let genesis = Arc::new(dolos_cardano::include::mainnet::load());
+        let (source, _, amount) = byron::genesis_utxos(&genesis.byron)
+            .into_iter()
+            .max_by_key(|(_, _, amount)| *amount)
+            .expect("the mainnet genesis has avvm utxos");
+
+        // the archive holds no tx that produced a genesis output
+        let store = InputTxMap::from([(source, None)]);
+
+        // a redemption is exempt from the minimum fee
+        for paid in [0, 170_000] {
+            let raw = byron_block(11, vec![byron_tx(&[TxoRef(source, 0)], &[amount - paid])]);
+            let block = MultiEraBlock::decode(&raw).unwrap();
+            let tx = &block.txs()[0];
+            assert_ne!(tx.fee_or_compute(), paid);
+
+            let mut resolver = InputResolver::new(&store).with_genesis(genesis.clone());
+            assert_eq!(resolver.fee(tx).unwrap(), paid);
+        }
+    }
+
+    #[test]
     fn decodes_each_dependency_once() {
         let vectors = vectors();
 
