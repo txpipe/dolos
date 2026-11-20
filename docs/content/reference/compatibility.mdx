@@ -22,7 +22,7 @@ A configuration declares the identifier it was written for (`compatibility = "â€
 - **Persisted data.** It opens a dataset an older binary wrote and keeps using it, with no rebuild, restore or operator-managed migration.
 - **Command line.** It keeps the [supported commands](#supported-surface-inventory), their arguments, the meaning of their exit codes and their documented machine-readable output (`--format json`).
 
-Breaking any of these needs a new major and a new identifier. A configuration or store under any other identifier, or under none, is refused before Dolos reads or writes anything, with a message that names the identifier and the next step.
+Breaking any of these needs a new major and a new identifier. A configuration or store under any other identifier, or under none, is refused before Dolos reads or writes it, with a message that names the identifier and the next step.
 
 ## Prerelease identifiers
 
@@ -48,7 +48,7 @@ Dolos 2.0.x ships no in-place migration. The first release that needs one will d
 
 The write-ahead log (WAL), the mempool and the cache's disk tier are outside the contract. Changing their formats needs no new identifier.
 
-When one of them records a version other than the binary's, older or newer, holds data with no version marker, or fails to decode, a writable open resets it, logs one warning and the node starts. A command that only reads the stores reads it as empty and leaves it as it is, for the next writable open to reset. A lock, permission or I/O error still fails the open. The reset runs only after the state and archive stores are admitted, so a binary that refuses those stores never wipes the WAL first.
+When one of them records a version other than the binary's, older or newer, holds data with no version marker, or fails to decode, a writable open resets it, logs one warning and goes on. A command that [observes the stores](cli#how-a-command-opens-the-stores) reads it as empty and leaves it as it is, for the next writable open to reset or, in the case below, keep. A lock, permission or I/O error still fails the open. The reset runs only after the state and archive stores are admitted, so a binary that refuses those stores never wipes the WAL first.
 
 One case is kept, not reset: a WAL that still holds blocks the state or archive needs, as a crash before both stores caught up can leave it. Resetting it would lose those blocks for good, so a writable open leaves the WAL as it is and the start fails with a message that names the store waiting on it. If another release wrote the WAL, start that release once, so it brings the stores together and shuts down cleanly, then start the new one; otherwise rebuild the state from the archive with `dolos data rebuild`, or replace the dataset with `dolos bootstrap --force`.
 
