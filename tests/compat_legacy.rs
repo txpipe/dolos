@@ -148,6 +148,11 @@ fn published(tag: &str) {
 
     for args in COMMANDS {
         let stderr = refused(&node, args);
+        assert_contains(
+            &stderr,
+            &format!("compatibility = \"{}\"", SUPPORTED_CONTRACTS[0]),
+            args,
+        );
         assert_contains(&stderr, MIGRATION_GUIDE_URL, args);
         assert_unchanged(&before, &files(&node), args);
     }

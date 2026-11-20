@@ -29,7 +29,7 @@ Rewriting the configuration does not touch the data in storage. Replacing the st
 
 ### What the node says about an old file
 
-The node checks the file's `compatibility` declaration before anything else, and stops before any store opens:
+The node checks the file's `compatibility` declaration before anything else, and stops before any store opens. The [compatibility policy](../reference/compatibility) states what a declaration promises and which transitions are refused:
 
 | message | cause | remedy |
 | ------- | ----- | ------ |

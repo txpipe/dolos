@@ -65,10 +65,21 @@ enum Command {
     Bootstrap(bootstrap::Args),
 }
 
+/// What `dolos --version` and `-V` print after the name: the release and the
+/// compatibility contract it implements.
+static VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "{} (compatibility {})",
+        env!("CARGO_PKG_VERSION"),
+        dolos_core::config::Compatibility::current()
+    )
+});
+
 #[derive(Debug, Parser)]
-#[clap(name = "Dolos")]
+#[clap(name = "dolos")]
 #[clap(bin_name = "dolos")]
-#[clap(author, version, about, long_about = None)]
+#[clap(author, about, long_about = None)]
+#[clap(version = VERSION.as_str())]
 struct Cli {
     #[command(subcommand)]
     command: Command,
