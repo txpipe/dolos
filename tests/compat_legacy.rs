@@ -35,18 +35,30 @@ const DEADLINE: Duration = Duration::from_secs(60);
 
 #[test]
 #[serial]
+#[cfg_attr(
+    feature = "debug",
+    ignore = "the debug feature's console subscriber panics a daemon built without tokio_unstable"
+)]
 fn a_v1_6_3_dataset_is_refused_untouched() {
     published("v1.6.3");
 }
 
 #[test]
 #[serial]
+#[cfg_attr(
+    feature = "debug",
+    ignore = "the debug feature's console subscriber panics a daemon built without tokio_unstable"
+)]
 fn a_v1_7_0_alpha_1_dataset_is_refused_untouched() {
     published("v1.7.0-alpha.1");
 }
 
 #[test]
 #[serial]
+#[cfg_attr(
+    feature = "debug",
+    ignore = "the debug feature's console subscriber panics a daemon built without tokio_unstable"
+)]
 fn a_v2_0_0_alpha_0_dataset_is_refused_untouched() {
     published("v2.0.0-alpha.0");
 }
@@ -54,6 +66,10 @@ fn a_v2_0_0_alpha_0_dataset_is_refused_untouched() {
 /// A `v2-alpha.2` store needs no old binary: the current one stamps it.
 #[test]
 #[serial]
+#[cfg_attr(
+    feature = "debug",
+    ignore = "the debug feature's console subscriber panics a daemon built without tokio_unstable"
+)]
 fn a_v2_alpha_2_dataset_is_refused_untouched() {
     let temp = tempfile::tempdir().unwrap();
     let node = temp.path().join("node");
