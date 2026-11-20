@@ -950,6 +950,13 @@ fn open_archive_at(
                     preset.into(),
                 ),
                 Access::Mutate => {
+                    ArchiveStoreBackend::admit_existing(
+                        &schema,
+                        path,
+                        blocks,
+                        preset.into(),
+                        |e| fjall_failure(path, e, ArchiveError::from),
+                    )?;
                     dolos_fjall::archive::ArchiveStore::open(schema, path, blocks, preset.into())
                 }
             }
@@ -973,7 +980,12 @@ fn open_state_at(
         StoreType::Fjall { preset } => {
             let store = match access {
                 Access::Observe => dolos_fjall::StateStore::open_view(path, preset.into()),
-                Access::Mutate => dolos_fjall::StateStore::open(path, preset.into()),
+                Access::Mutate => {
+                    StateStoreBackend::admit_existing(path, preset.into(), |e| {
+                        fjall_failure(path, e, StateError::from)
+                    })?;
+                    dolos_fjall::StateStore::open(path, preset.into())
+                }
             }
             .map_err(|error| fjall_failure(path, error, StateError::from))?;
 
@@ -1660,9 +1672,32 @@ impl StateStoreBackend {
         preset: dolos_fjall::Preset,
     ) -> Result<Self, StateError> {
         let path = path.as_ref();
+        Self::admit_existing(path, preset, StateError::from)?;
         let store = dolos_fjall::StateStore::open(path, preset)?;
 
         Self::admitted_fjall(store, path, Access::Mutate)
+    }
+
+    /// [`admit`] the store at `path`, when there is one, over a read-only
+    /// view, before a writable open: that open rewrites fjall's journal and
+    /// version files and creates missing keyspaces, so it would change a
+    /// store it then refuses. `failed` maps a view that fails to open.
+    fn admit_existing<E>(
+        path: &Path,
+        preset: dolos_fjall::Preset,
+        failed: impl FnOnce(dolos_fjall::Error) -> E,
+    ) -> Result<(), E>
+    where
+        E: From<StateError>,
+    {
+        if !dolos_fjall::database_exists(path) {
+            return Ok(());
+        }
+
+        let view = dolos_fjall::StateStore::open_view(path, preset).map_err(failed)?;
+        Self::admitted_fjall(view, path, Access::Observe)?;
+
+        Ok(())
     }
 
     /// The fjall store opened at `path`, through [`admit`]. Under
@@ -2055,9 +2090,41 @@ impl ArchiveStoreBackend {
         preset: dolos_fjall::Preset,
     ) -> Result<Self, ArchiveError> {
         let path = path.as_ref();
+        Self::admit_existing(&schema, path, blocks_path, preset, ArchiveError::from)?;
         let store = dolos_fjall::archive::ArchiveStore::open(schema, path, blocks_path, preset)?;
 
         Self::admitted_fjall(store, path, Access::Mutate)
+    }
+
+    /// [`admit`] the archive at `path`, when its index is there, over a
+    /// read-only view, before a writable open, which would change an index
+    /// it then refuses (see [`StateStoreBackend::admit_existing`]). Segments
+    /// not there yet are read from `path`, which a writable open creates.
+    fn admit_existing<E>(
+        schema: &StateSchema,
+        path: &Path,
+        blocks_path: Option<&Path>,
+        preset: dolos_fjall::Preset,
+        failed: impl FnOnce(dolos_fjall::Error) -> E,
+    ) -> Result<(), E>
+    where
+        E: From<ArchiveError>,
+    {
+        if !dolos_fjall::database_exists(&path.join("index")) {
+            return Ok(());
+        }
+
+        let blocks_path = blocks_path.filter(|blocks| blocks.is_dir());
+        let view = dolos_fjall::archive::ArchiveStore::open_view(
+            schema.clone(),
+            path,
+            blocks_path,
+            preset,
+        )
+        .map_err(failed)?;
+        Self::admitted_fjall(view, path, Access::Observe)?;
+
+        Ok(())
     }
 
     /// The fjall store opened at `path`, through [`admit`]. Under
