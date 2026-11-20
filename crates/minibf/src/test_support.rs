@@ -1250,3 +1250,92 @@ pub fn mixed_metadatum() -> pallas::ledger::primitives::Metadatum {
         (text("b"), text("second")),
     ])
 }
+
+pub fn byron_tx(
+    inputs: &[dolos_core::TxoRef],
+    outputs: &[u64],
+) -> pallas::ledger::primitives::byron::TxPayload<'static> {
+    use pallas::{
+        codec::utils::{CborWrap, EmptyMap, KeepRaw, MaybeIndefArray, TagWrap},
+        ledger::primitives::byron,
+    };
+
+    byron::TxPayload {
+        transaction: KeepRaw::from(byron::Tx {
+            inputs: MaybeIndefArray::Def(
+                inputs
+                    .iter()
+                    .map(|input| byron::TxIn::Variant0(CborWrap((input.0, input.1))))
+                    .collect(),
+            ),
+            outputs: MaybeIndefArray::Def(
+                outputs
+                    .iter()
+                    .map(|amount| byron::TxOut {
+                        address: byron::Address {
+                            payload: TagWrap::new(vec![0x83, 0x58, 0x1c].into()),
+                            crc: 0,
+                        },
+                        amount: *amount,
+                    })
+                    .collect(),
+            ),
+            attributes: EmptyMap,
+        }),
+        witness: KeepRaw::from(MaybeIndefArray::Def(vec![])),
+    }
+}
+
+pub fn byron_block(
+    slot: u64,
+    txs: Vec<pallas::ledger::primitives::byron::TxPayload<'static>>,
+) -> dolos_core::BlockBody {
+    use pallas::{codec::minicbor, codec::utils::MaybeIndefArray, ledger::primitives::byron};
+
+    let (_, raw) = dolos_testing::blocks::make_byron_block(0, slot, slot, [0; 32].into());
+    let (era, mut block): (u16, byron::Block<'_>) = minicbor::decode(&raw).unwrap();
+    block.body.tx_payload = MaybeIndefArray::Def(txs);
+    minicbor::to_vec((era, block)).unwrap()
+}
+
+pub fn byron_facade(
+    blocks: Vec<dolos_core::BlockBody>,
+) -> Facade<dolos_testing::faults::FaultyToyDomain> {
+    byron_app(blocks).facade
+}
+
+pub fn byron_funding(outputs: &[u64]) -> (dolos_core::BlockBody, dolos_core::TxHash) {
+    let raw = byron_block(10, vec![byron_tx(&[], outputs)]);
+    let block = pallas::ledger::traverse::MultiEraBlock::decode(&raw).unwrap();
+    let hash = block.txs()[0].hash();
+    (raw, hash)
+}
+
+pub fn byron_app(blocks: Vec<dolos_core::BlockBody>) -> TestApp {
+    use dolos_core::{ArchiveIndexDelta, ArchiveStore as _, ArchiveWriter as _, ChainPoint};
+    use pallas::ledger::traverse::MultiEraBlock;
+
+    TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), move |domain, _| {
+        seed_epoch_logs(domain, &[0]).unwrap();
+        let writer = domain.archive().start_writer().unwrap();
+        for raw in &blocks {
+            let block = MultiEraBlock::decode(raw).unwrap();
+            writer
+                .apply(
+                    &ChainPoint::Specific(block.slot(), block.hash()),
+                    &Arc::new(raw.clone()),
+                )
+                .unwrap();
+            writer
+                .apply_index(&[ArchiveIndexDelta {
+                    slot: block.slot(),
+                    block_hash: block.hash().to_vec(),
+                    block_number: Some(block.number()),
+                    tx_hashes: block.txs().iter().map(|tx| tx.hash().to_vec()).collect(),
+                    tags: vec![],
+                }])
+                .unwrap();
+        }
+        writer.commit().unwrap();
+    })
+}

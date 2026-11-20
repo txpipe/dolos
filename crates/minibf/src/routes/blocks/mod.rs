@@ -3,10 +3,11 @@ use blockfrost_openapi::models::block_content::BlockContent;
 use dolos_cardano::ChainSummary;
 use dolos_core::{ArchiveStore, BlockBody, ChainPoint, Domain};
 use itertools::Either;
-use pallas::ledger::traverse::MultiEraBlock;
+use pallas::ledger::traverse::{Era, MultiEraBlock};
 
 use crate::{
     error::Error,
+    inputs::InputDeps,
     mapping::IntoModel,
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
@@ -238,6 +239,18 @@ where
 {
     let block = MultiEraBlock::decode(body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let mut builder = BlockModelBuilder::new(body)?;
+
+    let mut deps = InputDeps::default();
+    let mut resolver = {
+        let txs = if builder.era() == Era::Byron {
+            builder.txs()
+        } else {
+            vec![]
+        };
+        deps.prepare(domain, txs.iter().filter(|tx| tx.as_byron().is_some()))
+            .await?
+    };
+    builder = builder.with_resolved_fees(&mut resolver)?;
 
     let previous_hash = builder.previous_hash();
 
@@ -538,5 +551,99 @@ mod tests {
 
         assert!(archive.blocks_after(&held).unwrap().is_some());
         assert!(archive.blocks_before(&held).unwrap().is_some());
+    }
+
+    async fn byron_model(
+        sources: Vec<dolos_core::BlockBody>,
+        raw: dolos_core::BlockBody,
+    ) -> BlockContent {
+        // the walk to `next_block` reads the modelled block off the archive
+        let mut blocks = sources;
+        blocks.push(raw.clone());
+        let facade = crate::test_support::byron_facade(blocks);
+        let chain = facade.get_chain_summary().unwrap();
+        super::build_block_model(&facade, &raw, &raw, &chain)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn byron_block_fees_are_paid_inputs_minus_outputs() {
+        use crate::test_support::{byron_block, byron_funding, byron_tx};
+        use dolos_core::TxoRef;
+        use pallas::ledger::traverse::MultiEraBlock;
+
+        for paid in [200_000, 0] {
+            let (funding, hash) = byron_funding(&[3_000_000, 1_700_000]);
+            let raw = byron_block(
+                11,
+                vec![byron_tx(
+                    &[TxoRef(hash, 0), TxoRef(hash, 1)],
+                    &[4_000_000, 700_000 - paid],
+                )],
+            );
+            let block = MultiEraBlock::decode(&raw).unwrap();
+            assert_ne!(block.txs()[0].fee_or_compute(), paid);
+            let model = byron_model(vec![funding], raw).await;
+            assert_eq!(model.tx_count, 1);
+            assert_eq!(model.fees, (paid != 0).then(|| paid.to_string()));
+        }
+    }
+
+    #[tokio::test]
+    async fn byron_block_fees_fall_back_when_any_input_is_missing() {
+        use crate::test_support::{byron_block, byron_funding, byron_tx};
+        use dolos_core::TxoRef;
+        use pallas::ledger::traverse::MultiEraBlock;
+
+        let (funding, hash) = byron_funding(&[5_000_000]);
+        let known = TxoRef(hash, 0);
+        let missing = TxoRef([0x77; 32].into(), 0);
+        for inputs in [
+            vec![missing.clone()],
+            vec![known.clone(), missing.clone()],
+            vec![missing, known.clone()],
+            vec![known, TxoRef(hash, 1)],
+        ] {
+            let raw = byron_block(11, vec![byron_tx(&inputs, &[1_000_000])]);
+            let block = MultiEraBlock::decode(&raw).unwrap();
+            let minimum = block.txs()[0].fee_or_compute();
+            assert_ne!(minimum, 4_000_000);
+            let model = byron_model(vec![funding.clone()], raw).await;
+            assert_eq!(model.fees, Some(minimum.to_string()));
+        }
+    }
+
+    #[tokio::test]
+    async fn byron_block_fees_mix_paid_and_fallback_per_transaction() {
+        use crate::test_support::{byron_block, byron_funding, byron_tx};
+        use dolos_core::TxoRef;
+        use pallas::ledger::traverse::MultiEraBlock;
+
+        let (funding, hash) = byron_funding(&[3_000_000, 2_000_000, 4_000_000]);
+        let raw = byron_block(
+            11,
+            vec![
+                byron_tx(&[TxoRef(hash, 0)], &[2_800_000]),
+                byron_tx(
+                    &[TxoRef(hash, 1), TxoRef([0x77; 32].into(), 0)],
+                    &[1_000_000],
+                ),
+                byron_tx(&[TxoRef(hash, 2)], &[3_700_000]),
+            ],
+        );
+        let block = MultiEraBlock::decode(&raw).unwrap();
+        let minimum = block.txs()[1].fee_or_compute();
+        let model = byron_model(vec![funding], raw).await;
+        assert_eq!(model.tx_count, 3);
+        assert_eq!(model.fees, Some((500_000 + minimum).to_string()));
+    }
+
+    #[tokio::test]
+    async fn byron_empty_block_has_no_fees() {
+        let raw = crate::test_support::byron_block(11, vec![]);
+        let model = byron_model(vec![], raw).await;
+        assert_eq!(model.tx_count, 0);
+        assert_eq!(model.fees, None);
     }
 }
