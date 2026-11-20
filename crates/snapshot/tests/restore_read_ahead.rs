@@ -765,7 +765,7 @@ fn a_registry_restore_reads_the_blocks_repository_it_is_given() {
                 resume: false,
                 skip_space_check: false,
                 journals: 0,
-                read_ahead: DEFAULT_READ_AHEAD,
+                read_ahead: None,
                 source: None,
             },
             Target::new(&blank.archive, blank.state()),
