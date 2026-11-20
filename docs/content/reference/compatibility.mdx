@@ -50,6 +50,8 @@ The write-ahead log (WAL), the mempool and the cache's disk tier are outside the
 
 When one of them records a version other than the binary's, older or newer, holds data with no version marker, or fails to decode, Dolos resets it when it opens it, logs one warning and starts. A lock, permission or I/O error still fails the open. The reset runs only after the state and archive stores are admitted, so a binary that refuses those stores never wipes the WAL first.
 
+One case is kept, not reset: a WAL that still holds blocks the state or archive needs, as a crash before both stores caught up can leave it. Resetting it would lose those blocks for good, so a writable open leaves the WAL as it is and the start fails with a message that names the store waiting on it. Start the release that wrote the WAL once, so it brings the stores together and shuts down cleanly, then start the new one; failing that, rebuild the state from the archive with `dolos data rebuild`, or replace the dataset with `dolos bootstrap --force`.
+
 ## Supported-surface inventory
 
 Every command the release binaries carry, one row each. The supported surface is the command, its arguments as its `--help` lists them, its exit codes and, where the table names one, its machine-readable output. [The CLI reference](cli) documents each command in full.
@@ -123,10 +125,10 @@ What the current binary does with a configuration or a dataset written by anothe
 
 | from | to | verification |
 | ---- | -- | ------------ |
-| 2.0.0 | any later 2.x | verified by archived fixtures from 2.0.0 (`tests/compat_fixtures.rs`) |
+| 2.0.0 | any later 2.x | verified by archived fixtures from 2.0.0 (`tests/compat_fixtures.rs`, pending: the harness is not in this release yet) |
 
 ## How releases keep it
 
-From 2.0.0, each stable minor release archives a small fixture: a configuration, a short-chain dataset and the golden output of the supported commands. CI opens every archived fixture with the current build, so a change that breaks an older release's configuration, data or command output fails before it merges.
+From 2.0.0, each stable minor release archives a small fixture: a configuration, a short-chain dataset and the golden output of the supported commands. CI opens every archived fixture with the current build, so a change that breaks an older release's configuration, data or command output fails before it merges. That CI job is pending: it arrives with the fixture harness.
 
 The release coordinator owns the check: archiving the fixture at each stable minor and confirming, in the release preflight, that every archived fixture still opens.
