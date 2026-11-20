@@ -84,9 +84,10 @@ pub struct Args {
 
     /// how many layers to read ahead of the one being written; a registry
     /// restore stages each in the scratch directory until its turn. 0 or 1
-    /// reads one layer at a time
-    #[arg(long, value_name = "LAYERS", default_value_t = dolos_snapshot::restore::DEFAULT_READ_AHEAD)]
-    pub read_ahead: usize,
+    /// reads one layer at a time. Default 8, lowered to fit 4 GiB of staging
+    /// but never below 8
+    #[arg(long, value_name = "LAYERS")]
+    pub read_ahead: Option<usize>,
 
     /// Resume an interrupted restore from the layers it recorded, reading the
     /// snapshot it started from again; with nothing to resume, restore as
@@ -164,7 +165,7 @@ impl Args {
             insecure: false,
             scratch_dir: None,
             skip_space_check: false,
-            read_ahead: dolos_snapshot::restore::DEFAULT_READ_AHEAD,
+            read_ahead: None,
             resume: false,
             credentials: super::from_environment()?,
         })
@@ -575,7 +576,7 @@ struct Node {
 struct RestoreOptions<'a> {
     feedback: &'a Feedback,
     skip_space_check: bool,
-    read_ahead: usize,
+    read_ahead: Option<usize>,
 }
 
 impl Node {
@@ -922,7 +923,7 @@ mod tests {
             insecure: false,
             scratch_dir: None,
             skip_space_check: false,
-            read_ahead: dolos_snapshot::restore::DEFAULT_READ_AHEAD,
+            read_ahead: None,
             resume: false,
             credentials: CredentialArgs::default(),
         }
@@ -1281,7 +1282,7 @@ mod tests {
         let options = RestoreOptions {
             feedback: &feedback,
             skip_space_check: false,
-            read_ahead: dolos_snapshot::restore::DEFAULT_READ_AHEAD,
+            read_ahead: None,
         };
 
         assert_eq!(node.restoring(&inputs, options).journals, expected);

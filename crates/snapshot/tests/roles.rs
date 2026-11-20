@@ -301,7 +301,7 @@ fn restored(root: &std::path::Path) -> Summary {
         resume: false,
         skip_space_check: true,
         journals: 0,
-        read_ahead: restore::DEFAULT_READ_AHEAD,
+        read_ahead: None,
         source: None,
     };
 

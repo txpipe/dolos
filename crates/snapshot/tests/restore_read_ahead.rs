@@ -765,7 +765,7 @@ fn a_registry_restore_reads_the_blocks_repository_it_is_given() {
                 resume: false,
                 skip_space_check: false,
                 journals: 0,
-                read_ahead: DEFAULT_READ_AHEAD,
+                read_ahead: None,
                 source: None,
             },
             Target::new(&blank.archive, blank.state()),
@@ -805,6 +805,69 @@ fn a_registry_restore_reads_the_blocks_repository_it_is_given() {
         "{error:?}"
     );
     assert_eq!(blank.state().read_cursor().unwrap(), None);
+}
+
+/// The depth an operator names reaches both streams of a registry restore
+/// through its entry point: asked for one layer at a time, it fetches one at a
+/// time in plan order, where the default reads ahead.
+#[test]
+fn a_registry_restore_reads_at_the_depth_its_operator_names() {
+    let published = Published::paired();
+    let registry = &published.registry;
+    let order = published.blobs(published.plan.layers());
+
+    let scratch = tempfile::tempdir().unwrap();
+    let repository = |name: &str| {
+        install_crypto_provider();
+
+        registry::SnapshotRepository::open(
+            &registry.repository(name),
+            true,
+            registry::Auth::default(),
+            scratch.path().to_path_buf(),
+            registry::Tuning::default(),
+        )
+        .unwrap()
+    };
+
+    // Every layer waits before its first byte, so the pulls a stream starts
+    // together are in flight together.
+    registry.delay(&order, Duration::from_millis(50));
+
+    let restored = |read_ahead: Option<usize>| {
+        registry.forget();
+
+        let storage = tempfile::tempdir().unwrap();
+        let blank = Blank::<MemoryStores>::open();
+
+        restore::execute(
+            restore::Input::Repository {
+                repository: &repository(REPOSITORY),
+                point: Point::Latest,
+                blocks: Some(&repository(BLOCKS_REPOSITORY)),
+            },
+            restore::Restoring {
+                network_magic: published.magic,
+                max_history: None,
+                storage_path: storage.path(),
+                resume: false,
+                skip_space_check: false,
+                journals: 0,
+                read_ahead,
+                source: None,
+            },
+            Target::new(&blank.archive, blank.state()),
+            None,
+        )
+        .unwrap();
+    };
+
+    restored(None);
+    assert!(registry.peak() > 1, "the default read nothing ahead");
+
+    restored(Some(1));
+    assert_eq!(registry.arrived(), order);
+    assert_eq!(registry.peak(), 1);
 }
 
 /// At a depth of 0 or 1 a paired restore asks for one layer at a time, from
