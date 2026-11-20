@@ -1852,18 +1852,6 @@ impl AssetTotals {
     }
 }
 
-pub fn aggregate_assets<'a>(
-    txouts: impl Iterator<Item = &'a MultiEraOutput<'a>>,
-) -> Vec<TxContentOutputAmountInner> {
-    let mut totals = AssetTotals::default();
-
-    for txout in txouts {
-        totals.add_output(txout);
-    }
-
-    totals.into_amounts()
-}
-
 pub fn list_assets<'a>(
     txouts: impl Iterator<Item = &'a MultiEraOutput<'a>>,
 ) -> Vec<TxContentOutputAmountInner> {
@@ -1905,16 +1893,15 @@ pub struct AssetAggregate {
     pub newest: Option<(u64, usize, TxoIdx)>,
 }
 
-/// Aggregates asset quantities per unit over a set of utxos, tracking the
-/// chain position of the oldest and newest utxo holding each asset —
-/// Blockfrost orders account assets by these. The BTreeMap keeps units
-/// sorted, providing the tie-break order for assets sharing a position.
-pub fn aggregate_account_assets(
+/// Adds the asset quantities of `utxos` to `by_unit`, tracking the chain
+/// position of the oldest and newest utxo holding each asset — Blockfrost
+/// orders account assets by these. The BTreeMap keeps units sorted,
+/// providing the tie-break order for assets sharing a position.
+pub fn add_account_assets(
+    by_unit: &mut BTreeMap<String, AssetAggregate>,
     utxos: &HashMap<TxoRef, Arc<UtxoValue>>,
     block_deps: &HashMap<TxHash, BlockRefMeta>,
-) -> Result<BTreeMap<String, AssetAggregate>, StatusCode> {
-    let mut by_unit: BTreeMap<String, AssetAggregate> = BTreeMap::new();
-
+) -> Result<(), StatusCode> {
     for (txo_ref, cbor) in utxos.iter() {
         let output = MultiEraOutput::try_from(cbor.as_ref())
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -1944,7 +1931,7 @@ pub fn aggregate_account_assets(
         }
     }
 
-    Ok(by_unit)
+    Ok(())
 }
 
 pub enum AddressKind {
