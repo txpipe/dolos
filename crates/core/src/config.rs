@@ -1580,7 +1580,11 @@ pub enum ConfigError {
     #[error("`compatibility` must be a string such as \"{current}\", found {0}", current = Compatibility::current())]
     MalformedCompatibility(String),
 
-    #[error("unsupported `compatibility = \"{0}\"`; this release supports {supported}", supported = supported_contracts())]
+    #[error(
+        "unsupported `compatibility = \"{0}\"`; this release supports {supported}; see the \
+         migration guide at {MIGRATION_GUIDE_URL}",
+        supported = supported_contracts()
+    )]
     UnsupportedCompatibility(String),
 
     #[error(

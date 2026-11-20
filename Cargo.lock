@@ -1569,6 +1569,7 @@ dependencies = [
  "stelae",
  "stelae-blocks",
  "stelae-driver",
+ "tar",
  "tempfile",
  "thiserror 2.0.21",
  "tikv-jemallocator",
