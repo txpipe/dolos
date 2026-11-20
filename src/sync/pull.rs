@@ -25,6 +25,29 @@ fn to_traverse(header: &HeaderContent) -> Result<MultiEraHeader<'_>, WorkerError
     out.or_panic()
 }
 
+/// The points offered to the peer for an intersection.
+struct Candidates {
+    points: Vec<Point>,
+    /// The WAL's point when it holds no other, as a reset or a bootstrap
+    /// leaves it: there is no earlier point to roll back to.
+    lone: Option<ChainPoint>,
+}
+
+/// Why the peer, at `tip`, holds none of the points offered. When the WAL
+/// holds one point alone and the peer is past its slot, a fork dropped that
+/// block: no retry finds an intersection, and the store can't sync on.
+fn no_intersection(lone: Option<&ChainPoint>, tip: &ChainPoint) -> Failure {
+    match lone {
+        Some(point) if tip.slot() > point.slot() => Failure::stranded(format!(
+            "finding the intersection: the WAL holds only {point}, with no earlier point to \
+             roll back to, and the peer, past it at {tip}, does not hold it"
+        )),
+        _ => Failure::message(format!(
+            "finding the intersection: the peer, at {tip}, holds none of the WAL's recent points"
+        )),
+    }
+}
+
 // ============================================================================
 // Pull stage
 // ============================================================================
@@ -211,7 +234,9 @@ impl Worker {
     }
 
     /// Connect to the peer and find the intersection: one attempt.
-    async fn open(stage: &Stage, candidates: Vec<Point>) -> Result<Self, Failure> {
+    async fn open(stage: &Stage, candidates: Candidates) -> Result<Self, Failure> {
+        let Candidates { points, lone } = candidates;
+
         debug!("connecting to peer");
 
         let mut peer_session = PeerClient::connect(&stage.peer_address, stage.network_magic)
@@ -226,7 +251,7 @@ impl Worker {
 
         debug!("finding intersect");
 
-        let found = peer_session.chainsync().find_intersect(candidates).await;
+        let found = peer_session.chainsync().find_intersect(points).await;
 
         let (point, tip) = match found {
             Ok(found) => found,
@@ -241,9 +266,7 @@ impl Worker {
         let Some(intersection) = point else {
             peer_session.abort().await;
 
-            return Err(Failure::message(format!(
-                "finding the intersection: the peer, at {tip}, holds none of the WAL's recent points"
-            )));
+            return Err(no_intersection(lone.as_ref(), &tip));
         };
 
         info!(?intersection, "found intersection");
@@ -368,22 +391,30 @@ impl Stage {
     }
 
     /// The points the WAL offers for an intersection, Origin when it holds
-    /// none.
-    fn intersect_candidates(&self) -> Result<Vec<Point>, WorkerError> {
-        let mut candidates = self
-            .wal
-            .intersect_candidates(5)
-            .or_panic()?
+    /// none, and its point when it holds one alone.
+    fn intersect_candidates(&self) -> Result<Candidates, WorkerError> {
+        let offered = self.wal.intersect_candidates(5).or_panic()?;
+
+        // One point offered that is also the WAL's start is all it holds.
+        let lone = match offered.as_slice() {
+            [point @ ChainPoint::Specific(..)] => {
+                let start = self.wal.find_start().or_panic()?.map(|(start, _)| start);
+                start.filter(|start| start == point)
+            }
+            _ => None,
+        };
+
+        let mut points = offered
             .into_iter()
             .map(TryFrom::try_from)
             .filter_map(|x| x.ok())
             .collect_vec();
 
-        if candidates.is_empty() {
-            candidates.push(Point::Origin);
+        if points.is_empty() {
+            points.push(Point::Origin);
         }
 
-        Ok(candidates)
+        Ok(Candidates { points, lone })
     }
 
     async fn flush_blocks(&mut self, blocks: Vec<BlockBody>) -> Result<(), WorkerError> {

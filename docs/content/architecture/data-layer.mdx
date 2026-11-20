@@ -26,13 +26,14 @@ Under the configured `storage.path`, a running node maintains three on-disk stor
 
 ## Store identity
 
-Each on-disk state and archive store records, when it is created, the compatibility identifier of the contract the binary that created it writes: the current entry of the `compatibility` values the release reads (`v2-alpha.2` for this release). The state store keeps it under the key `identity` in its `state-cursor` keyspace; the archive keeps it in the `archive-meta` keyspace of its index database.
+Each on-disk state and archive store records, when it is created, the compatibility identifier of the contract the binary that created it writes: the current entry of the `compatibility` values the release reads (`v2-beta.1` for this release). Beside it, in the same write, the store records its internal format: a number for the layout it was written in, the newest one the binary writes. A binary reads every internal format up to its own. The state store keeps both under the keys `identity` and `format` in its `state-cursor` keyspace; the archive keeps them in the `archive-meta` keyspace of its index database.
 
-Every command that opens a state or archive store checks it before anything else:
+Every command that opens a state or archive store checks them before anything else:
 
-- A store recording an identity the release reads opens.
-- A store with no identity that holds nothing is new: it records the current identity before its first write.
+- A store recording an identity the release reads, in an internal format no newer than the release's own, opens.
+- A store with no identity that holds nothing is new: it records the current identity and internal format before its first write.
 - A store holding data but no identity, written before stores recorded one, is refused, and so is a store recording an identity the release does not read. The error names the store, its path and what it found.
+- A store recording an identity the release reads but no internal format is refused, and so is one written in a newer internal format than the release reads, by a newer Dolos. For a newer format, the error names both formats.
 
 The configuration plays no part, so no edit to `dolos.toml` gets a refused store past the check. The remedies are the ways to get stores the release writes itself:
 
@@ -42,7 +43,11 @@ The configuration plays no part, so no edit to `dolos.toml` gets a refused store
 
 `dolos bootstrap` treats a refused store as data in the way: `--force` on its own clears it, and every other run of the command refuses with the same error, `--skip-if-data` and `--continue` included. `--force` clears only the storage root, though, and never a state store that fails to open for another reason, as a half-unpacked one does, or whose cursor fails to read. So beside a refused store it is refused too, naming what to remove by hand, while such a state is there, or while a directory the configuration keeps outside the root (an absolute or `..` `path`, or a `blocks_path` outside the root) holds data: a store with data, an archive that fails to open, or block segments. A directory holding no data, such as a fresh mount point or an empty store this release opens, doesn't stop it. A running node holds its stores, so they fail to open, and `--force` stops at the store's own error: stop the node first. A Stelae snapshot restore, a Mithril or ImmutableDB replay and a sync from genesis write through the running binary's own stores, so what they produce records that binary's identity. A Stelae snapshot's own compatibility is settled by its media types and schemas, not by this identity.
 
-The WAL keeps its own format version, wiped when older and refused when newer. The mempool and the cache are outside the check.
+The WAL keeps its own format version, and it is transient: a writable open checks it only after the state and the archive are admitted, and resets a WAL this release can't read, with a warning, instead of refusing it for its version. That is a WAL recording another version, older or newer, or none over entries, whose entries are wiped, and a WAL that fails to decode, as a file or in an entry a start reads (the first, the newest, and those it replays into the state and the archive), which is emptied. The node then reseeds the WAL at the state cursor and syncs on from there, losing the WAL's rollback window and fetching again the blocks past the state. A reseeded WAL holds that one point, with none before it to roll back to. So if a fork dropped the block at the state cursor, as a slot battle can drop a node's last block while it is stopped, a peer past it doesn't hold it and the sync can't go on: it stops at the peer's first answer, saying so, and the store has to be replaced with `dolos bootstrap --force`. A peer still behind that point is retried as `[sync.retry]` allows.
+
+A WAL the other stores still need is kept as it is instead, and the start stops with an error saying why and what to do. That is a WAL holding a block the state applied and the archive lacks, as a crash between their commits leaves it, unless the archive is a rolling one left empty, an ephemeral one, or off with `history.mode = "none"`; and a WAL holding the block at a state cursor without a block hash, as ESTART leaves one at an epoch's first block, which a start can't reseed from. A WAL that can't be read as a file at all is kept while either holds. `dolos sync recover` and `sync rollback` follow the same rule. To go on, start the release that wrote the WAL once, so it brings the stores together and shuts down cleanly, then start this one; or rebuild the state from the archive with `dolos data rebuild`, or replace the dataset with `dolos bootstrap --force`, either of which drops those blocks.
+
+A reading command reads a WAL this release can't read as empty and leaves it as it is, with a warning saying whether a writable open resets it or keeps it. A WAL another process holds, or that fails to open on a permission or I/O error, still fails. The mempool and the cache are outside the check.
 
 ## Storage traits and pluggable backends
 
@@ -277,7 +282,7 @@ The widest keys are Byron addresses: 17 live UTxOs sit at addresses of 3 kB to 2
 
 ### The compatibility identity
 
-The data model above is the contract `v2-alpha.2`, the one compatibility identifier this release reads. It replaces `v2-alpha.1` in a one-time amendment of the frozen model, which removed fields, renumbered others to close their index gaps and cleared the sync cursors from published rows, so a store recording `v2-alpha.1` is refused and rebuilt. A second and last amendment, the evolution conventions above, kept the identifier, since no store or Stelae snapshot on its earlier shape was released (decision 0070): a store built before it records `v2-alpha.2` and opens, but is not supported: it misses the rows under the renamed namespaces and fails to decode the reshaped ones, so it is rebuilt. Each state and archive store records it when created, under `identity` in `state-cursor` and in `archive-meta`, and a store holding data that records none, or one recording another, is refused at open, as [Store identity](#store-identity) describes.
+The data model above is the contract `v2-beta.1`, the one compatibility identifier this release reads. It replaces every v2 alpha identifier (`v2-alpha.*`): the first alpha's record layouts were changed by a one-time amendment of the frozen model, which removed fields, renumbered others to close their index gaps and cleared the sync cursors from published rows, and the alpha stores record no internal format. A store or configuration recording an alpha identifier is refused, and the store is rebuilt. Each state and archive store records the identifier when created, with its internal format, under `identity` and `format` in `state-cursor` and in `archive-meta`, and a store holding data that records none, or one recording another, is refused at open, as [Store identity](#store-identity) describes.
 
 ### New eras
 

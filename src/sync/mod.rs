@@ -55,6 +55,10 @@ pub struct UpstreamFailure {
     /// Whether the peer refused the last attempt's handshake: it serves
     /// another network, or shares no protocol version with dolos.
     pub refused: bool,
+    /// Whether the WAL holds one point alone, as a reset or a bootstrap
+    /// leaves it, which the peer, past it, does not hold: a fork dropped that
+    /// block, and the store can't sync on.
+    pub stranded: bool,
 }
 
 impl fmt::Display for UpstreamFailure {

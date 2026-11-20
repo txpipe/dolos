@@ -255,8 +255,11 @@ fn copy_wal_writes_the_slot_range() {
     assert_eq!(entries(&output), expected);
 }
 
+/// What the WAL's version check says on stderr when it wipes an output.
+const WIPED: &str = "its entries were wiped";
+
 /// An output at an older WAL version is wiped by the version check,
-/// which says so on stderr.
+/// which says so once on stderr.
 #[test]
 fn copy_wal_onto_an_older_wal_warns_of_the_wipe() {
     let node = Node::new(10..=20);
@@ -278,10 +281,11 @@ fn copy_wal_onto_an_older_wal_warns_of_the_wipe() {
     );
 
     stdout(&copied);
-    assert!(
-        String::from_utf8_lossy(&copied.stderr).contains("wiping WAL data"),
-        "no wipe warning\n{}",
-        String::from_utf8_lossy(&copied.stderr)
+    let said = String::from_utf8_lossy(&copied.stderr);
+    assert_eq!(
+        said.matches(WIPED).count(),
+        1,
+        "not one wipe warning\n{said}"
     );
 
     let slots: Vec<_> = entries(&output).iter().map(|(p, _)| p.slot()).collect();
@@ -320,19 +324,19 @@ fn copy_onto_an_older_wal(logging: &str) -> String {
 fn logs_follow_the_configured_level_and_filter() {
     let quiet = copy_onto_an_older_wal(r#"level = "error""#);
     assert!(
-        !quiet.contains("wiping WAL data"),
+        !quiet.contains(WIPED),
         "a warning got past level = error\n{quiet}"
     );
 
     let filtered = copy_onto_an_older_wal("level = \"error\"\nfilter = \"dolos_redb3=warn\"");
     assert!(
-        filtered.contains("wiping WAL data"),
+        filtered.contains(WIPED),
         "the filter was not applied\n{filtered}"
     );
 
     let alongside = copy_onto_an_older_wal("level = \"warn\"\nfilter = \"pallas=info\"");
     assert!(
-        alongside.contains("wiping WAL data"),
+        alongside.contains(WIPED),
         "the filter replaced the level\n{alongside}"
     );
 }
@@ -351,17 +355,17 @@ fn a_malformed_logging_filter_is_refused() {
     assert!(error.contains("logging.filter"), "{error}");
 }
 
-/// An output at a newer WAL version is refused, neither wiped nor restamped.
+/// An output at a newer WAL version is wiped and restamped, as an older one
+/// is: the WAL is transient.
 #[test]
-fn copy_wal_refuses_a_newer_wal() {
+fn copy_wal_wipes_a_newer_wal() {
     let node = Node::new(10..=20);
     let newer = Node::new(30..=31);
     let output = newer.wal_path();
-    let before = entries(&output);
 
     newer.stamp_wal(CURRENT_WAL_VERSION + 1);
 
-    stderr(&node.debug(
+    let copied = node.debug(
         "copy-wal",
         &[
             "--output",
@@ -371,12 +375,20 @@ fn copy_wal_refuses_a_newer_wal() {
             "--until",
             "15",
         ],
-    ));
+    );
 
-    assert_eq!(newer.wal_version(), Some(CURRENT_WAL_VERSION + 1));
+    stdout(&copied);
+    let said = String::from_utf8_lossy(&copied.stderr);
+    assert_eq!(
+        said.matches(WIPED).count(),
+        1,
+        "not one wipe warning\n{said}"
+    );
 
-    newer.stamp_wal(CURRENT_WAL_VERSION);
-    assert_eq!(entries(&output), before);
+    assert_eq!(newer.wal_version(), Some(CURRENT_WAL_VERSION));
+
+    let slots: Vec<_> = entries(&output).iter().map(|(p, _)| p.slot()).collect();
+    assert_eq!(slots, vec![12, 13, 14, 15]);
 }
 
 #[test]

@@ -32,12 +32,16 @@ Key:   [0x00]
 Value: bincode-serialized ChainPoint
 ```
 
-And the compatibility identity the store recorded when it was created, which
-the node's store opener checks before anything else (see the data layer docs):
+And the compatibility identity and internal format the store recorded when it
+was created, written in one batch, which the node's store opener checks before
+anything else (see the data layer docs):
 
 ```
 Key:   "identity"
-Value: UTF-8 contract identifier, e.g. "v2-alpha.2"
+Value: UTF-8 contract identifier, e.g. "v2-beta.1"
+
+Key:   "format"
+Value: big-endian u32, the internal format the store was written in
 ```
 
 ### UTxO Keyspace (`state-utxos`)

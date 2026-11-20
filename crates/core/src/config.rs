@@ -909,7 +909,8 @@ pub struct MinibfConfig {
     permissive_cors: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_registry_url: Option<String>,
-    /// The URL clients reach this API at.
+    /// The URL clients reach this API at, reported as `url` by `/`. Unset,
+    /// `/` carries no `url`; the bind address is never reported instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1579,7 +1580,11 @@ pub enum ConfigError {
     #[error("`compatibility` must be a string such as \"{current}\", found {0}", current = Compatibility::current())]
     MalformedCompatibility(String),
 
-    #[error("unsupported `compatibility = \"{0}\"`; this release supports {supported}", supported = supported_contracts())]
+    #[error(
+        "unsupported `compatibility = \"{0}\"`; this release supports {supported}; see the \
+         migration guide at {MIGRATION_GUIDE_URL}",
+        supported = supported_contracts()
+    )]
     UnsupportedCompatibility(String),
 
     #[error(
@@ -2274,15 +2279,15 @@ mod tests {
     #[test]
     fn compatibility_accepts_only_the_supported_contracts() {
         assert_eq!(
-            Compatibility::parse("v2-alpha.2").unwrap().as_str(),
-            "v2-alpha.2"
+            Compatibility::parse("v2-beta.1").unwrap().as_str(),
+            "v2-beta.1"
         );
         assert_eq!(Compatibility::current().as_str(), SUPPORTED_CONTRACTS[0]);
 
-        for refused in ["v2-alpha.0", "v2-alpha.1"] {
+        for refused in ["v2-alpha.0", "v2-alpha.1", "v2-alpha.2"] {
             let message = Compatibility::parse(refused).unwrap_err().to_string();
             assert!(message.contains(refused), "{message}");
-            assert!(message.contains("\"v2-alpha.2\""), "{message}");
+            assert!(message.contains("\"v2-beta.1\""), "{message}");
         }
     }
 

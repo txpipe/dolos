@@ -133,6 +133,7 @@ pallas = { workspace = true }
 tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
 stats_alloc = "0.1"
 serial_test = "3"
+tar = "0.4"
 dolos-redb3 = { path = "crates/redb3" }
 memmap2 = "0.9"
 tower = { workspace = true, features = ["util"] }

@@ -40,7 +40,7 @@ the store that holds what it projects:
 - the entity index maps an entity's id to the slot it was first seen at, for the `EntityKind`s the chain declares (Cardano: `dolos_cardano::indexes::entities`); it lives in the `ArchiveStore` (`ArchiveStore::entity_slots`, batched), written through `ArchiveWriter::write_entity` by the seal of an immutable epoch with the epoch's sealed logs, swept by a prune and never undone (decision 0064)
 
 ### Store identity
-Every on-disk state and archive store records the compatibility identifier it was created under (the current entry of `dolos_core::compat::SUPPORTED_CONTRACTS`): under the key `identity` in `state-cursor`, and in the archive's `archive-meta` keyspace. The adapters' `open_fjall` constructors (`src/adapters/storage.rs`) are the one gate: a supported identity opens, an empty store without one records the current identity before its first write, and a store holding data without one, or recording an unsupported one, is refused with `IncompatibleStore`. Nothing in the configuration enters the check. The WAL keeps its own version; the mempool and cache are outside it.
+Every on-disk state and archive store records the compatibility identifier it was created under (the current entry of `dolos_core::compat::SUPPORTED_CONTRACTS`) and the internal format it was written in (`dolos_core::compat::STORE_FORMAT`, a big-endian `u32`), in one batch: under the keys `identity` and `format` in `state-cursor`, and in the archive's `archive-meta` keyspace. The adapters' `open_fjall` constructors (`src/adapters/storage.rs`, `admit`) are the one gate: a supported identity in a format no newer than `STORE_FORMAT` opens, an empty store without an identity records the current identity and format before its first write, and a store holding data without an identity, recording an unsupported one, recording no format or a newer one, is refused with `IncompatibleStore`. Nothing in the configuration enters the check. The WAL keeps its own version; the mempool and cache are outside it.
 
 ### Database File Organization
 
@@ -318,7 +318,19 @@ This crate organization enables Dolos to serve as a lightweight, efficient Carda
 
 ### Code Verification Requirements
 
-All agents working on this repository must verify their modifications by running the following checks before considering any changes complete:
+The checks below are the bar every pull request must pass before it merges.
+They are not the command for every local run.
+
+While working, run what covers your change: a package (`-p <crate>`), a test
+target (`--test <name>`), a test-name filter, or the full list when the change
+is broad (a shared trait, a dependency bump, a workspace-wide refactor). Before
+asking for review, make sure the change meets each requirement below.
+
+CI runs the full test suite (item 3) on every pull request, and clippy on the
+root package only. It does not run the workspace-wide clippy (item 1), the
+warning-free build (item 2) or the registry restore round trip (item 4): where
+your change reaches what those cover, run them yourself, item 4 by the trigger
+given under it.
 
 1. **Clippy Linting**: Run `cargo clippy` and ensure no warnings appear
    ```bash
