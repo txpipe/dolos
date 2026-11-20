@@ -1573,7 +1573,9 @@ pub enum ConfigError {
 
     #[error(
         "this is a Dolos v1 or v2.0.0-alpha.0 configuration, which this release does not read; \
-         rewrite it as described in the migration guide at {MIGRATION_GUIDE_URL}"
+         rewrite it as described in the migration guide at {MIGRATION_GUIDE_URL}, with \
+         `compatibility = \"{}\"` at the top",
+        Compatibility::current()
     )]
     LegacyShape,
 
