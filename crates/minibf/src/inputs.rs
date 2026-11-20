@@ -33,9 +33,13 @@ use axum::http::StatusCode;
 use itertools::Itertools as _;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraInput, MultiEraOutput, MultiEraTx};
 
-use dolos_core::{BlockBody, BlockSlot, Domain, EraCbor, TxHash, UtxoPosition};
+use dolos_core::{BlockBody, BlockSlot, Domain, EraCbor, Genesis, TxHash, UtxoPosition};
 
-use crate::{pagination::Pagination, Facade};
+use crate::{
+    hacks::genesis_block::{self, GenesisListing},
+    pagination::Pagination,
+    Facade,
+};
 
 type InputTxMap = HashMap<TxHash, Option<(EraCbor, UtxoPosition)>>;
 
@@ -70,6 +74,7 @@ pub struct InputDeps {
     txs: InputTxMap,
     cap: usize,
     fetches: usize,
+    batches: usize,
 }
 
 impl Default for InputDeps {
@@ -84,6 +89,7 @@ impl InputDeps {
             txs: InputTxMap::new(),
             cap: cap.max(1),
             fetches: 0,
+            batches: 0,
         }
     }
 
@@ -93,6 +99,17 @@ impl InputDeps {
     /// module exists for is observable through this counter.
     pub fn fetches(&self) -> usize {
         self.fetches
+    }
+
+    /// Number of batched reads made from the domain so far.
+    pub fn batches(&self) -> usize {
+        self.batches
+    }
+
+    /// A resolver over the txs held so far, for callers that share one
+    /// prepared store.
+    pub fn resolver(&self) -> InputResolver<'_> {
+        InputResolver::new(&self.txs)
     }
 
     /// Fetch whatever is missing to resolve the inputs of `txs`, then hand out
@@ -147,6 +164,7 @@ impl InputDeps {
 
         if !missing.is_empty() {
             self.fetches += missing.len();
+            self.batches += 1;
             let fetched = domain
                 .query()
                 .tx_cbor_batch_with_positions(missing)
@@ -159,6 +177,7 @@ impl InputDeps {
             deps = required_len,
             held = self.txs.len(),
             fetches = self.fetches(),
+            batches = self.batches(),
             "prepared input dependencies"
         );
 
@@ -180,6 +199,15 @@ pub struct InputResolver<'a> {
     txs: &'a InputTxMap,
     decoded: HashMap<TxHash, Option<MultiEraTx<'a>>>,
     decodes: usize,
+    genesis: Option<Arc<Genesis>>,
+    genesis_outputs: Option<Arc<GenesisListing>>,
+}
+
+/// Why a Byron fee has no input total.
+enum Unspendable {
+    /// An input whose source output is unknown, as `tx#index`.
+    Unknown(String),
+    Failed(StatusCode),
 }
 
 impl<'a> InputResolver<'a> {
@@ -188,9 +216,16 @@ impl<'a> InputResolver<'a> {
             txs,
             decoded: HashMap::new(),
             decodes: 0,
+            genesis: None,
+            genesis_outputs: None,
         }
     }
 
+    /// The fee `tx` paid: an invalid tx forfeits its total collateral and a
+    /// later-era tx states its fee. A Byron tx states none, so it paid what
+    /// its inputs carry beyond its outputs, read off the archive and the
+    /// genesis. When pruned history leaves a source output unknown, the
+    /// policy minimum stands in, with a warning.
     pub fn fee(&mut self, tx: &MultiEraTx<'_>) -> Result<u64, StatusCode> {
         if !tx.is_valid() {
             return Ok(tx.total_collateral().unwrap_or_default());
@@ -200,25 +235,66 @@ impl<'a> InputResolver<'a> {
             return Ok(tx.fee_or_compute());
         }
 
-        let mut inputs = 0u64;
-        for input in tx.consumes() {
-            let Some(output) = self.resolve(&input)? else {
-                return Ok(tx.fee_or_compute());
-            };
-            inputs = inputs
-                .checked_add(output.value().coin())
-                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+        let paid = dolos_cardano::roll::epochs::consumed_minus_produced(tx, |input| {
+            match self.spent_coin(input) {
+                Ok(Some(coin)) => Ok(coin),
+                Ok(None) => Err(Unspendable::Unknown(input.output_ref().to_string())),
+                Err(status) => Err(Unspendable::Failed(status)),
+            }
+        });
+
+        match paid {
+            Ok(Some(fee)) => Ok(fee),
+            Ok(None) => {
+                tracing::error!(tx = %tx.hash(), "byron tx produces more than it consumes");
+                Err(StatusCode::INTERNAL_SERVER_ERROR)
+            }
+            Err(Unspendable::Unknown(input)) => {
+                let minimum = tx.fee_or_compute();
+                tracing::warn!(
+                    tx = %tx.hash(),
+                    input,
+                    minimum,
+                    "byron tx spends an output neither the archive nor the genesis holds; reporting the minimum fee"
+                );
+                Ok(minimum)
+            }
+            Err(Unspendable::Failed(status)) => Err(status),
+        }
+    }
+
+    /// The lovelace of the output `input` spends, from the archive or, for a
+    /// genesis output, from the genesis; `None` when neither holds it.
+    fn spent_coin(&mut self, input: &MultiEraInput<'_>) -> Result<Option<u64>, StatusCode> {
+        if let Some(output) = self.resolve(input)? {
+            return Ok(Some(output.value().coin()));
         }
 
-        let outputs = tx.outputs().iter().try_fold(0u64, |total, output| {
-            total
-                .checked_add(output.value().coin())
-                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
-        })?;
+        // a genesis output is the only one of its pseudo-tx
+        if input.index() != 0 {
+            return Ok(None);
+        }
 
-        inputs
-            .checked_sub(outputs)
-            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+        let Some(genesis) = self.genesis.as_ref() else {
+            return Ok(None);
+        };
+
+        if self.genesis_outputs.is_none() {
+            self.genesis_outputs = Some(genesis_block::genesis_listing(genesis)?);
+        }
+
+        Ok(self
+            .genesis_outputs
+            .as_ref()
+            .and_then(|listing| listing.outputs.get(input.hash()))
+            .map(|output| output.lovelace))
+    }
+
+    /// Resolves Byron fees against the outputs of `genesis` too, which no
+    /// archived tx produced.
+    pub fn with_genesis(mut self, genesis: Arc<Genesis>) -> Self {
+        self.genesis = Some(genesis);
+        self
     }
 
     /// Number of dependency txs decoded so far — one per distinct hash

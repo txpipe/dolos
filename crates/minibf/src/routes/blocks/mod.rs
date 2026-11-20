@@ -2,7 +2,8 @@ use axum::http::StatusCode;
 use blockfrost_openapi::models::block_content::BlockContent;
 use dolos_cardano::ChainSummary;
 use dolos_core::{ArchiveStore, BlockBody, ChainPoint, Domain};
-use itertools::Either;
+use futures::future::try_join_all;
+use itertools::{Either, Itertools as _};
 use pallas::ledger::traverse::{Era, MultiEraBlock};
 
 use crate::{
@@ -228,6 +229,35 @@ fn tip_block<D: Domain>(domain: &Facade<D>) -> Result<BlockBody, StatusCode> {
     Ok(tip)
 }
 
+/// The txs whose outputs the Byron txs of `bodies` spend, in one batched read,
+/// which every block model of a page resolves its paid fees against. Later
+/// eras state their fees and add nothing to it.
+async fn fee_deps<D>(domain: &Facade<D>, bodies: &[BlockBody]) -> Result<InputDeps, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let mut required = Vec::new();
+
+    for body in bodies {
+        let block = MultiEraBlock::decode(body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        if block.era() == Era::Byron {
+            required.extend(
+                block
+                    .txs()
+                    .iter()
+                    .flat_map(|tx| tx.consumes().into_iter().map(|input| *input.hash())),
+            );
+        }
+    }
+
+    let mut deps = InputDeps::default();
+    deps.fetch(domain, required.into_iter().unique().collect())
+        .await?;
+
+    Ok(deps)
+}
+
 async fn build_block_model<D>(
     domain: &Facade<D>,
     body: &BlockBody,
@@ -237,20 +267,48 @@ async fn build_block_model<D>(
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
+    let deps = fee_deps(domain, std::slice::from_ref(body)).await?;
+
+    block_model(domain, body, tip, chain, &deps).await
+}
+
+/// The models of a page of blocks, in order, over one read of the txs their
+/// Byron inputs spend.
+async fn build_block_models<D>(
+    domain: &Facade<D>,
+    bodies: &[BlockBody],
+    tip: &BlockBody,
+    chain: &ChainSummary,
+) -> Result<Vec<BlockContent>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let deps = fee_deps(domain, bodies).await?;
+
+    let models = bodies
+        .iter()
+        .map(|body| block_model(domain, body, tip, chain, &deps));
+
+    try_join_all(models).await
+}
+
+async fn block_model<D>(
+    domain: &Facade<D>,
+    body: &BlockBody,
+    tip: &BlockBody,
+    chain: &ChainSummary,
+    deps: &InputDeps,
+) -> Result<BlockContent, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
     let block = MultiEraBlock::decode(body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let mut builder = BlockModelBuilder::new(body)?;
 
-    let mut deps = InputDeps::default();
-    let mut resolver = {
-        let txs = if builder.era() == Era::Byron {
-            builder.txs()
-        } else {
-            vec![]
-        };
-        deps.prepare(domain, txs.iter().filter(|tx| tx.as_byron().is_some()))
-            .await?
-    };
-    builder = builder.with_resolved_fees(&mut resolver)?;
+    if builder.era() == Era::Byron {
+        let mut resolver = deps.resolver().with_genesis(domain.genesis());
+        builder = builder.with_resolved_fees(&mut resolver)?;
+    }
 
     let previous_hash = builder.previous_hash();
 
@@ -637,6 +695,71 @@ mod tests {
         let model = byron_model(vec![funding], raw).await;
         assert_eq!(model.tx_count, 3);
         assert_eq!(model.fees, Some((500_000 + minimum).to_string()));
+    }
+
+    #[tokio::test]
+    async fn byron_block_fees_resolve_genesis_inputs() {
+        use crate::test_support::{byron_block, byron_tx};
+        use dolos_core::TxoRef;
+        use pallas::interop::hardano::configs::byron;
+
+        let genesis = dolos_cardano::include::preview::load();
+        let (hash, _, amount) = byron::genesis_utxos(&genesis.byron)
+            .into_iter()
+            .max_by_key(|(_, _, amount)| *amount)
+            .expect("the preview genesis has byron utxos");
+
+        let raw = byron_block(11, vec![byron_tx(&[TxoRef(hash, 0)], &[amount - 170_000])]);
+        let block = MultiEraBlock::decode(&raw).unwrap();
+        assert_ne!(block.txs()[0].fee_or_compute(), 170_000);
+
+        let model = byron_model(vec![], raw).await;
+        assert_eq!(model.fees, Some("170000".to_string()));
+    }
+
+    /// Three Byron blocks, each spending an output of its own source tx.
+    fn byron_page() -> (dolos_core::BlockBody, Vec<dolos_core::BlockBody>, [u64; 3]) {
+        use crate::test_support::{byron_block, byron_tx};
+        use dolos_core::TxoRef;
+
+        let funds = [3_000_000, 2_000_000, 4_000_000];
+        let paid = [200_000, 170_807, 350_000];
+
+        let funding = byron_block(10, funds.map(|fund| byron_tx(&[], &[fund])).to_vec());
+        let sources: Vec<_> = MultiEraBlock::decode(&funding)
+            .unwrap()
+            .txs()
+            .iter()
+            .map(|tx| tx.hash())
+            .collect();
+
+        let page = (0..3)
+            .map(|i| {
+                let tx = byron_tx(&[TxoRef(sources[i], 0)], &[funds[i] - paid[i]]);
+                byron_block(11 + i as u64, vec![tx])
+            })
+            .collect();
+
+        (funding, page, paid)
+    }
+
+    #[tokio::test]
+    async fn byron_next_page_reports_each_blocks_paid_fees() {
+        let (funding, page, paid) = byron_page();
+        let from = MultiEraBlock::decode(&funding).unwrap().hash();
+
+        let mut blocks = vec![funding];
+        blocks.extend(page.iter().cloned());
+        let app = crate::test_support::byron_app(blocks);
+
+        let models = get_blocks(&app, &format!("/blocks/{from}/next?count=3")).await;
+        let fees: Vec<_> = models.iter().map(|model| model.fees.clone()).collect();
+
+        assert_eq!(fees, paid.map(|fee| Some(fee.to_string())));
+
+        let deps = super::fee_deps(&app.facade(), &page).await.unwrap();
+        assert_eq!(deps.fetches(), 3);
+        assert_eq!(deps.batches(), 1, "one batched read for the whole page");
     }
 
     #[tokio::test]

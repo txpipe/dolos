@@ -47,7 +47,9 @@ where
         let mut deps = InputDeps::default();
         let mut resolver = {
             let tx = builder.tx()?;
-            deps.prepare(&domain, [&tx]).await?
+            deps.prepare(&domain, [&tx])
+                .await?
+                .with_genesis(domain.genesis())
         };
         builder = builder.with_resolved_fee(&mut resolver)?;
     }
@@ -94,6 +96,34 @@ mod tests {
                 parsed.output_amount[0].quantity,
                 (4_700_000 - paid).to_string()
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn byron_tx_spending_a_genesis_output_reports_its_paid_fee() {
+        use crate::test_support::{byron_app, byron_block, byron_tx};
+        use dolos_core::TxoRef;
+        use pallas::ledger::traverse::MultiEraBlock;
+
+        use pallas::interop::hardano::configs::byron;
+
+        let genesis = dolos_cardano::include::preview::load();
+        let (source, _, amount) = byron::genesis_utxos(&genesis.byron)
+            .into_iter()
+            .max_by_key(|(_, _, amount)| *amount)
+            .expect("the preview genesis has byron utxos");
+
+        // a redemption pays no fee, which is below the policy minimum
+        for paid in [170_000, 0] {
+            let raw = byron_block(11, vec![byron_tx(&[TxoRef(source, 0)], &[amount - paid])]);
+            let block = MultiEraBlock::decode(&raw).unwrap();
+            let tx = &block.txs()[0];
+            assert_ne!(tx.fee_or_compute(), paid);
+            let tx_hash = tx.hash();
+
+            let app = byron_app(vec![raw.clone()]);
+            let parsed: TxContent = get_ok(&app, &format!("/txs/{tx_hash}")).await;
+            assert_eq!(parsed.fees, paid.to_string());
         }
     }
 
