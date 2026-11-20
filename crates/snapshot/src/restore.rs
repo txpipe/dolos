@@ -4592,6 +4592,13 @@ mod tests {
             staged_read_ahead(Some(64), |_| Ok::<_, Infallible>(Some(u64::MAX))).unwrap();
         assert_eq!((explicit, peak), (64, Some(u64::MAX)));
 
+        // The peak it is preflighted against is its own depth's, not the
+        // default's.
+        assert_eq!(
+            staged_read_ahead(Some(64), |depth| Ok::<_, Infallible>(Some(depth as u64))).unwrap(),
+            (64, Some(64))
+        );
+
         let deep = refusal(explicit);
         assert!(
             deep.contains("staging the layers it pulls, 65 at once at read-ahead 64"),
