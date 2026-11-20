@@ -98,8 +98,8 @@ fn a_v2_alpha_2_dataset_is_refused_untouched() {
 }
 
 /// A refused archive beside a state this release opens: the state passes,
-/// so the archive's own check is what refuses, and every command that
-/// reaches it, bootstrap's existing-data check among them, leaves the
+/// so the archive's own check is what refuses, and every command that opens
+/// it writable, bootstrap's existing-data check among them, leaves the
 /// archive's files as they were.
 #[test]
 #[serial]
