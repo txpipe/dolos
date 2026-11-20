@@ -26,6 +26,7 @@ bech32 = { workspace = true }
 pallas = { workspace = true }
 chrono = { workspace = true, features = ["clock"] }
 dolos-fjall = { path = "../crates/fjall" }
+fjall = { git = "https://github.com/txpipe/fjall", rev = "ae794ad448d90214c3491df4c50f59f0fe15cf90" }
 dolos-flatfiles = { path = "../crates/flatfiles" }
 dolos-minibf = { path = "../crates/minibf" }
 dolos-testing = { path = "../crates/testing" }

@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use xshell::{cmd, Shell};
 use xtask::perf::measure::PeakAlloc;
-use xtask::{debug, perf};
+use xtask::{debug, perf, store};
 
 mod bootstrap;
 mod config;
@@ -50,6 +50,10 @@ enum Commands {
     /// Maintainer tooling over a stopped node's stores
     #[command(subcommand)]
     Debug(debug::Cmd),
+
+    /// Development tooling over a stopped store directory
+    #[command(subcommand)]
+    Store(store::Cmd),
 }
 
 fn main() -> Result<()> {
@@ -70,6 +74,7 @@ fn main() -> Result<()> {
         Commands::GroundTruth(cmd) => ground_truth::run(cmd)?,
         Commands::TestInstance(cmd) => test_instance::run(&sh, cmd)?,
         Commands::Debug(cmd) => debug::run(cmd)?,
+        Commands::Store(cmd) => store::run(cmd)?,
     }
 
     Ok(())

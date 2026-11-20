@@ -2,7 +2,12 @@ use bincode;
 use itertools::Itertools;
 use redb::{Range, ReadableTableMetadata, TableDefinition};
 use serde::{de::DeserializeOwned, Serialize};
-use std::{marker::PhantomData, ops::RangeBounds, path::Path, sync::Arc};
+use std::{
+    marker::PhantomData,
+    ops::{Bound, RangeBounds},
+    path::Path,
+    sync::Arc,
+};
 use thiserror::Error;
 use tracing::{debug, event_enabled, info, trace, warn, Level};
 
@@ -11,7 +16,10 @@ use dolos_core::{
     WalError, WalStore,
 };
 
-use crate::handle::Handle;
+use crate::{
+    handle::Handle,
+    layout::{check_layout, is_corrupt},
+};
 
 #[derive(Debug, Error)]
 #[error(transparent)]
@@ -204,9 +212,9 @@ pub enum WalProbe {
 
 /// Whether the WAL file at `path` holds an entry, read without writing to it.
 ///
-/// Opening the file as a [`RedbWalStore`] stamps its version, and wipes one
-/// of another version, so a caller deciding whether to touch the WAL at all
-/// reads it here instead. A file that needs repair is an error.
+/// Opening the file as a [`RedbWalStore`] stamps its version, and resets one
+/// this release can't read, so a caller deciding whether to touch the WAL at
+/// all reads it here instead. A file that needs repair is an error.
 pub fn probe(path: impl AsRef<Path>) -> Result<WalProbe, RedbWalError> {
     use redb::ReadableDatabase as _;
 
@@ -229,8 +237,10 @@ pub fn probe(path: impl AsRef<Path>) -> Result<WalProbe, RedbWalError> {
 /// Current WAL on-disk schema version.
 ///
 /// Bump this whenever the serialized format of WAL entries changes in a way
-/// that breaks reading older data. On open, an older or missing version
-/// triggers an automatic wipe; a newer version triggers a refusal to start.
+/// that breaks reading older data. The WAL is transient: a writable open
+/// wipes the entries of a WAL recording any other version, older or newer,
+/// or none, unless a store still needs one of them (see
+/// [`RedbWalStore::open_replaying`]).
 ///
 /// 2: deltas carry typed, variable-length entity keys (decision 0051).
 /// 3: `EpochStatsUpdate` and `ScriptFirstSeen` drop the fields nothing reads.
@@ -244,6 +254,156 @@ pub fn probe(path: impl AsRef<Path>) -> Result<WalProbe, RedbWalError> {
 /// 9: the `Other` proposal action retires, and `proposed_in` is required.
 /// 10: `DatumRefIncrement` records whether it filled a row's datum bytes.
 pub const CURRENT_WAL_VERSION: u32 = 10;
+
+/// What a WAL file holds, as [`RedbWalStore::inspect`] reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Found {
+    /// Entries this release reads, or none, at [`CURRENT_WAL_VERSION`].
+    Current,
+    /// No entry, under another version or none.
+    Empty,
+    /// Entries under another version, or none.
+    OtherVersion(Option<u32>),
+}
+
+/// The version `found` records, for a message.
+fn recorded(found: Option<u32>) -> String {
+    match found {
+        Some(version) => format!("version {version}"),
+        None => "no version".into(),
+    }
+}
+
+/// Why this release can't read a WAL recording `found`, for a message.
+fn other_version(found: Option<u32>) -> String {
+    format!(
+        "it records {}, and this release reads version {CURRENT_WAL_VERSION}",
+        recorded(found)
+    )
+}
+
+/// What a read-only view of a WAL file finds (see [`RedbWalStore::view`]).
+enum Viewed<S> {
+    /// Entries this release reads, at [`CURRENT_WAL_VERSION`].
+    Readable(S),
+    /// No entry.
+    Empty,
+    /// What this release can't read, and why; with the view, unless redb
+    /// can't open the file.
+    Unreadable(Option<S>, String),
+}
+
+/// Why [`RedbWalStore::admit`] did not admit the WAL as it is.
+enum Unadmitted {
+    /// What redb failed with; a corrupt WAL is reset.
+    Failed(redb::Error),
+    /// A store needs a block the WAL holds: [`WalError::Kept`].
+    Kept(WalError),
+}
+
+impl From<redb::Error> for Unadmitted {
+    fn from(error: redb::Error) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<Unadmitted> for WalError {
+    fn from(unadmitted: Unadmitted) -> Self {
+        match unadmitted {
+            Unadmitted::Failed(error) => WalError::internal(error),
+            Unadmitted::Kept(kept) => kept,
+        }
+    }
+}
+
+/// Whether the file at `path` is empty, as a crash during its creation leaves
+/// it: a writable open initialises it, a read-only one fails on it.
+fn is_empty_file(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.len() == 0)
+}
+
+/// How many of the newest entries an open decodes: those the pull stage's
+/// intersect reads at every start, an exponential crawl that reads `2^n - 1`
+/// entries for `n` candidates (five), with room for synthetic ones it skips.
+const NEWEST_DECODED: usize = 64;
+
+/// How much further from a slot each try of [`WalStore::locate_point`] looks
+/// for an entry.
+const LOCATE_STEP: u64 = 20;
+
+/// The widest window [`WalStore::locate_point`] searches, on the last of
+/// [`RedbWalStore::approximate_slot_with_retry`]'s nine tries.
+const LOCATE_REACH: u64 = LOCATE_STEP * 9;
+
+/// The entries a start replays into the other stores.
+enum Replayed {
+    Nothing,
+    /// The entries from this key on.
+    From(DbChainPoint),
+    All,
+}
+
+/// What a start replays into stores at `positions`, locating each store's
+/// start as `dolos_core::bootstrap` does: the entry nearest its slot, or
+/// every entry for a store holding nothing or with no entry near its slot.
+fn replayed(
+    table: &redb::ReadOnlyTable<DbChainPoint, DbLogValue>,
+    positions: &[Option<BlockSlot>],
+) -> Result<Replayed, redb::Error> {
+    let mut replayed = Replayed::Nothing;
+
+    for &position in positions {
+        let Some(slot) = position
+            .map(|slot| nearest(table, slot))
+            .transpose()?
+            .flatten()
+        else {
+            return Ok(Replayed::All);
+        };
+
+        let start = DbChainPoint::min_bound(slot);
+
+        replayed = match replayed {
+            Replayed::From(current) => Replayed::From(current.min(start)),
+            _ => Replayed::From(start),
+        };
+    }
+
+    Ok(replayed)
+}
+
+/// Blocks a store still needs from the WAL, which a reset would lose. A
+/// writable open keeps a WAL holding one instead of resetting it (see
+/// [`RedbWalStore::open_replaying`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Needed {
+    /// The slot of the first block needed.
+    pub from: BlockSlot,
+    /// The slot of the last block needed; none for every block from `from`.
+    pub through: Option<BlockSlot>,
+    /// Which store needs them, and why, as the refusal says it.
+    pub by: String,
+}
+
+/// The slot of the entry nearest `slot`, as [`WalStore::locate_point`] finds
+/// it: the first of the nearest within [`LOCATE_REACH`].
+fn nearest(
+    table: &redb::ReadOnlyTable<DbChainPoint, DbLogValue>,
+    slot: BlockSlot,
+) -> Result<Option<BlockSlot>, redb::Error> {
+    let reach = slot.saturating_sub(LOCATE_REACH)..=slot.saturating_add(LOCATE_REACH);
+    let mut nearest: Option<BlockSlot> = None;
+
+    for entry in table.range(DbChainPoint::slot_range(reach))? {
+        let found = ChainPoint::from(entry?.0.value()).slot();
+
+        if nearest.is_none_or(|best| found.abs_diff(slot) < best.abs_diff(slot)) {
+            nearest = Some(found);
+        }
+    }
+
+    Ok(nearest)
+}
 
 pub struct LogIter<'a, T>(Range<'a, DbChainPoint, DbLogValue>, PhantomData<T>);
 
@@ -343,7 +503,7 @@ where
 
     pub fn is_empty(&self) -> Result<bool, RedbWalError> {
         // "Empty" here refers to absence of WAL data entries. The metadata
-        // table is always present after `ensure_version()`, so an empty WAL
+        // table is always present after `admit()` or `memory()`, so an empty WAL
         // can still have a populated `wal_metadata` table.
         let wr = self.db.begin_read()?;
 
@@ -367,67 +527,295 @@ where
             .create_with_backend(redb::backends::InMemoryBackend::new())
             .map_err(WalError::internal)?;
 
-        let out = Self {
-            db: Arc::new(Handle::Writable(db)),
-            _phantom: Default::default(),
-        };
+        let out = Self::over(Handle::Writable(db));
 
-        out.ensure_initialized()?;
-        out.ensure_version()?;
-
-        Ok(out)
-    }
-
-    pub fn open(path: impl AsRef<Path>, config: &RedbWalConfig) -> Result<Self, WalError> {
-        let inner = redb::Database::builder()
-            .set_repair_callback(|x| warn!(progress = x.progress() * 100f64, "wal db is repairing"))
-            .set_cache_size(1024 * 1024 * config.cache.unwrap_or(DEFAULT_CACHE_SIZE_MB))
-            .create(path)
+        out.ensure_initialized()
+            .and_then(|()| out.stamp_version(CURRENT_WAL_VERSION))
             .map_err(WalError::internal)?;
 
-        let out = Self {
-            db: Arc::new(Handle::Writable(inner)),
-            _phantom: Default::default(),
+        Ok(out)
+    }
+
+    /// Open the WAL at `path`, created if missing, at [`CURRENT_WAL_VERSION`].
+    ///
+    /// The WAL is transient, so one this release can't read is reset, never
+    /// refused for its version, with one warning: the entries of a WAL
+    /// recording another version, older or newer, or none, are wiped, and a
+    /// file whose contents fail to decode is emptied. A lock, permission or
+    /// I/O error fails, and leaves the file as it was. It decodes the first
+    /// entry and the newest ones the intersect reads; [`Self::open_replaying`]
+    /// adds those a start replays into the other stores, and keeps a WAL they
+    /// still need.
+    pub fn open(path: impl AsRef<Path>, config: &RedbWalConfig) -> Result<Self, WalError> {
+        Self::open_replaying(path, config, &[], &[])
+    }
+
+    /// [`Self::open`] for a start that then catches up stores at `positions`
+    /// (their slots, none for a store holding nothing) from the WAL: the
+    /// entries such a replay reads are decoded too, so one that fails resets
+    /// the WAL instead of panicking the replay.
+    ///
+    /// A WAL holding a block among those the stores still need, `needed`, is
+    /// never reset: the open fails with [`WalError::Kept`] and leaves it as it
+    /// is. So does a file redb can't open, which can't say what it holds,
+    /// while any block is needed.
+    pub fn open_replaying(
+        path: impl AsRef<Path>,
+        config: &RedbWalConfig,
+        positions: &[Option<BlockSlot>],
+        needed: &[Needed],
+    ) -> Result<Self, WalError> {
+        let path = path.as_ref();
+
+        // Any writable open rewrites the file, so a WAL a read-only view can
+        // read is kept before one; one needing a repair is decided after it.
+        if !needed.is_empty() {
+            if let Ok(Viewed::Unreadable(view, unreadable)) = Self::view(path, config, positions) {
+                Self::keep_needed(view.as_ref(), path, needed, &unreadable)?;
+            }
+        }
+
+        let (store, undecodable) = match Self::open_file(path, config) {
+            Ok(out) => match out.admit(path, positions, needed) {
+                Ok(()) => return Ok(out),
+                Err(Unadmitted::Kept(kept)) => return Err(kept),
+                Err(Unadmitted::Failed(error)) => (Some(out), error),
+            },
+            Err(error) => (None, error),
         };
 
-        out.ensure_initialized()?;
-        out.ensure_version()?;
+        if !is_corrupt(&undecodable) {
+            return Err(WalError::internal(undecodable));
+        }
+
+        Self::keep_needed(store.as_ref(), path, needed, &undecodable.to_string())?;
+
+        // Dropped before the reset, so it no longer holds the file.
+        drop(store);
+
+        // Emptied in place, so a link to it and its permissions are kept.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(path)
+            .map_err(|error| {
+                let reset = format!("resetting the WAL at {}: {error}", path.display());
+                WalError::internal(std::io::Error::new(error.kind(), reset))
+            })?;
+
+        warn!(
+            path = %path.display(),
+            %undecodable,
+            "the WAL fails to decode, and it is transient: it was reset empty"
+        );
+
+        let out = Self::reopen_emptied(path, config).map_err(WalError::internal)?;
+        out.admit(path, positions, &[])?;
 
         Ok(out)
     }
 
-    /// Open an existing WAL read-only (see [`Handle`]), without the
-    /// initialization and version stamps [`Self::open`] writes. A WAL of
-    /// another version is refused: only a writable open converts it.
+    /// Open an existing WAL read-only (see [`Handle`]), writing nothing.
+    ///
+    /// A WAL this release can't read, as [`Self::open`] would reset it, is
+    /// left as it is and read as an empty one in memory, with one warning. A
+    /// file holding no database yet, as a crash during its creation leaves
+    /// it, fails as redb reports it, as does a lock or I/O error.
     pub fn open_read_only(
         path: impl AsRef<Path>,
         config: &RedbWalConfig,
     ) -> Result<Self, WalError> {
+        Self::open_read_only_replaying(path, config, &[], &[])
+    }
+
+    /// [`Self::open_read_only`] for a command that reads what a start would
+    /// replay into stores at `positions`: it decodes the entries
+    /// [`Self::open_replaying`] decodes, so it reads as empty a WAL that open
+    /// would reset, or would keep for a block among `needed`, as its warning
+    /// says.
+    pub fn open_read_only_replaying(
+        path: impl AsRef<Path>,
+        config: &RedbWalConfig,
+        positions: &[Option<BlockSlot>],
+        needed: &[Needed],
+    ) -> Result<Self, WalError> {
+        let path = path.as_ref();
+
+        let (view, unreadable) = match Self::view(path, config, positions)? {
+            Viewed::Readable(out) => return Ok(out),
+            Viewed::Empty => return Self::memory(),
+            Viewed::Unreadable(view, unreadable) => (view, unreadable),
+        };
+
+        match Self::held_needed(view.as_ref(), needed) {
+            None => warn!(
+                path = %path.display(),
+                reason = %unreadable,
+                "this release can't read the WAL, so this command reads it as empty and leaves \
+                 it as it is; the WAL is transient, and the next writable open resets it"
+            ),
+            Some(needed) => warn!(
+                path = %path.display(),
+                reason = %unreadable,
+                %needed,
+                "this release can't read the WAL, so this command reads it as empty and leaves \
+                 it as it is; a store still needs what it holds, so a writable open keeps it and \
+                 stops"
+            ),
+        }
+
+        Self::memory()
+    }
+
+    /// What a read-only view of the WAL at `path` finds, decoding what
+    /// [`Self::inspect`] decodes for stores at `positions`, writing nothing. A
+    /// file holding no database yet, as a crash during its creation leaves
+    /// it, fails as redb reports it, as does a lock or I/O error.
+    fn view(
+        path: &Path,
+        config: &RedbWalConfig,
+        positions: &[Option<BlockSlot>],
+    ) -> Result<Viewed<Self>, WalError> {
+        match Self::view_file(path, config) {
+            Ok(out) => match out.inspect(positions) {
+                Ok(Found::Current) => Ok(Viewed::Readable(out)),
+                Ok(Found::Empty) => Ok(Viewed::Empty),
+                Ok(Found::OtherVersion(found)) => {
+                    Ok(Viewed::Unreadable(Some(out), other_version(found)))
+                }
+                Err(error) if is_corrupt(&error) => {
+                    Ok(Viewed::Unreadable(Some(out), error.to_string()))
+                }
+                Err(error) => Err(WalError::internal(error)),
+            },
+            Err(error) if is_corrupt(&error) && !is_empty_file(path) => {
+                Ok(Viewed::Unreadable(None, error.to_string()))
+            }
+            Err(error) => Err(WalError::internal(error)),
+        }
+    }
+
+    /// Fail with [`WalError::Kept`] if the WAL at `path`, which this release
+    /// can't read for `unreadable`, holds a block among `needed`; see
+    /// [`Self::held_needed`].
+    fn keep_needed(
+        wal: Option<&Self>,
+        path: &Path,
+        needed: &[Needed],
+        unreadable: &str,
+    ) -> Result<(), WalError> {
+        match Self::held_needed(wal, needed) {
+            None => Ok(()),
+            Some(needed) => Err(WalError::Kept {
+                path: path.to_path_buf(),
+                unreadable: unreadable.to_string(),
+                needed,
+            }),
+        }
+    }
+
+    /// What `wal` holds of `needed`, as a refusal says it: the first block a
+    /// store needs, or that it may hold one when its entries can't be read
+    /// (`wal` is none for a file redb can't open). None when it holds none.
+    fn held_needed(wal: Option<&Self>, needed: &[Needed]) -> Option<String> {
+        needed.iter().find_map(|needed| {
+            let held = match wal.map(|wal| wal.first_block_in(needed)) {
+                Some(Ok(None)) => return None,
+                Some(Ok(Some(slot))) => {
+                    format!("the WAL holds the block at slot {slot}, which a reset would lose")
+                }
+                Some(Err(_)) | None => "the WAL may hold a block a reset would lose".to_string(),
+            };
+
+            Some(format!("{}: {held}", needed.by))
+        })
+    }
+
+    /// The slot of the first block the WAL holds among `needed`'s slots. A
+    /// reset point holds none; an entry of any other bytes counts as a block,
+    /// whichever release wrote it.
+    fn first_block_in(&self, needed: &Needed) -> Result<Option<BlockSlot>, redb::Error> {
+        let rx = self.db.begin_read()?;
+
+        let table = match rx.open_table(WAL) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+
+        // The same bytes under every version: its delta list is empty.
+        let reset_point = to_raw_log_value(&LogValue::<T>::origin());
+
+        let through = needed.through.map_or(Bound::Unbounded, Bound::Included);
+        let slots = (Bound::Included(needed.from), through);
+
+        for entry in table.range(DbChainPoint::slot_range(slots))? {
+            let (point, value) = entry?;
+
+            if value.value() != reset_point {
+                return Ok(Some(ChainPoint::from(point.value()).slot()));
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn over(db: Handle) -> Self {
+        Self {
+            db: Arc::new(db),
+            _phantom: Default::default(),
+        }
+    }
+
+    /// The database at `path`, created if missing. [`check_layout`] first
+    /// fails a cut-short file as corrupt, which redb would panic on.
+    fn open_file(path: &Path, config: &RedbWalConfig) -> Result<Self, redb::Error> {
+        Self::create_file(path, config, |x| {
+            warn!(progress = x.progress() * 100f64, "wal db is repairing")
+        })
+    }
+
+    /// [`Self::open_file`] over the file a reset just emptied. redb repairs
+    /// every file it initialises, which here recovers nothing, so it is not
+    /// warned of.
+    fn reopen_emptied(path: &Path, config: &RedbWalConfig) -> Result<Self, redb::Error> {
+        Self::create_file(path, config, |x| {
+            debug!(progress = x.progress() * 100f64, "wal db is initializing")
+        })
+    }
+
+    fn create_file(
+        path: &Path,
+        config: &RedbWalConfig,
+        repairing: impl Fn(&mut redb::RepairSession) + 'static,
+    ) -> Result<Self, redb::Error> {
+        check_layout(path)?;
+
+        let db = redb::Database::builder()
+            .set_repair_callback(repairing)
+            .set_cache_size(1024 * 1024 * config.cache.unwrap_or(DEFAULT_CACHE_SIZE_MB))
+            .create(path)?;
+
+        Ok(Self::over(Handle::Writable(db)))
+    }
+
+    /// [`Self::open_file`], read-only.
+    fn view_file(path: &Path, config: &RedbWalConfig) -> Result<Self, redb::Error> {
+        check_layout(path)?;
+
         let db = Handle::open_read_only(
             path,
             1024 * 1024 * config.cache.unwrap_or(DEFAULT_CACHE_SIZE_MB),
-        )
-        .map_err(WalError::internal)?;
+        )?;
 
-        let out = Self {
-            db: Arc::new(db),
-            _phantom: Default::default(),
-        };
-
-        match out.read_version()? {
-            Some(CURRENT_WAL_VERSION) => Ok(out),
-            found => Err(WalError::IncompatibleVersion {
-                found: found.unwrap_or_default(),
-                expected: CURRENT_WAL_VERSION,
-            }),
-        }
+        Ok(Self::over(db))
     }
 
     pub fn db_mut(&mut self) -> Option<&mut redb::Database> {
         Arc::get_mut(&mut self.db).and_then(Handle::writable_mut)
     }
 
-    pub fn ensure_initialized(&self) -> Result<(), RedbWalError> {
+    fn ensure_initialized(&self) -> Result<(), redb::Error> {
         let mut wx = self.db.begin_write()?;
         wx.set_quick_repair(true);
         wx.open_table(WAL)?;
@@ -435,27 +823,100 @@ where
         Ok(())
     }
 
-    /// Read the current on-disk WAL schema version.
-    ///
-    /// Returns `Ok(None)` if the metadata table doesn't exist (legacy DB
-    /// predating the versioning mechanism) or has no version key set.
-    fn read_version(&self) -> Result<Option<u32>, RedbWalError> {
-        let rx = self.db.begin_read()?;
+    /// Bring the WAL to [`CURRENT_WAL_VERSION`]: stamp one holding no entry,
+    /// and wipe the entries of one recording another version, or none, unless
+    /// it holds a block among `needed`. An error [`is_corrupt`] finds is on
+    /// what the file holds, and [`Self::open_replaying`] resets the file for
+    /// it.
+    fn admit(
+        &self,
+        path: &Path,
+        positions: &[Option<BlockSlot>],
+        needed: &[Needed],
+    ) -> Result<(), Unadmitted> {
+        // Read before any write, so a WAL kept for `needed` is left as it was.
+        match self.inspect(positions)? {
+            Found::Current => Ok(()),
+            Found::Empty => {
+                info!(
+                    version = CURRENT_WAL_VERSION,
+                    "initializing WAL metadata version"
+                );
+                self.ensure_initialized()?;
+                Ok(self.stamp_version(CURRENT_WAL_VERSION)?)
+            }
+            Found::OtherVersion(found) => {
+                Self::keep_needed(Some(self), path, needed, &other_version(found))
+                    .map_err(Unadmitted::Kept)?;
 
-        let table = match rx.open_table(WAL_METADATA) {
-            Ok(t) => t,
-            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
-            Err(e) => return Err(RedbWalError::from(e)),
-        };
+                self.wipe_and_stamp(CURRENT_WAL_VERSION)?;
 
-        let value = table.get(WAL_METADATA_VERSION_KEY)?.map(|v| v.value());
+                warn!(
+                    path = %path.display(),
+                    found = %recorded(found),
+                    expected = CURRENT_WAL_VERSION,
+                    "the WAL records another version, and it is transient: its entries were wiped"
+                );
 
-        Ok(value)
+                Ok(())
+            }
+        }
     }
 
-    /// Stamp the metadata table with the given version. Used when the WAL
-    /// data table is empty (no destructive action needed).
-    fn stamp_version(&self, version: u32) -> Result<(), RedbWalError> {
+    /// What the WAL holds, read without writing to it.
+    ///
+    /// At the current version, the entries a start reads are decoded: the
+    /// first, the newest [`NEWEST_DECODED`], and those it replays into stores
+    /// at `positions` (see [`Self::open_replaying`]). One that fails is
+    /// [`redb::Error::Corrupted`]. Other entries are decoded as they are read.
+    fn inspect(&self, positions: &[Option<BlockSlot>]) -> Result<Found, redb::Error> {
+        let rx = self.db.begin_read()?;
+
+        let version = match rx.open_table(WAL_METADATA) {
+            Ok(table) => table.get(WAL_METADATA_VERSION_KEY)?.map(|v| v.value()),
+            Err(redb::TableError::TableDoesNotExist(_)) => None,
+            Err(error) => return Err(error.into()),
+        };
+
+        let table = match rx.open_table(WAL) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Found::Empty),
+            Err(error) => return Err(error.into()),
+        };
+
+        if version != Some(CURRENT_WAL_VERSION) {
+            return if table.is_empty()? {
+                Ok(Found::Empty)
+            } else {
+                Ok(Found::OtherVersion(version))
+            };
+        }
+
+        let first = table.range::<DbChainPoint>(..)?.take(1);
+        let newest = table.range::<DbChainPoint>(..)?.rev().take(NEWEST_DECODED);
+
+        let replayed = match replayed(&table, positions)? {
+            Replayed::Nothing => None,
+            Replayed::From(start) => Some(table.range(start..)?),
+            Replayed::All => Some(table.range::<DbChainPoint>(..)?),
+        };
+
+        for entry in first.chain(newest).chain(replayed.into_iter().flatten()) {
+            let (point, value) = entry?;
+
+            if let Err(error) = bincode::deserialize::<LogValue<T>>(&value.value()) {
+                let point = ChainPoint::from(point.value());
+
+                return Err(redb::Error::Corrupted(format!(
+                    "its entry at {point} fails to decode: {error}"
+                )));
+            }
+        }
+
+        Ok(Found::Current)
+    }
+
+    fn stamp_version(&self, version: u32) -> Result<(), redb::Error> {
         let mut wx = self.db.begin_write()?;
         wx.set_quick_repair(true);
         {
@@ -471,7 +932,7 @@ where
     ///
     /// This is a single redb transaction, so a crash between the drain and
     /// the version write cannot leave the DB in a half-upgraded state.
-    fn wipe_and_stamp(&self, version: u32) -> Result<(), RedbWalError> {
+    fn wipe_and_stamp(&self, version: u32) -> Result<(), redb::Error> {
         let mut wx = self.db.begin_write()?;
         wx.set_quick_repair(true);
         {
@@ -484,55 +945,6 @@ where
         }
         wx.commit()?;
         Ok(())
-    }
-
-    /// Verify that the on-disk WAL is compatible with `CURRENT_WAL_VERSION`,
-    /// performing a forced wipe + version bump if not.
-    ///
-    /// - Matching version → no-op.
-    /// - Newer on-disk version → returns `WalError::IncompatibleVersion` to
-    ///   prevent an old binary from destroying newer data.
-    /// - Older or missing version with empty data → just stamps the version.
-    /// - Older or missing version with non-empty data → wipes the data and
-    ///   stamps the version (logs a warning).
-    pub fn ensure_version(&self) -> Result<(), RedbWalError> {
-        let found = self.read_version()?;
-
-        match found {
-            Some(v) if v == CURRENT_WAL_VERSION => Ok(()),
-            Some(v) if v > CURRENT_WAL_VERSION => {
-                Err(RedbWalError(WalError::IncompatibleVersion {
-                    found: v,
-                    expected: CURRENT_WAL_VERSION,
-                }))
-            }
-            _ => {
-                if self.data_table_is_empty()? {
-                    info!(
-                        version = CURRENT_WAL_VERSION,
-                        "initializing WAL metadata version"
-                    );
-                    self.stamp_version(CURRENT_WAL_VERSION)?;
-                } else {
-                    warn!(
-                        found = ?found,
-                        expected = CURRENT_WAL_VERSION,
-                        "WAL on-disk version is incompatible with running code; wiping WAL data"
-                    );
-                    self.wipe_and_stamp(CURRENT_WAL_VERSION)?;
-                }
-                Ok(())
-            }
-        }
-    }
-
-    /// Low-level check on whether the WAL data table contains any entries,
-    /// using redb's `is_empty()` directly without deserializing values.
-    /// Safe to call against incompatible on-disk data.
-    fn data_table_is_empty(&self) -> Result<bool, RedbWalError> {
-        let rx = self.db.begin_read()?;
-        let table = rx.open_table(WAL)?;
-        Ok(table.is_empty()?)
     }
 
     /// Prunes the WAL history to maintain a maximum number of slots.
@@ -917,7 +1329,7 @@ where
 
     fn locate_point(&self, around: BlockSlot) -> Result<Option<ChainPoint>, WalError> {
         let search = |retry| {
-            let delta = 20 * retry as u64;
+            let delta = LOCATE_STEP * retry as u64;
             let start = around.saturating_sub(delta);
             let end = around.saturating_add(delta);
             start..=end
@@ -999,6 +1411,9 @@ mod tests {
 
     type TestStore = RedbWalStore<TestDelta>;
 
+    /// A named way to write a WAL file at a path.
+    type Case = (&'static str, fn(&Path));
+
     fn open_test_store(path: &Path) -> Result<TestStore, WalError> {
         TestStore::open(path, &RedbWalConfig::default())
     }
@@ -1007,6 +1422,79 @@ mod tests {
     /// simulate legacy on-disk state that predates the metadata table.
     fn open_raw_db(path: &Path) -> redb::Database {
         redb::Database::builder().create(path).unwrap()
+    }
+
+    /// The version the store records, if any.
+    fn stamped(store: &TestStore) -> Option<u32> {
+        let rx = store.db.begin_read().unwrap();
+
+        match rx.open_table(WAL_METADATA) {
+            Ok(table) => table
+                .get(WAL_METADATA_VERSION_KEY)
+                .unwrap()
+                .map(|v| v.value()),
+            Err(redb::TableError::TableDoesNotExist(_)) => None,
+            Err(error) => panic!("{error}"),
+        }
+    }
+
+    /// Whether the store's WAL table holds no row, read without decoding.
+    fn holds_no_entry(store: &TestStore) -> bool {
+        let rx = store.db.begin_read().unwrap();
+        rx.open_table(WAL).unwrap().is_empty().unwrap()
+    }
+
+    /// The bytes of an entry this release decodes.
+    fn decodable() -> Vec<u8> {
+        to_raw_log_value(&LogValue::<TestDelta>::origin())
+    }
+
+    /// The bytes of an entry no release decodes.
+    fn undecodable() -> Vec<u8> {
+        vec![0xDE, 0xAD, 0xBE, 0xEF]
+    }
+
+    /// Write a WAL file at `path` the way another release could have left
+    /// it: stamped `version`, or unstamped, holding `values` at successive
+    /// slots from 42.
+    fn write_raw(path: &Path, version: Option<u32>, values: &[Vec<u8>]) {
+        let entries: Vec<_> = (42..).zip(values.iter().cloned()).collect();
+        write_raw_at(path, version, &entries);
+    }
+
+    /// [`write_raw`], holding each value at its slot.
+    fn write_raw_at(path: &Path, version: Option<u32>, entries: &[(BlockSlot, Vec<u8>)]) {
+        let db = open_raw_db(path);
+        let wx = db.begin_write().unwrap();
+        {
+            if let Some(version) = version {
+                let mut metadata = wx.open_table(WAL_METADATA).unwrap();
+                metadata.insert(WAL_METADATA_VERSION_KEY, version).unwrap();
+            }
+
+            let mut table = wx.open_table(WAL).unwrap();
+
+            for (slot, value) in entries {
+                let key = DbChainPoint::from(ChainPoint::Specific(*slot, [1u8; 32].into()));
+                table.insert(key, value.clone()).unwrap();
+            }
+        }
+        wx.commit().unwrap();
+    }
+
+    /// Open the WAL at `path` writable and check it was reset: no entry, the
+    /// current version, and usable.
+    fn assert_reset_on_open(path: &Path) {
+        let store = open_test_store(path).unwrap();
+        assert_eq!(stamped(&store), Some(CURRENT_WAL_VERSION));
+        assert!(holds_no_entry(&store));
+
+        store.reset_to(&ChainPoint::Origin).unwrap();
+        assert_eq!(store.find_tip().unwrap().unwrap().0, ChainPoint::Origin);
+        drop(store);
+
+        let store = open_test_store(path).unwrap();
+        assert_eq!(store.find_tip().unwrap().unwrap().0, ChainPoint::Origin);
     }
 
     /// An entry is seen whatever version the file records, and reading it
@@ -1066,7 +1554,7 @@ mod tests {
     #[test]
     fn fresh_in_memory_stamps_current_version() {
         let store = TestStore::memory().unwrap();
-        assert_eq!(store.read_version().unwrap(), Some(CURRENT_WAL_VERSION));
+        assert_eq!(stamped(&store), Some(CURRENT_WAL_VERSION));
     }
 
     /// A read-only open leaves the file as it found it, refuses writes, and
@@ -1093,29 +1581,62 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
+    /// A WAL this release can't read is read as empty by a read-only open,
+    /// and left byte-identical for the next writable open to reset.
     #[test]
-    fn read_only_open_refuses_another_version() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("wal.redb");
+    fn a_read_only_open_reads_a_wal_it_cannot_read_as_empty() {
+        let cases: [Case; 8] = [
+            ("older", |path| {
+                write_raw(path, Some(CURRENT_WAL_VERSION - 1), &[decodable()])
+            }),
+            ("newer", |path| {
+                write_raw(path, Some(CURRENT_WAL_VERSION + 1), &[decodable()])
+            }),
+            ("newer and empty", |path| {
+                write_raw(path, Some(CURRENT_WAL_VERSION + 1), &[])
+            }),
+            ("unstamped", |path| write_raw(path, None, &[decodable()])),
+            ("undecodable tip", |path| {
+                write_raw(
+                    path,
+                    Some(CURRENT_WAL_VERSION),
+                    &[decodable(), undecodable()],
+                )
+            }),
+            ("undecodable start", |path| {
+                write_raw(
+                    path,
+                    Some(CURRENT_WAL_VERSION),
+                    &[undecodable(), decodable()],
+                )
+            }),
+            ("not a database", |path| {
+                std::fs::write(path, vec![0xa5; 64 * 1024]).unwrap()
+            }),
+            ("cut short past its header", |path| cut(path, 4096)),
+        ];
 
-        {
-            let db = open_raw_db(&path);
-            let wx = db.begin_write().unwrap();
-            wx.open_table(WAL).unwrap();
-            wx.commit().unwrap();
+        for (case, write) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("wal.redb");
+            write(&path);
+
+            let before = std::fs::read(&path).unwrap();
+
+            let store = TestStore::open_read_only(&path, &RedbWalConfig::default())
+                .unwrap_or_else(|error| panic!("{case}: {error}"));
+            assert!(store.find_tip().unwrap().is_none(), "{case}");
+            assert!(
+                store.iter_logs(None, None).unwrap().next().is_none(),
+                "{case}"
+            );
+            drop(store);
+
+            assert!(
+                std::fs::read(&path).unwrap() == before,
+                "{case}: the file changed"
+            );
         }
-
-        let error = TestStore::open_read_only(&path, &RedbWalConfig::default()).unwrap_err();
-        assert!(
-            matches!(
-                error,
-                WalError::IncompatibleVersion {
-                    found: 0,
-                    expected: CURRENT_WAL_VERSION
-                }
-            ),
-            "{error}"
-        );
     }
 
     #[test]
@@ -1124,7 +1645,7 @@ mod tests {
         let path = dir.path().join("wal.redb");
 
         let store = open_test_store(&path).unwrap();
-        assert_eq!(store.read_version().unwrap(), Some(CURRENT_WAL_VERSION));
+        assert_eq!(stamped(&store), Some(CURRENT_WAL_VERSION));
     }
 
     #[test]
@@ -1157,8 +1678,8 @@ mod tests {
         }
 
         let store = open_test_store(&path).unwrap();
-        assert_eq!(store.read_version().unwrap(), Some(CURRENT_WAL_VERSION));
-        assert!(store.data_table_is_empty().unwrap());
+        assert_eq!(stamped(&store), Some(CURRENT_WAL_VERSION));
+        assert!(holds_no_entry(&store));
     }
 
     /// Open a WAL stamped `version` that holds an entry, and check the open
@@ -1167,23 +1688,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wal.redb");
 
-        {
-            let db = open_raw_db(&path);
-            let wx = db.begin_write().unwrap();
-            {
-                let mut metadata = wx.open_table(WAL_METADATA).unwrap();
-                metadata.insert(WAL_METADATA_VERSION_KEY, version).unwrap();
-
-                let mut table = wx.open_table(WAL).unwrap();
-                let key = DbChainPoint::from(ChainPoint::Specific(42, [1u8; 32].into()));
-                table.insert(key, vec![0xDEu8, 0xAD, 0xBE, 0xEF]).unwrap();
-            }
-            wx.commit().unwrap();
-        }
+        write_raw(&path, Some(version), &[undecodable()]);
 
         let store = open_test_store(&path).unwrap();
-        assert_eq!(store.read_version().unwrap(), Some(CURRENT_WAL_VERSION));
-        assert!(store.data_table_is_empty().unwrap());
+        assert_eq!(stamped(&store), Some(CURRENT_WAL_VERSION));
+        assert!(holds_no_entry(&store));
     }
 
     /// A version-3 WAL holds inputs without their creation position, so
@@ -1207,31 +1716,730 @@ mod tests {
         assert_wiped_on_open(5);
     }
 
+    /// A WAL a newer release wrote is wiped as an older one is: this
+    /// release can't read it, and the WAL is transient.
     #[test]
-    fn newer_version_on_disk_refuses_to_open() {
+    fn a_newer_wal_is_wiped_on_open() {
+        assert_wiped_on_open(CURRENT_WAL_VERSION + 1);
+        assert_wiped_on_open(u32::MAX);
+    }
+
+    /// A newer WAL holding no entry is stamped with the current version.
+    #[test]
+    fn a_newer_empty_wal_is_stamped_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.redb");
+        write_raw(&path, Some(CURRENT_WAL_VERSION + 1), &[]);
+
+        let store = open_test_store(&path).unwrap();
+        assert_eq!(stamped(&store), Some(CURRENT_WAL_VERSION));
+        assert!(holds_no_entry(&store));
+    }
+
+    /// At the current version, an entry at either end that fails to decode
+    /// resets the WAL, as every open reads both ends, however long the WAL.
+    #[test]
+    fn an_entry_that_fails_to_decode_resets_the_wal() {
+        // past the newest entries an open decodes
+        let mut long = vec![decodable(); 2 * NEWEST_DECODED];
+        long[0] = undecodable();
+
+        let cases = [
+            vec![undecodable()],
+            vec![decodable(), undecodable()],
+            vec![undecodable(), decodable()],
+            vec![undecodable(), decodable(), undecodable()],
+            long,
+        ];
+
+        for values in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("wal.redb");
+            write_raw(&path, Some(CURRENT_WAL_VERSION), &values);
+
+            assert_reset_on_open(&path);
+        }
+    }
+
+    /// An entry between the ends among the newest, which the intersect reads
+    /// at every start, resets the WAL too, so reading them can't panic: down
+    /// to the deepest it reads, the 31st newest for five candidates.
+    #[test]
+    fn an_undecodable_entry_the_intersect_reads_resets_the_wal() {
+        let mut deepest = vec![decodable(); 40];
+        deepest[40 - 31] = undecodable();
+
+        for values in [vec![decodable(), undecodable(), decodable()], deepest] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("wal.redb");
+            write_raw(&path, Some(CURRENT_WAL_VERSION), &values);
+
+            let store = open_test_store(&path).unwrap();
+            assert!(store.intersect_candidates(5).unwrap().is_empty());
+            drop(store);
+
+            assert_reset_on_open(&path);
+        }
+    }
+
+    /// Past the first and the newest entries, an entry is decoded on open only
+    /// when a start replays it into a store at one of the positions: from the
+    /// entry nearest each slot, or every entry for a store holding nothing.
+    #[test]
+    fn an_open_decodes_the_entries_a_start_replays() {
+        // slots 42 to 141, the one at 52 undecodable
+        let mut values = vec![decodable(); 100];
+        values[10] = undecodable();
+
+        let cases: [(&[Option<BlockSlot>], bool); 11] = [
+            (&[], false),
+            (&[Some(60)], false),
+            (&[Some(141), Some(60)], false),
+            (&[Some(50)], true),
+            (&[Some(141), Some(52)], true),
+            (&[Some(52), Some(141)], true),
+            (&[Some(141), None], true),
+            // past the tip, with its nearest entry below it
+            (&[Some(150)], false),
+            // the tip, 180 slots below, is still within reach
+            (&[Some(141 + 180)], false),
+            // no entry within reach, so the replay reads them all
+            (&[Some(141 + 181)], true),
+            (&[Some(141 + 181), Some(141)], true),
+        ];
+
+        for (positions, reset) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("wal.redb");
+            write_raw(&path, Some(CURRENT_WAL_VERSION), &values);
+
+            assert_replayed(&path, positions, reset);
+        }
+    }
+
+    /// Between two entries as near to a store's slot, a start replays from
+    /// the lower one, as [`WalStore::locate_point`] finds it.
+    #[test]
+    fn an_open_replays_from_the_lower_of_two_nearest_entries() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wal.redb");
 
-        // Stamp metadata with a version newer than CURRENT_WAL_VERSION.
-        {
-            let db = open_raw_db(&path);
-            let wx = db.begin_write().unwrap();
-            {
-                let mut metadata = wx.open_table(WAL_METADATA).unwrap();
-                metadata
-                    .insert(WAL_METADATA_VERSION_KEY, CURRENT_WAL_VERSION + 1)
+        // 50 undecodable and older than the newest decoded, 51 between it and 52
+        let newest = (52..).take(NEWEST_DECODED).map(|slot| (slot, decodable()));
+        let entries: Vec<_> = [(42, decodable()), (50, undecodable())]
+            .into_iter()
+            .chain(newest)
+            .collect();
+        write_raw_at(&path, Some(CURRENT_WAL_VERSION), &entries);
+
+        assert_replayed(&path, &[Some(51)], true);
+    }
+
+    /// A start replays from the nearest entry above a store's slot too, as
+    /// [`WalStore::locate_point`] looks both ways from it.
+    #[test]
+    fn an_open_replays_from_a_nearer_entry_above() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.redb");
+
+        // 50 undecodable and older than the newest decoded, 57 nearer 60 than it
+        let newest = (60..).take(NEWEST_DECODED).map(|slot| (slot, decodable()));
+        let entries: Vec<_> = [(42, decodable()), (50, undecodable())]
+            .into_iter()
+            .chain(newest)
+            .collect();
+        write_raw_at(&path, Some(CURRENT_WAL_VERSION), &entries);
+
+        assert_replayed(&path, &[Some(57)], false);
+    }
+
+    /// Open the WAL at `path` for a start replaying into stores at
+    /// `positions`, read-only and then writable, and check both find it
+    /// unreadable exactly when `reset`: the read-only open reads it as empty
+    /// and leaves the file as it was, and the writable one empties it.
+    fn assert_replayed(path: &Path, positions: &[Option<BlockSlot>], reset: bool) {
+        let before = std::fs::read(path).unwrap();
+
+        let config = RedbWalConfig::default();
+
+        let store = TestStore::open_read_only_replaying(path, &config, positions, &[]).unwrap();
+        let read_empty = store.find_tip().unwrap().is_none();
+        assert_eq!(read_empty, reset, "read-only {positions:?}");
+        drop(store);
+
+        assert!(
+            std::fs::read(path).unwrap() == before,
+            "read-only {positions:?}: the file changed"
+        );
+
+        let store = TestStore::open_replaying(path, &config, positions, &[]).unwrap();
+        assert_eq!(holds_no_entry(&store), reset, "{positions:?}");
+    }
+
+    /// Decodable entries at the current version are kept as they are.
+    #[test]
+    fn decodable_entries_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.redb");
+        write_raw(
+            &path,
+            Some(CURRENT_WAL_VERSION),
+            &[decodable(), decodable()],
+        );
+
+        let store = open_test_store(&path).unwrap();
+        assert_eq!(slots(&store), vec![42, 43]);
+    }
+
+    /// A WAL whose tables another release laid out with other types, or as
+    /// multimaps, fails to decode and is reset.
+    #[test]
+    fn a_wal_whose_tables_changed_type_is_reset() {
+        let cases: [fn(&redb::WriteTransaction); 3] = [
+            |wx| {
+                let mut table = wx
+                    .open_table(TableDefinition::<&str, u64>::new("wal"))
                     .unwrap();
+                table.insert("tip", 1).unwrap();
+            },
+            |wx| {
+                let mut table = wx
+                    .open_table(TableDefinition::<&str, u64>::new("wal_metadata"))
+                    .unwrap();
+                table.insert(WAL_METADATA_VERSION_KEY, 1).unwrap();
+            },
+            |wx| {
+                let mut table = wx
+                    .open_multimap_table(redb::MultimapTableDefinition::<&str, u32>::new("wal"))
+                    .unwrap();
+                table.insert("tip", 1).unwrap();
+            },
+        ];
+
+        for write in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("wal.redb");
+
+            {
+                let db = open_raw_db(&path);
+                let wx = db.begin_write().unwrap();
+                write(&wx);
+                wx.commit().unwrap();
             }
-            wx.commit().unwrap();
+
+            assert_reset_on_open(&path);
+        }
+    }
+
+    /// A file redb can't read as a database, whether damaged, cut short or
+    /// not one at all, is emptied and recreated.
+    #[test]
+    fn a_file_redb_cannot_read_is_reset() {
+        let cases: [Case; 3] = [
+            ("not a database", |path| {
+                std::fs::write(path, vec![0xa5; 64 * 1024]).unwrap()
+            }),
+            ("cut short", |path| cut(path, 100)),
+            ("cut short past its header", |path| cut(path, 4096)),
+        ];
+
+        for (case, write) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("wal.redb");
+            write(&path);
+
+            #[cfg(unix)]
+            let identity = kept(&path);
+
+            let store = open_test_store(&path).unwrap_or_else(|error| panic!("{case}: {error}"));
+            assert!(holds_no_entry(&store), "{case}");
+            drop(store);
+
+            #[cfg(unix)]
+            assert_eq!(kept(&path), identity, "{case}: the file was replaced");
+
+            assert_reset_on_open(&path);
+        }
+    }
+
+    /// The file's identity and mode, which a reset in place keeps.
+    #[cfg(unix)]
+    fn kept(path: &Path) -> (u64, u64, u32) {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let metadata = std::fs::metadata(path).unwrap();
+        (metadata.dev(), metadata.ino(), metadata.mode())
+    }
+
+    /// A WAL holding an entry, cut to `len` bytes.
+    fn cut(path: &Path, len: u64) {
+        let store = open_test_store(path).unwrap();
+        store.append_entries(&[entry(10)]).unwrap();
+        drop(store);
+
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_len(len).unwrap();
+    }
+
+    /// A WAL another handle holds fails to open on the lock, writable or
+    /// read-only, and is left as it was.
+    #[test]
+    fn a_held_wal_fails_on_the_lock_and_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.redb");
+
+        let held = open_test_store(&path).unwrap();
+        held.append_entries(&[entry(10)]).unwrap();
+
+        // Windows enforces redb's lock on reads too
+        #[cfg(unix)]
+        let before = std::fs::read(&path).unwrap();
+
+        let error = open_test_store(&path).unwrap_err();
+        assert!(crate::handle::is_already_open(&error), "{error}");
+
+        let error = TestStore::open_read_only(&path, &RedbWalConfig::default()).unwrap_err();
+        assert!(crate::handle::is_already_open(&error), "{error}");
+
+        #[cfg(unix)]
+        assert!(std::fs::read(&path).unwrap() == before, "the file changed");
+        drop(held);
+
+        let store = open_test_store(&path).unwrap();
+        assert_eq!(slots(&store), vec![10]);
+    }
+
+    /// A WAL it may not write, or may not read, fails on the permission,
+    /// unreadable contents or not, with no warning, and is left as it was.
+    #[cfg(unix)]
+    #[test]
+    fn a_wal_it_may_not_write_fails_and_is_kept() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let writes: [fn(&Path); 3] = [
+            |path| write_raw(path, Some(CURRENT_WAL_VERSION + 1), &[decodable()]),
+            |path| std::fs::write(path, vec![0xa5; 64 * 1024]).unwrap(),
+            // readable, it reaches the reset's truncate
+            |path| cut(path, 4096),
+        ];
+
+        // read-only, and write-only: a reset could truncate the second
+        for mode in [0o444, 0o200] {
+            for write in writes {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("wal.redb");
+                write(&path);
+
+                let before = std::fs::read(&path).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+
+                // root reads and writes it regardless
+                let read = std::fs::File::open(&path).is_ok();
+                let written = std::fs::OpenOptions::new().write(true).open(&path).is_ok();
+
+                if read && written {
+                    return;
+                }
+
+                let mut opened = None;
+                let warned = warned_while(|| opened = Some(open_test_store(&path)));
+
+                let error = opened.unwrap().unwrap_err();
+                assert!(
+                    format!("{error:?}").contains("PermissionDenied"),
+                    "{mode:o}: {error:?}"
+                );
+                assert!(warned.is_empty(), "{mode:o}: {warned:?}");
+
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+                assert!(
+                    std::fs::read(&path).unwrap() == before,
+                    "{mode:o}: the file changed"
+                );
+            }
+        }
+    }
+
+    /// The WARN events `run` logs on this thread, each as its fields.
+    fn warned_while(run: impl FnOnce()) -> Vec<String> {
+        #[derive(Clone, Default)]
+        struct Warned(Arc<std::sync::Mutex<Vec<String>>>);
+
+        struct Fields(String);
+
+        impl tracing::field::Visit for Fields {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0.push_str(&format!("{}={value:?} ", field.name()));
+            }
         }
 
-        let err = open_test_store(&path).unwrap_err();
-        match err {
-            WalError::IncompatibleVersion { found, expected } => {
-                assert_eq!(found, CURRENT_WAL_VERSION + 1);
-                assert_eq!(expected, CURRENT_WAL_VERSION);
+        impl tracing::Subscriber for Warned {
+            fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+                *metadata.level() <= Level::WARN
             }
-            other => panic!("expected IncompatibleVersion, got {other:?}"),
+
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+            fn event(&self, event: &tracing::Event<'_>) {
+                if *event.metadata().level() == Level::WARN {
+                    let mut fields = Fields(String::new());
+                    event.record(&mut fields);
+                    self.0.lock().unwrap().push(fields.0);
+                }
+            }
+
+            fn enter(&self, _: &tracing::span::Id) {}
+
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+
+        // A callsite caches its interest per process: with a second dispatcher
+        // alive, every one asks the thread's subscriber instead.
+        let _second = tracing::Dispatch::new(Warned::default());
+        let warned = Warned::default();
+
+        tracing::subscriber::with_default(warned.clone(), run);
+
+        let events = warned.0.lock().unwrap().clone();
+
+        events
+    }
+
+    /// A reset, writable, and a reading as empty, read-only, each log one
+    /// warning naming the WAL.
+    #[test]
+    fn each_reset_logs_one_warning_naming_the_wal() {
+        // each case with what its writable open says
+        let cases: [(Case, &str); 3] = [
+            (
+                ("newer", |path| {
+                    write_raw(path, Some(CURRENT_WAL_VERSION + 1), &[decodable()])
+                }),
+                "entries were wiped",
+            ),
+            (
+                ("undecodable", |path| {
+                    write_raw(path, Some(CURRENT_WAL_VERSION), &[undecodable()])
+                }),
+                "reset empty",
+            ),
+            (("cut short", |path| cut(path, 4096)), "reset empty"),
+        ];
+
+        for ((case, write), said) in cases {
+            for writable in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("wal.redb");
+                write(&path);
+
+                let warned = warned_while(|| {
+                    if writable {
+                        open_test_store(&path).unwrap();
+                    } else {
+                        TestStore::open_read_only(&path, &RedbWalConfig::default()).unwrap();
+                    }
+                });
+
+                let said = if writable { said } else { "reads it as empty" };
+
+                assert_eq!(warned.len(), 1, "{case} {writable}: {warned:?}");
+                assert!(warned[0].contains(said), "{case} {writable}: {warned:?}");
+                assert!(
+                    warned[0].contains(&format!("path={}", path.display())),
+                    "{case} {writable}: {warned:?}"
+                );
+            }
+        }
+    }
+
+    /// The bytes of an entry holding a block, as a roll appends it.
+    fn block() -> Vec<u8> {
+        to_raw_log_value(&LogValue::<TestDelta> {
+            block: vec![0x82, 0x00, 0x80],
+            delta: vec![],
+            inputs: Default::default(),
+        })
+    }
+
+    /// What a store behind the WAL's entry at slot 43 needs of it.
+    fn needing(from: BlockSlot, through: Option<BlockSlot>) -> Needed {
+        Needed {
+            from,
+            through,
+            by: "the archive, at slot 42, is behind the state at slot 43".into(),
+        }
+    }
+
+    /// WALs this release can't read, each over a reset point at slot 42 and
+    /// a block at 43 where its entries can be read, with whether the open can
+    /// tell the block is there.
+    const KEPT_CASES: [(Case, bool); 6] = [
+        (
+            ("newer", |path| {
+                write_raw(path, Some(CURRENT_WAL_VERSION + 1), &[decodable(), block()])
+            }),
+            true,
+        ),
+        (
+            ("older", |path| {
+                write_raw(path, Some(CURRENT_WAL_VERSION - 1), &[decodable(), block()])
+            }),
+            true,
+        ),
+        (
+            ("unstamped", |path| {
+                write_raw(path, None, &[decodable(), block()])
+            }),
+            true,
+        ),
+        (
+            ("undecodable", |path| {
+                write_raw(
+                    path,
+                    Some(CURRENT_WAL_VERSION),
+                    &[decodable(), block(), undecodable()],
+                )
+            }),
+            true,
+        ),
+        (
+            ("tables changed type", |path| {
+                let db = open_raw_db(path);
+                let wx = db.begin_write().unwrap();
+                wx.open_table(TableDefinition::<&str, u64>::new("wal"))
+                    .unwrap()
+                    .insert("tip", 1)
+                    .unwrap();
+                wx.commit().unwrap();
+            }),
+            false,
+        ),
+        (("cut short past its header", |path| cut(path, 4096)), false),
+    ];
+
+    /// A writable open keeps a WAL it can't read that holds a block a store
+    /// still needs, or may hold one, and fails saying why and what to do,
+    /// with no warning. Once nothing needs it, the next open resets it.
+    #[test]
+    fn a_wal_holding_a_block_a_store_needs_is_kept() {
+        for ((case, write), seen) in KEPT_CASES {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("wal.redb");
+            write(&path);
+
+            let before = std::fs::read(&path).unwrap();
+
+            let mut opened = None;
+            let warned = warned_while(|| {
+                opened = Some(TestStore::open_replaying(
+                    &path,
+                    &RedbWalConfig::default(),
+                    &[],
+                    &[needing(43, Some(43))],
+                ))
+            });
+
+            let error = match opened.unwrap() {
+                Err(error @ WalError::Kept { .. }) => error.to_string(),
+                Err(error) => panic!("{case}: {error:?}"),
+                Ok(_) => panic!("{case}: opened"),
+            };
+
+            assert!(warned.is_empty(), "{case}: {warned:?}");
+            assert!(
+                std::fs::read(&path).unwrap() == before,
+                "{case}: the file changed"
+            );
+
+            let held = if seen {
+                "the WAL holds the block at slot 43"
+            } else {
+                "the WAL may hold a block a reset would lose"
+            };
+
+            for said in [
+                &format!("the WAL at {} is kept as it is", path.display()),
+                "the archive, at slot 42, is behind the state at slot 43",
+                held,
+                "start that release once",
+                "`dolos data rebuild`",
+            ] {
+                assert!(error.contains(said), "{case}: {error}");
+            }
+
+            assert_reset_on_open(&path);
+        }
+    }
+
+    /// The blocks a store needs that a WAL doesn't hold keep nothing: the
+    /// reset point before them holds none, and none lie past its tip.
+    #[test]
+    fn a_wal_holding_no_block_a_store_needs_is_reset() {
+        let needed = [needing(42, Some(42)), needing(44, None)];
+
+        let cases: [Case; 2] = [
+            ("newer", |path| {
+                write_raw(path, Some(CURRENT_WAL_VERSION + 1), &[decodable(), block()])
+            }),
+            ("undecodable", |path| {
+                write_raw(
+                    path,
+                    Some(CURRENT_WAL_VERSION),
+                    &[decodable(), undecodable()],
+                )
+            }),
+        ];
+
+        for (case, write) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("wal.redb");
+            write(&path);
+
+            let store = TestStore::open_replaying(&path, &RedbWalConfig::default(), &[], &needed)
+                .unwrap_or_else(|error| panic!("{case}: {error}"));
+            assert!(holds_no_entry(&store), "{case}");
+            assert_eq!(stamped(&store), Some(CURRENT_WAL_VERSION), "{case}");
+        }
+    }
+
+    /// A read-only open reads a WAL it can't read as empty whether or not a
+    /// store needs it, leaving it byte-identical, and its one warning says
+    /// which: a writable open keeps one that is needed, and resets the rest.
+    #[test]
+    fn a_read_only_open_says_whether_a_writable_one_keeps_the_wal() {
+        for ((case, write), seen) in KEPT_CASES {
+            for needed in [vec![needing(43, Some(43))], vec![]] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("wal.redb");
+                write(&path);
+
+                let before = std::fs::read(&path).unwrap();
+
+                let warned = warned_while(|| {
+                    let store = TestStore::open_read_only_replaying(
+                        &path,
+                        &RedbWalConfig::default(),
+                        &[],
+                        &needed,
+                    )
+                    .unwrap_or_else(|error| panic!("{case}: {error}"));
+
+                    assert!(store.find_tip().unwrap().is_none(), "{case}");
+                });
+
+                assert!(
+                    std::fs::read(&path).unwrap() == before,
+                    "{case}: the file changed"
+                );
+
+                assert_eq!(warned.len(), 1, "{case}: {warned:?}");
+                let warned = &warned[0];
+
+                if needed.is_empty() {
+                    assert!(warned.contains("next writable open resets it"), "{case}");
+                    assert!(!warned.contains("needed="), "{case}: {warned}");
+                } else {
+                    let held = if seen { "holds the block" } else { "may hold" };
+
+                    assert!(warned.contains("a writable open keeps it"), "{case}");
+                    assert!(warned.contains("behind the state"), "{case}: {warned}");
+                    assert!(warned.contains(held), "{case}: {warned}");
+                }
+            }
+        }
+    }
+
+    /// [`write_raw`], as a crash leaves it: a copy of the file taken while a
+    /// writer holds it, which a read-only open refuses until a writable one
+    /// repairs it. The file as written is left beside it.
+    #[cfg(unix)]
+    fn write_crashed(path: &Path, version: Option<u32>, values: &[Vec<u8>]) -> std::path::PathBuf {
+        let written = path.with_extension("written");
+        write_raw(&written, version, values);
+
+        let held = open_raw_db(&written);
+        std::fs::copy(&written, path).unwrap();
+        drop(held);
+
+        written
+    }
+
+    /// A WAL file's version, and each entry's key and bytes.
+    #[cfg(unix)]
+    type Recorded = (Option<u32>, Vec<(Vec<u8>, Vec<u8>)>);
+
+    /// What the WAL file at `path` records, read raw.
+    #[cfg(unix)]
+    fn recorded_in(path: &Path) -> Recorded {
+        use redb::{ReadableDatabase as _, ReadableTable as _};
+
+        let db = redb::ReadOnlyDatabase::open(path).unwrap();
+        let rx = db.begin_read().unwrap();
+
+        let version = rx
+            .open_table(WAL_METADATA)
+            .unwrap()
+            .get(WAL_METADATA_VERSION_KEY)
+            .unwrap()
+            .map(|version| version.value());
+
+        let entries = rx
+            .open_table(WAL)
+            .unwrap()
+            .iter()
+            .unwrap()
+            .map(|entry| {
+                let (key, value) = entry.unwrap();
+                (key.value().0.to_vec(), value.value())
+            })
+            .collect();
+
+        (version, entries)
+    }
+
+    /// A WAL a crash left, which only a writable open can read once it has
+    /// repaired it, is kept after the repair for a block a store needs: its
+    /// version and every entry as they were.
+    #[cfg(unix)]
+    #[test]
+    fn a_wal_a_crash_left_is_kept_once_repaired() {
+        let cases = [
+            ("newer", CURRENT_WAL_VERSION + 1, vec![decodable(), block()]),
+            (
+                "undecodable",
+                CURRENT_WAL_VERSION,
+                vec![decodable(), block(), undecodable()],
+            ),
+        ];
+
+        for (case, version, values) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("wal.redb");
+            let written = write_crashed(&path, Some(version), &values);
+
+            let config = RedbWalConfig::default();
+
+            let error = TestStore::open_read_only(&path, &config).unwrap_err();
+            assert!(crate::handle::needs_repair(&error), "{case}: {error}");
+
+            let opened = TestStore::open_replaying(&path, &config, &[], &[needing(43, Some(43))]);
+
+            match opened {
+                Err(error @ WalError::Kept { .. }) => {
+                    let error = error.to_string();
+                    assert!(error.contains("the block at slot 43"), "{case}: {error}");
+                }
+                Err(error) => panic!("{case}: {error:?}"),
+                Ok(_) => panic!("{case}: opened"),
+            }
+
+            assert_eq!(recorded_in(&path), recorded_in(&written), "{case}");
         }
     }
 
@@ -1245,7 +2453,7 @@ mod tests {
 
         // Second open: should succeed without rewriting (no panic, version intact).
         let store = open_test_store(&path).unwrap();
-        assert_eq!(store.read_version().unwrap(), Some(CURRENT_WAL_VERSION));
+        assert_eq!(stamped(&store), Some(CURRENT_WAL_VERSION));
     }
 
     /// WAL entry at `slot` with a deterministic nonzero hash (distinct from the

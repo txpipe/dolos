@@ -88,10 +88,7 @@ fn live_stake_pool(account: &AccountState) -> Option<PoolHash> {
         return None;
     }
 
-    account
-        .delegated_pool_live()
-        .or(account.retired_pool.as_ref())
-        .copied()
+    account.delegated_pool_live().copied()
 }
 
 fn live_stake_denominator_pool(
@@ -171,11 +168,7 @@ where
             return Ok(acc);
         }
 
-        if account
-            .delegated_pool_live()
-            .or(account.retired_pool.as_ref())
-            == Some(&target_pool)
-        {
+        if account.delegated_pool_live() == Some(&target_pool) {
             Ok(acc + account.live_stake())
         } else {
             Ok(acc)
@@ -1644,11 +1637,14 @@ mod tests {
 mod retired_pool_phases {
     use crate::{mapping::bech32_pool, test_support::TestApp};
     use axum::http::StatusCode;
-    use blockfrost_openapi::models::{pool::Pool, pool_list_retire_inner::PoolListRetireInner};
+    use blockfrost_openapi::models::{
+        account_content::AccountContent, pool::Pool, pool_delegators_inner::PoolDelegatorsInner,
+        pool_list_retire_inner::PoolListRetireInner,
+    };
     use dolos_cardano::{
         final_rows::FinalRows, indexes::CardanoArchiveIndexExt as _,
-        pallas_extras::MultiEraPoolRegistration, CalidusRegistration, PoolHash, PoolKey,
-        PoolRegistration, PoolState,
+        pallas_extras::MultiEraPoolRegistration, AccountKey, AccountState, CalidusRegistration,
+        PoolDelegation, PoolHash, PoolKey, PoolRegistration, PoolState,
     };
     use dolos_core::{
         ArchiveStore as _, ArchiveWriter as _, BlockSlot, Domain as _, EntityDelta as _,
@@ -2092,5 +2088,75 @@ mod retired_pool_phases {
         assert_eq!(status, StatusCode::OK);
         let retired: Vec<PoolListRetireInner> = serde_json::from_slice(&bytes).unwrap();
         assert!(retired.is_empty());
+    }
+
+    /// Clear every delegation to `pool` as the retirement leaves it after the
+    /// epoch boundary: the live delegation is `NotDelegated` and the account
+    /// keeps the retired pool in `retired_pool`. Returns the cleared accounts.
+    fn clear_delegations(domain: &ToyDomain, pool: PoolHash) -> Vec<AccountKey> {
+        let delegators: Vec<(AccountKey, AccountState)> = domain
+            .state()
+            .iter_entities_typed::<AccountState>(None)
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|(_, account)| account.delegated_pool_live() == Some(&pool))
+            .collect();
+
+        let writer = domain.state().start_writer().unwrap();
+        for (key, mut account) in delegators.clone() {
+            let epoch = account.pool.epoch().unwrap();
+            account.pool.replace(PoolDelegation::NotDelegated, epoch);
+            account.retired_pool = Some(pool);
+            writer.write_entity_typed(&key, &account).unwrap();
+        }
+        writer.commit().unwrap();
+
+        delegators.into_iter().map(|(key, _)| key).collect()
+    }
+
+    /// A retirement clears the delegations to the pool, as the ledger
+    /// POOLREAP rule does: the pool lists no delegators and has no live
+    /// stake, and its former delegators show no pool.
+    #[tokio::test]
+    async fn a_retired_pool_keeps_no_delegators() {
+        let delegated = retired_pool_app(2, |_, _, _| ());
+        let pool_id = delegated.vectors().pool_id.clone();
+        let delegators_path = format!("/pools/{pool_id}/delegators");
+
+        let (status, bytes) = delegated.get_bytes(&delegators_path).await;
+        assert_eq!(status, StatusCode::OK);
+        let before: Vec<PoolDelegatorsInner> = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            !before.is_empty(),
+            "the synthetic chain delegates to the pool"
+        );
+
+        let mut cleared = Vec::new();
+        let app = retired_pool_app(2, |domain, pool, _| {
+            cleared = clear_delegations(domain, pool);
+        });
+        assert_eq!(cleared.len(), before.len());
+
+        let (status, bytes) = app.get_bytes(&delegators_path).await;
+        assert_eq!(status, StatusCode::OK);
+        let after: Vec<PoolDelegatorsInner> = serde_json::from_slice(&bytes).unwrap();
+        assert!(after.is_empty());
+
+        let (status, bytes) = app.get_bytes(&format!("/pools/{pool_id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        let pool: Pool = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(pool.live_delegators, 0.0);
+        assert_eq!(pool.live_stake, "0");
+        assert_eq!(pool.live_pledge, "0");
+
+        for delegator in &before {
+            let (status, bytes) = app
+                .get_bytes(&format!("/accounts/{}", delegator.address))
+                .await;
+            assert_eq!(status, StatusCode::OK);
+            let account: AccountContent = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(account.pool_id, None, "{}", delegator.address);
+            assert!(!account.active, "{}", delegator.address);
+        }
     }
 }

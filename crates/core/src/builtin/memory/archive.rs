@@ -47,7 +47,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use pallas::ledger::traverse::MultiEraBlock;
 
 use crate::archive::{
-    blocks_through, check_entity_key, ArchiveError, ArchiveStore, ArchiveWriter, Skippable,
+    blocks_through, check_entity_key, position_in_slot, ArchiveError, ArchiveStore, ArchiveWriter,
+    Skippable,
 };
 use crate::indexes::{
     key_hash, ArchiveIndexDelta, EntityKind, EntityRecord, ExactKind, ExactRecord, IndexRecord,
@@ -101,6 +102,27 @@ struct Tables {
     /// The entity index, keyed by kind name as the disk backend keys it by
     /// the name's hash, and by the id verbatim.
     entities: BTreeMap<(&'static str, Vec<u8>), BlockSlot>,
+}
+
+impl Tables {
+    /// The bodies at `point`'s slot, and where among them the block it names
+    /// sits; none if the slot does not hold it.
+    fn find(&self, point: &ChainPoint) -> Option<(&[BlockBody], usize)> {
+        let bodies = self.blocks.get(&point.slot())?;
+        let at = position_in_slot(bodies, point)?;
+
+        Some((bodies, at))
+    }
+
+    /// Every block at the slots `range` covers, in chain order, cloned.
+    fn slots(
+        &self,
+        range: (Bound<BlockSlot>, Bound<BlockSlot>),
+    ) -> impl DoubleEndedIterator<Item = (BlockSlot, BlockBody)> + '_ {
+        self.blocks
+            .range(range)
+            .flat_map(|(slot, bodies)| bodies.iter().map(move |body| (*slot, body.clone())))
+    }
 }
 
 /// A single mutation, recorded by a writer and replayed at commit.
@@ -618,13 +640,90 @@ impl ArchiveStore for MemoryArchiveStore {
 
         let tables = self.tables.read().map_err(|_| poisoned())?;
 
-        let items = tables
-            .blocks
-            .range((start, end))
-            .flat_map(|(slot, bodies)| bodies.iter().map(move |body| (*slot, body.clone())))
+        Ok(MemoryBlockIter(tables.slots((start, end)).collect()))
+    }
+
+    fn blocks_after<'a>(
+        &self,
+        point: &ChainPoint,
+    ) -> Result<Option<Self::BlockIter<'a>>, ArchiveError> {
+        let tables = self.tables.read().map_err(|_| poisoned())?;
+
+        let Some((bodies, at)) = tables.find(point) else {
+            return Ok(None);
+        };
+
+        let slot = point.slot();
+        let items = bodies[at + 1..]
+            .iter()
+            .map(|body| (slot, body.clone()))
+            .chain(tables.slots((Bound::Excluded(slot), Bound::Unbounded)))
             .collect();
 
-        Ok(MemoryBlockIter(items))
+        Ok(Some(MemoryBlockIter(items)))
+    }
+
+    fn blocks_before<'a>(
+        &self,
+        point: &ChainPoint,
+    ) -> Result<Option<Self::BlockIter<'a>>, ArchiveError> {
+        let tables = self.tables.read().map_err(|_| poisoned())?;
+
+        let Some((bodies, at)) = tables.find(point) else {
+            return Ok(None);
+        };
+
+        let slot = point.slot();
+        let items = tables
+            .slots((Bound::Unbounded, Bound::Excluded(slot)))
+            .chain(bodies[..at].iter().map(|body| (slot, body.clone())))
+            .collect();
+
+        Ok(Some(MemoryBlockIter(items)))
+    }
+
+    /// Clones only the block it returns.
+    fn block_after(
+        &self,
+        point: &ChainPoint,
+    ) -> Result<Option<Option<(BlockSlot, BlockBody)>>, ArchiveError> {
+        let tables = self.tables.read().map_err(|_| poisoned())?;
+
+        let Some((bodies, at)) = tables.find(point) else {
+            return Ok(None);
+        };
+
+        let slot = point.slot();
+        let next = match bodies.get(at + 1) {
+            Some(body) => Some((slot, body.clone())),
+            None => tables
+                .slots((Bound::Excluded(slot), Bound::Unbounded))
+                .next(),
+        };
+
+        Ok(Some(next))
+    }
+
+    /// Clones only the block it returns.
+    fn block_before(
+        &self,
+        point: &ChainPoint,
+    ) -> Result<Option<Option<(BlockSlot, BlockBody)>>, ArchiveError> {
+        let tables = self.tables.read().map_err(|_| poisoned())?;
+
+        let Some((bodies, at)) = tables.find(point) else {
+            return Ok(None);
+        };
+
+        let slot = point.slot();
+        let previous = match at.checked_sub(1) {
+            Some(before) => Some((slot, bodies[before].clone())),
+            None => tables
+                .slots((Bound::Unbounded, Bound::Excluded(slot)))
+                .next_back(),
+        };
+
+        Ok(Some(previous))
     }
 
     fn find_intersect(&self, intersect: &[ChainPoint]) -> Result<Option<ChainPoint>, ArchiveError> {

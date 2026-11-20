@@ -13,9 +13,10 @@
 //! - [`InputDeps`] owns the fetched bytes for the whole request. Its
 //!   [`prepare`](InputDeps::prepare) batches the distinct dependency hashes of
 //!   a block's txs into a single round of deduped fetches (via
-//!   [`Facade::get_tx_batch`]) and only asks for hashes it does not already
-//!   hold, so a dependency shared across blocks is fetched once per request.
-//!   Misses (genesis or pruned txs) are recorded too, so they are not retried.
+//!   [`dolos_core::AsyncQueryFacade::tx_cbor_batch_with_positions`]) and only
+//!   asks for hashes it does not already hold, so a dependency shared across
+//!   blocks is fetched once per request. Misses (genesis or pruned txs) are
+//!   recorded too, so they are not retried.
 //! - [`InputResolver`] borrows those bytes and memoizes the decoding, handing
 //!   out transient [`MultiEraOutput`] borrows tied to `&mut self` — the same
 //!   ownership constraint `TxModelBuilder` manages for the `/txs/{hash}/*`
@@ -32,9 +33,25 @@ use axum::http::StatusCode;
 use itertools::Itertools as _;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraInput, MultiEraOutput, MultiEraTx};
 
-use dolos_core::{BlockBody, BlockSlot, Domain, EraCbor, TxHash};
+use dolos_core::{BlockBody, BlockSlot, Domain, EraCbor, TxHash, UtxoPosition};
 
-use crate::{pagination::Pagination, Facade, TxMap};
+use crate::{pagination::Pagination, Facade};
+
+type InputTxMap = HashMap<TxHash, Option<(EraCbor, UtxoPosition)>>;
+
+pub enum TouchedOutputPosition {
+    Produced(usize),
+    Consumed(UtxoPosition, usize),
+}
+
+impl TouchedOutputPosition {
+    pub fn in_tx(self, position: UtxoPosition) -> (UtxoPosition, usize) {
+        match self {
+            Self::Produced(index) => (position, index),
+            Self::Consumed(position, index) => (position, index),
+        }
+    }
+}
 
 /// How many dependency txs an [`InputDeps`] carries from one prepared batch to
 /// the next.
@@ -50,7 +67,7 @@ pub const MAX_INPUT_DEPS: usize = 4096;
 /// Request-scoped, bounded store of the dependency txs consumed by the blocks
 /// being scanned.
 pub struct InputDeps {
-    txs: TxMap,
+    txs: InputTxMap,
     cap: usize,
     fetches: usize,
 }
@@ -64,7 +81,7 @@ impl Default for InputDeps {
 impl InputDeps {
     pub fn with_capacity(cap: usize) -> Self {
         Self {
-            txs: TxMap::new(),
+            txs: InputTxMap::new(),
             cap: cap.max(1),
             fetches: 0,
         }
@@ -130,7 +147,11 @@ impl InputDeps {
 
         if !missing.is_empty() {
             self.fetches += missing.len();
-            let fetched = domain.get_tx_batch(missing).await?;
+            let fetched = domain
+                .query()
+                .tx_cbor_batch_with_positions(missing)
+                .await
+                .map_err(crate::log_and_500("failed to fetch input tx batch"))?;
             self.txs.extend(fetched);
         }
 
@@ -146,7 +167,7 @@ impl InputDeps {
 
     /// An owned copy of the held txs among `hashes`, for a resolver that runs
     /// away from the store.
-    pub fn held(&self, hashes: &[TxHash]) -> TxMap {
+    pub fn held(&self, hashes: &[TxHash]) -> InputTxMap {
         hashes
             .iter()
             .filter_map(|hash| Some((*hash, self.txs.get(hash)?.clone())))
@@ -156,13 +177,13 @@ impl InputDeps {
 
 /// Decodes each dependency tx at most once and resolves inputs against it.
 pub struct InputResolver<'a> {
-    txs: &'a TxMap,
+    txs: &'a InputTxMap,
     decoded: HashMap<TxHash, Option<MultiEraTx<'a>>>,
     decodes: usize,
 }
 
 impl<'a> InputResolver<'a> {
-    pub fn new(txs: &'a TxMap) -> Self {
+    pub fn new(txs: &'a InputTxMap) -> Self {
         Self {
             txs,
             decoded: HashMap::new(),
@@ -193,7 +214,7 @@ impl<'a> InputResolver<'a> {
             let source = self.txs;
 
             let decoded = match source.get(&hash) {
-                Some(Some(EraCbor(era, cbor))) => {
+                Some(Some((EraCbor(era, cbor), _))) => {
                     let era = (*era).try_into().map_err(|err| {
                         tracing::error!(error = ?err, "unknown era for dependency tx");
                         StatusCode::INTERNAL_SERVER_ERROR
@@ -248,17 +269,25 @@ pub fn for_each_touched_output<F>(
     mut visit: F,
 ) -> Result<bool, StatusCode>
 where
-    F: FnMut(&MultiEraOutput<'_>) -> Result<bool, StatusCode>,
+    F: FnMut(&MultiEraOutput<'_>, TouchedOutputPosition) -> Result<bool, StatusCode>,
 {
-    for (_, output) in tx.produces() {
-        if visit(&output)? {
+    for (index, output) in tx.produces() {
+        if visit(&output, TouchedOutputPosition::Produced(index))? {
             return Ok(true);
         }
     }
 
     for input in tx.consumes() {
+        let position = resolver
+            .txs
+            .get(input.hash())
+            .and_then(|source| source.as_ref().map(|(_, position)| *position));
         if let Some(output) = resolver.resolve(&input)? {
-            if visit(&output)? {
+            let position = position.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+            if visit(
+                &output,
+                TouchedOutputPosition::Consumed(position, input.index() as usize),
+            )? {
                 return Ok(true);
             }
         }
@@ -273,12 +302,12 @@ where
 pub fn tx_touches_output<F>(
     resolver: &mut InputResolver<'_>,
     tx: &MultiEraTx<'_>,
-    matches: F,
+    mut matches: F,
 ) -> Result<bool, StatusCode>
 where
     F: FnMut(&MultiEraOutput<'_>) -> Result<bool, StatusCode>,
 {
-    for_each_touched_output(resolver, tx, matches)
+    for_each_touched_output(resolver, tx, |output, _| matches(output))
 }
 
 /// A tx that a block scan matched.
@@ -411,8 +440,11 @@ mod tests {
         let input = inputs.first().expect("synthetic tx consumes an input");
 
         // pretend the source of the input is the synthetic tx itself
-        let mut txs = TxMap::new();
-        txs.insert(*input.hash(), Some(dep_cbor(&vectors)));
+        let mut txs = InputTxMap::new();
+        txs.insert(
+            *input.hash(),
+            Some((dep_cbor(&vectors), UtxoPosition::new(1, 0))),
+        );
 
         let mut resolver = InputResolver::new(&txs);
 
@@ -466,10 +498,13 @@ mod tests {
         );
 
         // pretend the input's source is the phase-2-invalid tx
-        let mut store = TxMap::new();
+        let mut store = InputTxMap::new();
         store.insert(
             *input.hash(),
-            Some(EraCbor(Era::Conway.into(), dep_tx_cbor)),
+            Some((
+                EraCbor(Era::Conway.into(), dep_tx_cbor),
+                UtxoPosition::new(1, 0),
+            )),
         );
 
         let mut resolver = InputResolver::new(&store);
@@ -496,7 +531,7 @@ mod tests {
         let inputs = tx.consumes();
         let input = inputs.first().expect("synthetic tx consumes an input");
 
-        let mut txs = TxMap::new();
+        let mut txs = InputTxMap::new();
         txs.insert(*input.hash(), None);
 
         let mut resolver = InputResolver::new(&txs);

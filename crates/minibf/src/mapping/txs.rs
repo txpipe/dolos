@@ -17,6 +17,7 @@ use pallas::{
         },
     },
 };
+use serde::Serialize;
 use std::{
     collections::{HashMap, HashSet},
     ops::Deref,
@@ -27,8 +28,6 @@ use blockfrost_openapi::models::{
     tx_content_cbor::TxContentCbor,
     tx_content_delegations_inner::TxContentDelegationsInner,
     tx_content_metadata_cbor_inner::TxContentMetadataCborInner,
-    tx_content_metadata_inner::TxContentMetadataInner,
-    tx_content_metadata_inner_json_metadata::TxContentMetadataInnerJsonMetadata,
     tx_content_mirs_inner::{Pot, TxContentMirsInner},
     tx_content_pool_certs_inner::TxContentPoolCertsInner,
     tx_content_pool_certs_inner_metadata::TxContentPoolCertsInnerMetadata,
@@ -48,7 +47,9 @@ use dolos_cardano::{
 use dolos_core::{ArchiveStore as _, Domain, EraCbor, TxHash, TxOrder, TxoRef};
 
 use super::{
-    bech32_pool, list_assets, pool_offchain_metadata, rational_to_f64, redeemer_fee,
+    bech32_pool,
+    direct_json::{drop_value, write_str, write_value, WriteJson},
+    list_assets, metadatum_to_json, pool_offchain_metadata, rational_to_f64, redeemer_fee,
     redeemer_script_hash, stake_cred_to_address, try_into_or_500, vkey_to_stake_address, IntoModel,
     PoolOffchainMetadata, UtxoOutputModelBuilder,
 };
@@ -698,44 +699,67 @@ impl IntoModel<TxContentCbor> for TxModelBuilder<'_> {
     }
 }
 
-impl IntoModel<TxContentMetadataInnerJsonMetadata> for alonzo::Metadatum {
-    type SortKey = ();
-
-    fn into_model(self) -> Result<TxContentMetadataInnerJsonMetadata, StatusCode> {
-        let out = match self {
-            alonzo::Metadatum::Int(x) => TxContentMetadataInnerJsonMetadata::String(x.to_string()),
-            alonzo::Metadatum::Bytes(x) => TxContentMetadataInnerJsonMetadata::String(format!(
-                "0x{}",
-                hex::encode(x.as_slice())
-            )),
-            alonzo::Metadatum::Text(x) => TxContentMetadataInnerJsonMetadata::String(x.to_string()),
-            alonzo::Metadatum::Array(x) => {
-                let items: Vec<_> = x.into_iter().map(|x| x.into_model()).try_collect()?;
-
-                TxContentMetadataInnerJsonMetadata::Object(HashMap::from_iter([(
-                    "array".to_string(),
-                    serde_json::Value::Array(items),
-                )]))
-            }
-            alonzo::Metadatum::Map(x) => {
-                let items: HashMap<String, serde_json::Value> = x
-                    .iter()
-                    .map(|(k, v)| Ok((k.clone().into_model()?, v.clone().into_model()?)))
-                    .try_collect()
-                    .map_err(|_: StatusCode| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-                TxContentMetadataInnerJsonMetadata::Object(items)
-            }
-        };
-
-        Ok(out)
+/// Converts a top-level metadatum to the `json_metadata` of
+/// `/txs/{hash}/metadata`. An integer becomes a string and an array becomes
+/// `{"array": [..]}`.
+fn tx_metadatum_to_json(metadatum: &alonzo::Metadatum) -> serde_json::Value {
+    match metadatum {
+        alonzo::Metadatum::Int(x) => serde_json::Value::String(x.to_string()),
+        // moves the array in; `json!` would copy it
+        alonzo::Metadatum::Array(_) => serde_json::Value::Object(serde_json::Map::from_iter([(
+            "array".to_string(),
+            metadatum_to_json(metadatum),
+        )])),
+        alonzo::Metadatum::Bytes(_) | alonzo::Metadatum::Text(_) | alonzo::Metadatum::Map(_) => {
+            metadatum_to_json(metadatum)
+        }
     }
 }
 
-impl IntoModel<Vec<TxContentMetadataInner>> for TxModelBuilder<'_> {
+/// One entry of `/txs/{hash}/metadata`. The fields are in sorted order, and
+/// serde writes them in this order.
+#[derive(Serialize)]
+pub struct TxMetadataJsonInner {
+    pub json_metadata: serde_json::Value,
+    pub label: String,
+}
+
+/// The body of `/txs/{hash}/metadata`, byte for byte what `serde_json`
+/// encodes for its entries. It writes and frees the metadata with a heap stack.
+pub struct TxMetadataJsonBody(pub Vec<TxMetadataJsonInner>);
+
+impl WriteJson for TxMetadataJsonBody {
+    fn write_json(&self, out: &mut Vec<u8>) {
+        out.push(b'[');
+
+        for (i, item) in self.0.iter().enumerate() {
+            if i > 0 {
+                out.push(b',');
+            }
+
+            out.extend_from_slice(b"{\"json_metadata\":");
+            write_value(out, &item.json_metadata);
+            out.extend_from_slice(b",\"label\":");
+            write_str(out, &item.label);
+            out.push(b'}');
+        }
+
+        out.push(b']');
+    }
+}
+
+impl Drop for TxMetadataJsonBody {
+    fn drop(&mut self) {
+        for item in self.0.drain(..) {
+            drop_value(item.json_metadata);
+        }
+    }
+}
+
+impl IntoModel<Vec<TxMetadataJsonInner>> for TxModelBuilder<'_> {
     type SortKey = ();
 
-    fn into_model(self) -> Result<Vec<TxContentMetadataInner>, StatusCode> {
+    fn into_model(self) -> Result<Vec<TxMetadataJsonInner>, StatusCode> {
         let tx = self.tx()?;
         let metadata = tx.metadata();
 
@@ -743,14 +767,11 @@ impl IntoModel<Vec<TxContentMetadataInner>> for TxModelBuilder<'_> {
 
         let items = entries
             .into_iter()
-            .map(|(label, metadatum)| {
-                Ok(TxContentMetadataInner {
-                    label: label.to_string(),
-                    json_metadata: Box::new(metadatum.clone().into_model()?),
-                })
+            .map(|(label, metadatum)| TxMetadataJsonInner {
+                json_metadata: tx_metadatum_to_json(metadatum),
+                label: label.to_string(),
             })
-            .try_collect()
-            .map_err(|_: StatusCode| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .collect();
 
         Ok(items)
     }
