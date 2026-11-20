@@ -1,13 +1,13 @@
 # The `io.txpipe.dolos.cardano` profile
 
-**Status: reopened for the diff chain** — profile version 1, payload
-media-type version 1 (`.v1`), every namespace at schema revision 1.
-Decision 0071 froze this profile for Dolos v2; decision 0080 reopened it for
-the diff chain and the blocks profile, edited in place with no version bump,
-and the next baseline decision names the commit of this document that freezes
-it again. Record content still follows decision 0026: an encoding change
-moves its namespace's revision, the field registry is append-only, and a
-retirement uses revision 0 (decision 0063).
+**Status: frozen for the diff chain** — profile version 1, payload
+media-type version 1 (`.v1`), every namespace at schema revision 1, all
+unchanged. Decision 0071 froze this profile for Dolos v2; decision 0080
+reopened it for the diff chain and the blocks profile, edited in place with no
+version bump; this commit of the document freezes it again, and the baseline
+decision names it. Every change from here on follows decision 0026: an
+encoding change moves its namespace's revision, the field registry is
+append-only, and a retirement uses revision 0 (decision 0063).
 
 This document is the normative specification of the Dolos profile of the
 [Stelae protocol](https://github.com/txpipe/stelae/blob/main/SPEC.md): the
