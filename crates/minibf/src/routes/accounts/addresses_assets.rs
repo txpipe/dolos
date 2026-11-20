@@ -128,7 +128,7 @@ mod tests {
     use super::*;
     use crate::{
         routes::accounts::testing::*,
-        test_support::{health_beside, TestApp, TestFault, SLOW_READ},
+        test_support::{health_throughout, TestApp, TestFault, SLOW_READ},
     };
     use blockfrost_openapi::models::account_addresses_assets_inner::AccountAddressesAssetsInner;
     use dolos_core::{EraCbor, StateWriter as _, UtxoSetDelta, UtxoValue};
@@ -364,7 +364,7 @@ mod tests {
         let app = TestApp::new_with_fault(Some(TestFault::SlowUtxoReads(SLOW_READ)));
         let path = format!("/accounts/{}/addresses/assets", app.vectors().stake_address);
 
-        assert_eq!(health_beside(&app, &path).await, StatusCode::OK);
+        assert_eq!(health_throughout(&app, &path).await, StatusCode::OK);
     }
 
     /// Chunks of one UTxO add up to the same assets, at the same oldest and

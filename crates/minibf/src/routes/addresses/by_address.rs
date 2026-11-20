@@ -48,7 +48,7 @@ mod tests {
     use super::*;
     use crate::{
         routes::addresses::testing::*,
-        test_support::{health_beside, TestApp, TestFault, SLOW_READ},
+        test_support::{health_throughout, TestApp, TestFault, SLOW_READ},
     };
     use blockfrost_openapi::models::address_content::{AddressContent, Type as AddressType};
     use pallas::ledger::addresses::Address;
@@ -143,7 +143,7 @@ mod tests {
         let app = TestApp::new_with_fault(Some(TestFault::SlowUtxoReads(SLOW_READ)));
         let path = format!("/addresses/{}", app.vectors().address);
 
-        assert_eq!(health_beside(&app, &path).await, StatusCode::OK);
+        assert_eq!(health_throughout(&app, &path).await, StatusCode::OK);
     }
 
     /// Chunks of one UTxO sum to the same amounts as one chunk of the whole
