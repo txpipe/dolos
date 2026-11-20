@@ -38,7 +38,7 @@ Dolos 2.0.x ships no in-place migration. The first release that needs one will d
 
 ## Not covered
 
-- **Network APIs.** The Blockfrost-compatible API, UTxO RPC, TRP and the Ouroboros protocols are versioned by their own specifications, and their conformance is documented per endpoint in each API's page, such as [minibf](../apis/minibf).
+- **Network APIs.** The Blockfrost-compatible API, UTxO RPC, TRP and the Ouroboros protocols are versioned by their own specifications. Where an API's pages document its conformance, as [minibf](../apis/minibf)'s do, they are the reference for it.
 - **Rust crates.** The `dolos-*` library crates follow Cargo semver only.
 - **Correctness and security fixes.** A 2.x release may change observed behaviour toward the documented or specified behaviour, or to close a security hole. Its release notes call each such change out.
 - **Resource limits.** New `503` or `504` answers, deadlines and admission refusals are operational, not functional, changes.
@@ -48,9 +48,9 @@ Dolos 2.0.x ships no in-place migration. The first release that needs one will d
 
 The write-ahead log (WAL), the mempool and the cache's disk tier are outside the contract. Changing their formats needs no new identifier.
 
-When one of them records a version other than the binary's, older or newer, holds data with no version marker, or fails to decode, Dolos resets it when it opens it, logs one warning and starts. A lock, permission or I/O error still fails the open. The reset runs only after the state and archive stores are admitted, so a binary that refuses those stores never wipes the WAL first.
+When one of them records a version other than the binary's, older or newer, holds data with no version marker, or fails to decode, a writable open resets it, logs one warning and the node starts. A command that only reads the stores reads it as empty and leaves it as it is, for the next writable open to reset. A lock, permission or I/O error still fails the open. The reset runs only after the state and archive stores are admitted, so a binary that refuses those stores never wipes the WAL first.
 
-One case is kept, not reset: a WAL that still holds blocks the state or archive needs, as a crash before both stores caught up can leave it. Resetting it would lose those blocks for good, so a writable open leaves the WAL as it is and the start fails with a message that names the store waiting on it. Start the release that wrote the WAL once, so it brings the stores together and shuts down cleanly, then start the new one; failing that, rebuild the state from the archive with `dolos data rebuild`, or replace the dataset with `dolos bootstrap --force`.
+One case is kept, not reset: a WAL that still holds blocks the state or archive needs, as a crash before both stores caught up can leave it. Resetting it would lose those blocks for good, so a writable open leaves the WAL as it is and the start fails with a message that names the store waiting on it. If another release wrote the WAL, start that release once, so it brings the stores together and shuts down cleanly, then start the new one; otherwise rebuild the state from the archive with `dolos data rebuild`, or replace the dataset with `dolos bootstrap --force`.
 
 ## Supported-surface inventory
 
@@ -107,7 +107,7 @@ Outside the contract:
 
 ## Transition matrix
 
-What the current binary does with a configuration or a dataset written by another release. A refused transition changes nothing on disk.
+What the current binary does with a configuration or a dataset written by another release. A refused transition leaves the refused configuration and stores as they were.
 
 ### Refused
 
