@@ -118,6 +118,8 @@ pub struct VerifyArgs {
 
 #[tokio::main]
 pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
+    crate::common::refuse_interrupted_restore(config)?;
+
     crate::common::setup_tracing_warnings()?;
 
     let domain = open_offline(config)?;

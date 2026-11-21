@@ -864,13 +864,38 @@ fn recorded_layers(node: &Node) -> Option<usize> {
         .map(|progress| progress.completed.len())
 }
 
-/// The commands that would run a node on its stores.
+/// The commands that would run on a node's stores: the node, a sync, store
+/// housekeeping, the cache, and a replay that is not `--force`d over them.
 const RUNS_ON_STORES: &[&[&str]] = &[
     &["daemon"],
     &["serve"],
     &["sync", "catchup"],
     &["sync", "recover"],
     &["sync", "recover", "--dry-run"],
+    &["data", "housekeeping"],
+    &["cache", "stats"],
+    &["cache", "clear", "--all"],
+    &["cache", "warm", "--namespace", "assets", "--scan"],
+    &["cache", "verify"],
+    &["bootstrap", "immutabledb", "--source", "immutable"],
+    &[
+        "bootstrap",
+        "immutabledb",
+        "--source",
+        "immutable",
+        "--continue",
+    ],
+    &[
+        "bootstrap",
+        "--skip-if-data",
+        "immutabledb",
+        "--source",
+        "immutable",
+    ],
+    #[cfg(feature = "mithril")]
+    &["bootstrap", "mithril"],
+    #[cfg(feature = "mithril")]
+    &["bootstrap", "mithril", "--continue"],
 ];
 
 /// Each of [`RUNS_ON_STORES`] refuses `node`'s storage as an interrupted
@@ -996,27 +1021,6 @@ fn a_killed_restore_resumes_with_continue() {
 
     // Every command that would run on it refuses, and leaves it resumable.
     refuses_to_run_on_an_interrupted_restore(&node);
-
-    // A command that checks no records first reaches the startup check over
-    // the partial archive, and names the restore, not a state rebuild that
-    // would spend it. It sets up tracing before the stores, where the debug
-    // feature's console subscriber panics a build without tokio_unstable.
-    if cfg!(not(feature = "debug")) {
-        let output = node.run(&["data", "housekeeping"]);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert_eq!(output.status.code(), Some(1), "{stderr}");
-        assert!(!stderr.contains("panicked"), "{stderr}");
-        assert!(
-            reports(&output.stderr, "but the state has no cursor"),
-            "{stderr}"
-        );
-        assert!(reports(&output.stderr, "was interrupted"), "{stderr}");
-        assert!(
-            reports(&output.stderr, "dolos bootstrap stelae --continue"),
-            "{stderr}"
-        );
-        assert!(!reports(&output.stderr, "dolos data rebuild"), "{stderr}");
-    }
 
     let output = node.run(&["bootstrap", "stelae", "--continue"]);
     let stdout = assert_ok(&output);

@@ -229,9 +229,9 @@ fn render_domain_build_error(storage_path: &Path, error: DomainBuildError) -> mi
             };
             miette::miette!(help = help, "{msg}")
         }
-        // A command that did not refuse the records first, such as
-        // `data housekeeping` or a `cache` command, reaches this over a
-        // restore's partial stores, where only `bootstrap stelae` applies.
+        // Each command refuses the records before it builds the domain; a
+        // caller that does not still names the restore, not a state rebuild
+        // that would spend its partial stores.
         DomainBuildError::Bootstrap(
             error @ dolos_core::DomainError::ArchiveWithoutState { .. },
         ) => match interrupted_restore(storage_path) {
@@ -712,6 +712,38 @@ mod tests {
             ..Default::default()
         };
         assert!(log_filter(&config).is_err());
+    }
+
+    #[test]
+    fn an_archive_without_a_state_names_the_restore_its_records_show() {
+        let storage = tempfile::tempdir().unwrap();
+        let rendered = |storage: &Path| {
+            let error = DomainBuildError::Bootstrap(dolos_core::DomainError::ArchiveWithoutState {
+                archive: 42,
+            });
+            let report = render_domain_build_error(storage, error);
+            let help = report
+                .help()
+                .map(|help| help.to_string())
+                .unwrap_or_default();
+            (report.to_string(), help)
+        };
+
+        let (message, help) = rendered(storage.path());
+        assert!(message.contains("but the state has no cursor"), "{message}");
+        assert!(help.contains("dolos data rebuild"), "{help}");
+        assert!(!help.contains("--continue"), "{help}");
+
+        std::fs::write(
+            storage.path().join(dolos_snapshot::restore::PROGRESS_FILE),
+            "{}",
+        )
+        .unwrap();
+
+        let (message, help) = rendered(storage.path());
+        assert!(message.contains("but the state has no cursor"), "{message}");
+        assert!(help.contains("dolos bootstrap stelae --continue"), "{help}");
+        assert!(!help.contains("dolos data rebuild"), "{help}");
     }
 
     #[test]

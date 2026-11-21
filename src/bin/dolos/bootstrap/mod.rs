@@ -468,8 +468,27 @@ fn setup_tracing(
     }
 }
 
+/// Refuse a replay into storage that an interrupted snapshot restore left
+/// its records in, unless `--force` replaces it: only `bootstrap stelae`
+/// finishes those stores, and a replay's `--continue` would build on them.
+fn refuse_a_replay_over_a_restore(
+    config: &RootConfig,
+    command: &Command,
+    policy: ExistingDataPolicy,
+) -> miette::Result<()> {
+    if policy.force || matches!(command, Command::Stelae(_)) {
+        return Ok(());
+    }
+
+    crate::common::refuse_interrupted_restore(config)
+}
+
 pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     let policy = args.policy().unwrap_or_else(|error| error.exit());
+
+    if let Some(command) = &args.command {
+        refuse_a_replay_over_a_restore(config, command, policy)?;
+    }
 
     let _tracing = setup_tracing(config, args.verbose)?;
 
@@ -484,7 +503,11 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
 
     let command = match args.command.clone() {
         Some(x) => x,
-        None => Command::inquire(KnownNetwork::by_name(&config.chain.network))?,
+        None => {
+            let command = Command::inquire(KnownNetwork::by_name(&config.chain.network))?;
+            refuse_a_replay_over_a_restore(config, &command, policy)?;
+            command
+        }
     };
 
     let clears = matches!(existing, Existing::Clear);
