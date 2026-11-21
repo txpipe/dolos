@@ -118,6 +118,54 @@ pub fn open_genesis(config: &RootConfig) -> miette::Result<Genesis> {
         .context("loading genesis")
 }
 
+/// What finishes or replaces stores that a snapshot restore left incomplete.
+const RESTORE_HELP: &str = "finish the restore with `dolos bootstrap stelae --continue`, or start \
+                            over with `dolos bootstrap stelae --force`";
+
+/// What recovers an archive whose state has no cursor when no snapshot restore
+/// left its records, as a `data rebuild` or `data reset` stopped before the
+/// state was written leaves it. With the records there, the stores are a
+/// restore's partial progress, and [`RESTORE_HELP`] applies instead: a state
+/// rebuild over them would spend the resume.
+const ARCHIVE_WITHOUT_STATE_HELP: &str =
+    "an interrupted `dolos data rebuild` or `dolos data reset` leaves the stores like this; \
+     rebuild the state from the archive with `dolos data rebuild`, or replace the dataset with \
+     `dolos bootstrap --force`";
+
+/// Refuse storage that an interrupted snapshot restore left its records in:
+/// its stores are incomplete, and only `bootstrap stelae` finishes or replaces
+/// them. Checked before any store is opened, so nothing on disk changes.
+pub fn refuse_interrupted_restore(config: &RootConfig) -> miette::Result<()> {
+    match interrupted_restore(&config.storage.path)? {
+        Some(refusal) => Err(refusal),
+        None => Ok(()),
+    }
+}
+
+/// The refusal for `storage` when an interrupted snapshot restore left its
+/// records there, naming them; `None` when it holds neither.
+fn interrupted_restore(storage: &Path) -> miette::Result<Option<miette::Report>> {
+    let records = dolos_snapshot::restore::records_in(storage)
+        .into_diagnostic()
+        .context("looking for the records of an interrupted snapshot restore")?;
+
+    if records.is_empty() {
+        return Ok(None);
+    }
+
+    let records: Vec<_> = records
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+
+    Ok(Some(miette::miette!(
+        help = RESTORE_HELP,
+        "a snapshot restore into {} was interrupted, so its stores are incomplete ({} left)",
+        storage.display(),
+        records.join(", "),
+    )))
+}
+
 pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
     setup_domain_with_stop_epoch(config, None)
 }
@@ -133,7 +181,7 @@ pub fn setup_domain_with_stop_epoch(
     DomainBuilder::new(config, genesis)
         .stop_epoch(stop_epoch)
         .build()
-        .map_err(render_domain_build_error)
+        .map_err(|error| render_domain_build_error(&config.storage.path, error))
 }
 
 /// A domain over `stores` as they stand, for a command that repairs or rolls
@@ -143,12 +191,13 @@ pub fn assemble_domain(config: &RootConfig, stores: &Stores) -> miette::Result<D
 
     DomainBuilder::new(config, genesis)
         .assemble(stores)
-        .map_err(render_domain_build_error)
+        .map_err(|error| render_domain_build_error(&config.storage.path, error))
 }
 
 /// Keep actionable executable diagnostics at the UI boundary while the
-/// library returns typed construction errors.
-fn render_domain_build_error(error: DomainBuildError) -> miette::Report {
+/// library returns typed construction errors. `storage_path` is where the
+/// stores live, read for the records a snapshot restore leaves.
+fn render_domain_build_error(storage_path: &Path, error: DomainBuildError) -> miette::Report {
     match error {
         DomainBuildError::Storage(error @ Error::InUse { .. }) => {
             miette::Report::new(storage::OpenError::from(error))
@@ -180,6 +229,16 @@ fn render_domain_build_error(error: DomainBuildError) -> miette::Report {
             };
             miette::miette!(help = help, "{msg}")
         }
+        // Each command refuses the records before it builds the domain; a
+        // caller that does not still names the restore, not a state rebuild
+        // that would spend its partial stores.
+        DomainBuildError::Bootstrap(
+            error @ dolos_core::DomainError::ArchiveWithoutState { .. },
+        ) => match interrupted_restore(storage_path) {
+            Ok(Some(refusal)) => refusal.wrap_err(error.to_string()),
+            Ok(None) => miette::miette!(help = ARCHIVE_WITHOUT_STATE_HELP, "{error}"),
+            Err(lookup) => lookup.wrap_err(error.to_string()),
+        },
         DomainBuildError::Bootstrap(error @ dolos_core::DomainError::WalGap { .. }) => {
             miette::miette!(
                 help = "To see the missing blocks, run `dolos sync recover --dry-run`. To reset the WAL to the state cursor, run `dolos sync recover --discard-wal`. This command erases the rollback history of the WAL.",
@@ -653,6 +712,38 @@ mod tests {
             ..Default::default()
         };
         assert!(log_filter(&config).is_err());
+    }
+
+    #[test]
+    fn an_archive_without_a_state_names_the_restore_its_records_show() {
+        let storage = tempfile::tempdir().unwrap();
+        let rendered = |storage: &Path| {
+            let error = DomainBuildError::Bootstrap(dolos_core::DomainError::ArchiveWithoutState {
+                archive: 42,
+            });
+            let report = render_domain_build_error(storage, error);
+            let help = report
+                .help()
+                .map(|help| help.to_string())
+                .unwrap_or_default();
+            (report.to_string(), help)
+        };
+
+        let (message, help) = rendered(storage.path());
+        assert!(message.contains("but the state has no cursor"), "{message}");
+        assert!(help.contains("dolos data rebuild"), "{help}");
+        assert!(!help.contains("--continue"), "{help}");
+
+        std::fs::write(
+            storage.path().join(dolos_snapshot::restore::PROGRESS_FILE),
+            "{}",
+        )
+        .unwrap();
+
+        let (message, help) = rendered(storage.path());
+        assert!(message.contains("but the state has no cursor"), "{message}");
+        assert!(help.contains("dolos bootstrap stelae --continue"), "{help}");
+        assert!(!help.contains("dolos data rebuild"), "{help}");
     }
 
     #[test]

@@ -864,6 +864,94 @@ fn recorded_layers(node: &Node) -> Option<usize> {
         .map(|progress| progress.completed.len())
 }
 
+/// The commands that would run on a node's stores: the node, a sync, a
+/// rollback, store housekeeping, a state rebuild, the cache, and a replay
+/// that is not `--force`d over them.
+const RUNS_ON_STORES: &[&[&str]] = &[
+    &["daemon"],
+    &["serve"],
+    &["sync", "catchup"],
+    &["sync", "recover"],
+    &["sync", "recover", "--dry-run"],
+    &[
+        "sync",
+        "rollback",
+        "--slot",
+        "1",
+        "--hash",
+        "0000000000000000000000000000000000000000000000000000000000000001",
+        "--yes",
+    ],
+    &["data", "housekeeping"],
+    &["data", "rebuild", "--yes"],
+    &["data", "rebuild", "--ephemeral", "--yes"],
+    &["cache", "stats"],
+    &["cache", "clear", "--all"],
+    &["cache", "warm", "--namespace", "assets", "--scan"],
+    &["cache", "verify"],
+    &["bootstrap", "immutabledb", "--source", "immutable"],
+    &[
+        "bootstrap",
+        "immutabledb",
+        "--source",
+        "immutable",
+        "--continue",
+    ],
+    &[
+        "bootstrap",
+        "--skip-if-data",
+        "immutabledb",
+        "--source",
+        "immutable",
+    ],
+    #[cfg(feature = "mithril")]
+    &["bootstrap", "mithril"],
+    #[cfg(feature = "mithril")]
+    &["bootstrap", "mithril", "--continue"],
+];
+
+/// Each of [`RUNS_ON_STORES`] refuses `node`'s storage as an interrupted
+/// restore, without a panic, naming the commands that finish or replace it.
+fn refuses_to_run_on_an_interrupted_restore(node: &Node) {
+    for args in RUNS_ON_STORES {
+        let output = node.run(args);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(!stderr.contains("panicked"), "{args:?}: {stderr}");
+        assert!(
+            reports(&output.stderr, "was interrupted"),
+            "{args:?}: {stderr}"
+        );
+        for named in ["dolos bootstrap stelae --continue", "--force"] {
+            assert!(reports(&output.stderr, named), "{args:?}: {stderr}");
+        }
+    }
+}
+
+/// Either record of an interrupted restore is enough to refuse, and the
+/// refusal comes before any store is opened: storage holding only the record
+/// holds only it afterwards.
+#[test]
+fn a_command_that_runs_on_the_stores_refuses_an_interrupted_restores_records() {
+    for name in [
+        dolos_snapshot::restore::SOURCE_FILE,
+        dolos_snapshot::restore::PROGRESS_FILE,
+    ] {
+        let node = Node::new();
+        std::fs::create_dir_all(&node.config.storage.path).unwrap();
+        std::fs::write(storage_file(&node, name), "{}").unwrap();
+
+        refuses_to_run_on_an_interrupted_restore(&node);
+
+        let left: Vec<_> = std::fs::read_dir(&node.config.storage.path)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(left, [std::ffi::OsString::from(name)], "{name}");
+    }
+}
+
 /// SIGKILL a restore of `fixture` into `node` while it waits on the blob of
 /// the `k`-th epoch layer, with the `k` before it recorded.
 ///
@@ -921,7 +1009,8 @@ fn kill_at_layer(fixture: &Fixture, node: &Node, k: usize) {
 
 /// Killed mid-run with a layer recorded, and `--continue` resumes it: the
 /// recorded snapshot read again, its recorded layers skipped, and the node an
-/// uninterrupted restore builds.
+/// uninterrupted restore builds. Commands that would run on the partial
+/// stores refuse them first, without changing what the resume reads.
 #[cfg(unix)]
 #[test]
 fn a_killed_restore_resumes_with_continue() {
@@ -941,6 +1030,9 @@ fn a_killed_restore_resumes_with_continue() {
     assert!(!refused.status.success());
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(stderr.contains("--force"), "{stderr}");
+
+    // Every command that would run on it refuses, and leaves it resumable.
+    refuses_to_run_on_an_interrupted_restore(&node);
 
     let output = node.run(&["bootstrap", "stelae", "--continue"]);
     let stdout = assert_ok(&output);

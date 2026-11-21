@@ -125,7 +125,9 @@ fn check_wal_in_sync_with_state<D: Domain>(domain: &D) -> Result<(), DomainError
 
 /// Check if archive is in sync with state store.
 ///
-/// Logs warnings/errors if there's a mismatch but doesn't attempt to fix it.
+/// Logs warnings/errors on a mismatch but doesn't attempt to fix it. An
+/// archive with no state cursor is refused: no replay starts from it, and a
+/// node run on it panics once it reads the chain summary.
 fn check_archive_in_sync_with_state<D: Domain>(domain: &D) -> Result<(), DomainError> {
     let archive = domain.archive().get_tip()?.map(|(slot, _)| slot);
     let state = domain.state().read_cursor()?.map(|x| x.slot());
@@ -139,8 +141,9 @@ fn check_archive_in_sync_with_state<D: Domain>(domain: &D) -> Result<(), DomainE
         (None, Some(_)) => {
             warn!("archive is missing");
         }
-        (Some(_), None) => {
-            error!("found archive but no state");
+        (Some(archive), None) => {
+            error!(%archive, "found archive but no state");
+            return Err(DomainError::ArchiveWithoutState { archive });
         }
         (None, None) => (),
     }

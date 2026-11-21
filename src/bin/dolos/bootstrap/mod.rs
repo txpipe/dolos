@@ -468,8 +468,47 @@ fn setup_tracing(
     }
 }
 
+/// Refuse a replay into storage that an interrupted snapshot restore left
+/// its records in, unless `--force` replaces it: only `bootstrap stelae`
+/// finishes those stores, and a replay's `--continue` would build on them.
+fn refuse_a_replay_over_a_restore(
+    config: &RootConfig,
+    command: &Command,
+    policy: ExistingDataPolicy,
+) -> miette::Result<()> {
+    if policy.force || matches!(command, Command::Stelae(_)) {
+        return Ok(());
+    }
+
+    crate::common::refuse_interrupted_restore(config)
+}
+
+/// Remove the records an interrupted snapshot restore left beside stores
+/// holding no data, where `--force` finds nothing to clear: kept, they would
+/// refuse the replayed node as that restore. The progress file goes first,
+/// so none is ever left without its source record.
+fn remove_restore_records(config: &RootConfig) -> miette::Result<()> {
+    let records = dolos_snapshot::restore::records_in(&config.storage.path)
+        .into_diagnostic()
+        .context("looking for the records of an interrupted snapshot restore")?;
+
+    for record in records.iter().rev() {
+        info!(record = %record.display(), "removing an interrupted restore's record due to --force");
+
+        std::fs::remove_file(record)
+            .into_diagnostic()
+            .with_context(|| format!("removing {}", record.display()))?;
+    }
+
+    Ok(())
+}
+
 pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     let policy = args.policy().unwrap_or_else(|error| error.exit());
+
+    if let Some(command) = &args.command {
+        refuse_a_replay_over_a_restore(config, command, policy)?;
+    }
 
     let _tracing = setup_tracing(config, args.verbose)?;
 
@@ -484,7 +523,11 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
 
     let command = match args.command.clone() {
         Some(x) => x,
-        None => Command::inquire(KnownNetwork::by_name(&config.chain.network))?,
+        None => {
+            let command = Command::inquire(KnownNetwork::by_name(&config.chain.network))?;
+            refuse_a_replay_over_a_restore(config, &command, policy)?;
+            command
+        }
     };
 
     let clears = matches!(existing, Existing::Clear);
@@ -498,6 +541,8 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         info!("existing data detected, clearing storage due to --force");
 
         dolos::storage::clear_storage(&config.storage.path).into_diagnostic()?;
+    } else if policy.force && !matches!(command, Command::Stelae(_)) {
+        remove_restore_records(config)?;
     }
 
     dispatch(config, resolved, feedback)

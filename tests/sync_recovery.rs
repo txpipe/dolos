@@ -1226,6 +1226,50 @@ fn a_state_without_a_cursor_is_refused() {
     }
 }
 
+/// An archive with blocks under an empty state and an empty WAL, as an
+/// interrupted state rebuild or store reset leaves them, stops a start before
+/// it reaches for a peer, naming the rebuild that recovers the state from the
+/// archive, which then does.
+#[test]
+#[cfg_attr(
+    feature = "debug",
+    ignore = "the debug feature's console subscriber panics a sync built without tokio_unstable"
+)]
+fn a_start_refuses_an_archive_without_a_state() {
+    let (node, blocks) = synced();
+    let tip = point(&blocks[3]);
+    empty_state(&node);
+    empty_wal(&node);
+
+    let stranded = (None, None, Some(tip.slot()));
+    assert_eq!(store_positions(&node), stranded);
+
+    for args in [&["sync", "catchup"][..], &["daemon"], &["serve"]] {
+        let output = node.run(args);
+        let message = stderr_words(&output);
+
+        assert_eq!(code(&output), Some(1), "{args:?}: {message}");
+        assert!(!message.contains("panicked"), "{args:?}: {message}");
+        for said in [
+            format!("the archive holds blocks up to slot {}", tip.slot()),
+            "the state has no cursor".to_string(),
+            "rebuild the state from the archive with `dolos data rebuild`".to_string(),
+            "`dolos bootstrap --force`".to_string(),
+        ] {
+            assert!(message.contains(&said), "{args:?}: {said:?} in {message}");
+        }
+        assert!(!message.contains("--continue"), "{args:?}: {message}");
+        assert_eq!(store_positions(&node), stranded, "{args:?}");
+    }
+
+    let output = node.run(&["data", "rebuild", "--yes"]);
+    assert_eq!(code(&output), Some(0), "{}", stderr_words(&output));
+    assert_eq!(
+        store_positions(&node),
+        (Some(tip.clone()), Some(tip.clone()), Some(tip.slot()))
+    );
+}
+
 /// The state at the tip, the archive two blocks back, and a WAL reset to the
 /// tip: resetting the WAL to the state cannot fill the archive.
 #[test]

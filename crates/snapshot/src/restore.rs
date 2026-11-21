@@ -1637,6 +1637,24 @@ pub fn source_path_in(storage_path: &Path) -> PathBuf {
     storage_path.join(SOURCE_FILE)
 }
 
+/// The records of an interrupted restore under `storage_path`: its source
+/// record and its progress file, whichever exist.
+///
+/// A restore removes both when it finishes, so either one means the stores
+/// under it are incomplete. Only their presence is checked; [`unfinished`]
+/// reads them.
+pub fn records_in(storage_path: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut found = Vec::new();
+
+    for path in [source_path_in(storage_path), progress_path_in(storage_path)] {
+        if path.try_exists()? {
+            found.push(path);
+        }
+    }
+
+    Ok(found)
+}
+
 /// Which snapshot a restore in flight reads, and from where.
 ///
 /// Durable before the first layer is fetched and removed after the progress

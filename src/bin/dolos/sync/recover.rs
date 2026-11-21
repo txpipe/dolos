@@ -311,6 +311,8 @@ impl fmt::Display for Recovery {
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
+    crate::common::refuse_interrupted_restore(config)?;
+
     crate::common::setup_tracing_warnings()?;
 
     let access = if args.dry_run {
