@@ -905,6 +905,9 @@ pub const HEALTH_BUDGET: Duration = Duration::from_millis(300);
 
 /// Sends `path` and `/health` together and checks that `/health` answers
 /// within [`HEALTH_BUDGET`]. Returns the status of `path`.
+///
+/// `/health` answers on its first poll, so this sees only the blocking work
+/// `path` does before its first await; [`health_throughout`] sees all of it.
 pub async fn health_beside(app: &TestApp, path: &str) -> StatusCode {
     let started = Instant::now();
     let heavy = app.get_bytes(path);
@@ -920,6 +923,49 @@ pub async fn health_beside(app: &TestApp, path: &str) -> StatusCode {
         health_took < HEALTH_BUDGET,
         "/health took {health_took:?} behind {path}"
     );
+
+    status
+}
+
+/// The pause between two `/health` probes of [`health_throughout`].
+const PROBE_GAP: Duration = Duration::from_millis(50);
+
+/// Sends `path` and probes `/health` beside it until `path` answers, checking
+/// that every probe answers within [`HEALTH_BUDGET`] of its due time. A probe
+/// that falls due while `path` holds the worker answers late, wherever the
+/// request does its blocking work. Returns the status of `path`.
+pub async fn health_throughout(app: &TestApp, path: &str) -> StatusCode {
+    let started = Instant::now();
+    let done = std::cell::Cell::new(false);
+
+    let heavy = async {
+        let (status, _) = app.get_bytes(path).await;
+        done.set(true);
+        status
+    };
+
+    // The first probe is due from the start: `path` is polled first, so work
+    // it blocks on before its first await delays that probe.
+    let probes = async {
+        let mut since = started;
+
+        loop {
+            tokio::time::sleep(PROBE_GAP).await;
+            let (status, _) = app.get_bytes("/health").await;
+            let took = since.elapsed().saturating_sub(PROBE_GAP);
+
+            assert_eq!(status, StatusCode::OK);
+            assert!(took < HEALTH_BUDGET, "/health took {took:?} behind {path}");
+
+            if done.get() {
+                break;
+            }
+
+            since = Instant::now();
+        }
+    };
+
+    let (status, ()) = tokio::join!(heavy, probes);
 
     status
 }

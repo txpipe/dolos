@@ -416,7 +416,7 @@ where
         )
         .route(
             "/accounts/{stake_address}/addresses/assets",
-            get(routes::accounts::by_stake_addresses_assets::<D>),
+            get(routes::accounts::by_stake_addresses_assets::<D>).layer(heavy.clone()),
         )
         .route(
             "/accounts/{stake_address}/addresses/total",
@@ -448,11 +448,11 @@ where
         )
         .route(
             "/addresses/{address}",
-            get(routes::addresses::by_address::<D>),
+            get(routes::addresses::by_address::<D>).layer(heavy.clone()),
         )
         .route(
             "/addresses/{address}/extended",
-            get(routes::addresses::extended::<D>),
+            get(routes::addresses::extended::<D>).layer(heavy.clone()),
         )
         .route(
             "/addresses/{address}/utxos",

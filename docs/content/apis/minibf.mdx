@@ -102,6 +102,7 @@ Check the [Configuration Schema](../configuration/schema) for detailed info on h
 
 These routes can read a large part of a store for one answer:
 
+- `/addresses/{address}` and `/addresses/{address}/extended`, and `/accounts/{stake_address}/addresses/assets`, which sum every UTxO they hold;
 - `/addresses/{address}/utxos`, `/addresses/{address}/utxos/{asset}`, `/accounts/{stake_address}/utxos` and `/scripts/{script_hash}/utxos`;
 - `/assets/{asset}/addresses`;
 - `/pools/extended`, `/pools/{pool_id}` and `/pools/{pool_id}/delegators`;
