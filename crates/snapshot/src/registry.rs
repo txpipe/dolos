@@ -247,7 +247,9 @@ impl std::str::FromStr for Point {
 ///
 /// `blocks` is the blocks repository. It is read at the snapshot's sequence
 /// only when [`crate::restore::blocks_wanted`] names a snapshot, and a restore
-/// that needs it and has none, or finds no snapshot there, is refused. The
+/// that needs it and has none, or finds no snapshot there, is refused. Its
+/// chain is walked on a second thread while the Dolos chain is, from the head's
+/// sequence, and dropped when the restore turns out not to want it. The
 /// preflight sizes the staging of both against `registry`'s scratch
 /// directory, so the two are opened with the same one.
 ///
@@ -270,19 +272,44 @@ where
 
     let record = crate::restore::pinned(&node)?;
 
+    // The head's sequence, which is all the blocks walk needs to start beside
+    // the Dolos one. A resume has read the head already.
+    let mut sequence = None;
+
     if let Some(record) = &record {
         let head = match point.pull(registry) {
-            Ok(head) => head.read_inscription()?.digest()?,
+            Ok(head) => head.read_inscription()?,
             Err(error) if is_absent(&error) => return Err(crate::restore::gone(record.clone())),
             Err(error) => return Err(error),
         };
 
-        if head != record.inscription_digest {
+        if head.digest()? != record.inscription_digest {
             return Err(crate::restore::gone(record.clone()));
         }
+
+        sequence = Some(head.sequence);
+    } else if blocks.is_some() {
+        // A pull fails as the resolve, which starts with one, would.
+        sequence = Some(match point {
+            Point::Epoch(epoch) => epoch,
+            Point::Latest => point.pull(registry)?.read_inscription()?.sequence,
+        });
     }
 
-    let snapshot = match point.resolve(registry) {
+    let (resolved, early) = match (blocks, sequence) {
+        (Some(blocks), Some(sequence)) => std::thread::scope(|scope| {
+            let walk = scope.spawn(|| walk_blocks(blocks, sequence, observer));
+            let resolved = point.resolve(registry);
+            let walked = walk
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+
+            (resolved, Some((sequence, walked)))
+        }),
+        _ => (point.resolve(registry), None),
+    };
+
+    let snapshot = match resolved {
         Ok(snapshot) => snapshot,
         Err(error) => {
             return Err(match record {
@@ -298,13 +325,20 @@ where
         crate::restore::blocks_wanted(chain, node.max_history)?,
         blocks,
     ) {
-        (Some(reference), Some(blocks)) => Some(resolve_blocks(
-            blocks,
-            reference,
-            chain.head().sequence,
-            observer,
-        )?),
+        (Some(reference), Some(blocks)) => {
+            let sequence = chain.head().sequence;
+
+            let walked = match early {
+                Some((walked_at, walked)) if walked_at == sequence => walked,
+                // The moving tag moved between the two reads of the head.
+                _ => walk_blocks(blocks, sequence, observer),
+            };
+
+            Some(blocks_found(blocks, reference, sequence, walked)?)
+        }
         // Wanted and not given: the plan refuses it, naming the reference.
+        // Not wanted: a blocks walk that ran beside the Dolos one, and any
+        // error it met, is dropped.
         _ => None,
     };
 
@@ -325,16 +359,25 @@ where
 }
 
 /// The blocks snapshot at `sequence` in `registry`, resolved through its
-/// chain, or [`Error::BlocksMissing`] when the repository holds none there.
-fn resolve_blocks(
+/// chain. [`blocks_found`] reads the result once the restore knows it wants it.
+fn walk_blocks(
+    registry: &Registry,
+    sequence: u64,
+    observer: &Observer,
+) -> Result<Snapshot, stelae::Error> {
+    registry.observe(observer.clone());
+    registry.resolve_sequence(&stelae_blocks::BlocksProfile, sequence)
+}
+
+/// A [`walk_blocks`] result as the restore's: [`Error::BlocksMissing`],
+/// naming `reference`, when the repository holds no snapshot at `sequence`.
+fn blocks_found(
     registry: &Registry,
     reference: Digest,
     sequence: u64,
-    observer: &Observer,
+    walked: Result<Snapshot, stelae::Error>,
 ) -> Result<Snapshot, Error> {
-    registry.observe(observer.clone());
-
-    match registry.resolve_sequence(&stelae_blocks::BlocksProfile, sequence) {
+    match walked {
         Ok(snapshot) => Ok(snapshot),
         Err(error) if error.is_absent() => Err(Error::BlocksMissing {
             reference,
