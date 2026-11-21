@@ -217,7 +217,7 @@ pub use stelae_driver::restore::{Budget, Checkpoint, Outlook};
 /// How many layers a restore reads ahead of the one it drains, unless its
 /// caller says otherwise. A restore that stages lowers it to fit
 /// [`STAGING_BUDGET`], never below [`MIN_DEFAULT_READ_AHEAD`].
-pub const DEFAULT_READ_AHEAD: usize = 8;
+pub const DEFAULT_READ_AHEAD: usize = 64;
 
 /// The compressed bytes a restore at the default depth may stage at once
 /// ([`Plan::staging_peak`]) before it lowers that depth. An explicit depth is
@@ -4580,7 +4580,7 @@ mod tests {
             "{serial}"
         );
 
-        let ahead = refusal(DEFAULT_READ_AHEAD);
+        let ahead = refusal(MIN_DEFAULT_READ_AHEAD);
         assert!(
             ahead.contains("staging the layers it pulls, 9 at once at read-ahead 8"),
             "{ahead}"
@@ -4611,7 +4611,8 @@ mod tests {
         assert_eq!(Staging::at_once(0), 1);
         assert_eq!(Staging::at_once(1), 1);
         assert_eq!(Staging::at_once(2), 3);
-        assert_eq!(Staging::at_once(DEFAULT_READ_AHEAD), 9);
+        assert_eq!(Staging::at_once(8), 9);
+        assert_eq!(Staging::at_once(DEFAULT_READ_AHEAD), 65);
     }
 
     #[test]
@@ -4682,14 +4683,28 @@ mod tests {
         // Nothing could be sized: kept.
         assert_eq!(fitted(64, |_| None), (64, vec![64]));
 
-        // A start of 8 never moves.
-        assert_eq!(fitted(DEFAULT_READ_AHEAD, |_| Some(u64::MAX)), (8, vec![8]));
+        // A start at the floor never moves.
+        assert_eq!(
+            fitted(MIN_DEFAULT_READ_AHEAD, |_| Some(u64::MAX)),
+            (8, vec![8])
+        );
 
         // No depth named: the default, fitted.
         assert_eq!(
             staged_read_ahead(None, |_| Ok::<_, Infallible>(Some(u64::MAX))).unwrap(),
-            (DEFAULT_READ_AHEAD, Some(u64::MAX))
+            (MIN_DEFAULT_READ_AHEAD, Some(u64::MAX))
         );
+
+        // A default restore whose staging at 64 is over the budget reads
+        // shallower than 64, but never below the floor.
+        let (chosen, _) = staged_read_ahead(None, |depth| {
+            Ok::<_, Infallible>(Some(depth as u64 * QUARTER_GIB))
+        })
+        .unwrap();
+        assert_eq!(DEFAULT_READ_AHEAD, 64);
+        assert!(chosen < DEFAULT_READ_AHEAD, "{chosen}");
+        assert!(chosen >= MIN_DEFAULT_READ_AHEAD, "{chosen}");
+        assert_eq!(chosen, 16);
     }
 
     /// A snapshot none of whose layers opens: each read fails naming the layer

@@ -84,7 +84,7 @@ pub struct Args {
 
     /// how many layers to read ahead of the one being written; a registry
     /// restore stages each in the scratch directory until its turn. 0 or 1
-    /// reads one layer at a time. Default 8, lowered to fit 4 GiB of staging
+    /// reads one layer at a time. Default 64, lowered to fit 4 GiB of staging
     /// but never below 8
     #[arg(long, value_name = "LAYERS")]
     pub read_ahead: Option<usize>,
