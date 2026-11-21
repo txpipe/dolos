@@ -194,10 +194,12 @@ enum Resolved<'a> {
 
 /// `clears` says that `--force` is to clear storage once the command is
 /// resolved, so that a source the clear would take is refused here.
+/// `feedback` is where a check that reads a registry reports while it runs.
 fn resolve<'a>(
     config: &RootConfig,
     command: &'a Command,
     clears: bool,
+    feedback: &Feedback,
 ) -> miette::Result<Resolved<'a>> {
     let network = KnownNetwork::by_name(&config.chain.network);
 
@@ -209,7 +211,7 @@ fn resolve<'a>(
         }
         Command::Stelae(args) => Resolved::Stelae(
             args,
-            Box::new(stelae::resolve(config, args, network, clears)?),
+            Box::new(stelae::resolve(config, args, network, clears, feedback)?),
         ),
         Command::Immutabledb(args) => {
             Resolved::Immutabledb(args, immutabledb::resolve(config, args, clears)?)
@@ -489,7 +491,7 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
 
     let clears = matches!(existing, Existing::Clear);
 
-    let resolved = resolve(config, &command, clears)?;
+    let resolved = resolve(config, &command, clears, feedback)?;
 
     // The first destructive step, and deliberately the last one before the run:
     // everything that could still refuse — the flags, the prompts, the source

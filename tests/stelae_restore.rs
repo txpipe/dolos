@@ -472,6 +472,31 @@ fn a_forced_registry_restore_walks_the_chain_once() {
     assert_eq!(Contents::read(&node), published.contents);
 }
 
+/// A manifest read the check before the clear retries is announced to the
+/// operator once, as the restore's own retries are, and the forced restore
+/// still replaces the node.
+#[test]
+fn a_retried_manifest_read_during_the_forced_check_is_announced() {
+    let published = Published::new(2, "net/blocks");
+    let (node, _) = synced();
+
+    published.registry.fail_next_manifest(1);
+
+    let output = published.restore_into(&node, "latest");
+    assert_ok(&output);
+
+    // A stderr that is not a terminal gets the plain lines.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let retry = "progress: retry 1 (";
+
+    assert_eq!(stderr.matches(retry).count(), 1, "{stderr}");
+    assert!(
+        stderr.find(retry) < stderr.find("progress: restoring "),
+        "the retry was not the check's: {stderr}"
+    );
+    assert_eq!(Contents::read(&node), published.contents);
+}
+
 /// A repository the registry does not hold is refused with the node intact.
 #[test]
 fn a_forced_restore_from_an_absent_repository_is_refused_intact() {

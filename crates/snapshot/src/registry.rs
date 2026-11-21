@@ -485,13 +485,24 @@ impl Checked {
 /// ([`Error::NoSnapshot`]), none at the point ([`Error::NoSnapshotAt`]), a gone
 /// tip, a broken chain, missing blocks, and a registry that does not answer.
 ///
+/// `observer` hears the check's retried manifest and inscription reads, which
+/// a restore of the [`Checked`] does not make again.
+///
 /// **Never call this from inside an async context.** See [`open`].
 pub fn check(
     registry: &Registry,
     point: Point,
     blocks: Option<&Registry>,
     max_history: Option<u64>,
+    observer: &Observer,
 ) -> Result<Checked, Error> {
+    // Attached before the first read, as `restore_registry` attaches it.
+    registry.observe(observer.clone());
+
+    if let Some(blocks) = blocks {
+        blocks.observe(observer.clone());
+    }
+
     let snapshot = match point.resolve(registry) {
         Ok(snapshot) => snapshot,
         Err(error) if is_absent(&error) => return Err(absent(registry, point)),
@@ -613,18 +624,21 @@ impl SnapshotRepository {
     }
 
     /// Resolve what a restore at `point` reads, reading blocks from `blocks`,
-    /// without pulling a layer; see [`check`].
+    /// without pulling a layer, with `observer` hearing its retries; see
+    /// [`check`].
     pub fn check(
         &self,
         point: Point,
         blocks: Option<&SnapshotRepository>,
         max_history: Option<u64>,
+        observer: &Observer,
     ) -> Result<Checked, Error> {
         check(
             &self.registry,
             point,
             blocks.map(|blocks| &blocks.registry),
             max_history,
+            observer,
         )
     }
 

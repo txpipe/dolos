@@ -544,6 +544,7 @@ fn a_checked_restore_reads_the_checked_snapshot_and_no_manifest() {
         Point::Latest,
         Some(&opened_at(&registry, scratch.path(), BLOCKS_REPOSITORY)),
         None,
+        &Observer::silent(),
     )
     .unwrap_or_else(|e| panic!("the check failed: {e}"));
 
@@ -582,4 +583,47 @@ fn a_checked_restore_reads_the_checked_snapshot_and_no_manifest() {
         .unwrap_err();
 
     assert!(error.to_string().contains("latest"), "{error}");
+}
+
+/// A manifest the registry fails once during the check is fetched again, and
+/// the retry is announced to the observer the check was given, once: the
+/// checked restore reads no manifest, so it has none to retry.
+#[test]
+fn a_retried_manifest_read_during_the_check_is_announced() {
+    let registry = FaultRegistry::spawn();
+    let scratch = tempfile::tempdir().unwrap();
+    let (domain, magic, _, _root) = chained(&registry, scratch.path(), BLOCKS_REPOSITORY);
+    let watcher = Arc::new(Watcher::default());
+
+    registry.fail_next_manifest(1);
+
+    let checked = registry::check(
+        &opened(&registry, scratch.path()),
+        Point::Latest,
+        Some(&opened_at(&registry, scratch.path(), BLOCKS_REPOSITORY)),
+        None,
+        &watcher.observer(),
+    )
+    .unwrap_or_else(|e| panic!("the check gave up on one failed read: {e}"));
+
+    assert_eq!(
+        watcher.retries(),
+        1,
+        "the check's retry reaches the observer"
+    );
+
+    let blank = Blank::<MemoryStores>::open();
+    let storage = tempfile::tempdir().unwrap();
+    let observer = watcher.observer();
+
+    restore::execute(
+        restore::Input::Checked(&checked),
+        restoring(storage.path(), magic),
+        restore::Target::new(&blank.archive, blank.state()),
+        Some(&observer),
+    )
+    .unwrap_or_else(|e| panic!("the checked restore failed: {e}"));
+
+    assert_eq!(watcher.retries(), 1, "the retry was announced again");
+    assert_eq!(blocks_of(&blank.archive), blocks_of(domain.archive()));
 }
