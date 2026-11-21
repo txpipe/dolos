@@ -20,7 +20,6 @@ use dolos_snapshot::{
     registry::{self, Point},
     restore::{
         self, default_budget, progress_path_in, Checkpoint, Plan, ReadAhead, Repo, Summary, Target,
-        DEFAULT_READ_AHEAD,
     },
     Error,
 };
@@ -37,6 +36,10 @@ use stelae::{
     Digest,
 };
 use watcher::Watcher;
+
+/// The depth these tests read ahead at: deep enough for each stream to read
+/// ahead, shallow enough that the fixtures hold more layers than it.
+const DEPTH: usize = 8;
 
 const REPOSITORY: &str = "dolos/read-ahead";
 
@@ -308,7 +311,7 @@ fn layers_that_arrive_out_of_order_are_written_and_recorded_in_plan_order() {
     }
     registry.forget();
 
-    let (ahead, ahead_node) = journaled(&published, DEFAULT_READ_AHEAD);
+    let (ahead, ahead_node) = journaled(&published, DEPTH);
 
     assert_ne!(
         registry.served(),
@@ -317,7 +320,7 @@ fn layers_that_arrive_out_of_order_are_written_and_recorded_in_plan_order() {
     );
     assert!(registry.peak() > 1, "nothing was read ahead");
     assert!(
-        registry.peak() <= DEFAULT_READ_AHEAD,
+        registry.peak() <= DEPTH,
         "{} layers were fetched at once",
         registry.peak()
     );
@@ -355,7 +358,7 @@ fn a_failed_layer_fails_the_restore_at_its_turn() {
     let error = published
         .restore(
             Target::new(&blank.archive, blank.state()),
-            DEFAULT_READ_AHEAD,
+            DEPTH,
             &mut published.checkpoint(storage.path(), false),
             &Observer::silent(),
         )
@@ -396,7 +399,7 @@ fn a_restore_that_fails_ends_the_reads_it_started() {
     // sixth is still arriving when the first layer's commit fails.
     let order = published.blobs(published.plan.layers());
     assert!(
-        order.len() > DEFAULT_READ_AHEAD,
+        order.len() > DEPTH,
         "the fixture needs more layers than the depth"
     );
     let slow = order.get(5).expect("the fixture needs a sixth layer");
@@ -407,7 +410,7 @@ fn a_restore_that_fails_ends_the_reads_it_started() {
     // would wait on it, and it arrives only once a layer past the first
     // layer's read-ahead has been requested: an early take cannot finish
     // before the check below sees that request.
-    registry.hold(&order[1], &order[DEFAULT_READ_AHEAD]);
+    registry.hold(&order[1], &order[DEPTH]);
 
     let storage = tempfile::tempdir().unwrap();
     let blank = Blank::<FjallStores>::open();
@@ -426,7 +429,7 @@ fn a_restore_that_fails_ends_the_reads_it_started() {
                     journal,
                 },
             ),
-            DEFAULT_READ_AHEAD,
+            DEPTH,
             &mut published.checkpoint(storage.path(), false),
             &watcher.observer(),
         )
@@ -443,10 +446,8 @@ fn a_restore_that_fails_ends_the_reads_it_started() {
     // read-ahead had been asked of the stream.
     let arrived = registry.arrived();
     assert!(
-        arrived
-            .iter()
-            .all(|blob| order[..DEFAULT_READ_AHEAD].contains(blob)),
-        "layers past the first {DEFAULT_READ_AHEAD} were read before their turn: {arrived:?}"
+        arrived.iter().all(|blob| order[..DEPTH].contains(blob)),
+        "layers past the first {DEPTH} were read before their turn: {arrived:?}"
     );
 
     // Its answer comes after the restore returned; a pull still running
@@ -488,7 +489,7 @@ fn a_resumed_restore_fetches_no_recorded_layer_again() {
     published
         .restore(
             Target::new(&blank.archive, blank.state()),
-            DEFAULT_READ_AHEAD,
+            DEPTH,
             &mut published.checkpoint(storage.path(), false),
             &Observer::silent(),
         )
@@ -503,7 +504,7 @@ fn a_resumed_restore_fetches_no_recorded_layer_again() {
     let summary = published
         .restore(
             Target::new(&blank.archive, blank.state()),
-            DEFAULT_READ_AHEAD,
+            DEPTH,
             &mut published.checkpoint(storage.path(), true),
             &Observer::silent(),
         )
@@ -573,7 +574,7 @@ fn exported() -> (tempfile::TempDir, u64) {
 }
 
 /// The staging need is the compressed size of the layers a restore holds at
-/// once: at the default depth, the nine largest still to pull.
+/// once: at a depth of 8, the nine largest still to pull.
 #[test]
 fn the_staging_preflight_charges_the_largest_layers_a_read_ahead_holds() {
     let (layout, magic) = exported();
@@ -605,7 +606,7 @@ fn the_staging_preflight_charges_the_largest_layers_a_read_ahead_holds() {
     };
 
     assert_eq!(
-        peak(&Resume::none(), DEFAULT_READ_AHEAD),
+        peak(&Resume::none(), DEPTH),
         Some(largest(&mut plan.layers(), 9))
     );
     assert_eq!(
@@ -622,7 +623,7 @@ fn the_staging_preflight_charges_the_largest_layers_a_read_ahead_holds() {
     let resume = Resume::from_progress(Some(&progress));
 
     assert_eq!(
-        peak(&resume, DEFAULT_READ_AHEAD),
+        peak(&resume, DEPTH),
         Some(largest(&mut plan.tip_layers(), 9))
     );
 }
@@ -648,7 +649,7 @@ fn both_repositories_are_read_ahead_under_one_depth() {
     registry.hold(&blocks[0], &blocks[1]);
     registry.forget();
 
-    let (ahead, ahead_node) = journaled(&published, DEFAULT_READ_AHEAD);
+    let (ahead, ahead_node) = journaled(&published, DEPTH);
 
     let arrived = registry.arrived();
     let at = |blob: &String| arrived.iter().position(|b| b == blob).unwrap();
@@ -659,7 +660,7 @@ fn both_repositories_are_read_ahead_under_one_depth() {
     );
     assert!(registry.peak() > 1, "nothing was read ahead");
     assert!(
-        registry.peak() <= DEFAULT_READ_AHEAD,
+        registry.peak() <= DEPTH,
         "{} layers were fetched at once",
         registry.peak()
     );
@@ -669,7 +670,7 @@ fn both_repositories_are_read_ahead_under_one_depth() {
 }
 
 /// Each stream keeps to its share of the depth, whatever it has left to read:
-/// at the default, the blocks stream fetches two layers at once and the
+/// at a depth of 8, the blocks stream fetches two layers at once and the
 /// snapshot's own six, and the staging preflight charges each of them one layer
 /// more, the one it drains.
 #[test]
@@ -677,7 +678,7 @@ fn each_stream_reads_ahead_at_its_share_of_the_depth() {
     let published = Published::paired_to(3);
     let registry = &published.registry;
     let plan = &published.plan;
-    let depths = ReadAhead::split(DEFAULT_READ_AHEAD, true);
+    let depths = ReadAhead::split(DEPTH, true);
 
     let blocks = published.blobs(plan.remaining_in(Repo::Blocks, &Resume::none()));
     let others = published.blobs(plan.remaining_in(Repo::Dolos, &Resume::none()));
@@ -686,7 +687,7 @@ fn each_stream_reads_ahead_at_its_share_of_the_depth() {
         "{} blocks layers",
         blocks.len()
     );
-    assert!(others.len() > DEFAULT_READ_AHEAD, "{} layers", others.len());
+    assert!(others.len() > DEPTH, "{} layers", others.len());
 
     // Every layer waits before its first byte, so the pulls a stream starts
     // together are in flight together.
@@ -697,7 +698,7 @@ fn each_stream_reads_ahead_at_its_share_of_the_depth() {
     published
         .restore(
             Target::new(&blank.archive, blank.state()),
-            DEFAULT_READ_AHEAD,
+            DEPTH,
             &mut Checkpoint::none(),
             &Observer::silent(),
         )
@@ -728,7 +729,7 @@ fn a_registry_restore_reads_the_blocks_repository_it_is_given() {
     published
         .restore(
             Target::new(&direct.archive, direct.state()),
-            DEFAULT_READ_AHEAD,
+            DEPTH,
             &mut Checkpoint::none(),
             &Observer::silent(),
         )
@@ -864,6 +865,13 @@ fn a_registry_restore_reads_at_the_depth_its_operator_names() {
 
     restored(None);
     assert!(registry.peak() > 1, "the default read nothing ahead");
+    // The snapshot's own stream alone reads deeper than the floor, which a
+    // default that fell back to the floor (a share of 6) cannot.
+    assert!(
+        registry.peak_in(REPOSITORY) > restore::MIN_DEFAULT_READ_AHEAD,
+        "the default read {} of the snapshot's layers at once",
+        registry.peak_in(REPOSITORY)
+    );
 
     restored(Some(1));
     assert_eq!(registry.arrived(), order);
@@ -902,9 +910,9 @@ fn a_paired_restore_at_a_depth_of_zero_or_one_fetches_one_layer_at_a_time() {
 #[test]
 fn the_staging_preflight_charges_each_stream_its_share() {
     assert_eq!(
-        ReadAhead::split(DEFAULT_READ_AHEAD, true),
+        ReadAhead::split(DEPTH, true),
         ReadAhead {
-            dolos: DEFAULT_READ_AHEAD - 2,
+            dolos: DEPTH - 2,
             blocks: 2
         }
     );
@@ -917,9 +925,9 @@ fn the_staging_preflight_charges_each_stream_its_share() {
     );
     assert_eq!(ReadAhead::split(1, true).at_once(), 1);
     assert_eq!(
-        ReadAhead::split(DEFAULT_READ_AHEAD, false),
+        ReadAhead::split(DEPTH, false),
         ReadAhead {
-            dolos: DEFAULT_READ_AHEAD,
+            dolos: DEPTH,
             blocks: 0
         }
     );
@@ -979,7 +987,7 @@ fn the_staging_preflight_charges_each_stream_its_share() {
 
     let largest = |sizes: &[u64], count: usize| sizes.iter().take(count).sum::<u64>();
     let (own, theirs) = (sizes(Repo::Dolos), sizes(Repo::Blocks));
-    assert!(own.len() > DEFAULT_READ_AHEAD && theirs.len() == 2);
+    assert!(own.len() > DEPTH && theirs.len() == 2);
 
     let peak = |depth| {
         plan.staging_peak(&snapshot, &index, Some(pair), &Resume::none(), depth)
@@ -988,8 +996,8 @@ fn the_staging_preflight_charges_each_stream_its_share() {
 
     // Seven of the snapshot's own at depth 6 and both blocks layers at depth 2.
     assert_eq!(
-        peak(DEFAULT_READ_AHEAD),
-        Some(largest(&own, DEFAULT_READ_AHEAD - 1) + largest(&theirs, 3))
+        peak(DEPTH),
+        Some(largest(&own, DEPTH - 1) + largest(&theirs, 3))
     );
 
     let mut both = [own.clone(), theirs.clone()].concat();
