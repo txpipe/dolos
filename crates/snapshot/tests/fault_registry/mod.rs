@@ -138,6 +138,13 @@ impl FaultRegistry {
         self.state().manifest_denials += times;
     }
 
+    /// Drop `tag` from the repository `name`, as a registry's retention
+    /// deletes one; the manifest stays under its digest.
+    pub fn untag(&self, name: &str, tag: &str) {
+        let removed = self.state().manifests.remove(&format!("{name}/{tag}"));
+        assert!(removed.is_some(), "{name} holds no tag {tag}");
+    }
+
     /// How many manifest `GET`s the registry received.
     pub fn manifest_gets(&self) -> usize {
         self.state().manifest_gets

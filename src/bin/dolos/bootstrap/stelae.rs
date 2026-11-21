@@ -241,8 +241,9 @@ struct Resuming {
 /// Resolves the source and, for a repository, the credentials, so that
 /// `--force`, which `clears` says is to clear storage, clears nothing for a
 /// restore that would refuse them, and the restore reads with the credentials
-/// that were checked. A `--continue` with records takes the recorded source
-/// and snapshot.
+/// that were checked. Before a clear, a repository's snapshot is checked as a
+/// directory's is ([`check_repo`]). A `--continue` with records takes the
+/// recorded source and snapshot, and clears nothing.
 pub(super) fn resolve(
     config: &RootConfig,
     args: &Args,
@@ -284,13 +285,16 @@ pub(super) fn resolve(
                     .with_context(|| format!("naming the {name} repository under {root}"))
             };
 
-            let reader = Reader::Repo {
-                repositories: Repositories {
-                    dolos: repository(DOLOS_REPOSITORY)?,
-                    blocks: repository(BLOCKS_REPOSITORY)?,
-                },
-                auth,
+            let repositories = Repositories {
+                dolos: repository(DOLOS_REPOSITORY)?,
+                blocks: repository(BLOCKS_REPOSITORY)?,
             };
+
+            if clears && resuming.is_none() {
+                check_repo(config, args, &repositories, &auth, point)?;
+            }
+
+            let reader = Reader::Repo { repositories, auth };
 
             (reader, Source::Repo(root))
         }
@@ -535,6 +539,45 @@ fn check_dir(config: &RootConfig, root: &Path, clears: bool) -> miette::Result<P
     }
 
     Ok(root)
+}
+
+/// Refuse, before `--force` clears the node, a registry restore at `point`
+/// that could not read its snapshot: an absent repository or tag, a registry
+/// that does not answer, a broken chain, a gone tip, or a blocks repository
+/// without the blocks snapshot the Dolos snapshot reads. Pulls no layer.
+fn check_repo(
+    config: &RootConfig,
+    args: &Args,
+    repositories: &Repositories,
+    auth: &Auth,
+    point: Point,
+) -> miette::Result<()> {
+    let scratch = node::scratch_dir(&config.storage, args.scratch_dir.as_deref());
+
+    let (dolos, blocks) = repositories.open(|repo| {
+        SnapshotRepository::open(
+            repo,
+            args.insecure,
+            auth.clone(),
+            scratch.clone(),
+            registry::Tuning::default(),
+        )
+        .into_diagnostic()
+        .with_context(|| format!("opening the repository {repo}"))
+    })?;
+
+    dolos
+        .check(point, Some(&blocks), config.history.max_slots())
+        .into_diagnostic()
+        .with_context(|| {
+            format!(
+                "checking the snapshot at {point} in {}, before `--force` clears the node; \
+                 nothing was cleared",
+                repositories.dolos
+            )
+        })?;
+
+    Ok(())
 }
 
 /// Refuse a network root whose `name` directory, `dir`, is absent or is not
