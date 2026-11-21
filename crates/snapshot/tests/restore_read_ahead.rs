@@ -865,6 +865,13 @@ fn a_registry_restore_reads_at_the_depth_its_operator_names() {
 
     restored(None);
     assert!(registry.peak() > 1, "the default read nothing ahead");
+    // Deeper than the floor's share for the snapshot's own stream, so a
+    // default that fell back to the floor fails here.
+    assert!(
+        registry.peak_in(REPOSITORY) > DEPTH,
+        "the default read {} of the snapshot's layers at once",
+        registry.peak_in(REPOSITORY)
+    );
 
     restored(Some(1));
     assert_eq!(registry.arrived(), order);
