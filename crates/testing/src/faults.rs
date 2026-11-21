@@ -102,6 +102,12 @@ impl FaultyToyDomain {
         self.state.scans.load(Ordering::SeqCst)
     }
 
+    /// How many tx hashes the archive has looked up by
+    /// [`ArchiveStore::slot_by_tx_hash`].
+    pub fn tx_lookups(&self) -> usize {
+        self.archive.tx_lookups.load(Ordering::SeqCst)
+    }
+
     /// Runs `hook` after every [`StateStore::utxos_by_tag_page`] read, with the
     /// entries read and the store under the adapter, before the caller gets
     /// them: a write that lands between a listing's tag read and its value
@@ -421,6 +427,7 @@ pub struct FaultyArchiveStore {
     inner: MemoryArchiveStore,
     fault: TestFault,
     commits: Arc<AtomicU32>,
+    tx_lookups: Arc<AtomicUsize>,
     entity_slots_hook: Arc<Mutex<Option<EntitySlotsHook>>>,
     each_entity_slots_hook: Arc<Mutex<Option<EachEntitySlotsHook>>>,
     read_logs_hook: Arc<Mutex<Option<ReadLogsHook>>>,
@@ -436,6 +443,7 @@ impl FaultyArchiveStore {
             inner,
             fault,
             commits,
+            tx_lookups: Default::default(),
             entity_slots_hook: Default::default(),
             each_entity_slots_hook: Default::default(),
             read_logs_hook: Default::default(),
@@ -626,6 +634,7 @@ impl ArchiveStore for FaultyArchiveStore {
         if self.should_fault() {
             return Err(self.fault_err());
         }
+        self.tx_lookups.fetch_add(1, Ordering::SeqCst);
         self.inner.slot_by_tx_hash(hash)
     }
 

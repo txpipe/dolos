@@ -20,7 +20,7 @@ use pallas::ledger::{
 use crate::{
     error::Error,
     inputs::{match_block_txs, tx_touches_output, InputDeps, InputResolver},
-    mapping::{aggregate_assets, AddressKind},
+    mapping::{AddressKind, AssetTotals},
     pagination::{Order, Pagination},
     Facade,
 };
@@ -40,6 +40,10 @@ pub use transactions::transactions;
 pub use txs::txs;
 pub use utxos::utxos;
 pub use utxos_asset::utxos_with_asset;
+
+/// UTxOs an address or account summary reads and decodes per blocking task.
+/// The summary loads the whole live set; chunks keep each task short.
+pub(crate) const SUMMARY_CHUNK: usize = 1024;
 
 impl From<Order> for SlotOrder {
     fn from(order: Order) -> Self {
@@ -143,24 +147,34 @@ fn address_tag(parsed: &ParsedAddress) -> Tag {
     }
 }
 
-fn refs_for_parsed_address<D: Domain>(
+/// The live UTxOs of `parsed`, read on the blocking pool under the query
+/// limiter.
+async fn refs_for_parsed_address<D>(
     domain: &Facade<D>,
     parsed: &ParsedAddress,
-) -> Result<HashSet<TxoRef>, StatusCode> {
-    match parsed {
-        ParsedAddress::Payment { key, .. } => {
-            Ok(domain.state().utxos_by_payment(key).map_err(|err| {
+) -> Result<HashSet<TxoRef>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let (key, payment) = match parsed {
+        ParsedAddress::Payment { key, .. } => (key.clone(), true),
+        ParsedAddress::Shelley { key, .. } | ParsedAddress::Byron { key } => (key.clone(), false),
+    };
+
+    domain
+        .blocking(move |domain| {
+            let refs = if payment {
+                domain.state().utxos_by_payment(&key)
+            } else {
+                domain.state().utxos_by_address(&key)
+            };
+
+            refs.map_err(|err| {
                 tracing::error!(?err);
                 StatusCode::INTERNAL_SERVER_ERROR
-            })?)
-        }
-        ParsedAddress::Shelley { key, .. } | ParsedAddress::Byron { key } => {
-            Ok(domain.state().utxos_by_address(key).map_err(|err| {
-                tracing::error!(?err);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?)
-        }
-    }
+            })
+        })
+        .await
 }
 
 fn blocks_for_address_stream<D>(
@@ -210,28 +224,45 @@ impl ParsedAddress {
     }
 }
 
-fn amount_for_refs<D: Domain>(
+/// The summed amounts of the UTxOs behind `refs`, read and decoded `chunk` at
+/// a time on the blocking pool, so that a request cut by its deadline stops
+/// at the next chunk.
+async fn amount_for_refs<D>(
     domain: &Facade<D>,
     refs: HashSet<TxoRef>,
-) -> Result<Vec<TxContentOutputAmountInner>, Error> {
-    let utxos = domain
-        .state()
-        .get_utxos(refs.into_iter().collect())
-        .map_err(|err| {
-            tracing::error!(?err);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    chunk: usize,
+) -> Result<Vec<TxContentOutputAmountInner>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let refs: Vec<TxoRef> = refs.into_iter().collect();
+    let mut totals = AssetTotals::default();
 
-    let outputs: Vec<MultiEraOutput<'_>> = utxos
-        .values()
-        .map(|x| MultiEraOutput::try_from(x.as_ref()))
-        .collect::<Result<_, _>>()
-        .map_err(|err| {
-            tracing::error!(?err);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    for chunk in refs.chunks(chunk.max(1)) {
+        let chunk = chunk.to_vec();
 
-    Ok(aggregate_assets(outputs.iter()))
+        totals = domain
+            .blocking(move |domain| {
+                let utxos = domain.state().get_utxos(chunk).map_err(|err| {
+                    tracing::error!(?err);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+
+                for utxo in utxos.values() {
+                    let output = MultiEraOutput::try_from(utxo.as_ref()).map_err(|err| {
+                        tracing::error!(?err);
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?;
+
+                    totals.add_output(&output);
+                }
+
+                Ok(totals)
+            })
+            .await?;
+    }
+
+    Ok(totals.into_amounts())
 }
 
 async fn is_address_in_chain<D>(domain: &Facade<D>, address: &str) -> Result<bool, Error>

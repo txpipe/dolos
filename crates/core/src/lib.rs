@@ -441,6 +441,9 @@ pub enum BrokenInvariant {
     #[error("missing utxo {0:?}")]
     MissingUtxo(TxoRef),
 
+    #[error("tx {0} produces more lovelace than it consumes")]
+    UnbalancedTx(TxHash),
+
     #[error("invalid genesis config")]
     InvalidGenesisConfig,
 

@@ -87,8 +87,8 @@ where
                 .as_ref()
                 .and_then(|x| x.outputs.get(input.hash()));
 
-            if let Some(address) = spent {
-                addresses.insert(address.clone());
+            if let Some(output) = spent {
+                addresses.insert(output.address.clone());
             }
         }
 

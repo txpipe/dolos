@@ -150,6 +150,13 @@ pub fn set_genesis_previous_block<D: Domain>(
 pub struct GenesisTx {
     pub hash: Hash<32>,
     pub address: String,
+    pub lovelace: u64,
+}
+
+/// What a genesis output holds, as a tx that spends it reads it.
+pub struct GenesisOutput {
+    pub address: String,
+    pub lovelace: u64,
 }
 
 /// The genesis block's transactions in the order db-sync stores them, which is
@@ -160,11 +167,17 @@ pub struct GenesisTx {
 /// file. No network has both kinds; AVVM goes first, then the other Byron
 /// balances, then Shelley's initial funds.
 pub fn genesis_txs(genesis: &Genesis) -> Result<Vec<GenesisTx>, StatusCode> {
+    let lovelace = |amount: &String| -> Result<u64, StatusCode> {
+        amount
+            .parse()
+            .map_err(log_and_500("malformed genesis entry"))
+    };
+
     let mut avvm = genesis
         .byron
         .avvm_distr
-        .keys()
-        .map(|key| {
+        .iter()
+        .map(|(key, amount)| {
             let key = base64::engine::general_purpose::URL_SAFE
                 .decode(key)
                 .map_err(log_and_500("malformed genesis entry"))?;
@@ -172,39 +185,42 @@ pub fn genesis_txs(genesis: &Genesis) -> Result<Vec<GenesisTx>, StatusCode> {
                 PublicKey::try_from(&key[..]).map_err(log_and_500("malformed genesis entry"))?;
             let address: ByronAddress = AddressPayload::new_redeem(pubkey, None).into();
 
-            Ok((key, address))
+            Ok((key, address, lovelace(amount)?))
         })
         .collect::<Result<Vec<_>, StatusCode>>()?;
-    avvm.sort_by(|(a, _), (b, _)| a.cmp(b));
+    avvm.sort_by(|(a, ..), (b, ..)| a.cmp(b));
 
     let mut balances = genesis
         .byron
         .non_avvm_balances
-        .keys()
-        .map(|address| {
-            ByronAddress::from_base58(address).map_err(log_and_500("malformed genesis entry"))
+        .iter()
+        .map(|(address, amount)| {
+            let address = ByronAddress::from_base58(address)
+                .map_err(log_and_500("malformed genesis entry"))?;
+
+            Ok((address, lovelace(amount)?))
         })
         .collect::<Result<Vec<_>, StatusCode>>()?;
-    balances.sort_by_key(|address| address.to_vec());
+    balances.sort_by_key(|(address, _)| address.to_vec());
 
     let byron = avvm
         .into_iter()
-        .map(|(_, address)| address)
+        .map(|(_, address, amount)| (address, amount))
         .chain(balances)
-        .map(|address| GenesisTx {
+        .map(|(address, lovelace)| GenesisTx {
             hash: Hasher::<256>::hash_cbor(&address),
             address: address.to_base58(),
+            lovelace,
         });
 
     let mut funds = shelley::shelley_utxos(&genesis.shelley)
         .into_iter()
-        .map(|(hash, address, _)| (address.to_vec(), hash, address))
-        .collect::<Vec<(Vec<u8>, Hash<32>, Address)>>();
+        .map(|(hash, address, lovelace)| (address.to_vec(), hash, address, lovelace))
+        .collect::<Vec<(Vec<u8>, Hash<32>, Address, u64)>>();
     funds.sort_by(|(a, ..), (b, ..)| a.cmp(b));
 
-    let shelley = funds
-        .into_iter()
-        .map(|(_, hash, address)| -> Result<GenesisTx, StatusCode> {
+    let shelley = funds.into_iter().map(
+        |(_, hash, address, lovelace)| -> Result<GenesisTx, StatusCode> {
             // the Shelley genesis takes a bootstrap address too
             let address = match address {
                 Address::Byron(address) => address.to_base58(),
@@ -213,8 +229,13 @@ pub fn genesis_txs(genesis: &Genesis) -> Result<Vec<GenesisTx>, StatusCode> {
                     .map_err(log_and_500("malformed genesis entry"))?,
             };
 
-            Ok(GenesisTx { hash, address })
-        });
+            Ok(GenesisTx {
+                hash,
+                address,
+                lovelace,
+            })
+        },
+    );
 
     byron.map(Ok).chain(shelley).collect()
 }
@@ -224,9 +245,9 @@ pub fn genesis_txs(genesis: &Genesis) -> Result<Vec<GenesisTx>, StatusCode> {
 pub struct GenesisListing {
     /// The transactions, in Blockfrost's order.
     pub txs: Vec<GenesisTx>,
-    /// The address of each output, by transaction hash: what a block that
-    /// spends one is read against once the archive no longer holds its input.
-    pub outputs: HashMap<Hash<32>, String>,
+    /// Each output, by transaction hash: what a tx that spends one is read
+    /// against, since no archived tx produced it.
+    pub outputs: HashMap<Hash<32>, GenesisOutput>,
     /// The `/blocks/{genesis}/addresses` listing.
     pub addresses: Vec<BlockContentAddressesInner>,
 }
@@ -258,7 +279,17 @@ pub fn genesis_listing(genesis: &Arc<Genesis>) -> Result<Arc<GenesisListing>, St
     let txs = genesis_txs(genesis)?;
 
     let listing = Arc::new(GenesisListing {
-        outputs: txs.iter().map(|tx| (tx.hash, tx.address.clone())).collect(),
+        outputs: txs
+            .iter()
+            .map(|tx| {
+                let output = GenesisOutput {
+                    address: tx.address.clone(),
+                    lovelace: tx.lovelace,
+                };
+
+                (tx.hash, output)
+            })
+            .collect(),
         addresses: touched_addresses_model(
             txs.iter()
                 .map(|tx| (tx.hash.to_string(), BTreeSet::from([tx.address.clone()]))),
@@ -295,8 +326,30 @@ mod tests {
         let txs = genesis_txs(&genesis).unwrap();
         assert_eq!(first.txs.len(), txs.len());
         assert_eq!(first.outputs.len(), txs.len());
-        assert_eq!(first.outputs.get(&txs[0].hash), Some(&txs[0].address));
+        let output = &first.outputs[&txs[0].hash];
+        assert_eq!(output.address, txs[0].address);
+        assert_eq!(output.lovelace, txs[0].lovelace);
         assert_eq!(first.addresses.len(), txs.len());
+    }
+
+    /// Mainnet funds Byron only through AVVM entries, so its outputs are the
+    /// ones that carry the AVVM amounts.
+    #[test]
+    fn mainnet_genesis_outputs_carry_the_avvm_amounts() {
+        use pallas::interop::hardano::configs::byron;
+
+        let genesis = Arc::new(dolos_cardano::include::mainnet::load());
+        assert!(genesis.byron.non_avvm_balances.is_empty());
+
+        let listing = genesis_listing(&genesis).unwrap();
+        let utxos = byron::genesis_utxos(&genesis.byron);
+        assert_eq!(utxos.len(), genesis.byron.avvm_distr.len());
+
+        for (hash, address, lovelace) in utxos {
+            let output = &listing.outputs[&hash];
+            assert_eq!(output.lovelace, lovelace, "{hash}");
+            assert_eq!(output.address, address.to_base58(), "{hash}");
+        }
     }
 
     /// Two domains on one magic and one Shelley genesis, with different Byron

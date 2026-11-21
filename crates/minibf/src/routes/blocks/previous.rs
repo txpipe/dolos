@@ -5,13 +5,12 @@ use axum::{
 };
 use blockfrost_openapi::models::block_content::BlockContent;
 use dolos_core::{archive::Skippable as _, ArchiveStore as _, Domain};
-use futures::future::try_join_all;
 use pallas::ledger::traverse::MultiEraBlock;
 
 use crate::{error::Error, pagination::PaginationParameters, Facade};
 
 use super::{
-    blocks_before_bound, build_block_model, count_and_page, genesis, load_block_by_hash_or_number,
+    blocks_before_bound, build_block_models, count_and_page, genesis, load_block_by_hash_or_number,
     names_genesis, parse_hash_or_number, point_of, tip_block,
 };
 
@@ -100,10 +99,7 @@ where
     // read after the page, like `/next`
     let tip = tip_block(&domain)?;
 
-    let futures = bodies
-        .iter()
-        .map(|body| build_block_model(&domain, body, &tip, &chain));
-    let mut output = try_join_all(futures).await?;
+    let mut output = build_block_models(&domain, &bodies, &tip, &chain).await?;
 
     if reaches_genesis {
         if let Some(genesis) = genesis::genesis_block(&domain).map_err(Error::Code)? {
