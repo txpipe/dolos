@@ -29,7 +29,7 @@ DIR/
 └── blocks/   an OCI image layout: oci-layout, index.json, blobs/
 ```
 
-and is named with `--source file://DIR`. A root missing either directory is refused, naming it, before `--force` clears anything. A registry root, `--source oci://HOST/PATH`, is checked the same way before `--force` clears anything: the snapshot at `--point` must resolve, chain and tip included, with the blocks snapshot it names.
+and is named with `--source file://DIR`. A root missing either directory is refused, naming it, before `--force` clears anything. A registry root, `--source oci://HOST/PATH`, is checked the same way before `--force` clears anything: the snapshot at `--point` must resolve, chain and tip included, with the blocks snapshot it names. The restore then reads exactly the snapshot that was checked, even if `latest` moves in the meantime.
 
 Bootstrapping is optional. A node with empty stores syncs from genesis with `dolos daemon` (or `dolos sync catchup`), which takes from a few hours to several days depending on the network.
 

@@ -528,3 +528,58 @@ fn a_restore_that_needs_blocks_and_finds_none_is_refused() {
     assert!(blank.state().read_cursor().unwrap().is_none());
     assert!(blocks_of(&blank.archive).is_empty());
 }
+
+/// A restore of a checked snapshot reads what the check resolved and nothing
+/// else: no manifest is read again, so tags dropped after the check, the
+/// moving one included, are not read, and it writes what a restore that
+/// resolves its own point writes.
+#[test]
+fn a_checked_restore_reads_the_checked_snapshot_and_no_manifest() {
+    let registry = FaultRegistry::spawn();
+    let scratch = tempfile::tempdir().unwrap();
+    let (domain, magic, pair, _root) = chained(&registry, scratch.path(), BLOCKS_REPOSITORY);
+
+    let checked = registry::check(
+        &opened(&registry, scratch.path()),
+        Point::Latest,
+        Some(&opened_at(&registry, scratch.path(), BLOCKS_REPOSITORY)),
+        None,
+    )
+    .unwrap_or_else(|e| panic!("the check failed: {e}"));
+
+    assert_eq!(checked.sequence(), HEAD);
+
+    registry.untag_all(REPOSITORY);
+    registry.untag_all(BLOCKS_REPOSITORY);
+    let checked_at = registry.manifest_gets();
+
+    let blank = Blank::<MemoryStores>::open();
+    let storage = tempfile::tempdir().unwrap();
+    let outcome = restore::execute(
+        restore::Input::Checked(&checked),
+        restoring(storage.path(), magic),
+        restore::Target::new(&blank.archive, blank.state()),
+        None,
+    )
+    .unwrap_or_else(|e| panic!("the checked restore failed: {e}"));
+
+    assert_eq!(
+        registry.manifest_gets(),
+        checked_at,
+        "a manifest was read again"
+    );
+    assert_eq!(outcome.plan.sequence, HEAD);
+    assert_eq!(outcome.plan.blocks, Some(pair.blocks[&HEAD]));
+    assert_eq!(blocks_of(&blank.archive), blocks_of(domain.archive()));
+    assert_eq!(
+        blank.state().read_cursor().unwrap(),
+        domain.state().read_cursor().unwrap(),
+    );
+
+    // With the tags gone, a restore that resolves its point finds nothing.
+    let error = restore_chained(&registry, scratch.path(), &Blank::open(), magic, None)
+        .map(|(plan, _)| plan.sequence)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("latest"), "{error}");
+}

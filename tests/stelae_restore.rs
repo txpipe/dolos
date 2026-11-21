@@ -452,6 +452,26 @@ fn a_forced_registry_restore_of_a_whole_snapshot_replaces_the_node() {
     }
 }
 
+/// A forced restore reads the snapshot the check before the clear resolved, so
+/// it reads as many manifests as a restore into an empty node, which checks
+/// nothing and resolves its point once: the chain is walked once.
+#[test]
+fn a_forced_registry_restore_walks_the_chain_once() {
+    let published = Published::new(2, "net/blocks");
+    let point = format!("epoch-{}", published.head);
+    let manifests_read = |node: &Node| {
+        let before = published.registry.manifest_gets();
+        assert_ok(&published.restore_into(node, &point));
+        published.registry.manifest_gets() - before
+    };
+
+    let once = manifests_read(&Node::new());
+
+    let (node, _) = synced();
+    assert_eq!(manifests_read(&node), once, "the chain was walked again");
+    assert_eq!(Contents::read(&node), published.contents);
+}
+
 /// A repository the registry does not hold is refused with the node intact.
 #[test]
 fn a_forced_restore_from_an_absent_repository_is_refused_intact() {

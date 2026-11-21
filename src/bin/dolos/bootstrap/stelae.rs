@@ -37,7 +37,7 @@ use miette::{Context as _, IntoDiagnostic as _};
 use dolos_snapshot::{
     facade::{self as snapshot, RestoreInput, SnapshotRepository},
     node,
-    registry::{self, Auth, Point, Repository},
+    registry::{self, Auth, Checked, Point, Repository},
     restore::{
         blocks_dir, blocks_wanted, profile_repository, ResumeRefusal, Source, SourceRecord,
         BLOCKS_REPOSITORY, DOLOS_REPOSITORY,
@@ -200,6 +200,9 @@ enum Reader {
     Repo {
         repositories: Repositories,
         auth: Auth,
+        /// The snapshot checked before `--force` cleared the node, which the
+        /// restore reads instead of resolving the point again.
+        checked: Option<Box<Checked>>,
     },
 }
 
@@ -242,8 +245,9 @@ struct Resuming {
 /// `--force`, which `clears` says is to clear storage, clears nothing for a
 /// restore that would refuse them, and the restore reads with the credentials
 /// that were checked. Before a clear, a repository's snapshot is checked as a
-/// directory's is ([`check_repo`]). A `--continue` with records takes the
-/// recorded source and snapshot, and clears nothing.
+/// directory's is ([`check_repo`]), and the restore reads the snapshot that
+/// was checked. A `--continue` with records takes the recorded source and
+/// snapshot, and clears nothing.
 pub(super) fn resolve(
     config: &RootConfig,
     args: &Args,
@@ -290,11 +294,22 @@ pub(super) fn resolve(
                 blocks: repository(BLOCKS_REPOSITORY)?,
             };
 
-            if clears && resuming.is_none() {
-                check_repo(config, args, &repositories, &auth, point)?;
-            }
+            let checked = match clears && resuming.is_none() {
+                true => Some(Box::new(check_repo(
+                    config,
+                    args,
+                    &repositories,
+                    &auth,
+                    point,
+                )?)),
+                false => None,
+            };
 
-            let reader = Reader::Repo { repositories, auth };
+            let reader = Reader::Repo {
+                repositories,
+                auth,
+                checked,
+            };
 
             (reader, Source::Repo(root))
         }
@@ -544,14 +559,15 @@ fn check_dir(config: &RootConfig, root: &Path, clears: bool) -> miette::Result<P
 /// Refuse, before `--force` clears the node, a registry restore at `point`
 /// that could not read its snapshot: an absent repository or tag, a registry
 /// that does not answer, a broken chain, a gone tip, or a blocks repository
-/// without the blocks snapshot the Dolos snapshot reads. Pulls no layer.
+/// without the blocks snapshot the Dolos snapshot reads. Pulls no layer, and
+/// hands back what it resolved for the restore to read.
 fn check_repo(
     config: &RootConfig,
     args: &Args,
     repositories: &Repositories,
     auth: &Auth,
     point: Point,
-) -> miette::Result<()> {
+) -> miette::Result<Checked> {
     let scratch = node::scratch_dir(&config.storage, args.scratch_dir.as_deref());
 
     let (dolos, blocks) = repositories.open(|repo| {
@@ -575,9 +591,7 @@ fn check_repo(
                  nothing was cleared",
                 repositories.dolos
             )
-        })?;
-
-    Ok(())
+        })
 }
 
 /// Refuse a network root whose `name` directory, `dir`, is absent or is not
@@ -713,33 +727,41 @@ fn restore(
             },
             dolos.display().to_string(),
         ),
-        Reader::Repo { repositories, auth } => {
-            // Staging resolution remains node policy. The profile facade
-            // receives the resolved inputs and never reads configuration or
-            // environment on its own. Both repositories stage in the same
-            // directory, which the preflight sizes for the two.
-            let scratch = node::scratch_dir(&config.storage, args.scratch_dir.as_deref());
-            let open = |repo: &Repository| {
-                SnapshotRepository::open(
-                    repo,
-                    args.insecure,
-                    auth.clone(),
-                    scratch.clone(),
-                    registry::Tuning::default(),
-                )
-                .into_diagnostic()
-                .with_context(|| format!("opening the repository {repo}"))
-            };
+        Reader::Repo {
+            repositories,
+            auth,
+            checked,
+        } => {
+            let input = match checked {
+                // What the check before `--force` resolved, read as checked.
+                Some(checked) => RestoreInput::Checked(checked),
+                None => {
+                    // Staging resolution remains node policy. The profile
+                    // facade receives the resolved inputs and never reads
+                    // configuration or environment on its own. Both
+                    // repositories stage in the same directory, which the
+                    // preflight sizes for the two.
+                    let scratch = node::scratch_dir(&config.storage, args.scratch_dir.as_deref());
+                    let open = |repo: &Repository| {
+                        SnapshotRepository::open(
+                            repo,
+                            args.insecure,
+                            auth.clone(),
+                            scratch.clone(),
+                            registry::Tuning::default(),
+                        )
+                        .into_diagnostic()
+                        .with_context(|| format!("opening the repository {repo}"))
+                    };
 
-            let opened = opened.insert(repositories.open(open)?);
+                    repository_input(opened.insert(repositories.open(open)?), inputs.point)
+                }
+            };
 
             println!("source:   {} ({})", repositories.dolos, inputs.point);
             println!("blocks:   {}", repositories.blocks);
 
-            (
-                repository_input(opened, inputs.point),
-                repositories.dolos.to_string(),
-            )
+            (input, repositories.dolos.to_string())
         }
     };
 

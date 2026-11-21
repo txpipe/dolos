@@ -2481,6 +2481,10 @@ pub enum Input<'a> {
         point: crate::registry::Point,
         blocks: Option<&'a crate::registry::SnapshotRepository>,
     },
+    /// A registry snapshot, and its blocks, resolved before the stores were
+    /// touched by [`crate::registry::SnapshotRepository::check`]: restored as
+    /// checked, with no chain walked again.
+    Checked(&'a crate::registry::Checked),
 }
 
 /// The structured result of a completed restore.
@@ -2516,6 +2520,7 @@ where
             point,
             blocks,
         } => repository.restore(point, blocks, node, target, observer)?,
+        Input::Checked(checked) => checked.restore(node, target, observer)?,
     };
 
     Ok(RestoreOutcome {
