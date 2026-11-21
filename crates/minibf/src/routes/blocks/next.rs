@@ -5,14 +5,13 @@ use axum::{
 };
 use blockfrost_openapi::models::block_content::BlockContent;
 use dolos_core::{archive::Skippable as _, ArchiveStore as _, Domain};
-use futures::future::try_join_all;
 use itertools::Either;
 use pallas::ledger::traverse::MultiEraBlock;
 
 use crate::{error::Error, pagination::PaginationParameters, Facade};
 
 use super::{
-    blocks_after_bound, build_block_model, count_and_page, genesis, load_block_by_hash_or_number,
+    blocks_after_bound, build_block_models, count_and_page, genesis, load_block_by_hash_or_number,
     parse_hash_or_number, point_of, tip_block,
 };
 
@@ -89,10 +88,7 @@ where
     // page, so the tip its confirmations count from must not be older than it
     let tip = tip_block(&domain)?;
 
-    let futures = bodies
-        .iter()
-        .map(|body| build_block_model(&domain, body, &tip, &chain));
-    let output = try_join_all(futures).await?;
+    let output = build_block_models(&domain, &bodies, &tip, &chain).await?;
 
     // Blockfrost takes no `order` here
     Ok(Json(output))

@@ -6,9 +6,11 @@ use axum::{
 use blockfrost_openapi::models::tx_content::TxContent;
 use dolos_cardano::{AccountState, DRepState, PoolState};
 use dolos_core::Domain;
+use pallas::ledger::traverse::Era;
 
 use crate::{
     hacks::genesis_tx,
+    inputs::InputDeps,
     mapping::{txs::TxModelBuilder, IntoModel as _},
     Facade,
 };
@@ -41,6 +43,17 @@ where
         .with_chain(chain)
         .with_historical_pparams::<D>(&domain)?;
 
+    if builder.era() == Era::Byron {
+        let mut deps = InputDeps::default();
+        let mut resolver = {
+            let tx = builder.tx()?;
+            deps.prepare(&domain, [&tx])
+                .await?
+                .with_genesis(domain.genesis())
+        };
+        builder = builder.with_resolved_fee(&mut resolver)?;
+    }
+
     builder.compute_deposit(&domain)?;
 
     builder.into_response()
@@ -51,6 +64,144 @@ mod tests {
     use super::*;
     use crate::routes::txs::testing::*;
     use crate::test_support::{TestApp, TestFault};
+
+    #[tokio::test]
+    async fn byron_txs_by_hash_reports_paid_fee_not_policy_minimum() {
+        use crate::test_support::{byron_app, byron_block, byron_funding, byron_tx};
+        use dolos_core::TxoRef;
+        use pallas::ledger::traverse::MultiEraBlock;
+
+        for paid in [200_000, 0] {
+            let (funding, hash) = byron_funding(&[3_000_000, 1_700_000]);
+            let raw = byron_block(
+                11,
+                vec![
+                    byron_tx(&[TxoRef([0x77; 32].into(), 0)], &[1_000_000]),
+                    byron_tx(
+                        &[TxoRef(hash, 0), TxoRef(hash, 1)],
+                        &[4_000_000, 700_000 - paid],
+                    ),
+                ],
+            );
+            let block = MultiEraBlock::decode(&raw).unwrap();
+            let tx = block.txs()[1].clone();
+            let tx_hash = tx.hash().to_string();
+            assert_ne!(tx.fee_or_compute(), paid);
+            let app = byron_app(vec![funding, raw.clone()]);
+            let parsed: TxContent = get_ok(&app, &format!("/txs/{tx_hash}")).await;
+            assert_eq!(parsed.hash, tx_hash);
+            assert_eq!(parsed.index, 1);
+            assert_eq!(parsed.fees, paid.to_string());
+            assert_eq!(
+                parsed.output_amount[0].quantity,
+                (4_700_000 - paid).to_string()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn byron_tx_spending_a_genesis_output_reports_its_paid_fee() {
+        use crate::test_support::{byron_app, byron_block, byron_tx};
+        use dolos_core::TxoRef;
+        use pallas::ledger::traverse::MultiEraBlock;
+
+        use pallas::interop::hardano::configs::byron;
+
+        let genesis = dolos_cardano::include::preview::load();
+        let (source, _, amount) = byron::genesis_utxos(&genesis.byron)
+            .into_iter()
+            .max_by_key(|(_, _, amount)| *amount)
+            .expect("the preview genesis has byron utxos");
+
+        // a redemption pays no fee, which is below the policy minimum
+        for paid in [170_000, 0] {
+            let raw = byron_block(11, vec![byron_tx(&[TxoRef(source, 0)], &[amount - paid])]);
+            let block = MultiEraBlock::decode(&raw).unwrap();
+            let tx = &block.txs()[0];
+            assert_ne!(tx.fee_or_compute(), paid);
+            let tx_hash = tx.hash();
+
+            let app = byron_app(vec![raw.clone()]);
+            let parsed: TxContent = get_ok(&app, &format!("/txs/{tx_hash}")).await;
+            assert_eq!(parsed.fees, paid.to_string());
+        }
+    }
+
+    #[tokio::test]
+    async fn byron_txs_by_hash_falls_back_if_any_source_output_is_missing() {
+        use crate::test_support::{byron_app, byron_block, byron_funding, byron_tx};
+        use dolos_core::TxoRef;
+        use pallas::ledger::traverse::MultiEraBlock;
+
+        let (funding, hash) = byron_funding(&[5_000_000]);
+        let known = TxoRef(hash, 0);
+        let missing = TxoRef([0x77; 32].into(), 0);
+        for inputs in [
+            vec![missing.clone()],
+            vec![known.clone(), missing.clone()],
+            vec![missing, known.clone()],
+            vec![known, TxoRef(hash, 1)],
+        ] {
+            let raw = byron_block(11, vec![byron_tx(&inputs, &[1_000_000])]);
+            let block = MultiEraBlock::decode(&raw).unwrap();
+            let tx = block.txs()[0].clone();
+            let tx_hash = tx.hash().to_string();
+            let minimum = tx.fee_or_compute();
+            assert_ne!(minimum, 4_000_000);
+            let app = byron_app(vec![funding.clone(), raw.clone()]);
+            let parsed: TxContent = get_ok(&app, &format!("/txs/{tx_hash}")).await;
+            assert_eq!(parsed.fees, minimum.to_string());
+            assert_eq!(parsed.utxo_count, (inputs.len() + 1) as i32);
+        }
+    }
+
+    #[tokio::test]
+    async fn byron_fees_fall_back_with_pruned_source_block() {
+        use crate::test_support::{byron_app, byron_block, byron_funding, byron_tx};
+        use blockfrost_openapi::models::block_content::BlockContent;
+        use dolos_core::{ArchiveStore as _, ArchiveWriter as _, ChainPoint, TxoRef};
+        use pallas::ledger::traverse::MultiEraBlock;
+
+        let (funding, hash) = byron_funding(&[300_000]);
+        let source = MultiEraBlock::decode(&funding).unwrap();
+        let point = ChainPoint::Specific(source.slot(), source.hash());
+        let raw = byron_block(11, vec![byron_tx(&[TxoRef(hash, 0)], &[129_193])]);
+        let block = MultiEraBlock::decode(&raw).unwrap();
+        let tx = block.txs()[0].clone();
+        let minimum = tx.fee_or_compute().to_string();
+        let app = byron_app(vec![funding, raw.clone()]);
+        let facade = app.facade();
+        let writer = facade.archive().start_writer().unwrap();
+        writer.undo(&point).unwrap();
+        for (slot, raw) in facade.archive().get_range(Some(12), None).unwrap() {
+            let block = MultiEraBlock::decode(&raw).unwrap();
+            writer
+                .undo(&ChainPoint::Specific(slot, block.hash()))
+                .unwrap();
+        }
+        writer.commit().unwrap();
+        assert_eq!(
+            facade.archive().slot_by_tx_hash(hash.as_ref()).unwrap(),
+            Some(10)
+        );
+
+        let parsed: TxContent = get_ok(&app, &format!("/txs/{}", tx.hash())).await;
+        assert_eq!(parsed.fees, minimum);
+        let parsed: BlockContent = get_ok(&app, &format!("/blocks/{}", block.hash())).await;
+        assert_eq!(parsed.fees, Some(minimum));
+    }
+
+    #[tokio::test]
+    async fn later_era_tx_reads_no_inputs_for_its_fee() {
+        let app = TestApp::new();
+        let tx_hash = app.vectors().tx_hash.clone();
+
+        let parsed: TxContent = get_ok(&app, &format!("/txs/{tx_hash}")).await;
+        assert_eq!(parsed.hash, tx_hash);
+
+        // the lookup of the tx itself, none of the txs its inputs spend
+        assert_eq!(app.facade().inner.tx_lookups(), 1);
+    }
 
     #[tokio::test]
     async fn txs_by_hash_happy_path() {

@@ -12,11 +12,11 @@ use itertools::Itertools as _;
 use pallas::{
     codec::minicbor,
     crypto::hash::{Hash, Hasher},
-    ledger::traverse::{MultiEraBlock, MultiEraHeader, MultiEraTx},
+    ledger::traverse::{Era, MultiEraBlock, MultiEraHeader, MultiEraTx},
 };
 
 use super::{bech32_pool, collated, IntoModel};
-use crate::log_and_500;
+use crate::{inputs::InputResolver, log_and_500};
 
 pub struct BlockModelBuilder<'a> {
     block: MultiEraBlock<'a>,
@@ -26,6 +26,7 @@ pub struct BlockModelBuilder<'a> {
     tip: Option<MultiEraBlock<'a>>,
     touched_addresses: Option<Vec<(String, BTreeSet<String>)>>,
     genesis_delegates: Option<HashSet<Hash<28>>>,
+    fees: Option<u64>,
 }
 
 impl<'a> BlockModelBuilder<'a> {
@@ -40,11 +41,28 @@ impl<'a> BlockModelBuilder<'a> {
             chain: None,
             touched_addresses: None,
             genesis_delegates: None,
+            fees: None,
         })
+    }
+
+    pub fn era(&self) -> Era {
+        self.block.era()
     }
 
     pub fn txs(&self) -> Vec<MultiEraTx<'_>> {
         self.block.txs()
+    }
+
+    pub fn with_resolved_fees(
+        mut self,
+        resolver: &mut InputResolver<'_>,
+    ) -> Result<Self, StatusCode> {
+        self.fees = Some(self.block.txs().iter().try_fold(0u64, |total, tx| {
+            total
+                .checked_add(resolver.fee(tx)?)
+                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+        })?);
+        Ok(self)
     }
 
     /// Calls `collect` for every tx in block order.
@@ -203,6 +221,10 @@ impl<'a> BlockModelBuilder<'a> {
     }
 
     fn compute_total_fees(&self) -> String {
+        if let Some(fees) = self.fees {
+            return fees.to_string();
+        }
+
         let txs = self.block.txs();
 
         txs.iter()
@@ -298,10 +320,9 @@ impl<'a> IntoModel<BlockContent> for BlockModelBuilder<'a> {
                 "0" => None,
                 _ => Some(output),
             },
-            fees: match fees.as_str() {
-                "0" => None,
-                _ => Some(fees),
-            },
+            // a sum over the block's txs: none without txs, "0" when they paid
+            // nothing (Byron redemptions)
+            fees: (!block.txs().is_empty()).then_some(fees),
         };
 
         Ok(out)

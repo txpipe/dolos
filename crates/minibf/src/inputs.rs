@@ -33,9 +33,13 @@ use axum::http::StatusCode;
 use itertools::Itertools as _;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraInput, MultiEraOutput, MultiEraTx};
 
-use dolos_core::{BlockBody, BlockSlot, Domain, EraCbor, TxHash, UtxoPosition};
+use dolos_core::{BlockBody, BlockSlot, Domain, EraCbor, Genesis, TxHash, UtxoPosition};
 
-use crate::{pagination::Pagination, Facade};
+use crate::{
+    hacks::genesis_block::{self, GenesisListing},
+    pagination::Pagination,
+    Facade,
+};
 
 type InputTxMap = HashMap<TxHash, Option<(EraCbor, UtxoPosition)>>;
 
@@ -70,6 +74,7 @@ pub struct InputDeps {
     txs: InputTxMap,
     cap: usize,
     fetches: usize,
+    batches: usize,
 }
 
 impl Default for InputDeps {
@@ -84,6 +89,7 @@ impl InputDeps {
             txs: InputTxMap::new(),
             cap: cap.max(1),
             fetches: 0,
+            batches: 0,
         }
     }
 
@@ -93,6 +99,17 @@ impl InputDeps {
     /// module exists for is observable through this counter.
     pub fn fetches(&self) -> usize {
         self.fetches
+    }
+
+    /// Number of batched reads made from the domain so far.
+    pub fn batches(&self) -> usize {
+        self.batches
+    }
+
+    /// A resolver over the txs held so far, for callers that share one
+    /// prepared store.
+    pub fn resolver(&self) -> InputResolver<'_> {
+        InputResolver::new(&self.txs)
     }
 
     /// Fetch whatever is missing to resolve the inputs of `txs`, then hand out
@@ -147,6 +164,7 @@ impl InputDeps {
 
         if !missing.is_empty() {
             self.fetches += missing.len();
+            self.batches += 1;
             let fetched = domain
                 .query()
                 .tx_cbor_batch_with_positions(missing)
@@ -159,6 +177,7 @@ impl InputDeps {
             deps = required_len,
             held = self.txs.len(),
             fetches = self.fetches(),
+            batches = self.batches(),
             "prepared input dependencies"
         );
 
@@ -180,6 +199,15 @@ pub struct InputResolver<'a> {
     txs: &'a InputTxMap,
     decoded: HashMap<TxHash, Option<MultiEraTx<'a>>>,
     decodes: usize,
+    genesis: Option<Arc<Genesis>>,
+    genesis_outputs: Option<Arc<GenesisListing>>,
+}
+
+/// Why a Byron fee has no input total.
+enum Unspendable {
+    /// An input whose source output is unknown, as `tx#index`.
+    Unknown(String),
+    Failed(StatusCode),
 }
 
 impl<'a> InputResolver<'a> {
@@ -188,7 +216,85 @@ impl<'a> InputResolver<'a> {
             txs,
             decoded: HashMap::new(),
             decodes: 0,
+            genesis: None,
+            genesis_outputs: None,
         }
+    }
+
+    /// The fee `tx` paid: an invalid tx forfeits its total collateral and a
+    /// later-era tx states its fee. A Byron tx states none, so it paid what
+    /// its inputs carry beyond its outputs, read off the archive and the
+    /// genesis. When pruned history leaves a source output unknown, the
+    /// policy minimum stands in, with a warning.
+    pub fn fee(&mut self, tx: &MultiEraTx<'_>) -> Result<u64, StatusCode> {
+        if !tx.is_valid() {
+            return Ok(tx.total_collateral().unwrap_or_default());
+        }
+
+        if tx.as_byron().is_none() {
+            return Ok(tx.fee_or_compute());
+        }
+
+        let paid = dolos_cardano::roll::epochs::consumed_minus_produced(tx, |input| {
+            match self.spent_coin(input) {
+                Ok(Some(coin)) => Ok(coin),
+                Ok(None) => Err(Unspendable::Unknown(input.output_ref().to_string())),
+                Err(status) => Err(Unspendable::Failed(status)),
+            }
+        });
+
+        match paid {
+            Ok(Some(fee)) => Ok(fee),
+            Ok(None) => {
+                tracing::error!(tx = %tx.hash(), "byron tx produces more than it consumes");
+                Err(StatusCode::INTERNAL_SERVER_ERROR)
+            }
+            Err(Unspendable::Unknown(input)) => {
+                let minimum = tx.fee_or_compute();
+                tracing::warn!(
+                    tx = %tx.hash(),
+                    input,
+                    minimum,
+                    "byron tx spends an output neither the archive nor the genesis holds; reporting the minimum fee"
+                );
+                Ok(minimum)
+            }
+            Err(Unspendable::Failed(status)) => Err(status),
+        }
+    }
+
+    /// The lovelace of the output `input` spends, from the archive or, for a
+    /// genesis output, from the genesis; `None` when neither holds it.
+    fn spent_coin(&mut self, input: &MultiEraInput<'_>) -> Result<Option<u64>, StatusCode> {
+        if let Some(output) = self.resolve(input)? {
+            return Ok(Some(output.value().coin()));
+        }
+
+        // a genesis output is the only one of its pseudo-tx
+        if input.index() != 0 {
+            return Ok(None);
+        }
+
+        let Some(genesis) = self.genesis.as_ref() else {
+            return Ok(None);
+        };
+
+        if self.genesis_outputs.is_none() {
+            self.genesis_outputs = Some(genesis_block::genesis_listing(genesis)?);
+        }
+
+        Ok(self
+            .genesis_outputs
+            .as_ref()
+            .and_then(|listing| listing.outputs.get(input.hash()))
+            .map(|output| output.lovelace))
+    }
+
+    /// Resolves Byron fees against the outputs of `genesis` too, which no
+    /// archived tx produced.
+    pub fn with_genesis(mut self, genesis: Arc<Genesis>) -> Self {
+        self.genesis = Some(genesis);
+        self
     }
 
     /// Number of dependency txs decoded so far — one per distinct hash
@@ -428,6 +534,116 @@ mod tests {
 
     fn dep_cbor(vectors: &SyntheticVectors) -> EraCbor {
         EraCbor(Era::Conway.into(), vectors.tx_cbor.clone())
+    }
+
+    #[test]
+    fn later_era_fees_need_no_dependencies() {
+        use dolos_core::TxoRef;
+        use dolos_testing::{synthetic::build_phase2_invalid_tx_cbor, TestAddress};
+        use pallas::{codec::minicbor, ledger::primitives::conway};
+
+        let store = InputTxMap::new();
+        let mut resolver = InputResolver::new(&store);
+        let vectors = vectors();
+        let tx = MultiEraTx::decode_for_era(Era::Conway, &vectors.tx_cbor).unwrap();
+        assert_eq!(resolver.fee(&tx).unwrap(), tx.fee().unwrap());
+
+        let raw = build_phase2_invalid_tx_cbor(
+            TxoRef([1; 32].into(), 0),
+            TxoRef([2; 32].into(), 0),
+            TestAddress::Alice,
+            1_500_000,
+        );
+        let tx = MultiEraTx::decode_for_era(Era::Conway, &raw).unwrap();
+        assert_ne!(tx.fee_or_compute(), 500_000);
+        assert_eq!(resolver.fee(&tx).unwrap(), 500_000);
+
+        let mut tx: conway::Tx<'_> = minicbor::decode(&raw).unwrap();
+        tx.transaction_body.total_collateral = None;
+        let raw = minicbor::to_vec(tx).unwrap();
+        let tx = MultiEraTx::decode_for_era(Era::Conway, &raw).unwrap();
+        assert_eq!(resolver.fee(&tx).unwrap(), 0);
+        assert_eq!(resolver.decodes(), 0);
+    }
+
+    #[tokio::test]
+    async fn byron_fees_share_dependency_fetches_and_decodes() {
+        use crate::test_support::{byron_block, byron_facade, byron_funding, byron_tx};
+        use dolos_core::TxoRef;
+
+        let (funding, hash) = byron_funding(&[300_000, 400_000]);
+        let domain = byron_facade(vec![funding]);
+        let raw = byron_block(
+            11,
+            vec![
+                byron_tx(&[TxoRef(hash, 0)], &[129_193]),
+                byron_tx(&[TxoRef(hash, 1)], &[200_000]),
+            ],
+        );
+        let block = MultiEraBlock::decode(&raw).unwrap();
+        let txs = block.txs();
+        let mut deps = InputDeps::default();
+        let mut resolver = deps.prepare(&domain, &txs).await.unwrap();
+        assert_ne!(txs[0].fee_or_compute(), 170_807);
+        assert_eq!(resolver.fee(&txs[0]).unwrap(), 170_807);
+        assert_eq!(resolver.fee(&txs[1]).unwrap(), 200_000);
+        assert_eq!(resolver.decodes(), 1);
+        assert_eq!(deps.fetches(), 1);
+    }
+
+    #[tokio::test]
+    async fn byron_fees_count_each_consumed_output_once() {
+        use crate::test_support::{byron_block, byron_facade, byron_funding, byron_tx};
+        use dolos_core::TxoRef;
+
+        let (funding, hash) = byron_funding(&[300_000, 400_000]);
+        let domain = byron_facade(vec![funding]);
+        for (inputs, output) in [
+            (vec![TxoRef(hash, 0), TxoRef(hash, 0)], 129_193),
+            (
+                vec![TxoRef(hash, 0), TxoRef(hash, 1), TxoRef(hash, 0)],
+                529_193,
+            ),
+        ] {
+            let raw = byron_block(11, vec![byron_tx(&inputs, &[output])]);
+            let block = MultiEraBlock::decode(&raw).unwrap();
+            let txs = block.txs();
+            let mut deps = InputDeps::default();
+            let mut resolver = deps.prepare(&domain, &txs).await.unwrap();
+
+            assert_eq!(txs[0].inputs().len(), inputs.len());
+            assert_ne!(txs[0].fee_or_compute(), 170_807);
+            assert_eq!(resolver.fee(&txs[0]).unwrap(), 170_807);
+            assert_eq!(resolver.decodes(), 1);
+            assert_eq!(deps.fetches(), 1);
+        }
+    }
+
+    #[test]
+    fn byron_redemption_of_a_mainnet_avvm_output_pays_its_fee() {
+        use crate::test_support::{byron_block, byron_tx};
+        use dolos_core::TxoRef;
+        use pallas::interop::hardano::configs::byron;
+
+        let genesis = Arc::new(dolos_cardano::include::mainnet::load());
+        let (source, _, amount) = byron::genesis_utxos(&genesis.byron)
+            .into_iter()
+            .max_by_key(|(_, _, amount)| *amount)
+            .expect("the mainnet genesis has avvm utxos");
+
+        // the archive holds no tx that produced a genesis output
+        let store = InputTxMap::from([(source, None)]);
+
+        // a redemption is exempt from the minimum fee
+        for paid in [0, 170_000] {
+            let raw = byron_block(11, vec![byron_tx(&[TxoRef(source, 0)], &[amount - paid])]);
+            let block = MultiEraBlock::decode(&raw).unwrap();
+            let tx = &block.txs()[0];
+            assert_ne!(tx.fee_or_compute(), paid);
+
+            let mut resolver = InputResolver::new(&store).with_genesis(genesis.clone());
+            assert_eq!(resolver.fee(tx).unwrap(), paid);
+        }
     }
 
     #[test]
