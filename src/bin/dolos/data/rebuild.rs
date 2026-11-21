@@ -596,6 +596,8 @@ fn replay(
 }
 
 pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
+    crate::common::refuse_interrupted_restore(config)?;
+
     crate::common::setup_tracing_error_only()?;
 
     let mode = match (&args.target, args.ephemeral) {

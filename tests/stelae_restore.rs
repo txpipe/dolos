@@ -864,15 +864,27 @@ fn recorded_layers(node: &Node) -> Option<usize> {
         .map(|progress| progress.completed.len())
 }
 
-/// The commands that would run on a node's stores: the node, a sync, store
-/// housekeeping, the cache, and a replay that is not `--force`d over them.
+/// The commands that would run on a node's stores: the node, a sync, a
+/// rollback, store housekeeping, a state rebuild, the cache, and a replay
+/// that is not `--force`d over them.
 const RUNS_ON_STORES: &[&[&str]] = &[
     &["daemon"],
     &["serve"],
     &["sync", "catchup"],
     &["sync", "recover"],
     &["sync", "recover", "--dry-run"],
+    &[
+        "sync",
+        "rollback",
+        "--slot",
+        "1",
+        "--hash",
+        "0000000000000000000000000000000000000000000000000000000000000001",
+        "--yes",
+    ],
     &["data", "housekeeping"],
+    &["data", "rebuild", "--yes"],
+    &["data", "rebuild", "--ephemeral", "--yes"],
     &["cache", "stats"],
     &["cache", "clear", "--all"],
     &["cache", "warm", "--namespace", "assets", "--scan"],

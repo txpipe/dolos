@@ -28,6 +28,8 @@ fn parse_hash(hash: &str) -> Result<BlockHash, String> {
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
+    crate::common::refuse_interrupted_restore(config)?;
+
     let point = ChainPoint::Specific(args.slot, args.hash);
 
     args.confirm.require(&format!(
