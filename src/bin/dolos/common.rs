@@ -118,6 +118,37 @@ pub fn open_genesis(config: &RootConfig) -> miette::Result<Genesis> {
         .context("loading genesis")
 }
 
+/// What finishes or replaces stores that a snapshot restore left incomplete.
+const RESTORE_HELP: &str = "finish the restore with `dolos bootstrap stelae --continue`, or start \
+                            over with `dolos bootstrap stelae --force`";
+
+/// Refuse storage that an interrupted snapshot restore left its records in:
+/// its stores are incomplete, and only `bootstrap stelae` finishes or replaces
+/// them. Checked before any store is opened, so nothing on disk changes.
+pub fn refuse_interrupted_restore(config: &RootConfig) -> miette::Result<()> {
+    let storage = &config.storage.path;
+
+    let records = dolos_snapshot::restore::records_in(storage)
+        .into_diagnostic()
+        .context("looking for the records of an interrupted snapshot restore")?;
+
+    if records.is_empty() {
+        return Ok(());
+    }
+
+    let records: Vec<_> = records
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+
+    Err(miette::miette!(
+        help = RESTORE_HELP,
+        "a snapshot restore into {} was interrupted, so its stores are incomplete ({} left)",
+        storage.display(),
+        records.join(", "),
+    ))
+}
+
 pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
     setup_domain_with_stop_epoch(config, None)
 }
@@ -180,6 +211,14 @@ fn render_domain_build_error(error: DomainBuildError) -> miette::Report {
             };
             miette::miette!(help = help, "{msg}")
         }
+        DomainBuildError::Bootstrap(
+            error @ dolos_core::DomainError::ArchiveWithoutState { .. },
+        ) => miette::miette!(
+            help = format!(
+                "an interrupted snapshot restore leaves the stores like this; {RESTORE_HELP}"
+            ),
+            "{error}"
+        ),
         DomainBuildError::Bootstrap(error @ dolos_core::DomainError::WalGap { .. }) => {
             miette::miette!(
                 help = "To see the missing blocks, run `dolos sync recover --dry-run`. To reset the WAL to the state cursor, run `dolos sync recover --discard-wal`. This command erases the rollback history of the WAL.",

@@ -948,6 +948,11 @@ pub enum DomainError {
         state: Option<ChainPoint>,
     },
 
+    /// The archive holds blocks but the state has no cursor, as a snapshot
+    /// restore stopped before it finished leaves the stores.
+    #[error("the archive holds blocks up to slot {archive}, but the state has no cursor")]
+    ArchiveWithoutState { archive: BlockSlot },
+
     #[error("{0}")]
     Internal(String),
 
