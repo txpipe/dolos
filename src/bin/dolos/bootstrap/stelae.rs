@@ -37,7 +37,8 @@ use miette::{Context as _, IntoDiagnostic as _};
 use dolos_snapshot::{
     facade::{self as snapshot, RestoreInput, SnapshotRepository},
     node,
-    registry::{self, Auth, Point, Repository},
+    progress::Observer,
+    registry::{self, Auth, Checked, Point, Repository},
     restore::{
         blocks_dir, blocks_wanted, profile_repository, ResumeRefusal, Source, SourceRecord,
         BLOCKS_REPOSITORY, DOLOS_REPOSITORY,
@@ -200,6 +201,9 @@ enum Reader {
     Repo {
         repositories: Repositories,
         auth: Auth,
+        /// The snapshot checked before `--force` cleared the node, which the
+        /// restore reads instead of resolving the point again.
+        checked: Option<Box<Checked>>,
     },
 }
 
@@ -227,6 +231,9 @@ pub(super) struct Inputs {
     /// The snapshot to read in a repository.
     point: Point,
     resuming: Option<Resuming>,
+    /// The renderer a check before the clear already reported through, which
+    /// the restore goes on with.
+    progress: Option<RestoreProgress>,
 }
 
 /// What a `--continue` resumes.
@@ -241,14 +248,19 @@ struct Resuming {
 /// Resolves the source and, for a repository, the credentials, so that
 /// `--force`, which `clears` says is to clear storage, clears nothing for a
 /// restore that would refuse them, and the restore reads with the credentials
-/// that were checked. A `--continue` with records takes the recorded source
-/// and snapshot.
+/// that were checked. Before a clear, a repository's snapshot is checked as a
+/// directory's is ([`check_repo`]), and the restore reads the snapshot that
+/// was checked. A `--continue` with records takes the recorded source and
+/// snapshot, and clears nothing.
 pub(super) fn resolve(
     config: &RootConfig,
     args: &Args,
     network: Option<&KnownNetwork>,
     clears: bool,
+    feedback: &Feedback,
 ) -> miette::Result<Inputs> {
+    let mut progress = None;
+
     let resuming = match args.resume {
         true => unfinished(config, args)?,
         false => None,
@@ -284,12 +296,34 @@ pub(super) fn resolve(
                     .with_context(|| format!("naming the {name} repository under {root}"))
             };
 
+            let repositories = Repositories {
+                dolos: repository(DOLOS_REPOSITORY)?,
+                blocks: repository(BLOCKS_REPOSITORY)?,
+            };
+
+            let checked = match clears && resuming.is_none() {
+                true => {
+                    // The restore's own renderer, so a read the check retries
+                    // is announced as the restore's are, under its source.
+                    report_source(&repositories, point);
+                    let progress = progress.insert(RestoreProgress::for_stderr(feedback));
+
+                    Some(Box::new(check_repo(
+                        config,
+                        args,
+                        &repositories,
+                        &auth,
+                        point,
+                        &progress.observer(),
+                    )?))
+                }
+                false => None,
+            };
+
             let reader = Reader::Repo {
-                repositories: Repositories {
-                    dolos: repository(DOLOS_REPOSITORY)?,
-                    blocks: repository(BLOCKS_REPOSITORY)?,
-                },
+                repositories,
                 auth,
+                checked,
             };
 
             (reader, Source::Repo(root))
@@ -301,6 +335,7 @@ pub(super) fn resolve(
         source,
         point,
         resuming,
+        progress,
     })
 }
 
@@ -537,6 +572,46 @@ fn check_dir(config: &RootConfig, root: &Path, clears: bool) -> miette::Result<P
     Ok(root)
 }
 
+/// Refuse, before `--force` clears the node, a registry restore at `point`
+/// that could not read its snapshot: an absent repository or tag, a registry
+/// that does not answer, a broken chain, a gone tip, or a blocks repository
+/// without the blocks snapshot the Dolos snapshot reads. Pulls no layer, and
+/// hands back what it resolved for the restore to read. `observer` hears its
+/// retried reads.
+fn check_repo(
+    config: &RootConfig,
+    args: &Args,
+    repositories: &Repositories,
+    auth: &Auth,
+    point: Point,
+    observer: &Observer,
+) -> miette::Result<Checked> {
+    let scratch = node::scratch_dir(&config.storage, args.scratch_dir.as_deref());
+
+    let (dolos, blocks) = repositories.open(|repo| {
+        SnapshotRepository::open(
+            repo,
+            args.insecure,
+            auth.clone(),
+            scratch.clone(),
+            registry::Tuning::default(),
+        )
+        .into_diagnostic()
+        .with_context(|| format!("opening the repository {repo}"))
+    })?;
+
+    dolos
+        .check(point, Some(&blocks), config.history.max_slots(), observer)
+        .into_diagnostic()
+        .with_context(|| {
+            format!(
+                "checking the snapshot at {point} in {}, before `--force` clears the node; \
+                 nothing was cleared",
+                repositories.dolos
+            )
+        })
+}
+
 /// Refuse a network root whose `name` directory, `dir`, is absent or is not
 /// a directory. Any other fault reading it, such as a permission or a
 /// symlink loop, is refused with its own cause rather than read as absent.
@@ -652,11 +727,14 @@ impl Node {
 fn restore(
     config: &RootConfig,
     args: &Args,
-    inputs: Inputs,
+    mut inputs: Inputs,
     options: RestoreOptions<'_>,
 ) -> miette::Result<()> {
     let node = Node::open(config)?;
-    let progress = RestoreProgress::for_stderr(options.feedback);
+    let progress = inputs
+        .progress
+        .take()
+        .unwrap_or_else(|| RestoreProgress::for_stderr(options.feedback));
     let observer = progress.observer();
     let restoring = node.restoring(&inputs, options);
 
@@ -670,33 +748,44 @@ fn restore(
             },
             dolos.display().to_string(),
         ),
-        Reader::Repo { repositories, auth } => {
-            // Staging resolution remains node policy. The profile facade
-            // receives the resolved inputs and never reads configuration or
-            // environment on its own. Both repositories stage in the same
-            // directory, which the preflight sizes for the two.
-            let scratch = node::scratch_dir(&config.storage, args.scratch_dir.as_deref());
-            let open = |repo: &Repository| {
-                SnapshotRepository::open(
-                    repo,
-                    args.insecure,
-                    auth.clone(),
-                    scratch.clone(),
-                    registry::Tuning::default(),
-                )
-                .into_diagnostic()
-                .with_context(|| format!("opening the repository {repo}"))
+        Reader::Repo {
+            repositories,
+            auth,
+            checked,
+        } => {
+            let input = match checked {
+                // What the check before `--force` resolved, read as checked,
+                // under the source lines the check printed.
+                Some(checked) => RestoreInput::Checked(checked),
+                None => {
+                    // Staging resolution remains node policy. The profile
+                    // facade receives the resolved inputs and never reads
+                    // configuration or environment on its own. Both
+                    // repositories stage in the same directory, which the
+                    // preflight sizes for the two.
+                    let scratch = node::scratch_dir(&config.storage, args.scratch_dir.as_deref());
+                    let open = |repo: &Repository| {
+                        SnapshotRepository::open(
+                            repo,
+                            args.insecure,
+                            auth.clone(),
+                            scratch.clone(),
+                            registry::Tuning::default(),
+                        )
+                        .into_diagnostic()
+                        .with_context(|| format!("opening the repository {repo}"))
+                    };
+
+                    let input =
+                        repository_input(opened.insert(repositories.open(open)?), inputs.point);
+
+                    report_source(repositories, inputs.point);
+
+                    input
+                }
             };
 
-            let opened = opened.insert(repositories.open(open)?);
-
-            println!("source:   {} ({})", repositories.dolos, inputs.point);
-            println!("blocks:   {}", repositories.blocks);
-
-            (
-                repository_input(opened, inputs.point),
-                repositories.dolos.to_string(),
-            )
+            (input, repositories.dolos.to_string())
         }
     };
 
@@ -729,6 +818,12 @@ fn repository_input(
         point,
         blocks: Some(blocks),
     }
+}
+
+/// The lines a registry restore starts with: what it reads, at `point`.
+fn report_source(repositories: &Repositories, point: Point) {
+    println!("source:   {} ({point})", repositories.dolos);
+    println!("blocks:   {}", repositories.blocks);
 }
 
 /// The line a resumed restore starts with, before its first layer.
@@ -996,7 +1091,14 @@ mod tests {
                 "oci://127.0.0.1:5000/mirror/preview",
             ),
         ] {
-            let inputs = resolve(&config, &args(given), Some(&networks::PREVIEW), false).unwrap();
+            let inputs = resolve(
+                &config,
+                &args(given),
+                Some(&networks::PREVIEW),
+                false,
+                &Feedback::hidden(),
+            )
+            .unwrap();
 
             let Reader::Repo { repositories, .. } = &inputs.reader else {
                 panic!("{root} did not resolve to repositories");
@@ -1106,7 +1208,7 @@ mod tests {
         config.storage.path = storage.path().to_path_buf();
 
         let root = "oci://127.0.0.1:5000/mirror/preview";
-        let inputs = resolve(&config, &args(Some(root)), None, false).unwrap();
+        let inputs = resolve(&config, &args(Some(root)), None, false, &Feedback::hidden()).unwrap();
         let Reader::Repo { repositories, .. } = &inputs.reader else {
             panic!("{root} did not resolve to repositories");
         };
@@ -1207,7 +1309,7 @@ mod tests {
         };
         assert_eq!(args.point, Point::Latest);
 
-        let inputs = resolve(&config, &args, None, false).unwrap();
+        let inputs = resolve(&config, &args, None, false, &Feedback::hidden()).unwrap();
 
         assert_eq!(inputs.point, Point::Epoch(42));
         assert!(matches!(inputs.reader, Reader::Repo { .. }));
@@ -1277,6 +1379,7 @@ mod tests {
             source: Source::Dir(storage.path().join("root")),
             point: Point::Latest,
             resuming: None,
+            progress: None,
         };
         let feedback = Feedback::hidden();
         let options = RestoreOptions {
