@@ -122,10 +122,11 @@ pub fn open_genesis(config: &RootConfig) -> miette::Result<Genesis> {
 const RESTORE_HELP: &str = "finish the restore with `dolos bootstrap stelae --continue`, or start \
                             over with `dolos bootstrap stelae --force`";
 
-/// What recovers an archive whose state has no cursor, as a `data rebuild`
-/// or `data reset` stopped before the state was written leaves it. Commands
-/// that run [`refuse_interrupted_restore`] first reach it only without
-/// restore records, where `bootstrap stelae --continue` has nothing to resume.
+/// What recovers an archive whose state has no cursor when no snapshot restore
+/// left its records, as a `data rebuild` or `data reset` stopped before the
+/// state was written leaves it. With the records there, the stores are a
+/// restore's partial progress, and [`RESTORE_HELP`] applies instead: a state
+/// rebuild over them would spend the resume.
 const ARCHIVE_WITHOUT_STATE_HELP: &str =
     "an interrupted `dolos data rebuild` or `dolos data reset` leaves the stores like this; \
      rebuild the state from the archive with `dolos data rebuild`, or replace the dataset with \
@@ -135,14 +136,21 @@ const ARCHIVE_WITHOUT_STATE_HELP: &str =
 /// its stores are incomplete, and only `bootstrap stelae` finishes or replaces
 /// them. Checked before any store is opened, so nothing on disk changes.
 pub fn refuse_interrupted_restore(config: &RootConfig) -> miette::Result<()> {
-    let storage = &config.storage.path;
+    match interrupted_restore(&config.storage.path)? {
+        Some(refusal) => Err(refusal),
+        None => Ok(()),
+    }
+}
 
+/// The refusal for `storage` when an interrupted snapshot restore left its
+/// records there, naming them; `None` when it holds neither.
+fn interrupted_restore(storage: &Path) -> miette::Result<Option<miette::Report>> {
     let records = dolos_snapshot::restore::records_in(storage)
         .into_diagnostic()
         .context("looking for the records of an interrupted snapshot restore")?;
 
     if records.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
 
     let records: Vec<_> = records
@@ -150,12 +158,12 @@ pub fn refuse_interrupted_restore(config: &RootConfig) -> miette::Result<()> {
         .map(|path| path.display().to_string())
         .collect();
 
-    Err(miette::miette!(
+    Ok(Some(miette::miette!(
         help = RESTORE_HELP,
         "a snapshot restore into {} was interrupted, so its stores are incomplete ({} left)",
         storage.display(),
         records.join(", "),
-    ))
+    )))
 }
 
 pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
@@ -173,7 +181,7 @@ pub fn setup_domain_with_stop_epoch(
     DomainBuilder::new(config, genesis)
         .stop_epoch(stop_epoch)
         .build()
-        .map_err(render_domain_build_error)
+        .map_err(|error| render_domain_build_error(&config.storage.path, error))
 }
 
 /// A domain over `stores` as they stand, for a command that repairs or rolls
@@ -183,12 +191,13 @@ pub fn assemble_domain(config: &RootConfig, stores: &Stores) -> miette::Result<D
 
     DomainBuilder::new(config, genesis)
         .assemble(stores)
-        .map_err(render_domain_build_error)
+        .map_err(|error| render_domain_build_error(&config.storage.path, error))
 }
 
 /// Keep actionable executable diagnostics at the UI boundary while the
-/// library returns typed construction errors.
-fn render_domain_build_error(error: DomainBuildError) -> miette::Report {
+/// library returns typed construction errors. `storage_path` is where the
+/// stores live, read for the records a snapshot restore leaves.
+fn render_domain_build_error(storage_path: &Path, error: DomainBuildError) -> miette::Report {
     match error {
         DomainBuildError::Storage(error @ Error::InUse { .. }) => {
             miette::Report::new(storage::OpenError::from(error))
@@ -220,9 +229,16 @@ fn render_domain_build_error(error: DomainBuildError) -> miette::Report {
             };
             miette::miette!(help = help, "{msg}")
         }
+        // A command that did not refuse the records first, such as
+        // `data housekeeping` or a `cache` command, reaches this over a
+        // restore's partial stores, where only `bootstrap stelae` applies.
         DomainBuildError::Bootstrap(
             error @ dolos_core::DomainError::ArchiveWithoutState { .. },
-        ) => miette::miette!(help = ARCHIVE_WITHOUT_STATE_HELP, "{error}"),
+        ) => match interrupted_restore(storage_path) {
+            Ok(Some(refusal)) => refusal.wrap_err(error.to_string()),
+            Ok(None) => miette::miette!(help = ARCHIVE_WITHOUT_STATE_HELP, "{error}"),
+            Err(lookup) => lookup.wrap_err(error.to_string()),
+        },
         DomainBuildError::Bootstrap(error @ dolos_core::DomainError::WalGap { .. }) => {
             miette::miette!(
                 help = "To see the missing blocks, run `dolos sync recover --dry-run`. To reset the WAL to the state cursor, run `dolos sync recover --discard-wal`. This command erases the rollback history of the WAL.",

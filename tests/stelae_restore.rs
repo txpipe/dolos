@@ -997,6 +997,24 @@ fn a_killed_restore_resumes_with_continue() {
     // Every command that would run on it refuses, and leaves it resumable.
     refuses_to_run_on_an_interrupted_restore(&node);
 
+    // A command that checks no records first reaches the startup check over
+    // the partial archive, and names the restore, not a state rebuild that
+    // would spend it.
+    let output = node.run(&["data", "housekeeping"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert!(
+        reports(&output.stderr, "but the state has no cursor"),
+        "{stderr}"
+    );
+    assert!(reports(&output.stderr, "was interrupted"), "{stderr}");
+    assert!(
+        reports(&output.stderr, "dolos bootstrap stelae --continue"),
+        "{stderr}"
+    );
+    assert!(!reports(&output.stderr, "dolos data rebuild"), "{stderr}");
+
     let output = node.run(&["bootstrap", "stelae", "--continue"]);
     let stdout = assert_ok(&output);
 
