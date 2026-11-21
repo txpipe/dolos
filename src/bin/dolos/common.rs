@@ -122,6 +122,15 @@ pub fn open_genesis(config: &RootConfig) -> miette::Result<Genesis> {
 const RESTORE_HELP: &str = "finish the restore with `dolos bootstrap stelae --continue`, or start \
                             over with `dolos bootstrap stelae --force`";
 
+/// What recovers an archive whose state has no cursor, as a `data rebuild`
+/// or `data reset` stopped before the state was written leaves it. Commands
+/// that run [`refuse_interrupted_restore`] first reach it only without
+/// restore records, where `bootstrap stelae --continue` has nothing to resume.
+const ARCHIVE_WITHOUT_STATE_HELP: &str =
+    "an interrupted `dolos data rebuild` or `dolos data reset` leaves the stores like this; \
+     rebuild the state from the archive with `dolos data rebuild`, or replace the dataset with \
+     `dolos bootstrap --force`";
+
 /// Refuse storage that an interrupted snapshot restore left its records in:
 /// its stores are incomplete, and only `bootstrap stelae` finishes or replaces
 /// them. Checked before any store is opened, so nothing on disk changes.
@@ -213,12 +222,7 @@ fn render_domain_build_error(error: DomainBuildError) -> miette::Report {
         }
         DomainBuildError::Bootstrap(
             error @ dolos_core::DomainError::ArchiveWithoutState { .. },
-        ) => miette::miette!(
-            help = format!(
-                "an interrupted snapshot restore leaves the stores like this; {RESTORE_HELP}"
-            ),
-            "{error}"
-        ),
+        ) => miette::miette!(help = ARCHIVE_WITHOUT_STATE_HELP, "{error}"),
         DomainBuildError::Bootstrap(error @ dolos_core::DomainError::WalGap { .. }) => {
             miette::miette!(
                 help = "To see the missing blocks, run `dolos sync recover --dry-run`. To reset the WAL to the state cursor, run `dolos sync recover --discard-wal`. This command erases the rollback history of the WAL.",
