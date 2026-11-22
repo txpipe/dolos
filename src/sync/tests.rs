@@ -10,7 +10,7 @@ use dolos_testing::blocks::make_conway_block_with_prev;
 use dolos_testing::peer::{PeerFixture, PeerOptions};
 use gasket::messaging::OutputPort;
 use gasket::metrics::Reading;
-use gasket::runtime::{StagePhase, Tether, TetherState};
+use gasket::runtime::{Tether, TetherState};
 use itertools::Itertools as _;
 
 use super::*;
@@ -109,7 +109,7 @@ impl Stages {
 }
 
 fn is_ended(tether: &Tether) -> bool {
-    !matches!(tether.check_state(), TetherState::Alive(phase) if phase != StagePhase::Ended)
+    !matches!(tether.check_state(), TetherState::Alive(phase) if phase.end_cause().is_none())
 }
 
 fn start(
