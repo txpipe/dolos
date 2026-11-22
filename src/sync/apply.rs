@@ -40,15 +40,17 @@ pub struct Stage {
 
     pub upstream: UpstreamPort,
 
+    /// Blocks rolled forward.
     #[metric]
-    block_count: gasket::metrics::Counter,
+    blocks: gasket::metrics::Counter,
 
+    /// Rollbacks applied.
     #[metric]
-    wal_count: gasket::metrics::Counter,
+    rollbacks: gasket::metrics::Counter,
 
     /// Housekeeping rounds over, each with the target check after it.
     #[metric]
-    housekeeping_count: gasket::metrics::Counter,
+    housekeeping_runs: gasket::metrics::Counter,
 }
 
 impl Stage {
@@ -64,9 +66,9 @@ impl Stage {
             progress,
             housekeeping_interval,
             upstream: Default::default(),
-            block_count: Default::default(),
-            wal_count: Default::default(),
-            housekeeping_count: Default::default(),
+            blocks: Default::default(),
+            rollbacks: Default::default(),
+            housekeeping_runs: Default::default(),
         }
     }
 
@@ -74,6 +76,10 @@ impl Stage {
         debug!("handling roll forward");
 
         match self.domain.roll_forward(block) {
+            Ok(_) => {
+                self.blocks.inc(1);
+                Ok(())
+            }
             Err(DomainError::StopEpochReached) => {
                 info!("stop epoch reached");
                 self.progress.mark_stop_epoch_reached();
@@ -87,6 +93,7 @@ impl Stage {
         debug!(slot = &point.slot(), "handling rollback");
 
         self.domain.rollback(point).or_panic()?;
+        self.rollbacks.inc(1);
 
         Ok(())
     }
@@ -179,7 +186,7 @@ impl gasket::framework::Worker<Stage> for Worker {
         }
 
         if let WorkUnit::Housekeeping = unit {
-            stage.housekeeping_count.inc(1);
+            stage.housekeeping_runs.inc(1);
         }
 
         Ok(())

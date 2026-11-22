@@ -1,4 +1,4 @@
-use dolos::sync::SyncLimit;
+use dolos::sync::{metrics::ExportedDaemon, SyncLimit};
 use dolos_core::config::RootConfig;
 use futures_util::stream::FuturesUnordered;
 use miette::{Context, IntoDiagnostic};
@@ -26,9 +26,10 @@ pub async fn run(config: RootConfig, _args: &Args) -> miette::Result<()> {
         .context("bootstrapping sync pipeline")?;
 
     let progress = sync.progress;
+    let _sync_gauges = sync.gauges;
 
     let sync = tokio::spawn(crate::common::run_pipeline(
-        gasket::daemon::Daemon::new(sync.tethers),
+        ExportedDaemon::new(gasket::daemon::Daemon::new(sync.tethers)),
         exit.clone(),
     ));
 

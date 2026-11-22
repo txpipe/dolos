@@ -530,7 +530,7 @@ pub fn mempool_metrics(domain: &DomainAdapter) -> MempoolMetrics {
 /// Returns the stages that ended on their own when one did, which is a
 /// failure: `exit` is then cancelled, so the rest of the process winds down.
 pub async fn run_pipeline(
-    pipeline: gasket::daemon::Daemon,
+    pipeline: dolos::sync::metrics::ExportedDaemon,
     exit: CancellationToken,
 ) -> Option<Vec<String>> {
     let ended = loop {

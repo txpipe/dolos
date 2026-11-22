@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use dolos::adapters::DomainAdapter;
 use dolos::prelude::*;
-use dolos::sync::{SyncLimit, SyncProgress};
+use dolos::sync::{metrics::ExportedDaemon, SyncLimit, SyncProgress};
 use dolos_core::config::{RootConfig, UpstreamConfig};
 use gasket::daemon::Daemon;
 use miette::{Context, IntoDiagnostic};
@@ -76,7 +76,8 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         .context("bootstrapping sync pipeline")?;
 
     let progress = sync.progress;
-    let daemon = Daemon::new(sync.tethers);
+    let _gauges = sync.gauges;
+    let daemon = ExportedDaemon::new(Daemon::new(sync.tethers));
 
     let end = wait(&daemon, &progress);
     daemon.teardown();

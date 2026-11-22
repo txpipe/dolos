@@ -14,6 +14,7 @@ pub mod mempool;
 pub mod queries;
 pub mod requests;
 pub mod storage;
+pub mod sync;
 
 /// The meter of the instruments this crate records.
 pub const METER: &str = "dolos-core";
@@ -47,6 +48,10 @@ pub const OUTCOME: &str = "outcome";
 /// The state of a mempool transaction: a lifecycle stage, or `pending` and
 /// `inflight` for the mempool's size.
 pub const STATE: &str = "state";
+
+/// The name of a sync work unit: `roll`, `rupd`, `ewrap`, `estart`,
+/// `genesis`, `forced_stop`.
+pub const WORK_UNIT: &str = "work_unit";
 
 /// The crate version of the running build.
 pub const VERSION: &str = "version";

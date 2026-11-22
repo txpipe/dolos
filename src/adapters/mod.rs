@@ -58,15 +58,20 @@ pub struct DomainAdapter {
     pub storage_gauges: Arc<metrics::StorageGauges>,
 }
 
+/// The slot and block number of the archive's tip block, if it has one.
+pub fn archive_tip(archive: &ArchiveStoreBackend) -> Option<(u64, u64)> {
+    let (_, body) = archive.get_tip().ok()??;
+    let block = MultiEraBlock::decode(&body).ok()?;
+
+    Some((block.slot(), block.number()))
+}
+
 /// Registers the `dolos.sync.tip.*` gauges over the archive's tip block.
 pub fn tip_gauges(archive: &ArchiveStoreBackend) -> Arc<dolos_core::telemetry::TipGauges> {
     let archive = archive.clone();
 
     Arc::new(dolos_core::telemetry::TipGauges::register(move || {
-        let (_, body) = archive.get_tip().ok()??;
-        let block = MultiEraBlock::decode(&body).ok()?;
-
-        Some((block.slot(), block.number()))
+        archive_tip(&archive)
     }))
 }
 
