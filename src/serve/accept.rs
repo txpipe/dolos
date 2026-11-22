@@ -112,6 +112,6 @@ mod tests {
         assert_eq!(start.elapsed(), Duration::ZERO);
 
         AcceptFailure::Listener.settle().await;
-        assert_eq!(start.elapsed(), LISTENER_RETRY_DELAY);
+        assert_eq!(start.elapsed(), Duration::from_secs(1));
     }
 }
