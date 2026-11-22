@@ -10,10 +10,13 @@
 //!
 //! The destination is a network root: the Dolos snapshot goes into its
 //! `dolos/` layout and the closed epochs' blocks into `blocks/`, which the
-//! Dolos snapshot names in `position.blocks`. A destination that already holds
-//! a layout is appended to: the new inscription names the latest one as its
-//! `previous` and lists only its own diff. Progress rendering and destination
-//! cleanup remain host responsibilities.
+//! Dolos snapshot names in `position.blocks`. An empty destination starts a
+//! lineage. One whose latest Dolos snapshot is at the sequence just before
+//! this one is appended to: the new inscription names that snapshot as its
+//! `previous` and lists its own diff and the tip, not the predecessor's
+//! layers. A latest Dolos snapshot at any other sequence is refused before a
+//! layer is written. Progress rendering and destination cleanup remain host
+//! responsibilities.
 //!
 //! The stores must stand on the first block of an epoch, with the archive
 //! ending there, as a sync stopped at that epoch leaves them; any other cut is
@@ -54,7 +57,8 @@ fn main() -> Result<(), AnyError> {
         snapshot.verify_reproduction(&inscription, &plan)?;
 
         // The identity is the published inscription's: after an append it
-        // names its predecessor and lists only this sequence's diff.
+        // names its predecessor, and the layer count is this sequence's diff
+        // plus the tip.
         eprintln!("sequence: {}", plan.sequence);
         eprintln!("layers:   {}", inscription.layers().count());
         eprintln!("identity: {}", inscription.digest()?);
