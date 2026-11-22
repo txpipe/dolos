@@ -144,7 +144,7 @@ fn copy(pristine: &Path, scratch: &Path, name: &str) -> PathBuf {
 
 /// Each recorded command, on its own copy of `pristine` and after the
 /// command its `.before` file names, exits with its code and prints its
-/// golden.
+/// golden, the fields its `.shape` file names compared by shape only.
 fn goldens(pristine: &Path, scratch: &Path) -> Vec<String> {
     let cli = pristine.join("cli");
     let mut exits: Vec<PathBuf> = std::fs::read_dir(&cli)
@@ -192,8 +192,11 @@ fn goldens(pristine: &Path, scratch: &Path) -> Vec<String> {
 
         if json.is_file() {
             let golden = std::fs::read_to_string(&json).unwrap();
+            let shaped =
+                std::fs::read_to_string(cli.join(format!("{stem}.shape"))).unwrap_or_default();
+            let shaped: Vec<&str> = shaped.lines().collect();
 
-            if let Err(found) = compat::matches_golden(&golden, &stdout) {
+            if let Err(found) = compat::matches_golden(&golden, &stdout, &shaped) {
                 problems.extend(found.into_iter().map(|f| format!("{stem}: {f}")));
             }
         }

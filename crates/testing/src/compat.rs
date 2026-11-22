@@ -59,9 +59,10 @@ pub enum Output {
     Nothing,
     /// The JSON, whole.
     Json,
-    /// The JSON without these top-level fields, which describe data outside
-    /// the contract, for the reason given.
-    JsonWithout(&'static [&'static str], &'static str),
+    /// The JSON, with these top-level fields compared by shape only: each
+    /// keeps its key and its JSON type, recursively, while its values
+    /// describe data outside the contract, for the reason given.
+    JsonShaped(&'static [&'static str], &'static str),
     /// Nothing, for the reason given. The generator still checks that the
     /// command printed JSON.
     Unkept(&'static str),
@@ -108,7 +109,7 @@ const fn golden(
     }
 }
 
-const WAL: &str = "each describes the WAL, which is outside the contract";
+const WAL: &str = "their values describe the WAL, which is outside the contract";
 
 /// Every row of the supported-surface inventory, with its invocation.
 ///
@@ -177,14 +178,14 @@ pub const GOLDENS: &[Golden] = &[
         "dolos sync status",
         &["sync", "status", "--format", "json"],
         0,
-        Output::JsonWithout(&["wal", "rollback_window", "integrity"], WAL),
+        Output::JsonShaped(&["wal", "rollback_window", "integrity"], WAL),
     )
     .after_recover(),
     golden(
         "dolos sync recover",
         &["sync", "recover", "--dry-run", "--format", "json"],
         0,
-        Output::JsonWithout(&["wal"], WAL),
+        Output::Json,
     )
     .after_recover(),
     golden(
@@ -594,7 +595,7 @@ fn record(binary: &Path, out: &Path, golden: &Golden) -> Result<(), String> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json = match golden.output {
         Output::Json => Some(json_lines(&stdout, &[])?),
-        Output::JsonWithout(fields, _) => Some(json_lines(&stdout, fields)?),
+        Output::JsonShaped(fields, _) => Some(json_lines(&stdout, fields)?),
         Output::Unkept(_) => json_lines(&stdout, &[]).map(|_| None)?,
         Output::Nothing | Output::Help(_) => None,
     };
@@ -614,6 +615,10 @@ fn record(binary: &Path, out: &Path, golden: &Golden) -> Result<(), String> {
 
     if let Some(json) = json {
         write(file("json"), json)?;
+    }
+
+    if let Output::JsonShaped(fields, _) = golden.output {
+        write(file("shape"), lines(fields))?;
     }
 
     Ok(())
@@ -638,21 +643,19 @@ pub fn run_first(binary: &Path, node: &Path, args: &[&str]) -> Result<(), String
     }
 }
 
-/// `stdout`, one JSON value per line, with the top-level fields `left_out`
-/// removed from each; refused when it holds no value, or a value lacks one
-/// of those fields.
-fn json_lines(stdout: &str, left_out: &[&str]) -> Result<String, String> {
+/// `stdout`, one JSON value per line; refused when it holds no value, or a
+/// value lacks one of the top-level fields `required`.
+fn json_lines(stdout: &str, required: &[&str]) -> Result<String, String> {
     let mut kept = String::new();
 
     for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
-        let mut value: Value = serde_json::from_str(line)
+        let value: Value = serde_json::from_str(line)
             .map_err(|e| format!("printed a line that is not JSON: {e}"))?;
 
-        for field in left_out {
-            value
-                .as_object_mut()
-                .and_then(|object| object.remove(*field))
-                .ok_or_else(|| format!("printed no `{field}` to leave out"))?;
+        for field in required {
+            if value.get(*field).is_none() {
+                return Err(format!("printed no `{field}` to compare by shape"));
+            }
         }
 
         kept.push_str(&serde_json::to_string(&value).map_err(|e| e.to_string())?);
@@ -682,17 +685,19 @@ fn fixture_md(provenance: &Provenance, slot: u64, hash: &str) -> String {
          - commit: `{}`\n\
          - contract: `{}`\n\
          - tip: `{slot}` `{hash}`\n\n\
-         ## Left out of the goldens\n\n\
+         ## Compared by shape or left out\n\n\
          Each row runs on its own copy of `data/`. A row with a `.before` file runs \
-         that command first, on the same copy.\n\n",
+         that command first, on the same copy. A row with a `.shape` file compares \
+         the top-level fields it names by key and JSON type only, recursively; \
+         an array there may change its length.\n\n",
         provenance.version, provenance.commit, provenance.contract,
     );
 
     for golden in GOLDENS {
         let left_out = match golden.output {
-            Output::JsonWithout(fields, why) => {
+            Output::JsonShaped(fields, why) => {
                 let fields: Vec<String> = fields.iter().map(|f| format!("`{f}`")).collect();
-                format!("leaves out {}: {why}", fields.join(", "))
+                format!("compares {} by shape only: {why}", fields.join(", "))
             }
             Output::Unkept(why) => format!("keeps its exit code only: {why}"),
             Output::Help(why) => format!("records `--help`: {why}"),
@@ -818,8 +823,10 @@ fn compare(
 }
 
 /// Check stdout of a command against its golden: one JSON value per line,
-/// each compared with [`added_fields_only`] and no defaults.
-pub fn matches_golden(golden: &str, current: &str) -> Result<(), Vec<String>> {
+/// each compared with [`added_fields_only`] and no defaults, apart from the
+/// top-level fields `shaped`, which compare by shape only: each keeps its
+/// keys and JSON types, recursively, and an array may change its length.
+pub fn matches_golden(golden: &str, current: &str, shaped: &[&str]) -> Result<(), Vec<String>> {
     let parse = |text: &str| -> Result<Vec<Value>, Vec<String>> {
         text.lines()
             .filter(|line| !line.trim().is_empty())
@@ -845,7 +852,7 @@ pub fn matches_golden(golden: &str, current: &str) -> Result<(), Vec<String>> {
         .zip(&current)
         .enumerate()
         .filter_map(|(line, (golden, current))| {
-            added_fields_only(golden, current, None)
+            record_matches(golden, current, shaped)
                 .err()
                 .map(|found| (line, found))
         })
@@ -856,6 +863,75 @@ pub fn matches_golden(golden: &str, current: &str) -> Result<(), Vec<String>> {
         Ok(())
     } else {
         Err(problems)
+    }
+}
+
+/// One record of [`matches_golden`]: `shaped` fields by shape, the rest by
+/// value.
+fn record_matches(golden: &Value, current: &Value, shaped: &[&str]) -> Result<(), Vec<String>> {
+    let (mut golden, mut current) = (golden.clone(), current.clone());
+    let mut problems = Vec::new();
+
+    for field in shaped {
+        let at = format!("$.{field}");
+        let taken = |value: &mut Value| value.as_object_mut().and_then(|o| o.remove(*field));
+
+        match (taken(&mut golden), taken(&mut current)) {
+            (Some(golden), Some(current)) => shape(&at, &golden, &current, &mut problems),
+            (Some(_), None) => problems.push(format!("{at} is gone")),
+            (None, _) => {}
+        }
+    }
+
+    if let Err(found) = added_fields_only(&golden, &current, None) {
+        problems.extend(found);
+    }
+
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems)
+    }
+}
+
+/// Check that `current` keeps every key `golden` has, with the same JSON
+/// type, recursively, whatever the values; added keys are allowed. Arrays
+/// may change their length, and the elements both hold compare in turn.
+fn shape(path: &str, golden: &Value, current: &Value, problems: &mut Vec<String>) {
+    match (golden, current) {
+        (Value::Object(golden), Value::Object(current)) => {
+            for (key, golden) in golden {
+                let at = format!("{path}.{key}");
+
+                match current.get(key) {
+                    Some(current) => shape(&at, golden, current, problems),
+                    None => problems.push(format!("{at} is gone")),
+                }
+            }
+        }
+        (Value::Array(golden), Value::Array(current)) => {
+            for (index, (golden, current)) in golden.iter().zip(current).enumerate() {
+                shape(&format!("{path}[{index}]"), golden, current, problems);
+            }
+        }
+        (golden, current) if kind(golden) == kind(current) => {}
+        (golden, current) => problems.push(format!(
+            "{path} was {}, now {}",
+            kind(golden),
+            kind(current)
+        )),
+    }
+}
+
+/// The JSON type of `value`, as an error names it.
+fn kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
     }
 }
 
@@ -1017,15 +1093,15 @@ mod tests {
         let golden = "{\"a\":1}\n{\"a\":2}\n";
 
         assert_eq!(
-            matches_golden(golden, "{\"a\":1,\"b\":0}\n{\"a\":2}\n"),
+            matches_golden(golden, "{\"a\":1,\"b\":0}\n{\"a\":2}\n", &[]),
             Ok(())
         );
         assert_eq!(
-            matches_golden(golden, "{\"a\":1}\n"),
+            matches_golden(golden, "{\"a\":1}\n", &[]),
             Err(vec!["1 records, the golden has 2".to_string()])
         );
         assert_eq!(
-            matches_golden(golden, "{\"a\":1}\n{\"a\":5}\n"),
+            matches_golden(golden, "{\"a\":1}\n{\"a\":5}\n", &[]),
             Err(vec!["line 1: $.a was 2, now 5".to_string()])
         );
     }
@@ -1033,23 +1109,69 @@ mod tests {
     #[test]
     fn an_empty_golden_matches_nothing() {
         assert_eq!(
-            matches_golden("", ""),
+            matches_golden("", "", &[]),
             Err(vec!["the golden holds no record".to_string()])
         );
     }
 
     #[test]
-    fn a_golden_leaves_out_the_fields_named() {
+    fn a_golden_keeps_the_fields_it_compares_by_shape() {
         assert_eq!(
             json_lines("{\"a\":1,\"wal\":2}\n\n{\"a\":3,\"wal\":4}\n", &["wal"]),
-            Ok("{\"a\":1}\n{\"a\":3}\n".to_string())
+            Ok("{\"a\":1,\"wal\":2}\n{\"a\":3,\"wal\":4}\n".to_string())
         );
         assert_eq!(
             json_lines("{\"a\":1}\n", &["wal"]),
-            Err("printed no `wal` to leave out".to_string())
+            Err("printed no `wal` to compare by shape".to_string())
         );
         assert_eq!(json_lines("\n", &[]), Err("printed no JSON".to_string()));
         assert!(json_lines("Error: no store\n", &[]).is_err());
+    }
+
+    #[test]
+    fn a_shaped_field_keeps_its_keys_and_types_whatever_its_values() {
+        let golden = json!({
+            "tip": 9,
+            "wal": {"start_slot": 1, "entries": [{"slot": 1, "hash": "aa"}]},
+            "window": {"from": 1},
+        });
+        let line = |value: serde_json::Value| format!("{value}\n");
+        let check = |current: serde_json::Value| {
+            matches_golden(&line(golden.clone()), &line(current), &["wal", "window"])
+        };
+
+        assert_eq!(
+            check(json!({
+                "tip": 9,
+                "wal": {"start_slot": 7, "entries": [], "added": true},
+                "window": {"from": 3},
+            })),
+            Ok(())
+        );
+        assert_eq!(
+            check(json!({
+                "tip": 9,
+                "wal": {"start_slot": 7, "entries": [{"slot": 2}, {"slot": 3, "hash": "bb"}]},
+                "window": {"from": 3},
+            })),
+            Err(vec!["line 0: $.wal.entries[0].hash is gone".to_string()])
+        );
+        assert_eq!(
+            check(json!({"tip": 9, "wal": null, "rollback": {"from": 1}})),
+            Err(vec![
+                "line 0: $.wal was an object, now null".to_string(),
+                "line 0: $.window is gone".to_string(),
+            ])
+        );
+        assert_eq!(
+            check(
+                json!({"tip": 8, "wal": {"start_slot": "1", "entries": []}, "window": {"from": 1}})
+            ),
+            Err(vec![
+                "line 0: $.wal.start_slot was a number, now a string".to_string(),
+                "line 0: $.tip was 9, now 8".to_string(),
+            ])
+        );
     }
 
     #[test]

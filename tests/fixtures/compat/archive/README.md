@@ -12,12 +12,13 @@ current build, and so does CI's `compat-fixtures` job, on every push to
 - `cli/`, one golden per row of the supported-surface inventory on
   `docs/content/reference/compatibility.mdx`: the arguments (`.args`), the exit
   code (`.exit`), for a command with machine-readable output its JSON
-  (`.json`), and for a row that reads the WAL the command run before it
-  (`.before`);
+  (`.json`), for a row that reads the WAL the command run before it
+  (`.before`), and the top-level fields compared by key and JSON type only,
+  not by value (`.shape`);
 - `FIXTURE.md`, the binary's version, commit and contract, the tip the
-  stores stand at, and what the goldens leave out and why: the WAL, the
-  mempool and the cache's disk tier are outside the contract, and some
-  reports are not deterministic.
+  stores stand at, and what the goldens compare by shape or leave out, and
+  why: the WAL, the mempool and the cache's disk tier are outside the
+  contract, and some reports are not deterministic.
 
 The harness gives the stores and each golden their own copy of `data/`, so
 no command sees what another wrote.
