@@ -16,7 +16,9 @@ $ dolos --version
 dolos <version> (compatibility <identifier>)
 ```
 
-A configuration declares the identifier it was written for (`compatibility = "…"` at the top of `dolos.toml`), and the state and archive stores record the one they were created under. Within one identifier, a newer binary keeps these promises:
+There is no machine-readable release registry: to learn which identifier a release implements, read it from `dolos --version`, a refusal or the release notes.
+
+A configuration declares the identifier it was written for (`compatibility = "…"` at the top of `dolos.toml`), and the state and archive stores record the one they were created under. The archive's identity covers its indexes, which live in the archive store, and the state's covers the live indexes beside the UTxO set. Within one identifier, a newer binary keeps these promises:
 
 - **Configuration.** It accepts a configuration an older binary accepted, and gives it the same meaning.
 - **Persisted data.** It opens a dataset an older binary wrote and keeps using it, with no rebuild, restore or operator-managed migration.
@@ -120,6 +122,8 @@ What the current binary does with a configuration or a dataset written by anothe
 | a store holding data but recording no identity | the store identity | refill the store as for v1.6.x |
 
 `dolos init` writes a new configuration and refuses to overwrite a file that does not load, so move the old file aside first. A refused store stays refused until it is replaced: `bootstrap` with `--force` clears the storage root before it fills it, and `dolos data reset --yes` clears it for a re-sync from genesis. No configuration edit gets a refused store past the check.
+
+A restore stamps the restoring binary's identifier on the state and archive it writes, whatever release wrote the snapshot: `dolos bootstrap stelae` writes through the binary's own stores, so a restored dataset is the restoring release's, not the snapshot publisher's.
 
 ### Supported
 
