@@ -18,7 +18,7 @@ dolos <version> (compatibility <identifier>)
 
 There is no machine-readable release registry: to learn which identifier a release implements, read it from `dolos --version`, a refusal or the release notes.
 
-A configuration declares the identifier it was written for (`compatibility = "…"` at the top of `dolos.toml`), and the state and archive stores record the one they were created under. The archive's identity covers its indexes, which live in the archive store and commit with its blocks, and the state's covers the live indexes beside the UTxO set. Within one identifier, a newer binary keeps these promises:
+A configuration declares the identifier it was written for (`compatibility = "…"` at the top of `dolos.toml`), and the state and archive stores record the one they were created under. The archive's identity covers its indexes, which live in the archive store, and the state's covers the live indexes beside the UTxO set. Within one identifier, a newer binary keeps these promises:
 
 - **Configuration.** It accepts a configuration an older binary accepted, and gives it the same meaning.
 - **Persisted data.** It opens a dataset an older binary wrote and keeps using it, with no rebuild, restore or operator-managed migration.
