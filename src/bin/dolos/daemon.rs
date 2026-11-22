@@ -11,7 +11,7 @@ pub struct Args {}
 pub async fn run(config: RootConfig, _args: &Args) -> miette::Result<()> {
     crate::common::refuse_interrupted_restore(&config)?;
 
-    let _tracing = crate::common::setup_tracing(&config)?;
+    let telemetry = crate::common::setup_tracing(&config)?;
 
     let domain = crate::common::setup_domain(&config)?;
     let _limiter_gauges =
@@ -30,6 +30,7 @@ pub async fn run(config: RootConfig, _args: &Args) -> miette::Result<()> {
 
     let sync = tokio::spawn(crate::common::run_pipeline(
         ExportedDaemon::new(gasket::daemon::Daemon::new(sync.tethers)),
+        telemetry.metrics_flush(),
         exit.clone(),
     ));
 

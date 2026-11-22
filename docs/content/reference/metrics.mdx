@@ -128,10 +128,10 @@ The query limiter bounds the blocking query work of the whole process, whichever
 | `dolos.sync.upstream.sessions`<br />`dolos_sync_upstream_sessions_total` | `dolos` | counter, `{session}` | `outcome` | Sessions with the upstream peer, by outcome |
 | `dolos.sync.upstream.last_delivery.age`<br />`dolos_sync_upstream_last_delivery_age_seconds` | `dolos` | gauge, `s` | none | Time since the upstream peer last delivered |
 | `dolos.sync.work_unit.duration`<br />`dolos_sync_work_unit_duration_seconds` | `dolos-core` | histogram, `s` | `work_unit` | How long each sync work unit took |
-| `dolos.sync.rollback.depth`<br />`dolos_sync_rollback_depth` | `dolos-core` | histogram, `{block}` | none | Blocks each rollback undid |
+| `dolos.sync.rollback.depth`<br />`dolos_sync_rollback_depth` | `dolos-core` | histogram, `{block}` | none | Blocks each rollback undid, when it undid any |
 | `dolos.sync.stage.blocks`<br />`dolos_sync_stage_blocks_total` | `dolos` | counter | `stage` | Blocks the stage sent on (`pull`, `emulator`) or rolled forward (`apply`) |
 | `dolos.sync.stage.upstream_tip_slot`<br />`dolos_sync_stage_upstream_tip_slot` | `dolos` | gauge | `stage` | Slot of the tip the upstream (`pull`) or the emulator last reported |
-| `dolos.sync.stage.rollbacks`<br />`dolos_sync_stage_rollbacks_total` | `dolos` | counter | `stage` | Rollbacks the apply stage applied |
+| `dolos.sync.stage.rollbacks`<br />`dolos_sync_stage_rollbacks_total` | `dolos` | counter | `stage` | Rollbacks the apply stage applied that undid at least one block |
 | `dolos.sync.stage.housekeeping_runs`<br />`dolos_sync_stage_housekeeping_runs_total` | `dolos` | counter | `stage` | Housekeeping rounds the apply stage ran |
 | `dolos.sync.stage.ticks`<br />`dolos_sync_stage_ticks_total` | `dolos` | counter, `{tick}` | `stage` | State-machine ticks of the stage |
 | `dolos.sync.stage.units`<br />`dolos_sync_stage_units_total` | `dolos` | counter, `{unit}` | `stage` | Work units the stage executed |
@@ -145,7 +145,7 @@ The query limiter bounds the blocking query work of the whole process, whichever
 - A session's `outcome` is `connected` when it connected and found its intersection, `failed` for an attempt that did not, and `lost` for a connected session that ended. Rising `failed` with no `connected` means the peer is unreachable; rising `lost` means it keeps dropping sessions.
 - The delivery age counts from the last time a session delivered blocks or reached the peer's tip, a rollback the peer sends at the tip included. It is not reported before the first delivery. At the tip it grows until the next block, so read it against the network's block interval.
 - `work_unit` is the unit's name: `roll` (a batch of blocks), `rupd` (the reward update), `ewrap` and `estart` (the epoch boundary), `genesis` and `forced_stop`. A slow apply stage shows as long `roll` units; a slow peer as a delivery age that grows while `dolos.sync.tip.lag` does.
-- The rollback depth has the bucket boundaries 1, 2, 3, 5, 10, 20, 50, 100, 500 and 2160 blocks.
+- The rollback depth has the bucket boundaries 1, 2, 3, 5, 10, 20, 50, 100, 500 and 2160 blocks. Every session starts with a rollback to its intersection, which undoes nothing: such a rollback records no depth sample and does not count in `dolos.sync.stage.rollbacks`.
 
 ## Cache
 

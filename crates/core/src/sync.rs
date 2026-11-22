@@ -56,7 +56,10 @@ pub trait SyncExt: Domain {
     /// undoing each block's effects on state, UTxOs (tags included), and the
     /// archive's index entries; the archive's blocks and logs are then cut
     /// with `truncate_front`, and the WAL drops the entries undone.
-    fn rollback(&self, to: &ChainPoint) -> Result<(), DomainError>;
+    ///
+    /// Returns the number of blocks undone, which is zero when `to` is
+    /// already the tip, as it is at the start of every upstream session.
+    fn rollback(&self, to: &ChainPoint) -> Result<usize, DomainError>;
 }
 
 impl<D: Domain> SyncExt for D {
@@ -105,7 +108,7 @@ impl<D: Domain> SyncExt for D {
     }
 
     #[instrument(skip_all, fields(rollback_to = %to))]
-    fn rollback(&self, to: &ChainPoint) -> Result<(), DomainError> {
+    fn rollback(&self, to: &ChainPoint) -> Result<usize, DomainError> {
         // Keys sort the entries of one slot by hash, so a block the chain
         // puts after `to` at its slot can sort below it: read from the slot's
         // first key.
@@ -179,9 +182,11 @@ impl<D: Domain> SyncExt for D {
         // undone at its slot, or drop one the chain puts before it.
         self.wal().remove_points(&undone)?;
 
-        metrics::record_rollback(undone.len());
+        if !undone.is_empty() {
+            metrics::record_rollback(undone.len());
+        }
 
-        Ok(())
+        Ok(undone.len())
     }
 }
 

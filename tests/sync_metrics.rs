@@ -209,6 +209,8 @@ fn a_sync_exports_each_stage_s_blocks_and_framework_series() {
     )
     .unwrap();
 
+    let before = collect();
+
     let pipeline = dolos::sync::sync(
         &config.sync,
         PREVIEW_MAGIC,
@@ -255,6 +257,17 @@ fn a_sync_exports_each_stage_s_blocks_and_framework_series() {
     assert_eq!(
         value(&points, "dolos.sync.upstream.sessions{outcome=connected}"),
         1.0
+    );
+
+    // The session opened with a rollback to its intersection, which undid
+    // nothing and is no rollback of the chain.
+    assert_eq!(
+        value(&points, "dolos.sync.stage.rollbacks{stage=apply}"),
+        0.0
+    );
+    assert_eq!(
+        value(&points, "dolos.sync.rollback.depth.count{}"),
+        value(&before, "dolos.sync.rollback.depth.count{}"),
     );
 
     daemon.teardown();

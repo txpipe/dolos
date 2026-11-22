@@ -67,7 +67,7 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         .into());
     }
 
-    let _tracing = crate::common::setup_tracing(config)?;
+    let telemetry = crate::common::setup_tracing(config)?;
 
     let domain = crate::common::setup_domain_with_stop_epoch(config, args.stop_epoch)?;
 
@@ -80,6 +80,10 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     let daemon = ExportedDaemon::new(Daemon::new(sync.tethers));
 
     let end = wait(&daemon, &progress);
+
+    // The guard's flush on exit comes after the gauges and the bridge are
+    // gone, so export their final values first.
+    telemetry.metrics_flush().flush();
     daemon.teardown();
 
     eprintln!("committed: {}", committed(&domain));

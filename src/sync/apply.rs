@@ -44,7 +44,7 @@ pub struct Stage {
     #[metric]
     blocks: gasket::metrics::Counter,
 
-    /// Rollbacks applied.
+    /// Rollbacks that undid at least one block.
     #[metric]
     rollbacks: gasket::metrics::Counter,
 
@@ -92,8 +92,11 @@ impl Stage {
     fn on_rollback(&self, point: &ChainPoint) -> Result<(), WorkerError> {
         debug!(slot = &point.slot(), "handling rollback");
 
-        self.domain.rollback(point).or_panic()?;
-        self.rollbacks.inc(1);
+        // A session starts by rolling back to its intersection, which undoes
+        // nothing: only a rollback that undid blocks counts.
+        if self.domain.rollback(point).or_panic()? > 0 {
+            self.rollbacks.inc(1);
+        }
 
         Ok(())
     }

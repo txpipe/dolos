@@ -61,7 +61,7 @@ pub(crate) fn time_work_unit<T>(name: &'static str, run: impl FnOnce() -> T) -> 
     result
 }
 
-/// Records one rollback that undid `blocks` blocks.
+/// Records one rollback that undid `blocks` blocks, at least one.
 pub(crate) fn record_rollback(blocks: usize) {
     instruments().rollback_depth.record(blocks as u64, &[]);
 }
