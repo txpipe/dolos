@@ -35,21 +35,52 @@ const MAGIC: u32 = 2;
 ///
 /// A command with machine-readable output runs it against the fixture's
 /// stores. One without runs where that is offline and leaves the dataset as
-/// it was; otherwise it records its `--help`, which keeps its arguments and
-/// exit code `0` under test.
+/// it was; otherwise it records its `--help`, which keeps its exit code under
+/// test. Each row runs on its own copy of the dataset, so no row sees what
+/// another wrote.
 pub struct Golden {
     /// The command as the inventory names it, `dolos` included.
     pub command: &'static str,
     /// The arguments after `dolos`.
     pub args: &'static [&'static str],
-    /// Whether stdout is JSON, kept as the golden.
-    pub json: bool,
+    /// The exit code the row records; the generator refuses any other.
+    pub exit: i32,
+    /// What the golden keeps of stdout.
+    pub output: Output,
+    /// Whether the row runs after [`RECOVER`] on its copy, as on a node a new
+    /// release has started once: the WAL is outside the contract, and the
+    /// row reads it.
+    pub after_recover: bool,
+}
+
+/// What a golden keeps of a command's stdout.
+pub enum Output {
+    /// Nothing: the command prints no machine-readable output.
+    Nothing,
+    /// The JSON, whole.
+    Json,
+    /// The JSON without these top-level fields, which describe data outside
+    /// the contract, for the reason given.
+    JsonWithout(&'static [&'static str], &'static str),
+    /// Nothing, for the reason given. The generator still checks that the
+    /// command printed JSON.
+    Unkept(&'static str),
+    /// Nothing: the row records `--help` in place of a report, for the
+    /// reason given.
+    Help(&'static str),
 }
 
 impl Golden {
     /// The file stem of its golden, as `dolos-sync-status`.
     pub fn stem(&self) -> String {
         stem(self.command)
+    }
+
+    const fn after_recover(self) -> Self {
+        Self {
+            after_recover: true,
+            ..self
+        }
     }
 }
 
@@ -58,31 +89,43 @@ pub fn stem(command: &str) -> String {
     command.split_whitespace().collect::<Vec<_>>().join("-")
 }
 
-const fn golden(command: &'static str, args: &'static [&'static str], json: bool) -> Golden {
+/// The command an `after_recover` row runs first: its writable open resets
+/// a WAL this build can't read, and it seeds the WAL again from the state.
+pub const RECOVER: &[&str] = &["sync", "recover", "--format", "json"];
+
+const fn golden(
+    command: &'static str,
+    args: &'static [&'static str],
+    exit: i32,
+    output: Output,
+) -> Golden {
     Golden {
         command,
         args,
-        json,
+        exit,
+        output,
+        after_recover: false,
     }
 }
 
+const WAL: &str = "each describes the WAL, which is outside the contract";
+
 /// Every row of the supported-surface inventory, with its invocation.
 ///
-/// Three reports are not deterministic, so only their exit code is kept:
-/// `data stats` names each keyspace by absolute path, and `data check` times
-/// each check (`elapsed_ms`). `service install` and `service uninstall`
-/// record their `--help`: their report names the unit file and the binary by
-/// absolute path, and differs between service managers. `data check` leaves
-/// out `totals`, which the synthetic chain fails: the pots leave out the
-/// UTxOs its custom genesis seeds.
+/// The groups exit `2`, and `bootstrap --force` exits `1` at the prompt it has
+/// no terminal for, before it clears anything. `data check` leaves out
+/// `totals`, which the synthetic chain fails: the pots leave out the UTxOs its
+/// custom genesis seeds. What a row leaves out of its golden, and why, is
+/// written into the fixture's `FIXTURE.md`.
 pub const GOLDENS: &[Golden] = &[
-    golden("dolos", &[], false),
-    golden("dolos init", &["init", "--help"], false),
-    golden("dolos config", &["config"], false),
+    golden("dolos", &[], 2, Output::Nothing),
+    golden("dolos init", &["init", "--help"], 0, Output::Nothing),
+    golden("dolos config", &["config"], 2, Output::Nothing),
     golden(
         "dolos config check",
         &["config", "check", "--format", "json"],
-        true,
+        0,
+        Output::Json,
     ),
     golden(
         "dolos config write-genesis",
@@ -94,53 +137,74 @@ pub const GOLDENS: &[Golden] = &[
             "--dir",
             "written-genesis",
         ],
-        false,
+        0,
+        Output::Nothing,
     ),
-    golden("dolos daemon", &["daemon", "--help"], false),
-    golden("dolos serve", &["serve", "--help"], false),
-    golden("dolos bootstrap", &["bootstrap"], false),
+    golden("dolos daemon", &["daemon", "--help"], 0, Output::Nothing),
+    golden("dolos serve", &["serve", "--help"], 0, Output::Nothing),
+    golden(
+        "dolos bootstrap",
+        &["bootstrap", "--force"],
+        1,
+        Output::Nothing,
+    ),
     golden(
         "dolos bootstrap mithril",
         &["bootstrap", "mithril", "--help"],
-        false,
+        0,
+        Output::Nothing,
     ),
     golden(
         "dolos bootstrap stelae",
         &["bootstrap", "stelae", "--help"],
-        false,
+        0,
+        Output::Nothing,
     ),
     golden(
         "dolos bootstrap immutabledb",
         &["bootstrap", "immutabledb", "--help"],
-        false,
+        0,
+        Output::Nothing,
     ),
-    golden("dolos sync", &["sync"], false),
-    golden("dolos sync catchup", &["sync", "catchup", "--help"], false),
+    golden("dolos sync", &["sync"], 2, Output::Nothing),
+    golden(
+        "dolos sync catchup",
+        &["sync", "catchup", "--help"],
+        0,
+        Output::Nothing,
+    ),
     golden(
         "dolos sync status",
         &["sync", "status", "--format", "json"],
-        true,
-    ),
+        0,
+        Output::JsonWithout(&["wal", "rollback_window", "integrity"], WAL),
+    )
+    .after_recover(),
     golden(
         "dolos sync recover",
         &["sync", "recover", "--dry-run", "--format", "json"],
-        true,
-    ),
+        0,
+        Output::JsonWithout(&["wal"], WAL),
+    )
+    .after_recover(),
     golden(
         "dolos sync dump",
         &["sync", "dump", "--limit", "0", "--format", "json"],
-        true,
+        0,
+        Output::Unkept("its records are the WAL's entries, which are outside the contract"),
     ),
     golden(
         "dolos sync rollback",
         &["sync", "rollback", "--help"],
-        false,
+        0,
+        Output::Nothing,
     ),
-    golden("dolos data", &["data"], false),
+    golden("dolos data", &["data"], 2, Output::Nothing),
     golden(
         "dolos data stats",
         &["data", "stats", "--format", "json"],
-        false,
+        0,
+        Output::Unkept("it names each keyspace by absolute path"),
     ),
     golden(
         "dolos data inspect",
@@ -152,9 +216,10 @@ pub const GOLDENS: &[Golden] = &[
             "--format",
             "json",
         ],
-        true,
+        0,
+        Output::Json,
     ),
-    golden("dolos data dump", &["data", "dump"], false),
+    golden("dolos data dump", &["data", "dump"], 2, Output::Nothing),
     golden(
         "dolos data dump state",
         &[
@@ -168,7 +233,8 @@ pub const GOLDENS: &[Golden] = &[
             "--format",
             "json",
         ],
-        true,
+        0,
+        Output::Json,
     ),
     golden(
         "dolos data dump logs",
@@ -183,12 +249,14 @@ pub const GOLDENS: &[Golden] = &[
             "--format",
             "json",
         ],
-        true,
+        0,
+        Output::Json,
     ),
     golden(
         "dolos data dump blocks",
         &["data", "dump", "blocks", "--limit", "0", "--format", "json"],
-        true,
+        0,
+        Output::Json,
     ),
     golden(
         "dolos data check",
@@ -206,38 +274,74 @@ pub const GOLDENS: &[Golden] = &[
             "--format",
             "json",
         ],
-        false,
-    ),
+        0,
+        Output::Unkept("it times each check (`elapsed_ms`)"),
+    )
+    .after_recover(),
     golden(
         "dolos data housekeeping",
         &["data", "housekeeping", "--help"],
-        false,
+        0,
+        Output::Nothing,
     ),
-    golden("dolos data reset", &["data", "reset", "--help"], false),
-    golden("dolos data rebuild", &["data", "rebuild", "--help"], false),
-    golden("dolos cache", &["cache"], false),
-    golden("dolos cache warm", &["cache", "warm", "--help"], false),
-    golden("dolos cache clear", &["cache", "clear", "--help"], false),
+    golden(
+        "dolos data reset",
+        &["data", "reset", "--help"],
+        0,
+        Output::Nothing,
+    ),
+    golden(
+        "dolos data rebuild",
+        &["data", "rebuild", "--help"],
+        0,
+        Output::Nothing,
+    ),
+    golden("dolos cache", &["cache"], 2, Output::Nothing),
+    golden(
+        "dolos cache warm",
+        &["cache", "warm", "--help"],
+        0,
+        Output::Nothing,
+    ),
+    golden(
+        "dolos cache clear",
+        &["cache", "clear", "--help"],
+        0,
+        Output::Nothing,
+    ),
     golden(
         "dolos cache stats",
         &["cache", "stats", "--format", "json"],
-        true,
+        0,
+        Output::Unkept(
+            "its namespaces and their versions describe the cache's disk tier, which is \
+             outside the contract",
+        ),
     ),
     golden(
         "dolos cache verify",
         &["cache", "verify", "--format", "json"],
-        true,
+        0,
+        Output::Json,
     ),
-    golden("dolos service", &["service"], false),
+    golden("dolos service", &["service"], 2, Output::Nothing),
     golden(
         "dolos service install",
         &["service", "install", "--help"],
-        false,
+        0,
+        Output::Help(
+            "its report names the unit file and the binary by absolute path, and differs \
+             between service managers",
+        ),
     ),
     golden(
         "dolos service uninstall",
         &["service", "uninstall", "--help"],
-        false,
+        0,
+        Output::Help(
+            "its report names the unit file by absolute path, and differs between service \
+             managers",
+        ),
     ),
 ];
 
@@ -355,11 +459,24 @@ pub struct Provenance {
 /// Write a fixture into `out`, which must not exist, with `binary`: its
 /// configuration, its stores after importing a short synthetic chain (packed
 /// as [`DATASET`]), the golden of every inventory row and its `FIXTURE.md`.
+///
+/// Refused, with nothing left at `out`, when a row exits other than it
+/// should or prints no JSON where it should.
 pub fn generate(binary: &Path, out: &Path, commit: &str) -> Result<(), String> {
     if out.exists() {
         return Err(format!("{} already exists", out.display()));
     }
 
+    let written = write_fixture(binary, out, commit);
+
+    if written.is_err() {
+        let _ = std::fs::remove_dir_all(out);
+    }
+
+    written
+}
+
+fn write_fixture(binary: &Path, out: &Path, commit: &str) -> Result<(), String> {
     // Commands run from the node directory, where a relative path no longer
     // names the binary.
     let binary = &binary
@@ -429,27 +546,8 @@ pub fn generate(binary: &Path, out: &Path, commit: &str) -> Result<(), String> {
         ));
     }
 
-    let scratch = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let node = scratch.path().join("node");
-    copy_dir(out, &node)?;
-
     for golden in GOLDENS {
-        let output = dolos(binary, &node, golden.args)
-            .output()
-            .map_err(|e| e.to_string())?;
-        let code = output.status.code().ok_or("killed by a signal")?;
-        let cli = out.join("cli");
-        let stem = golden.stem();
-
-        std::fs::write(cli.join(format!("{stem}.args")), lines(golden.args))
-            .map_err(|e| e.to_string())?;
-        std::fs::write(cli.join(format!("{stem}.exit")), format!("{code}\n"))
-            .map_err(|e| e.to_string())?;
-
-        if golden.json {
-            std::fs::write(cli.join(format!("{stem}.json")), &output.stdout)
-                .map_err(|e| e.to_string())?;
-        }
+        record(binary, out, golden).map_err(|e| format!("{}: {e}", golden.command))?;
     }
 
     pack(&out.join("data"), &out.join(DATASET))?;
@@ -469,6 +567,105 @@ pub fn generate(binary: &Path, out: &Path, commit: &str) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+/// Run `golden` on its own copy of the node at `out` and write its files
+/// under `out/cli`.
+fn record(binary: &Path, out: &Path, golden: &Golden) -> Result<(), String> {
+    let scratch = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let node = scratch.path().join("node");
+    copy_dir(out, &node)?;
+
+    if golden.after_recover {
+        run_first(binary, &node, RECOVER)?;
+    }
+
+    let output = dolos(binary, &node, golden.args)
+        .output()
+        .map_err(|e| e.to_string())?;
+    let code = output.status.code().ok_or("killed by a signal")?;
+
+    if code != golden.exit {
+        return Err(format!(
+            "exited {code}, not {}\n{}",
+            golden.exit,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json = match golden.output {
+        Output::Json => Some(json_lines(&stdout, &[])?),
+        Output::JsonWithout(fields, _) => Some(json_lines(&stdout, fields)?),
+        Output::Unkept(_) => json_lines(&stdout, &[]).map(|_| None)?,
+        Output::Nothing | Output::Help(_) => None,
+    };
+
+    let file = |extension: &str| {
+        out.join("cli")
+            .join(format!("{}.{extension}", golden.stem()))
+    };
+    let write = |path: PathBuf, text: String| std::fs::write(path, text).map_err(|e| e.to_string());
+
+    write(file("args"), lines(golden.args))?;
+    write(file("exit"), format!("{code}\n"))?;
+
+    if golden.after_recover {
+        write(file("before"), lines(RECOVER))?;
+    }
+
+    if let Some(json) = json {
+        write(file("json"), json)?;
+    }
+
+    Ok(())
+}
+
+/// Run `dolos <args>` in `node`, which must succeed: the command a golden's
+/// `.before` file names.
+pub fn run_first(binary: &Path, node: &Path, args: &[&str]) -> Result<(), String> {
+    let output = dolos(binary, node, args)
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "`dolos {}`, run first, exited {:?}\n{}",
+            args.join(" "),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+/// `stdout`, one JSON value per line, with the top-level fields `left_out`
+/// removed from each; refused when it holds no value, or a value lacks one
+/// of those fields.
+fn json_lines(stdout: &str, left_out: &[&str]) -> Result<String, String> {
+    let mut kept = String::new();
+
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        let mut value: Value = serde_json::from_str(line)
+            .map_err(|e| format!("printed a line that is not JSON: {e}"))?;
+
+        for field in left_out {
+            value
+                .as_object_mut()
+                .and_then(|object| object.remove(*field))
+                .ok_or_else(|| format!("printed no `{field}` to leave out"))?;
+        }
+
+        kept.push_str(&serde_json::to_string(&value).map_err(|e| e.to_string())?);
+        kept.push('\n');
+    }
+
+    if kept.is_empty() {
+        return Err("printed no JSON".into());
+    }
+
+    Ok(kept)
+}
+
 /// `config` as the build deserializes it, before genesis paths are resolved
 /// against the file's directory: the meaning it gives each key.
 pub fn resolved(config: &str) -> Result<Value, String> {
@@ -477,16 +674,35 @@ pub fn resolved(config: &str) -> Result<Value, String> {
 }
 
 fn fixture_md(provenance: &Provenance, slot: u64, hash: &str) -> String {
-    format!(
+    let mut md = format!(
         "# Compatibility fixture\n\n\
          Written by `cargo xtask compat fixture`; `tests/compat_fixtures.rs` opens it \
          with every later build.\n\n\
          - version: `{}`\n\
          - commit: `{}`\n\
          - contract: `{}`\n\
-         - tip: `{slot}` `{hash}`\n",
+         - tip: `{slot}` `{hash}`\n\n\
+         ## Left out of the goldens\n\n\
+         Each row runs on its own copy of `data/`. A row with a `.before` file runs \
+         that command first, on the same copy.\n\n",
         provenance.version, provenance.commit, provenance.contract,
-    )
+    );
+
+    for golden in GOLDENS {
+        let left_out = match golden.output {
+            Output::JsonWithout(fields, why) => {
+                let fields: Vec<String> = fields.iter().map(|f| format!("`{f}`")).collect();
+                format!("leaves out {}: {why}", fields.join(", "))
+            }
+            Output::Unkept(why) => format!("keeps its exit code only: {why}"),
+            Output::Help(why) => format!("records `--help`: {why}"),
+            Output::Json | Output::Nothing => continue,
+        };
+
+        md.push_str(&format!("- `{}` {left_out}.\n", golden.command));
+    }
+
+    md
 }
 
 /// The tip `FIXTURE.md` records, as its slot and block hash.
@@ -612,6 +828,10 @@ pub fn matches_golden(golden: &str, current: &str) -> Result<(), Vec<String>> {
     };
     let (golden, current) = (parse(golden)?, parse(current)?);
 
+    if golden.is_empty() {
+        return Err(vec!["the golden holds no record".into()]);
+    }
+
     if golden.len() != current.len() {
         return Err(vec![format!(
             "{} records, the golden has {}",
@@ -664,7 +884,8 @@ pub fn unpack(node: &Path) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// Copy the directory `from` to `to`, recursively.
+/// Copy the directory `from` to `to`, recursively, skipping runs of zeros
+/// so that the preallocated store journals stay sparse in each copy.
 pub fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
     std::fs::create_dir_all(to).map_err(|e| e.to_string())?;
 
@@ -675,11 +896,38 @@ pub fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
         if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
             copy_dir(&entry.path(), &target)?;
         } else {
-            std::fs::copy(entry.path(), &target).map_err(|e| e.to_string())?;
+            copy_sparse(&entry.path(), &target).map_err(|e| e.to_string())?;
         }
     }
 
     Ok(())
+}
+
+fn copy_sparse(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    let mut source = std::fs::File::open(from)?;
+    let mut target = std::fs::File::create(to)?;
+    let mut buffer = vec![0u8; 1 << 16];
+    let mut length = 0u64;
+
+    loop {
+        let read = source.read(&mut buffer)?;
+
+        if read == 0 {
+            break;
+        }
+
+        if buffer[..read].iter().all(|byte| *byte == 0) {
+            target.seek(SeekFrom::Current(read as i64))?;
+        } else {
+            target.write_all(&buffer[..read])?;
+        }
+
+        length += read as u64;
+    }
+
+    target.set_len(length)
 }
 
 fn lines(args: &[&str]) -> String {
@@ -779,6 +1027,46 @@ mod tests {
         assert_eq!(
             matches_golden(golden, "{\"a\":1}\n{\"a\":5}\n"),
             Err(vec!["line 1: $.a was 2, now 5".to_string()])
+        );
+    }
+
+    #[test]
+    fn an_empty_golden_matches_nothing() {
+        assert_eq!(
+            matches_golden("", ""),
+            Err(vec!["the golden holds no record".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_golden_leaves_out_the_fields_named() {
+        assert_eq!(
+            json_lines("{\"a\":1,\"wal\":2}\n\n{\"a\":3,\"wal\":4}\n", &["wal"]),
+            Ok("{\"a\":1}\n{\"a\":3}\n".to_string())
+        );
+        assert_eq!(
+            json_lines("{\"a\":1}\n", &["wal"]),
+            Err("printed no `wal` to leave out".to_string())
+        );
+        assert_eq!(json_lines("\n", &[]), Err("printed no JSON".to_string()));
+        assert!(json_lines("Error: no store\n", &[]).is_err());
+    }
+
+    #[test]
+    fn a_sparse_copy_keeps_the_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = vec![0u8; 3 << 16];
+        bytes[70_000] = 7;
+        bytes.extend_from_slice(b"tail");
+        bytes.extend(std::iter::repeat_n(0u8, 100));
+        std::fs::create_dir_all(dir.path().join("from/sub")).unwrap();
+        std::fs::write(dir.path().join("from/sub/file"), &bytes).unwrap();
+
+        copy_dir(&dir.path().join("from"), &dir.path().join("to")).unwrap();
+
+        assert_eq!(
+            std::fs::read(dir.path().join("to/sub/file")).unwrap(),
+            bytes
         );
     }
 

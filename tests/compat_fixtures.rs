@@ -3,7 +3,8 @@
 //! same code, opens with this build. Its configuration loads with the same
 //! meaning, its stores open as they are at the tip it recorded, and each
 //! supported command exits as recorded and prints the golden JSON, with
-//! fields added since allowed.
+//! fields added since allowed. The stores and each command get their own
+//! copy of the dataset, so nothing one of them writes reaches another.
 //!
 //! The archive's README says who adds a fixture and when; the generator is
 //! `dolos_testing::compat`, run by `cargo xtask compat fixture`.
@@ -88,18 +89,19 @@ fn a_fixture_written_now_opens_and_covers_the_inventory() {
     opens(&fixture);
 }
 
-/// Check `fixture` from a copy, so that nothing a command writes reaches it.
+/// Check `fixture` from copies, so that nothing a command writes reaches it
+/// or the next check.
 fn opens(fixture: &Path) {
     let name = fixture.file_name().unwrap().to_string_lossy().into_owned();
     let scratch = tempfile::tempdir().unwrap();
-    let node = scratch.path().join("node");
-    compat::copy_dir(fixture, &node).unwrap();
-    compat::unpack(&node).unwrap();
+    let pristine = scratch.path().join("pristine");
+    compat::copy_dir(fixture, &pristine).unwrap();
+    compat::unpack(&pristine).unwrap();
 
     let mut problems = Vec::new();
-    problems.extend(configuration(&node));
-    problems.extend(goldens(&node));
-    problems.extend(stores(&node));
+    problems.extend(configuration(&pristine));
+    problems.extend(stores(&copy(&pristine, scratch.path(), "stores")));
+    problems.extend(goldens(&pristine, scratch.path()));
 
     assert!(
         problems.is_empty(),
@@ -133,9 +135,18 @@ fn configuration(node: &Path) -> Vec<String> {
     }
 }
 
-/// Each recorded command exits with its code and prints its golden.
-fn goldens(node: &Path) -> Vec<String> {
-    let cli = node.join("cli");
+/// A fresh copy of the unpacked fixture at `pristine`, as `scratch/<name>`.
+fn copy(pristine: &Path, scratch: &Path, name: &str) -> PathBuf {
+    let node = scratch.join(name);
+    compat::copy_dir(pristine, &node).unwrap();
+    node
+}
+
+/// Each recorded command, on its own copy of `pristine` and after the
+/// command its `.before` file names, exits with its code and prints its
+/// golden.
+fn goldens(pristine: &Path, scratch: &Path) -> Vec<String> {
+    let cli = pristine.join("cli");
     let mut exits: Vec<PathBuf> = std::fs::read_dir(&cli)
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -154,8 +165,18 @@ fn goldens(node: &Path) -> Vec<String> {
             .trim()
             .parse()
             .unwrap();
+        let node = copy(pristine, scratch, &stem);
 
-        let output = compat::dolos(binary(), node, &args).output().unwrap();
+        if let Ok(before) = std::fs::read_to_string(cli.join(format!("{stem}.before"))) {
+            let before: Vec<&str> = before.lines().collect();
+
+            if let Err(error) = compat::run_first(binary(), &node, &before) {
+                problems.push(format!("{stem}: {error}"));
+                continue;
+            }
+        }
+
+        let output = compat::dolos(binary(), &node, &args).output().unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
 
         if output.status.code() != Some(expected) {
@@ -176,6 +197,8 @@ fn goldens(node: &Path) -> Vec<String> {
                 problems.extend(found.into_iter().map(|f| format!("{stem}: {f}")));
             }
         }
+
+        std::fs::remove_dir_all(&node).unwrap();
     }
 
     problems

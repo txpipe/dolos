@@ -36,11 +36,17 @@ pub fn run(sh: &Shell, cmd: Cmd) -> Result<()> {
 }
 
 fn fixture(sh: &Shell, args: &FixtureArgs) -> Result<()> {
-    let root = workspace_root();
+    let root = PathBuf::from(
+        cmd!(sh, "git rev-parse --show-toplevel")
+            .read()
+            .context("finding the checkout")?,
+    );
+    sh.change_dir(&root);
+    refuse_another_build(&root)?;
+
     let binary = match &args.bin {
         Some(binary) => binary.clone(),
         None => {
-            sh.change_dir(&root);
             cmd!(sh, "cargo build --locked --bin dolos").run()?;
             target_dir(&root)
                 .join("debug")
@@ -52,7 +58,6 @@ fn fixture(sh: &Shell, args: &FixtureArgs) -> Result<()> {
         bail!("no dolos binary at {}", binary.display());
     }
 
-    sh.change_dir(&root);
     let commit = cmd!(sh, "git describe --always --dirty --abbrev=40")
         .read()
         .context("reading the commit")?;
@@ -67,11 +72,24 @@ fn fixture(sh: &Shell, args: &FixtureArgs) -> Result<()> {
     Ok(())
 }
 
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("xtask sits in the workspace")
-        .to_path_buf()
+/// The goldens, the configuration tables and `config.json`'s meaning are
+/// compiled into this binary, so only an xtask `cargo run` has just built
+/// from the checkout is known to hold the checkout's. An installed helper
+/// stays at the commit it was built from, and would archive that commit's
+/// fixture under this one's name.
+fn refuse_another_build(root: &Path) -> Result<()> {
+    let canonical = |dir: &Path| dir.canonicalize().ok();
+    let built = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from);
+
+    if built.as_deref().and_then(canonical) != canonical(&root.join("xtask")) {
+        bail!(
+            "this xtask was not built by `cargo run` from the checkout at {}; run `cargo run \
+             --locked -p xtask -- compat fixture …` there instead",
+            root.display()
+        );
+    }
+
+    Ok(())
 }
 
 fn target_dir(root: &Path) -> PathBuf {
