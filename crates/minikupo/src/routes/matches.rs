@@ -649,6 +649,10 @@ fn output_datum_info(output: &MultiEraOutput<'_>) -> (Option<String>, Option<Str
     }
 }
 
+#[allow(
+    deprecated,
+    reason = "Pallas 1.5 deprecates script_ref; moving to multi_era_script_ref is a separate change"
+)]
 fn output_script_hash(output: &MultiEraOutput<'_>) -> Option<pallas::crypto::hash::Hash<28>> {
     output.script_ref().map(|script| match script {
         ScriptRef::NativeScript(x) => x.original_hash(),

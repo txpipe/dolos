@@ -2129,6 +2129,12 @@ impl<'a> IntoModel<TxContentUtxoOutputsInner> for UtxoOutputModelBuilder<'a> {
     type SortKey = u64;
 
     fn into_model(self) -> Result<TxContentUtxoOutputsInner, StatusCode> {
+        #[allow(
+            deprecated,
+            reason = "Pallas 1.5 deprecates script_ref; moving to multi_era_script_ref is a separate change"
+        )]
+        let script_ref = self.output.script_ref();
+
         let out = TxContentUtxoOutputsInner {
             address: self.output.address().into_model()?,
             amount: self
@@ -2153,11 +2159,7 @@ impl<'a> IntoModel<TxContentUtxoOutputsInner> for UtxoOutputModelBuilder<'a> {
                 })
                 .map(hex::encode),
             collateral: self.is_collateral,
-            reference_script_hash: self
-                .output
-                .script_ref()
-                .map(|h| h.into_model())
-                .transpose()?,
+            reference_script_hash: script_ref.map(|h| h.into_model()).transpose()?,
         };
 
         Ok(out)
@@ -2174,6 +2176,12 @@ impl<'a> IntoModel<AddressUtxoContentInner> for UtxoOutputModelBuilder<'a> {
     }
 
     fn into_model(self) -> Result<AddressUtxoContentInner, StatusCode> {
+        #[allow(
+            deprecated,
+            reason = "Pallas 1.5 deprecates script_ref; moving to multi_era_script_ref is a separate change"
+        )]
+        let script_ref = self.output.script_ref();
+
         let out = AddressUtxoContentInner {
             address: self.output.address().into_model()?,
             // source the tx_hash from the UTxO's own TxoRef (always present),
@@ -2199,11 +2207,7 @@ impl<'a> IntoModel<AddressUtxoContentInner> for UtxoOutputModelBuilder<'a> {
                     DatumOption::Data(x) => Some(minicbor::to_vec(&x.0).unwrap()),
                 })
                 .map(hex::encode),
-            reference_script_hash: self
-                .output
-                .script_ref()
-                .map(|h| h.into_model())
-                .transpose()?,
+            reference_script_hash: script_ref.map(|h| h.into_model()).transpose()?,
 
             // DEPRECATED
             tx_index: try_into_or_500!(self.txo_ref.1),
@@ -2223,6 +2227,12 @@ impl<'a> IntoModel<ScriptUtxosInner> for UtxoOutputModelBuilder<'a> {
     }
 
     fn into_model(self) -> Result<ScriptUtxosInner, StatusCode> {
+        #[allow(
+            deprecated,
+            reason = "Pallas 1.5 deprecates script_ref; moving to multi_era_script_ref is a separate change"
+        )]
+        let script_ref = self.output.script_ref();
+
         let out = ScriptUtxosInner {
             address: self.output.address().into_model()?,
             // source the tx_hash from the UTxO's own TxoRef (always present),
@@ -2250,9 +2260,7 @@ impl<'a> IntoModel<ScriptUtxosInner> for UtxoOutputModelBuilder<'a> {
                 .map(hex::encode),
             // the model requires the hash; callers only build this model for
             // outputs that carry a reference script.
-            reference_script_hash: self
-                .output
-                .script_ref()
+            reference_script_hash: script_ref
                 .map(|h| h.into_model())
                 .transpose()?
                 .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
@@ -2293,6 +2301,12 @@ impl<'a> IntoModel<AssetUtxoContentInner> for UtxoOutputModelBuilder<'a> {
         let block_height = self.block_data.as_ref().map_or(0, |b| b.height);
         let block_time = self.block_time.unwrap_or_default();
 
+        #[allow(
+            deprecated,
+            reason = "Pallas 1.5 deprecates script_ref; moving to multi_era_script_ref is a separate change"
+        )]
+        let script_ref = self.output.script_ref();
+
         let out = AssetUtxoContentInner {
             address: self.output.address().into_model()?,
             tx_hash: self.txo_ref.0.to_string(),
@@ -2312,11 +2326,7 @@ impl<'a> IntoModel<AssetUtxoContentInner> for UtxoOutputModelBuilder<'a> {
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
                 .map(hex::encode),
             inline_datum_json,
-            reference_script_hash: self
-                .output
-                .script_ref()
-                .map(|h| h.into_model())
-                .transpose()?,
+            reference_script_hash: script_ref.map(|h| h.into_model()).transpose()?,
         };
 
         Ok(out)
