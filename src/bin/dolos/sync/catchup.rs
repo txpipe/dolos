@@ -71,7 +71,7 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
     let domain = crate::common::setup_domain_with_stop_epoch(config, args.stop_epoch)?;
 
-    let sync = dolos::sync::pipeline(config, limit, domain.clone())
+    let sync = dolos::sync::pipeline(config, limit, domain.clone(), telemetry.metrics_flush())
         .into_diagnostic()
         .context("bootstrapping sync pipeline")?;
 
@@ -82,7 +82,8 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     let end = wait(&daemon, &progress);
 
     // The guard's flush on exit comes after the gauges and the bridge are
-    // gone, so export their final values first.
+    // gone, so export their final values first. The flush is bounded, so a
+    // stalled collector delays the teardown by its bound at most.
     telemetry.metrics_flush().flush();
     daemon.teardown();
 

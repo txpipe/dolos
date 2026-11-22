@@ -12,7 +12,11 @@ use std::time::{Duration, Instant};
 
 use dolos::adapters::DomainAdapter;
 use dolos::engine::DomainBuilder;
-use dolos::sync::{apply, metrics::ExportedDaemon, SyncLimit, SyncProgress};
+use dolos::sync::{
+    apply,
+    metrics::{ExportedDaemon, MetricsFlush},
+    SyncLimit, SyncProgress,
+};
 use dolos_core::config::{
     ArchiveStoreConfig, ChainConfig, RetryConfig, RootConfig, StateStoreConfig,
 };
@@ -22,7 +26,7 @@ use dolos_core::{
 use dolos_testing::blocks::make_conway_block_with_prev;
 use dolos_testing::peer::{PeerFixture, PeerOptions};
 use gasket::metrics::Reading;
-use gasket::runtime::Tether;
+use gasket::runtime::{Tether, TetherState};
 use opentelemetry::global;
 use opentelemetry_sdk::metrics::{
     data::{AggregatedMetrics, MetricData},
@@ -48,13 +52,21 @@ fn provider() -> &'static (SdkMeterProvider, InMemoryMetricExporter) {
     })
 }
 
-/// Every point of the two meters as `name{attributes}`: a counter's or a
-/// gauge's value, or for a histogram `name.count{…}` and `name.sum{…}`.
+/// Every point of the two meters as `name{attributes}`, collected now.
 fn collect() -> BTreeMap<String, f64> {
     let (provider, exporter) = provider();
 
     exporter.reset();
     provider.force_flush().unwrap();
+
+    exported()
+}
+
+/// Every point of the two meters the exporter holds, as `name{attributes}`:
+/// a counter's or a gauge's value, or for a histogram `name.count{…}` and
+/// `name.sum{…}`. A later export of a series replaces an earlier one.
+fn exported() -> BTreeMap<String, f64> {
+    let (_, exporter) = provider();
 
     let mut points = BTreeMap::new();
 
@@ -217,6 +229,7 @@ fn a_sync_exports_each_stage_s_blocks_and_framework_series() {
         peer.address().to_string(),
         SyncLimit::Follow,
         domain.clone(),
+        MetricsFlush::default(),
     )
     .unwrap();
 
@@ -254,10 +267,8 @@ fn a_sync_exports_each_stage_s_blocks_and_framework_series() {
     assert_eq!(value(&points, "dolos.sync.caught_up{}"), 1.0);
     assert!(points.contains_key("dolos.sync.tip.lag{}"));
     assert!(points.contains_key("dolos.sync.upstream.last_delivery.age{}"));
-    assert_eq!(
-        value(&points, "dolos.sync.upstream.sessions{outcome=connected}"),
-        1.0
-    );
+    let connected = "dolos.sync.upstream.sessions{outcome=connected}";
+    assert_eq!(value(&points, connected) - value(&before, connected), 1.0);
 
     // The session opened with a rollback to its intersection, which undid
     // nothing and is no rollback of the chain.
@@ -275,6 +286,67 @@ fn a_sync_exports_each_stage_s_blocks_and_framework_series() {
     // Released, the bridge reports no stage.
     let points = collect();
     assert!(!points.contains_key("dolos.sync.stage.blocks{stage=pull}"));
+}
+
+/// The bridge reads a stage only while it runs, so a catch-up's apply stage,
+/// which ends once it commits the target, exports its counts before it ends.
+#[test]
+#[serial]
+fn a_catch_up_exports_the_apply_stage_s_counts_before_it_ends() {
+    let (provider, exporter) = provider();
+
+    let temp = tempfile::tempdir().unwrap();
+    let (config, domain) = domain_over(temp.path());
+    let peer = PeerFixture::start(
+        "127.0.0.1:0",
+        PREVIEW_MAGIC,
+        PeerOptions {
+            initial_blocks: 20,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    exporter.reset();
+    let pipeline = dolos::sync::sync(
+        &config.sync,
+        PREVIEW_MAGIC,
+        peer.address().to_string(),
+        SyncLimit::CatchUp,
+        domain.clone(),
+        MetricsFlush::new(provider.clone()),
+    )
+    .unwrap();
+
+    let progress = pipeline.progress;
+    let _gauges = pipeline.gauges;
+    let daemon = ExportedDaemon::new(gasket::daemon::Daemon::new(pipeline.tethers));
+
+    let apply = || daemon.tethers().find(|t| t.name() == "apply").unwrap();
+    wait_until(
+        "the apply stage's thread ends",
+        Duration::from_secs(60),
+        || matches!(apply().check_state(), TetherState::Finished(_)),
+    );
+    assert!(progress.caught_up());
+    assert_eq!(apply().end_cause(), Some(gasket::runtime::EndCause::Done));
+
+    let archived = domain.archive().get_range(None, None).unwrap().count() as f64;
+    assert!(archived > 0.0);
+
+    let points = exported();
+    assert_eq!(
+        value(&points, "dolos.sync.stage.blocks{stage=apply}"),
+        archived
+    );
+    assert!(points.contains_key("dolos.sync.stage.units{stage=apply}"));
+    assert_eq!(value(&points, "dolos.sync.caught_up{}"), 1.0);
+
+    // Ended, the stage is no longer read.
+    let points = collect();
+    assert!(!points.contains_key("dolos.sync.stage.blocks{stage=apply}"));
+
+    daemon.teardown();
 }
 
 #[test]

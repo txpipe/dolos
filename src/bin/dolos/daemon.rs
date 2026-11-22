@@ -21,9 +21,14 @@ pub async fn run(config: RootConfig, _args: &Args) -> miette::Result<()> {
 
     let exit = crate::common::hook_exit_token();
 
-    let sync = dolos::sync::pipeline(&config, SyncLimit::Follow, domain.clone())
-        .into_diagnostic()
-        .context("bootstrapping sync pipeline")?;
+    let sync = dolos::sync::pipeline(
+        &config,
+        SyncLimit::Follow,
+        domain.clone(),
+        telemetry.metrics_flush(),
+    )
+    .into_diagnostic()
+    .context("bootstrapping sync pipeline")?;
 
     let progress = sync.progress;
     let _sync_gauges = sync.gauges;

@@ -226,22 +226,26 @@ pub fn peer_address(config: &RootConfig, network: &ResolvedNetwork) -> Result<St
         .ok_or_else(|| Error::ConfigError("`upstream.peer_address` is not set".into()))
 }
 
+/// The sync `config` sets up, which flushes `export` before it ends on its
+/// own.
 pub fn pipeline(
     config: &RootConfig,
     limit: SyncLimit,
     domain: DomainAdapter,
+    export: metrics::MetricsFlush,
 ) -> Result<Pipeline, Error> {
     let network = ResolvedNetwork::resolve(&config.chain)
         .map_err(|error| Error::ConfigError(error.to_string()))?;
 
     match &config.upstream {
-        Some(UpstreamConfig::Emulator(cfg)) => devnet(cfg, domain, &config.sync.retry),
+        Some(UpstreamConfig::Emulator(cfg)) => devnet(cfg, domain, &config.sync.retry, export),
         _ => sync(
             &config.sync,
             network.magic(),
             peer_address(config, &network)?,
             limit,
             domain,
+            export,
         ),
     }
 }
@@ -252,6 +256,7 @@ pub fn sync(
     peer_address: String,
     limit: SyncLimit,
     domain: DomainAdapter,
+    export: metrics::MetricsFlush,
 ) -> Result<Pipeline, Error> {
     let progress = Arc::new(SyncProgress::default());
 
@@ -269,7 +274,8 @@ pub fn sync(
         limit,
         progress.clone(),
         HOUSEKEEPING_INTERVAL,
-    );
+    )
+    .with_final_export(export);
 
     let (to_apply, from_pull) = gasket::messaging::tokio::mpsc_channel(50);
     pull.downstream.connect(to_apply);
@@ -314,6 +320,7 @@ pub fn devnet(
     emulator_cfg: &EmulatorConfig,
     domain: DomainAdapter,
     retries: &RetryConfig,
+    export: metrics::MetricsFlush,
 ) -> Result<Pipeline, Error> {
     let progress = Arc::new(SyncProgress::default());
 
@@ -328,7 +335,8 @@ pub fn devnet(
         SyncLimit::Follow,
         progress.clone(),
         HOUSEKEEPING_INTERVAL,
-    );
+    )
+    .with_final_export(export);
 
     let (to_apply, from_pull) = gasket::messaging::tokio::mpsc_channel(50);
     emulator.downstream.connect(to_apply);

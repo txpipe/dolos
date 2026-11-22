@@ -5,7 +5,7 @@ use gasket::{framework::*, messaging::Message};
 use tokio::sync::watch;
 use tracing::{debug, info};
 
-use super::{SyncLimit, SyncProgress};
+use super::{metrics::MetricsFlush, SyncLimit, SyncProgress};
 use crate::{adapters::DomainAdapter, prelude::*};
 
 pub type UpstreamPort = gasket::messaging::InputPort<PullEvent>;
@@ -38,6 +38,9 @@ pub struct Stage {
 
     housekeeping_interval: std::time::Duration,
 
+    /// Exports the sync's final readings before the stage ends on its own.
+    final_export: MetricsFlush,
+
     pub upstream: UpstreamPort,
 
     /// Blocks rolled forward.
@@ -65,10 +68,21 @@ impl Stage {
             limit,
             progress,
             housekeeping_interval,
+            final_export: MetricsFlush::default(),
             upstream: Default::default(),
             blocks: Default::default(),
             rollbacks: Default::default(),
             housekeeping_runs: Default::default(),
+        }
+    }
+
+    /// Flush `export` before the stage ends on its own: the bridge reads a
+    /// stage only while it runs, so its last counts would miss the export at
+    /// exit.
+    pub fn with_final_export(self, export: MetricsFlush) -> Self {
+        Self {
+            final_export: export,
+            ..self
         }
     }
 
@@ -154,6 +168,7 @@ impl gasket::framework::Worker<Stage> for Worker {
 
     async fn schedule(&mut self, stage: &mut Stage) -> Result<WorkSchedule<WorkUnit>, WorkerError> {
         if stage.progress.succeeded(stage.limit) {
+            stage.final_export.flush();
             return Ok(WorkSchedule::Done);
         }
 

@@ -124,6 +124,7 @@ fn start(
         peer.address().to_string(),
         limit,
         domain.clone(),
+        Default::default(),
     )
     .unwrap();
 
@@ -904,6 +905,7 @@ fn a_connection_dropped_in_the_handshake_is_no_refusal() {
         accepting_and_closing().to_string(),
         SyncLimit::CatchUp,
         domain.clone(),
+        Default::default(),
     )
     .unwrap();
 

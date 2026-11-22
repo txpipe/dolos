@@ -3,8 +3,8 @@
 //! progress and the chain tip.
 
 use std::ops::Deref;
-use std::sync::{Arc, Weak};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{mpsc, Arc, Weak};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dolos_core::telemetry::OUTCOME;
 use gasket::daemon::Daemon;
@@ -13,7 +13,9 @@ use opentelemetry::{
     metrics::{Counter, Meter, ObservableGauge},
     KeyValue,
 };
+use opentelemetry_sdk::metrics::SdkMeterProvider;
 use pallas::interop::utxorpc::LedgerContext as _;
+use tracing::warn;
 
 use super::SyncProgress;
 use crate::adapters::DomainAdapter;
@@ -61,6 +63,79 @@ impl Deref for ExportedDaemon {
 
     fn deref(&self) -> &Daemon {
         &self.daemon
+    }
+}
+
+/// How long a [`MetricsFlush`] waits for the exporter before its caller goes
+/// on.
+pub const FLUSH_BOUND: Duration = Duration::from_secs(2);
+
+/// Exports a meter provider's pending metrics when asked, waiting at most a
+/// bound.
+///
+/// Observable instruments report only while their sources live, so a sync
+/// flushes before it drops them. The export runs on a thread of its own: an
+/// exporter that never answers holds that thread, not the caller.
+#[derive(Clone)]
+pub struct MetricsFlush {
+    meters: Option<SdkMeterProvider>,
+    bound: Duration,
+}
+
+impl MetricsFlush {
+    /// Flushes `meters`, waiting at most [`FLUSH_BOUND`].
+    pub fn new(meters: SdkMeterProvider) -> Self {
+        Self {
+            meters: Some(meters),
+            bound: FLUSH_BOUND,
+        }
+    }
+
+    /// The same flush, waiting at most `bound`.
+    pub fn within(self, bound: Duration) -> Self {
+        Self { bound, ..self }
+    }
+
+    /// Exports the pending metrics now. Returns whether the exporter finished
+    /// within the bound; there is nothing to export without a provider.
+    pub fn flush(&self) -> bool {
+        let Some(meters) = self.meters.clone() else {
+            return true;
+        };
+
+        let (done, finished) = mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("metrics-flush".into())
+            .spawn(move || {
+                let _ = done.send(meters.force_flush());
+            });
+
+        if let Err(err) = spawned {
+            warn!(%err, "failed to flush metrics");
+            return false;
+        }
+
+        match finished.recv_timeout(self.bound) {
+            Ok(Ok(())) => true,
+            Ok(Err(err)) => {
+                warn!(%err, "failed to flush metrics");
+                false
+            }
+            Err(_) => {
+                warn!(bound = ?self.bound, "the metrics exporter did not finish in time");
+                false
+            }
+        }
+    }
+}
+
+impl Default for MetricsFlush {
+    /// A flush with no provider, which exports nothing.
+    fn default() -> Self {
+        Self {
+            meters: None,
+            bound: FLUSH_BOUND,
+        }
     }
 }
 
