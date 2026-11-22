@@ -12,7 +12,9 @@ use crate::{
     Facade,
 };
 
-use super::{amount_for_refs, is_address_in_chain, parse_address, refs_for_parsed_address};
+use super::{
+    amount_for_refs, is_address_in_chain, parse_address, refs_for_parsed_address, SUMMARY_CHUNK,
+};
 
 pub async fn by_address<D>(
     Path(address): Path<String>,
@@ -22,13 +24,13 @@ where
     D: Domain + Clone + Send + Sync + 'static,
 {
     let parsed = parse_address(&address)?;
-    let refs = refs_for_parsed_address(&domain, &parsed)?;
+    let refs = refs_for_parsed_address(&domain, &parsed).await?;
 
     if refs.is_empty() && !is_address_in_chain(&domain, &address).await? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
-    let amount = amount_for_refs(&domain, refs)?;
+    let amount = amount_for_refs(&domain, refs, SUMMARY_CHUNK).await?;
 
     let model = AddressModelBuilder {
         address,
@@ -46,7 +48,7 @@ mod tests {
     use super::*;
     use crate::{
         routes::addresses::testing::*,
-        test_support::{TestApp, TestFault},
+        test_support::{health_throughout, TestApp, TestFault, SLOW_READ},
     };
     use blockfrost_openapi::models::address_content::{AddressContent, Type as AddressType};
     use pallas::ledger::addresses::Address;
@@ -132,5 +134,38 @@ mod tests {
         let address = app.vectors().address.as_str();
         let path = format!("/addresses/{address}");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    /// The whole-set load runs on the blocking pool: `/health` answers beside
+    /// a slow one on a single worker.
+    #[tokio::test(flavor = "current_thread")]
+    async fn slow_address_summary_does_not_stall_health() {
+        let app = TestApp::new_with_fault(Some(TestFault::SlowUtxoReads(SLOW_READ)));
+        let path = format!("/addresses/{}", app.vectors().address);
+
+        assert_eq!(health_throughout(&app, &path).await, StatusCode::OK);
+    }
+
+    /// Chunks of one UTxO sum to the same amounts as one chunk of the whole
+    /// set.
+    #[tokio::test]
+    async fn address_amounts_do_not_depend_on_the_chunk_size() {
+        let app = TestApp::new_with_cfg(dolos_testing::synthetic::SyntheticBlockConfig {
+            block_count: 3,
+            txs_per_block: 2,
+            ..Default::default()
+        });
+        let domain = app.facade();
+        let parsed = parse_address(&app.vectors().address).unwrap();
+        let refs = refs_for_parsed_address(&domain, &parsed).await.unwrap();
+        assert!(refs.len() > 1, "the fixture needs several UTxOs");
+
+        let whole = amount_for_refs(&domain, refs.clone(), SUMMARY_CHUNK)
+            .await
+            .unwrap();
+        let single = amount_for_refs(&domain, refs, 1).await.unwrap();
+
+        assert!(whole.len() > 1, "the fixture needs a native asset");
+        assert_eq!(single, whole);
     }
 }

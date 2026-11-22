@@ -1115,6 +1115,71 @@ fn force_replays_a_source_named_through_the_root() {
     assert!(beside.join("immutable").is_dir(), "the source was cleared");
 }
 
+/// A snapshot restore interrupted before its first layer leaves its records
+/// over stores that hold no data. A `--force`d replay removes them with
+/// nothing else to clear, so the node it replays is not refused as that
+/// restore.
+#[test]
+fn a_forced_replay_removes_an_interrupted_restores_records() {
+    let fixture = Fixture::new();
+    let source = fixture.source();
+
+    #[cfg_attr(not(feature = "mithril"), allow(unused_mut))]
+    let mut replays: Vec<Vec<&str>> = vec![vec![
+        "bootstrap",
+        "--force",
+        "immutabledb",
+        "--source",
+        &source,
+    ]];
+
+    #[cfg(feature = "mithril")]
+    replays.push(vec![
+        "bootstrap",
+        "--force",
+        "mithril",
+        "--skip-download",
+        "--skip-validation",
+        "--retain-snapshot",
+        "--download-dir",
+        &source,
+        "--aggregator",
+        "https://aggregator.invalid",
+        "--genesis-vkey",
+        "5b31",
+    ]);
+
+    let records = [
+        dolos_snapshot::restore::SOURCE_FILE,
+        dolos_snapshot::restore::PROGRESS_FILE,
+    ];
+
+    for replay in &replays {
+        let node = fixture.node();
+        drop(
+            dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&node.config).unwrap(),
+        );
+        for name in records {
+            std::fs::write(node.config.storage.path.join(name), "{}").unwrap();
+        }
+
+        assert_ok(&node.run(replay));
+
+        for name in records {
+            let path = node.config.storage.path.join(name);
+            assert!(!path.exists(), "{replay:?}: {} left", path.display());
+        }
+        assert_healthy_at(&node, &fixture.tip());
+
+        let recover = node.run(&["sync", "recover", "--dry-run"]);
+        assert!(
+            !said(&recover).contains("was interrupted"),
+            "{replay:?}: {}",
+            stderr(&recover)
+        );
+    }
+}
+
 /// A node synced on past its database: the first three blocks by the
 /// replay, the rest through the live path, which writes the WAL entries a
 /// rollback undoes.

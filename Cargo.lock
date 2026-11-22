@@ -1569,6 +1569,7 @@ dependencies = [
  "stelae",
  "stelae-blocks",
  "stelae-driver",
+ "tar",
  "tempfile",
  "thiserror 2.0.21",
  "tikv-jemallocator",
@@ -1693,6 +1694,7 @@ version = "2.0.0-alpha.0"
 dependencies = [
  "axum 0.8.4",
  "base58",
+ "base64 0.22.1",
  "bech32 0.11.1",
  "blockfrost-openapi",
  "chrono",
@@ -7372,6 +7374,7 @@ dependencies = [
  "dolos-minibf",
  "dolos-redb3",
  "dolos-testing",
+ "fjall",
  "hdrhistogram",
  "hex",
  "itertools 0.14.0",

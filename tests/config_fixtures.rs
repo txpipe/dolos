@@ -10,6 +10,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use dolos_cardano::networks::{KnownNetwork, ResolvedNetwork};
+use dolos_core::compat::SUPPORTED_CONTRACTS;
 use dolos_core::config::{
     load, load_checked, override_variables, ArchiveStoreConfig, CacheConfig, ChainConfig,
     ConfigError, CustomUtxo, FjallPreset, GenesisConfig, HistoryConfig, HistoryMode, HistoryWindow,
@@ -456,7 +457,13 @@ fn older_files_point_to_the_migration_guide() {
         let error = load(Some(&fixture(name))).unwrap_err();
 
         assert!(matches!(error, ConfigError::LegacyShape), "{name}: {error}");
-        assert!(error.to_string().contains(MIGRATION_GUIDE_URL), "{name}");
+
+        let message = error.to_string();
+        assert!(message.contains(MIGRATION_GUIDE_URL), "{name}: {message}");
+        assert!(
+            message.contains(&format!("compatibility = \"{}\"", SUPPORTED_CONTRACTS[0])),
+            "{name}: {message}"
+        );
     }
 }
 

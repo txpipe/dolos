@@ -94,10 +94,7 @@ where
                 accounts
                     .into_iter()
                     .filter(|(_, account)| {
-                        account
-                            .delegated_pool_live()
-                            .or(account.retired_pool.as_ref())
-                            .is_some_and(|f| *f == pool)
+                        account.delegated_pool_live().is_some_and(|f| *f == pool)
                     })
                     .collect::<Vec<_>>()
             })

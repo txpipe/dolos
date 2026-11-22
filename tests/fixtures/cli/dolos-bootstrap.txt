@@ -13,7 +13,7 @@ Options:
                          bootstrap left for `--continue`
       --skip-if-data     Exit 0 without bootstrapping when storage already holds a node, as an
                          interrupted replay that has committed leaves one for `--continue` to
-                         resume; data without one, as an interrupted Dolos snapshot restore or a
+                         resume; data without one, as an interrupted Stelae snapshot restore or a
                          bootstrap interrupted before it commits a cursor leaves, and a store this
                          release refuses are errors instead
       --verbose          Enable verbose logging output

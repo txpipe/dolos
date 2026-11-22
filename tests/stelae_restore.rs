@@ -10,6 +10,8 @@
 //! clearing the storage directory, and a node that has to come back from
 //! nothing but a directory the retained profile encoder wrote.
 
+#[path = "../crates/snapshot/tests/fault_registry/mod.rs"]
+mod fault_registry;
 mod node;
 #[path = "../crates/snapshot/tests/paired/mod.rs"]
 mod paired;
@@ -285,35 +287,312 @@ fn an_unusable_point_is_refused_before_force_clears_anything() {
 ///
 /// The other half of the two tests above, and the half that would catch a
 /// grammar so strict it refused everything: this URL is accepted, the command
-/// runs, and what stops it is the registry not being there — which happens
-/// after `--force`, as a runtime failure, exactly like a `file://` directory
-/// that turns out not to hold a snapshot.
+/// tries the registry, and what stops it is the registry not being there. That
+/// is refused before `--force` clears anything, as a `file://` directory that
+/// holds no snapshot is, so the node is left as it was.
 #[test]
 fn a_well_formed_repository_reaches_the_registry() {
     let node = Node::new();
     node.sync();
+    let before = Contents::read(&node);
 
     // A port nothing is listening on, on the loopback address, so the failure
     // is a connection refused rather than a name lookup that could hang.
     let output = node.bootstrap_stelae("oci://127.0.0.1:1/txpipe/dolos-snapshots/preview");
 
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(1));
 
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    // Not a parse error: the source was accepted and the command got as far as
-    // trying to use it. Which of the two it is depends on how the binary was
-    // built, and both are the right answer.
+    // Not a parse error: the source was accepted and the check before the
+    // clear got as far as trying to use it.
     assert!(
-        stderr.contains("restoring the snapshot")
-            || stderr.contains("opening the repository")
-            || stderr.contains("--features registry"),
+        reports(&output.stderr, "checking the snapshot at latest in"),
         "the repository was refused before it was tried: {stderr}"
     );
 
     assert!(
         !stderr.contains("is not an OCI repository"),
         "a well-formed repository was refused by the grammar: {stderr}"
+    );
+
+    assert_eq!(Contents::read(&node), before);
+}
+
+// ---------------------------------------------------------------------------
+// A registry source, checked before `--force` clears the node
+// ---------------------------------------------------------------------------
+
+/// The network root the registry tests publish, `oci://HOST/net`.
+const ROOT: &str = "net";
+
+/// A network root published into an in-process registry from a synced node.
+struct Published {
+    _origin: Node,
+    registry: fault_registry::FaultRegistry,
+    url: String,
+    /// The origin's contents, which a restore of the head reproduces.
+    contents: Contents,
+    /// The head's sequence.
+    head: u64,
+}
+
+impl Published {
+    /// The origin's snapshots at boundaries `1..=boundaries`, the last the
+    /// head, paired into `net/dolos` and the repository `blocks` on the same
+    /// registry.
+    fn new(boundaries: u64, blocks: &str) -> Self {
+        static PROVIDER: std::sync::Once = std::sync::Once::new();
+        PROVIDER.call_once(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
+
+        let origin = Node::new();
+        origin.sync();
+
+        let root = origin.root.path().join("root");
+        for boundary in 1..=boundaries {
+            origin.stand_at_boundary_of(boundary);
+            origin.write_snapshot(&root);
+        }
+
+        let registry = fault_registry::FaultRegistry::spawn();
+        let scratch = origin.root.path().join("scratch");
+        let open = |name: &str| {
+            dolos_snapshot::registry::open(
+                &registry.repository(name),
+                true,
+                Default::default(),
+                scratch.clone(),
+                Default::default(),
+            )
+            .unwrap()
+        };
+
+        let paired = paired::pair(&root, &open(&format!("{ROOT}/dolos")), &open(blocks));
+
+        let url = url_of(&registry, ROOT);
+
+        Self {
+            contents: Contents::read(&origin),
+            head: paired.head().0,
+            _origin: origin,
+            registry,
+            url,
+        }
+    }
+
+    /// `dolos bootstrap --force stelae` from this root at `point`, into `node`.
+    fn restore_into(&self, node: &Node, point: &str) -> std::process::Output {
+        forced_from(node, &self.url, point)
+    }
+}
+
+/// The URL of the root `name` on `registry`.
+fn url_of(registry: &fault_registry::FaultRegistry, name: &str) -> String {
+    let repository = registry.repository(name);
+
+    format!(
+        "oci://{}/{}",
+        repository.registry(),
+        repository.repository()
+    )
+}
+
+/// `dolos bootstrap --force stelae --insecure` from `url` at `point`.
+fn forced_from(node: &Node, url: &str, point: &str) -> std::process::Output {
+    node.run(&[
+        "bootstrap",
+        "--force",
+        "stelae",
+        "--source",
+        url,
+        "--insecure",
+        "--point",
+        point,
+    ])
+}
+
+/// A synced node to restore into, and what it holds.
+fn synced() -> (Node, Contents) {
+    let node = Node::new();
+    node.sync();
+
+    let before = Contents::read(&node);
+    before.assert_populated();
+
+    (node, before)
+}
+
+/// Assert that `output` failed reporting `text` from the check before the
+/// clear, and that `node` still holds `before`.
+fn refused_intact(output: &std::process::Output, text: &str, node: &Node, before: &Contents) {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(
+        reports(&output.stderr, text),
+        "expected {text:?} in: {stderr}"
+    );
+    assert!(reports(&output.stderr, "nothing was cleared"), "{stderr}");
+    assert_eq!(&Contents::read(node), before, "--force cleared the node");
+}
+
+/// The check passes a snapshot the registry holds whole, at `latest` and at
+/// its epoch tag, and the restore reproduces the node it came from.
+#[test]
+fn a_forced_registry_restore_of_a_whole_snapshot_replaces_the_node() {
+    let published = Published::new(1, "net/blocks");
+
+    for point in ["latest".to_owned(), format!("epoch-{}", published.head)] {
+        let (node, _) = synced();
+
+        assert_ok(&published.restore_into(&node, &point));
+        assert_eq!(Contents::read(&node), published.contents, "{point}");
+    }
+}
+
+/// A forced restore reads the snapshot the check before the clear resolved, so
+/// it reads as many manifests as a restore into an empty node, which checks
+/// nothing and resolves its point once: the chain is walked once.
+#[test]
+fn a_forced_registry_restore_walks_the_chain_once() {
+    let published = Published::new(2, "net/blocks");
+    let point = format!("epoch-{}", published.head);
+    let manifests_read = |node: &Node| {
+        let before = published.registry.manifest_gets();
+        assert_ok(&published.restore_into(node, &point));
+        published.registry.manifest_gets() - before
+    };
+
+    let once = manifests_read(&Node::new());
+
+    let (node, _) = synced();
+    assert_eq!(manifests_read(&node), once, "the chain was walked again");
+    assert_eq!(Contents::read(&node), published.contents);
+}
+
+/// A manifest read the check before the clear retries is announced to the
+/// operator once, as the restore's own retries are, and the forced restore
+/// still replaces the node.
+#[test]
+fn a_retried_manifest_read_during_the_forced_check_is_announced() {
+    let published = Published::new(2, "net/blocks");
+    let (node, _) = synced();
+
+    published.registry.fail_next_manifest(1);
+
+    let output = published.restore_into(&node, "latest");
+    assert_ok(&output);
+
+    // A stderr that is not a terminal gets the plain lines.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let retry = "progress: retry 1 (";
+
+    assert_eq!(stderr.matches(retry).count(), 1, "{stderr}");
+    assert!(
+        stderr.find(retry) < stderr.find("progress: restoring "),
+        "the retry was not the check's: {stderr}"
+    );
+    assert_eq!(Contents::read(&node), published.contents);
+}
+
+/// A repository the registry does not hold is refused with the node intact.
+#[test]
+fn a_forced_restore_from_an_absent_repository_is_refused_intact() {
+    let published = Published::new(1, "net/blocks");
+    let (node, before) = synced();
+
+    let url = url_of(&published.registry, "nonexistent");
+
+    for point in ["latest", "epoch-1"] {
+        refused_intact(
+            &forced_from(&node, &url, point),
+            "nonexistent/dolos holds no snapshot: it does not exist, or nothing has been \
+             published to it",
+            &node,
+            &before,
+        );
+    }
+}
+
+/// An epoch the repository holds no snapshot at is refused with the node
+/// intact, naming the latest it holds.
+#[test]
+fn a_forced_restore_at_an_absent_epoch_is_refused_intact() {
+    let published = Published::new(1, "net/blocks");
+    let (node, before) = synced();
+
+    refused_intact(
+        &published.restore_into(&node, "epoch-99999"),
+        &format!(
+            "holds no snapshot at epoch-99999; the latest it holds is epoch-{}",
+            published.head
+        ),
+        &node,
+        &before,
+    );
+}
+
+/// A head whose tip the registry no longer holds is refused with the node
+/// intact, at its epoch tag and at `latest`, which names the same sequence.
+#[test]
+fn a_forced_restore_whose_tip_is_gone_is_refused_intact() {
+    let published = Published::new(1, "net/blocks");
+    let tip = format!("epoch-{}.tip", published.head);
+    published.registry.untag("net/dolos", &tip);
+
+    let (node, before) = synced();
+
+    for point in ["latest".to_owned(), format!("epoch-{}", published.head)] {
+        refused_intact(
+            &published.restore_into(&node, &point),
+            &format!(
+                "the tip of the snapshot at epoch-{} is gone",
+                published.head
+            ),
+            &node,
+            &before,
+        );
+    }
+}
+
+/// A head whose predecessor the registry no longer holds is refused with the
+/// node intact: the head and its tip are whole, so only its chain refuses it.
+#[test]
+fn a_forced_restore_whose_chain_is_broken_is_refused_intact() {
+    let published = Published::new(2, "net/blocks");
+    assert_eq!(published.head, 2);
+
+    for tag in ["epoch-1", "epoch-1.tip"] {
+        published.registry.untag("net/dolos", tag);
+    }
+
+    let (node, before) = synced();
+
+    refused_intact(
+        &published.restore_into(&node, "latest"),
+        "its chain is broken",
+        &node,
+        &before,
+    );
+}
+
+/// A root whose blocks repository lacks the blocks snapshot the Dolos
+/// snapshot reads is refused with the node intact.
+#[test]
+fn a_forced_restore_whose_blocks_are_elsewhere_is_refused_intact() {
+    let published = Published::new(1, "elsewhere/blocks");
+    let (node, before) = synced();
+
+    refused_intact(
+        &published.restore_into(&node, "latest"),
+        &format!(
+            "the blocks repository {}/blocks holds no snapshot at epoch-{}",
+            published.url, published.head
+        ),
+        &node,
+        &before,
     );
 }
 
@@ -864,6 +1143,94 @@ fn recorded_layers(node: &Node) -> Option<usize> {
         .map(|progress| progress.completed.len())
 }
 
+/// The commands that would run on a node's stores: the node, a sync, a
+/// rollback, store housekeeping, a state rebuild, the cache, and a replay
+/// that is not `--force`d over them.
+const RUNS_ON_STORES: &[&[&str]] = &[
+    &["daemon"],
+    &["serve"],
+    &["sync", "catchup"],
+    &["sync", "recover"],
+    &["sync", "recover", "--dry-run"],
+    &[
+        "sync",
+        "rollback",
+        "--slot",
+        "1",
+        "--hash",
+        "0000000000000000000000000000000000000000000000000000000000000001",
+        "--yes",
+    ],
+    &["data", "housekeeping"],
+    &["data", "rebuild", "--yes"],
+    &["data", "rebuild", "--ephemeral", "--yes"],
+    &["cache", "stats"],
+    &["cache", "clear", "--all"],
+    &["cache", "warm", "--namespace", "assets", "--scan"],
+    &["cache", "verify"],
+    &["bootstrap", "immutabledb", "--source", "immutable"],
+    &[
+        "bootstrap",
+        "immutabledb",
+        "--source",
+        "immutable",
+        "--continue",
+    ],
+    &[
+        "bootstrap",
+        "--skip-if-data",
+        "immutabledb",
+        "--source",
+        "immutable",
+    ],
+    #[cfg(feature = "mithril")]
+    &["bootstrap", "mithril"],
+    #[cfg(feature = "mithril")]
+    &["bootstrap", "mithril", "--continue"],
+];
+
+/// Each of [`RUNS_ON_STORES`] refuses `node`'s storage as an interrupted
+/// restore, without a panic, naming the commands that finish or replace it.
+fn refuses_to_run_on_an_interrupted_restore(node: &Node) {
+    for args in RUNS_ON_STORES {
+        let output = node.run(args);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(!stderr.contains("panicked"), "{args:?}: {stderr}");
+        assert!(
+            reports(&output.stderr, "was interrupted"),
+            "{args:?}: {stderr}"
+        );
+        for named in ["dolos bootstrap stelae --continue", "--force"] {
+            assert!(reports(&output.stderr, named), "{args:?}: {stderr}");
+        }
+    }
+}
+
+/// Either record of an interrupted restore is enough to refuse, and the
+/// refusal comes before any store is opened: storage holding only the record
+/// holds only it afterwards.
+#[test]
+fn a_command_that_runs_on_the_stores_refuses_an_interrupted_restores_records() {
+    for name in [
+        dolos_snapshot::restore::SOURCE_FILE,
+        dolos_snapshot::restore::PROGRESS_FILE,
+    ] {
+        let node = Node::new();
+        std::fs::create_dir_all(&node.config.storage.path).unwrap();
+        std::fs::write(storage_file(&node, name), "{}").unwrap();
+
+        refuses_to_run_on_an_interrupted_restore(&node);
+
+        let left: Vec<_> = std::fs::read_dir(&node.config.storage.path)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(left, [std::ffi::OsString::from(name)], "{name}");
+    }
+}
+
 /// SIGKILL a restore of `fixture` into `node` while it waits on the blob of
 /// the `k`-th epoch layer, with the `k` before it recorded.
 ///
@@ -921,7 +1288,8 @@ fn kill_at_layer(fixture: &Fixture, node: &Node, k: usize) {
 
 /// Killed mid-run with a layer recorded, and `--continue` resumes it: the
 /// recorded snapshot read again, its recorded layers skipped, and the node an
-/// uninterrupted restore builds.
+/// uninterrupted restore builds. Commands that would run on the partial
+/// stores refuse them first, without changing what the resume reads.
 #[cfg(unix)]
 #[test]
 fn a_killed_restore_resumes_with_continue() {
@@ -941,6 +1309,9 @@ fn a_killed_restore_resumes_with_continue() {
     assert!(!refused.status.success());
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(stderr.contains("--force"), "{stderr}");
+
+    // Every command that would run on it refuses, and leaves it resumable.
+    refuses_to_run_on_an_interrupted_restore(&node);
 
     let output = node.run(&["bootstrap", "stelae", "--continue"]);
     let stdout = assert_ok(&output);

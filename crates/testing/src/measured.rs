@@ -214,6 +214,48 @@ impl<Inner: ArchiveStore> ArchiveStore for MeasuredArchive<Inner> {
         })
     }
 
+    fn blocks_after<'a>(
+        &self,
+        point: &ChainPoint,
+    ) -> Result<Option<Self::BlockIter<'a>>, ArchiveError> {
+        Ok(self.inner.blocks_after(point)?.map(|inner| CountedBlocks {
+            inner,
+            counters: self.counters.clone(),
+        }))
+    }
+
+    fn blocks_before<'a>(
+        &self,
+        point: &ChainPoint,
+    ) -> Result<Option<Self::BlockIter<'a>>, ArchiveError> {
+        Ok(self.inner.blocks_before(point)?.map(|inner| CountedBlocks {
+            inner,
+            counters: self.counters.clone(),
+        }))
+    }
+
+    fn block_after(
+        &self,
+        point: &ChainPoint,
+    ) -> Result<Option<Option<(BlockSlot, BlockBody)>>, ArchiveError> {
+        let next = self.inner.block_after(point)?;
+        if let Some(Some((_, body))) = &next {
+            self.counters.body(body);
+        }
+        Ok(next)
+    }
+
+    fn block_before(
+        &self,
+        point: &ChainPoint,
+    ) -> Result<Option<Option<(BlockSlot, BlockBody)>>, ArchiveError> {
+        let previous = self.inner.block_before(point)?;
+        if let Some(Some((_, body))) = &previous {
+            self.counters.body(body);
+        }
+        Ok(previous)
+    }
+
     fn find_intersect(&self, intersect: &[ChainPoint]) -> Result<Option<ChainPoint>, ArchiveError> {
         self.inner.find_intersect(intersect)
     }

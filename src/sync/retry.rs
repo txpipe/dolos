@@ -24,6 +24,9 @@ pub(super) struct Failure {
     /// Whether the peer refused the handshake: it serves another network, or
     /// shares no protocol version with dolos.
     refused: bool,
+    /// Whether the WAL holds one point alone, which the peer, past it, does
+    /// not hold: no retry can find an intersection.
+    stranded: bool,
 }
 
 impl Failure {
@@ -35,6 +38,15 @@ impl Failure {
         Self {
             cause,
             refused: false,
+            stranded: false,
+        }
+    }
+
+    /// An intersection no retry can find: the stage gives up at once.
+    pub fn stranded(cause: String) -> Self {
+        Self {
+            stranded: true,
+            ..Self::message(cause)
         }
     }
 
@@ -53,6 +65,7 @@ impl Failure {
         Self {
             cause: format!("connecting: {detail}"),
             refused,
+            stranded: false,
         }
     }
 }
@@ -117,10 +130,10 @@ fn describe_plexer(error: &multiplexer::Error) -> String {
 }
 
 /// A stage's failed attempts in a row at the upstream peer. Attempt `n` in a
-/// row waits `backoff(n)`, whatever failed; the one past `max_retries` gives
-/// up, recording why. A pull session that delivers between two attempts
-/// starts the count again: the peer serves the sync, and giving up on it
-/// would not help.
+/// row waits `backoff(n)`, whatever failed; the one past `max_retries`, or a
+/// stranded one, gives up, recording why. A pull session that delivers
+/// between two attempts starts the count again: the peer serves the sync, and
+/// giving up on it would not help.
 pub(super) struct Attempts {
     stage: &'static str,
     peer_address: String,
@@ -153,8 +166,8 @@ impl Attempts {
         self.failures.set(0);
     }
 
-    /// Count a failed attempt and wait its backoff; past the last retry,
-    /// record why and end the stage.
+    /// Count a failed attempt and wait its backoff; past the last retry, or
+    /// for a stranded attempt, record why and end the stage.
     pub async fn failed(&self, failure: Failure) -> Result<(), WorkerError> {
         let deliveries = self.progress.deliveries();
 
@@ -167,7 +180,7 @@ impl Attempts {
 
         let max_retries = self.retry.max_retries;
 
-        if failures <= max_retries {
+        if failures <= max_retries && !failure.stranded {
             let backoff = backoff(&self.retry, failures);
 
             warn!(
@@ -197,6 +210,7 @@ impl Attempts {
                 self.stage, self.peer_address
             ),
             refused: failure.refused,
+            stranded: failure.stranded,
         });
 
         Err(WorkerError::Panic)

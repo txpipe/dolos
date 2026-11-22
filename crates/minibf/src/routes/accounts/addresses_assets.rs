@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -8,7 +10,7 @@ use dolos_cardano::{
     indexes::CardanoStateIndexExt,
     model::{AccountState, ProposalState},
 };
-use dolos_core::{async_query::BlockMetaResolver, Domain, StateStore as _};
+use dolos_core::{async_query::BlockMetaResolver, Domain, StateStore as _, TxoRef};
 
 use crate::{
     error::Error,
@@ -18,6 +20,7 @@ use crate::{
 };
 
 use super::{account_exists, parse_account_key_param};
+use crate::routes::addresses::SUMMARY_CHUNK;
 
 pub async fn by_stake_addresses_assets<D>(
     Path(stake_address): Path<String>,
@@ -38,25 +41,7 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     }
 
-    let refs = domain
-        .state()
-        .utxos_by_stake(&account_key.address.to_vec())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let utxos = domain
-        .state()
-        .get_utxos(refs.into_iter().collect())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // chain position of each utxo's tx: Blockfrost orders assets by the
-    // position of the oldest (asc) or newest (desc) utxo holding them
-    let mut block_meta = BlockMetaResolver::new(domain.query());
-    let block_deps = block_meta
-        .resolve_batch(utxos.keys().map(|txo_ref| txo_ref.0))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let by_unit = mapping::aggregate_account_assets(&utxos, &block_deps)?;
+    let by_unit = account_assets(&domain, account_key.address.to_vec(), SUMMARY_CHUNK).await?;
 
     let mut entries: Vec<(String, mapping::AssetAggregate)> = by_unit.into_iter().collect();
 
@@ -82,12 +67,68 @@ where
     Ok(Json(assets))
 }
 
+/// The assets held by the live UTxOs of `stake`, with the chain position of
+/// the oldest and newest UTxO holding each. The UTxOs are read, located and
+/// decoded `chunk` at a time, each step off the async workers, so that a
+/// request cut by its deadline stops at the next chunk.
+async fn account_assets<D>(
+    domain: &Facade<D>,
+    stake: Vec<u8>,
+    chunk: usize,
+) -> Result<BTreeMap<String, mapping::AssetAggregate>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let refs: Vec<TxoRef> = domain
+        .blocking(move |domain| {
+            domain
+                .state()
+                .utxos_by_stake(&stake)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        })
+        .await?
+        .into_iter()
+        .collect();
+
+    // chain position of each utxo's tx: Blockfrost orders assets by the
+    // position of the oldest (asc) or newest (desc) utxo holding them
+    let mut block_meta = BlockMetaResolver::new(domain.query());
+    let mut by_unit = BTreeMap::new();
+
+    for chunk in refs.chunks(chunk.max(1)) {
+        let chunk = chunk.to_vec();
+
+        let utxos = domain
+            .blocking(move |domain| {
+                domain
+                    .state()
+                    .get_utxos(chunk)
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+            })
+            .await?;
+
+        let block_deps = block_meta
+            .resolve_batch(utxos.keys().map(|txo_ref| txo_ref.0))
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        by_unit = domain
+            .blocking(move |_| {
+                mapping::add_account_assets(&mut by_unit, &utxos, &block_deps)?;
+                Ok(by_unit)
+            })
+            .await?;
+    }
+
+    Ok(by_unit)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         routes::accounts::testing::*,
-        test_support::{TestApp, TestFault},
+        test_support::{health_throughout, TestApp, TestFault, SLOW_READ},
     };
     use blockfrost_openapi::models::account_addresses_assets_inner::AccountAddressesAssetsInner;
     use dolos_core::{EraCbor, StateWriter as _, UtxoSetDelta, UtxoValue};
@@ -314,5 +355,49 @@ mod tests {
         let second_page: Vec<AccountAddressesAssetsInner> =
             serde_json::from_slice(&bytes).expect("failed to parse second assets page");
         assert_eq!(extract_units(second_page), vec![asset_b_unit]);
+    }
+
+    /// The whole-set load runs on the blocking pool: `/health` answers beside
+    /// a slow one on a single worker.
+    #[tokio::test(flavor = "current_thread")]
+    async fn slow_account_assets_do_not_stall_health() {
+        let app = TestApp::new_with_fault(Some(TestFault::SlowUtxoReads(SLOW_READ)));
+        let path = format!("/accounts/{}/addresses/assets", app.vectors().stake_address);
+
+        assert_eq!(health_throughout(&app, &path).await, StatusCode::OK);
+    }
+
+    /// Chunks of one UTxO add up to the same assets, at the same oldest and
+    /// newest positions, as one chunk of the whole set.
+    #[tokio::test]
+    async fn account_assets_do_not_depend_on_the_chunk_size() {
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 3,
+            txs_per_block: 2,
+            ..Default::default()
+        });
+        let stake = Address::from_bech32(&app.vectors().stake_address)
+            .expect("invalid fixture stake address")
+            .to_vec();
+
+        let flatten = |by_unit: BTreeMap<String, mapping::AssetAggregate>| {
+            by_unit
+                .into_iter()
+                .map(|(unit, agg)| (unit, agg.quantity, agg.oldest, agg.newest))
+                .collect::<Vec<_>>()
+        };
+
+        let whole = flatten(
+            account_assets(&app.facade(), stake.clone(), SUMMARY_CHUNK)
+                .await
+                .unwrap(),
+        );
+        let single = flatten(account_assets(&app.facade(), stake, 1).await.unwrap());
+
+        assert!(!whole.is_empty());
+        assert!(whole
+            .iter()
+            .all(|(_, _, oldest, newest)| oldest.is_some() && newest.is_some()));
+        assert_eq!(single, whole);
     }
 }

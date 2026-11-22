@@ -129,18 +129,22 @@ pub fn check_entity_key(kind: EntityKind, key: &[u8]) -> Result<(), ArchiveError
 /// Byron boundary block and the main block chained onto it. A point naming no
 /// hash, or a block the slot does not hold, keeps them all.
 pub fn blocks_through(bodies: &[impl AsRef<[u8]>], after: &ChainPoint) -> usize {
-    let Some(hash) = after.hash() else {
-        return bodies.len();
-    };
-
-    if bodies.len() < 2 {
+    if after.hash().is_none() || bodies.len() < 2 {
         return bodies.len();
     }
+
+    position_in_slot(bodies, after).map_or(bodies.len(), |at| at + 1)
+}
+
+/// Where among `bodies`, the blocks an archive holds at `point`'s slot in
+/// chain order, the block `point` names sits. None for a point that names no
+/// hash, or a block the slot does not hold.
+pub fn position_in_slot(bodies: &[impl AsRef<[u8]>], point: &ChainPoint) -> Option<usize> {
+    let hash = point.hash()?;
 
     bodies
         .iter()
         .position(|body| crate::wal::block_hash(body.as_ref()) == Some(hash))
-        .map_or(bodies.len(), |at| at + 1)
 }
 
 /// Iterator used by backends that do not implement
@@ -485,6 +489,42 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
         from: Option<BlockSlot>,
         to: Option<BlockSlot>,
     ) -> Result<Self::BlockIter<'a>, ArchiveError>;
+
+    /// The blocks the archive holds after the block `point` names, in chain
+    /// order, starting with one that shares its slot.
+    ///
+    /// `None` when the archive does not hold that block at its slot (pruned,
+    /// rolled back, or never there): it is not looked for at other slots. A
+    /// point with no hash names no block, so it is absent too.
+    fn blocks_after<'a>(
+        &self,
+        point: &ChainPoint,
+    ) -> Result<Option<Self::BlockIter<'a>>, ArchiveError>;
+
+    /// The blocks the archive holds before the block `point` names, in chain
+    /// order, so the nearest one is at the back. Absent as for
+    /// [`Self::blocks_after`].
+    fn blocks_before<'a>(
+        &self,
+        point: &ChainPoint,
+    ) -> Result<Option<Self::BlockIter<'a>>, ArchiveError>;
+
+    /// The block right after the one `point` names: `None` when the archive
+    /// does not hold that block, as for [`Self::blocks_after`], and
+    /// `Some(None)` when it is the newest.
+    ///
+    /// Reads no body beyond the point's slot and the block it returns.
+    fn block_after(
+        &self,
+        point: &ChainPoint,
+    ) -> Result<Option<Option<(BlockSlot, BlockBody)>>, ArchiveError>;
+
+    /// The block right before the one `point` names, as
+    /// [`Self::block_after`] answers it, `Some(None)` for the oldest.
+    fn block_before(
+        &self,
+        point: &ChainPoint,
+    ) -> Result<Option<Option<(BlockSlot, BlockBody)>>, ArchiveError>;
 
     fn find_intersect(&self, intersect: &[ChainPoint]) -> Result<Option<ChainPoint>, ArchiveError>;
 

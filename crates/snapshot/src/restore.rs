@@ -215,8 +215,18 @@ use stelae_driver::preflight;
 pub use stelae_driver::restore::{Budget, Checkpoint, Outlook};
 
 /// How many layers a restore reads ahead of the one it drains, unless its
-/// caller says otherwise.
-pub const DEFAULT_READ_AHEAD: usize = 8;
+/// caller says otherwise. A restore that stages lowers it to fit
+/// [`STAGING_BUDGET`], never below [`MIN_DEFAULT_READ_AHEAD`].
+pub const DEFAULT_READ_AHEAD: usize = 64;
+
+/// The compressed bytes a restore at the default depth may stage at once
+/// ([`Plan::staging_peak`]) before it lowers that depth. An explicit depth is
+/// held to the preflight alone.
+pub const STAGING_BUDGET: u64 = 4 * 1024 * 1024 * 1024;
+
+/// The depth below which a default restore never lowers its read-ahead to fit
+/// [`STAGING_BUDGET`].
+pub const MIN_DEFAULT_READ_AHEAD: usize = 8;
 
 /// This profile's restore [`Budget`].
 ///
@@ -345,13 +355,14 @@ impl<R> Copy for Blocks<'_, R> {}
 ///
 /// The two depths add up to the restore's own, so reading both never fetches
 /// more at once than one stream at that depth did. Most of a plan's layers are
-/// the snapshot's, so the blocks stream takes 2 once there are 4 to share,
-/// which keeps the next epoch's blocks downloading while this epoch's other
-/// layers drain, and reads one layer at a time below that.
+/// the snapshot's, so from a depth of 4 the blocks stream takes a quarter of
+/// it, between 2 and 8: enough to keep the next epochs' blocks downloading
+/// while this epoch's other layers drain, without starving it at depth. Below
+/// 4 it reads one layer at a time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadAhead {
     pub dolos: usize,
-    /// 0 when the restore reads no blocks repository.
+    /// 0 when the restore reads no blocks repository, or reads at depth 0.
     pub blocks: usize,
 }
 
@@ -364,7 +375,11 @@ impl ReadAhead {
             };
         }
 
-        let blocks = if read_ahead >= 4 { 2 } else { 1 };
+        let blocks = match read_ahead {
+            // 0 and 1 both read one layer at a time.
+            0..4 => read_ahead.min(1),
+            depth => (depth / 4).clamp(2, 8),
+        };
 
         Self {
             dolos: read_ahead.saturating_sub(blocks),
@@ -1622,6 +1637,24 @@ pub fn source_path_in(storage_path: &Path) -> PathBuf {
     storage_path.join(SOURCE_FILE)
 }
 
+/// The records of an interrupted restore under `storage_path`: its source
+/// record and its progress file, whichever exist.
+///
+/// A restore removes both when it finishes, so either one means the stores
+/// under it are incomplete. Only their presence is checked; [`unfinished`]
+/// reads them.
+pub fn records_in(storage_path: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut found = Vec::new();
+
+    for path in [source_path_in(storage_path), progress_path_in(storage_path)] {
+        if path.try_exists()? {
+            found.push(path);
+        }
+    }
+
+    Ok(found)
+}
+
 /// Which snapshot a restore in flight reads, and from where.
 ///
 /// Durable before the first layer is fetched and removed after the progress
@@ -1912,9 +1945,11 @@ pub struct Restoring<'a> {
     /// `journal_mb`, and nothing for a store that keeps no journal.
     pub journals: u64,
     /// How many layers to read ahead of the one being drained; 0 and 1 read
-    /// one layer at a time. [`DEFAULT_READ_AHEAD`] unless the operator says.
-    /// A transport whose blobs are local reads one at a time whatever it says.
-    pub read_ahead: usize,
+    /// one layer at a time. `None` when the operator named no depth: the
+    /// restore reads at [`DEFAULT_READ_AHEAD`], lowered to fit
+    /// [`STAGING_BUDGET`] where the transport stages. A transport whose blobs
+    /// are local reads one at a time whatever it says.
+    pub read_ahead: Option<usize>,
     /// The network root the snapshot is read from, for the [`SourceRecord`]:
     /// recorded before the first layer and, on a resume, the record the
     /// snapshot has to match. `None` records and checks nothing, so a resume
@@ -2221,21 +2256,23 @@ where
     // and here writes — `Checkpoint::open` only reads the progress file and
     // `blob_index` only reads the snapshot — so the preflight still refuses before
     // the first byte is written, which is the whole of its promise.
-    let staging = match scratch_dir {
-        Some(dir) => Some(Staging {
-            dir,
-            read_ahead: node.read_ahead,
-            blocks: blocks.is_some(),
-            peak: plan.staging_peak(
-                snapshot,
-                &index,
-                blocks,
-                checkpoint.resume(),
-                node.read_ahead,
-            )?,
-            unsized_layers: outlook.remaining.unsized_layers,
-        }),
-        None => None,
+    let (read_ahead, staging) = match scratch_dir {
+        Some(dir) => {
+            let (read_ahead, peak) = staged_read_ahead(node.read_ahead, |depth| {
+                plan.staging_peak(snapshot, &index, blocks, checkpoint.resume(), depth)
+            })?;
+
+            let staging = Staging {
+                dir,
+                read_ahead,
+                blocks: blocks.is_some(),
+                peak,
+                unsized_layers: outlook.remaining.unsized_layers,
+            };
+
+            (read_ahead, Some(staging))
+        }
+        None => (node.read_ahead.unwrap_or(DEFAULT_READ_AHEAD), None),
     };
 
     check_restore_space(
@@ -2265,7 +2302,7 @@ where
         &plan,
         target,
         default_budget(),
-        node.read_ahead,
+        read_ahead,
         &mut checkpoint,
         observer,
     )?;
@@ -2278,6 +2315,51 @@ where
     }
 
     Ok((plan, outlook, summary))
+}
+
+/// The depth a restore that stages reads ahead at, and the staging peak
+/// `peak` gives at it: the operator's depth as given, else the default fitted
+/// to [`STAGING_BUDGET`] ([`fit_staging_budget`]).
+fn staged_read_ahead<E>(
+    requested: Option<usize>,
+    mut peak: impl FnMut(usize) -> Result<Option<u64>, E>,
+) -> Result<(usize, Option<u64>), E> {
+    match requested {
+        Some(depth) => Ok((depth, peak(depth)?)),
+        None => fit_staging_budget(DEFAULT_READ_AHEAD, peak),
+    }
+}
+
+/// `start`, halved while the staging peak `peak` gives at the depth exceeds
+/// [`STAGING_BUDGET`] and half of it is still [`MIN_DEFAULT_READ_AHEAD`] or
+/// more, with the peak at the depth chosen. A peak nothing could size keeps
+/// the depth. Logs the change when it lowers the depth.
+fn fit_staging_budget<E>(
+    start: usize,
+    mut peak: impl FnMut(usize) -> Result<Option<u64>, E>,
+) -> Result<(usize, Option<u64>), E> {
+    let start_peak = peak(start)?;
+    let (mut depth, mut depth_peak) = (start, start_peak);
+
+    while depth_peak.is_some_and(|bytes| bytes > STAGING_BUDGET)
+        && depth / 2 >= MIN_DEFAULT_READ_AHEAD
+    {
+        depth /= 2;
+        depth_peak = peak(depth)?;
+    }
+
+    if depth < start {
+        info!(
+            default = start,
+            chosen = depth,
+            default_peak = start_peak,
+            chosen_peak = depth_peak,
+            budget = STAGING_BUDGET,
+            "lowered the read-ahead to fit the staging budget"
+        );
+    }
+
+    Ok((depth, depth_peak))
 }
 
 fn check_restore_space(
@@ -2417,6 +2499,10 @@ pub enum Input<'a> {
         point: crate::registry::Point,
         blocks: Option<&'a crate::registry::SnapshotRepository>,
     },
+    /// A registry snapshot, and its blocks, resolved before the stores were
+    /// touched by [`crate::registry::SnapshotRepository::check`]: restored as
+    /// checked, with no chain walked again.
+    Checked(&'a crate::registry::Checked),
 }
 
 /// The structured result of a completed restore.
@@ -2452,6 +2538,7 @@ where
             point,
             blocks,
         } => repository.restore(point, blocks, node, target, observer)?,
+        Input::Checked(checked) => checked.restore(node, target, observer)?,
     };
 
     Ok(RestoreOutcome {
@@ -3093,6 +3180,8 @@ mod source_tests {
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
+
     use serde_json::json;
     use stelae::{inscription::LayerDescriptor, Digest, RestoreProgress};
 
@@ -4069,7 +4158,7 @@ mod tests {
                 resume: false,
                 skip_space_check: true,
                 journals: 0,
-                read_ahead: DEFAULT_READ_AHEAD,
+                read_ahead: None,
                 source: None,
             },
             || panic!("a skipped check estimates nothing"),
@@ -4514,10 +4603,29 @@ mod tests {
             "{serial}"
         );
 
-        let ahead = refusal(DEFAULT_READ_AHEAD);
+        let ahead = refusal(MIN_DEFAULT_READ_AHEAD);
         assert!(
             ahead.contains("staging the layers it pulls, 9 at once at read-ahead 8"),
             "{ahead}"
+        );
+
+        // An operator's depth is not fitted to the budget: it is used as
+        // given, and the preflight is what refuses it.
+        let (explicit, peak) =
+            staged_read_ahead(Some(64), |_| Ok::<_, Infallible>(Some(u64::MAX))).unwrap();
+        assert_eq!((explicit, peak), (64, Some(u64::MAX)));
+
+        // The peak it is preflighted against is its own depth's, not the
+        // default's.
+        assert_eq!(
+            staged_read_ahead(Some(64), |depth| Ok::<_, Infallible>(Some(depth as u64))).unwrap(),
+            (64, Some(64))
+        );
+
+        let deep = refusal(explicit);
+        assert!(
+            deep.contains("staging the layers it pulls, 65 at once at read-ahead 64"),
+            "{deep}"
         );
     }
 
@@ -4526,7 +4634,100 @@ mod tests {
         assert_eq!(Staging::at_once(0), 1);
         assert_eq!(Staging::at_once(1), 1);
         assert_eq!(Staging::at_once(2), 3);
-        assert_eq!(Staging::at_once(DEFAULT_READ_AHEAD), 9);
+        assert_eq!(Staging::at_once(8), 9);
+        assert_eq!(Staging::at_once(DEFAULT_READ_AHEAD), 65);
+    }
+
+    #[test]
+    fn the_blocks_stream_takes_a_quarter_of_the_depth_between_2_and_8() {
+        let paired = [
+            (0, 0, 0),
+            (1, 0, 1),
+            (3, 2, 1),
+            (4, 2, 2),
+            (7, 5, 2),
+            (8, 6, 2),
+            (16, 12, 4),
+            (32, 24, 8),
+            (64, 56, 8),
+            (128, 120, 8),
+        ];
+
+        for (depth, dolos, blocks) in paired {
+            let split = ReadAhead::split(depth, true);
+            assert_eq!(split, ReadAhead { dolos, blocks }, "paired at {depth}");
+            assert_eq!(split.dolos + split.blocks, depth, "paired at {depth}");
+
+            let alone = ReadAhead::split(depth, false);
+            assert_eq!(
+                alone,
+                ReadAhead {
+                    dolos: depth,
+                    blocks: 0
+                },
+                "unpaired at {depth}"
+            );
+        }
+    }
+
+    /// The depth [`fit_staging_budget`] chooses from `start` when `peak` gives
+    /// the staging peak at each depth, and the depths it asked the peak of.
+    fn fitted(start: usize, peak: impl Fn(usize) -> Option<u64>) -> (usize, Vec<usize>) {
+        let mut asked = Vec::new();
+
+        let (depth, at) = fit_staging_budget(start, |depth| {
+            asked.push(depth);
+            Ok::<_, Infallible>(peak(depth))
+        })
+        .unwrap();
+
+        assert_eq!(at, peak(depth), "the peak is the chosen depth's");
+
+        (depth, asked)
+    }
+
+    #[test]
+    fn a_default_read_ahead_halves_until_its_staging_fits_the_budget() {
+        const QUARTER_GIB: u64 = 256 * 1024 * 1024;
+
+        // Under the budget: kept.
+        assert_eq!(fitted(64, |_| Some(STAGING_BUDGET)), (64, vec![64]));
+
+        // Over it: halved to the first depth that fits, 16 at 4 GiB.
+        let by_depth = |depth: usize| Some(depth as u64 * QUARTER_GIB);
+        assert_eq!(fitted(64, by_depth), (16, vec![64, 32, 16]));
+
+        // Never below the floor, even when the floor does not fit.
+        assert_eq!(
+            fitted(64, |_| Some(u64::MAX)),
+            (MIN_DEFAULT_READ_AHEAD, vec![64, 32, 16, 8])
+        );
+
+        // Nothing could be sized: kept.
+        assert_eq!(fitted(64, |_| None), (64, vec![64]));
+
+        // A start at the floor never moves.
+        assert_eq!(
+            fitted(MIN_DEFAULT_READ_AHEAD, |_| Some(u64::MAX)),
+            (8, vec![8])
+        );
+
+        // No depth named: the default, fitted.
+        assert_eq!(
+            staged_read_ahead(None, |_| Ok::<_, Infallible>(Some(u64::MAX))).unwrap(),
+            (MIN_DEFAULT_READ_AHEAD, Some(u64::MAX))
+        );
+
+        // A default restore whose staging at 64 is over the budget reads
+        // shallower than 64, but never below the floor.
+        let (chosen, _) = staged_read_ahead(None, |depth| {
+            Ok::<_, Infallible>(Some(depth as u64 * QUARTER_GIB))
+        })
+        .unwrap();
+        assert_eq!(DEFAULT_READ_AHEAD, 64);
+        assert!(chosen < DEFAULT_READ_AHEAD, "{chosen}");
+        assert!(chosen >= MIN_DEFAULT_READ_AHEAD, "{chosen}");
+        assert_eq!(chosen, 16);
     }
 
     /// A snapshot none of whose layers opens: each read fails naming the layer

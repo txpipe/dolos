@@ -54,6 +54,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[tokio::main]
 pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
+    crate::common::refuse_interrupted_restore(config)?;
+
     let limit = args.sync_limit();
     let emulator = matches!(config.upstream, Some(UpstreamConfig::Emulator(_)));
 

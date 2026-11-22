@@ -318,7 +318,19 @@ This crate organization enables Dolos to serve as a lightweight, efficient Carda
 
 ### Code Verification Requirements
 
-All agents working on this repository must verify their modifications by running the following checks before considering any changes complete:
+The checks below are the bar every pull request must pass before it merges.
+They are not the command for every local run.
+
+While working, run what covers your change: a package (`-p <crate>`), a test
+target (`--test <name>`), a test-name filter, or the full list when the change
+is broad (a shared trait, a dependency bump, a workspace-wide refactor). Before
+asking for review, make sure the change meets each requirement below.
+
+CI runs the full test suite (item 3) on every pull request, and clippy on the
+root package only. It does not run the workspace-wide clippy (item 1), the
+warning-free build (item 2) or the registry restore round trip (item 4): where
+your change reaches what those cover, run them yourself, item 4 by the trigger
+given under it.
 
 1. **Clippy Linting**: Run `cargo clippy` and ensure no warnings appear
    ```bash

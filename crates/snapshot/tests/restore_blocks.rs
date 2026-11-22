@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use dolos_core::{ArchiveStore as _, BlockSlot, Domain as _, StateStore as _};
 use dolos_snapshot::{
     export,
-    restore::{self, Input, Repo, RestoreOutcome, Restoring, Target, DEFAULT_READ_AHEAD},
+    restore::{self, Input, Repo, RestoreOutcome, Restoring, Target},
     Error, BLOCKS,
 };
 use dolos_testing::toy_domain::{MemoryStores, ToyDomain};
@@ -103,7 +103,7 @@ impl Fixture {
                 resume: false,
                 skip_space_check: false,
                 journals: 0,
-                read_ahead: DEFAULT_READ_AHEAD,
+                read_ahead: None,
                 source: None,
             },
             Target::new(&blank.archive, blank.state()),
@@ -576,7 +576,7 @@ fn a_single_boundary_export_to_a_root_restores_its_full_block_history() {
             resume: false,
             skip_space_check: false,
             journals: 0,
-            read_ahead: DEFAULT_READ_AHEAD,
+            read_ahead: None,
             source: None,
         },
         Target::new(&blank.archive, blank.state()),

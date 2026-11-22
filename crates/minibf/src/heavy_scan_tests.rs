@@ -45,12 +45,15 @@ fn closures(snapshot: &Snapshot, name: &str) -> f64 {
 }
 
 /// Every heavy-scan route, the two account scans of the stakes-only ruling
-/// included.
+/// and the address and account summaries included.
 fn heavy_paths(app: &TestApp) -> Vec<String> {
     let v = app.vectors();
     let epoch = app.tip_epoch();
 
     vec![
+        format!("/addresses/{}", v.address),
+        format!("/addresses/{}/extended", v.address),
+        format!("/accounts/{}/addresses/assets", v.stake_address),
         format!("/addresses/{}/utxos", v.address),
         format!("/addresses/{}/utxos/{}", v.address, v.asset_unit),
         format!("/accounts/{}/utxos", v.stake_address),

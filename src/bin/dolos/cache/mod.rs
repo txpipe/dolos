@@ -118,10 +118,11 @@ pub struct VerifyArgs {
 
 #[tokio::main]
 pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing_warnings()?;
-    ensure_offline(&config.storage)?;
+    crate::common::refuse_interrupted_restore(config)?;
 
-    let domain = crate::common::setup_domain(config)?;
+    crate::common::setup_tracing_warnings()?;
+
+    let domain = open_offline(config)?;
     let namespaces = register(&domain)?;
 
     match &args.command {
@@ -155,8 +156,16 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     }
 }
 
+/// The domain the cache commands work on, once no other process holds the
+/// cache file.
+fn open_offline(config: &RootConfig) -> miette::Result<dolos::adapters::DomainAdapter> {
+    ensure_offline(&config.storage)?;
+    crate::common::setup_domain(config)
+}
+
 /// Fails while another process, such as a running node, holds the cache file,
-/// and while the cache is off.
+/// and while the cache is off. It only probes the file's lock, so a cache of
+/// another version is reset later, by the domain, once the state is admitted.
 pub fn ensure_offline(storage: &StorageConfig) -> miette::Result<()> {
     let Some(dir) = storage.cache_path() else {
         bail!(
@@ -165,7 +174,7 @@ pub fn ensure_offline(storage: &StorageConfig) -> miette::Result<()> {
         );
     };
 
-    match RedbCacheTier::open(&dir, storage.cache.disk_bytes()) {
+    match RedbCacheTier::check_unheld(&dir) {
         Ok(_) => Ok(()),
         Err(CacheError::InUse(path)) => Err(miette!(
             help = "stop the node first, or wait for the other dolos command to finish: the cache commands run with the node stopped",
@@ -1724,6 +1733,71 @@ mod tests {
 
         drop(running);
         ensure_offline(&storage).unwrap();
+    }
+
+    /// The cache file of a config over `root`, recording another file version
+    /// over a namespace, next to a state no release records an identity for.
+    fn a_newer_cache_over_a_refused_state(root: &Path) -> (RootConfig, PathBuf) {
+        use dolos_redb3::redb::{Database, TableDefinition};
+
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = root.to_path_buf();
+        config.storage.cache.enabled = true;
+
+        let state = dolos_fjall::StateStore::open(
+            config.storage.state_path().unwrap(),
+            dolos_fjall::Preset::Standard,
+        )
+        .unwrap();
+        let writer = dolos_core::StateStore::start_writer(&state).unwrap();
+        dolos_core::StateWriter::set_cursor(&writer, dolos_core::ChainPoint::Origin).unwrap();
+        dolos_core::StateWriter::commit(writer).unwrap();
+        state.shutdown().unwrap();
+        drop(state);
+
+        let dir = config.storage.cache_path().unwrap();
+        let tier = RedbCacheTier::open(&dir, 1 << 20).unwrap();
+        tier.open_namespace("ns", 1).unwrap();
+        tier.put("ns", b"key", b"value", 1).unwrap();
+        tier.flush().unwrap();
+        drop(tier);
+
+        let path = dir.join(dolos_redb3::cache::FILE_NAME);
+        let db = Database::create(&path).unwrap();
+        let wx = db.begin_write().unwrap();
+        wx.open_table(TableDefinition::<&str, u32>::new("cache-versions"))
+            .unwrap()
+            .insert("", 99)
+            .unwrap();
+        wx.commit().unwrap();
+
+        (config, path)
+    }
+
+    /// The cache commands reset an incompatible cache only once the state is
+    /// admitted.
+    #[test]
+    fn a_refused_state_leaves_a_newer_cache_as_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, path) = a_newer_cache_over_a_refused_state(&dir.path().join("data"));
+        let before = std::fs::read(&path).unwrap();
+
+        ensure_offline(&config.storage).unwrap();
+        assert!(std::fs::read(&path).unwrap() == before, "probing the lock");
+
+        let Err(error) = open_offline(&config) else {
+            panic!("the cache commands opened a refused state");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("records no compatibility identity"),
+            "{error:?}"
+        );
+        assert!(
+            std::fs::read(&path).unwrap() == before,
+            "opening the domain"
+        );
     }
 
     #[test]

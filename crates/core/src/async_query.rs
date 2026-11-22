@@ -658,10 +658,25 @@ where
         &self,
         tx_hashes: impl IntoIterator<Item = TxHash>,
     ) -> Result<Vec<(TxHash, Option<EraCbor>)>, DomainError> {
+        Ok(self
+            .tx_cbor_batch_with_positions(tx_hashes)
+            .await?
+            .into_iter()
+            .map(|(hash, value)| (hash, value.map(|(cbor, _)| cbor)))
+            .collect())
+    }
+
+    pub async fn tx_cbor_batch_with_positions(
+        &self,
+        tx_hashes: impl IntoIterator<Item = TxHash>,
+    ) -> Result<Vec<(TxHash, Option<(EraCbor, UtxoPosition)>)>, DomainError> {
         let requested = tx_hashes.into_iter().unique().collect();
         let (fetched, _) = self
-            .extract_by_tx_hashes(requested, |block, _, _, tx| {
-                EraCbor(block.era().into(), tx.encode())
+            .extract_by_tx_hashes(requested, |block, tx_index, _, tx| {
+                (
+                    EraCbor(block.era().into(), tx.encode()),
+                    UtxoPosition::of_tx(block.slot(), tx_index),
+                )
             })
             .await?;
         Ok(fetched)

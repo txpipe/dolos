@@ -247,7 +247,9 @@ impl std::str::FromStr for Point {
 ///
 /// `blocks` is the blocks repository. It is read at the snapshot's sequence
 /// only when [`crate::restore::blocks_wanted`] names a snapshot, and a restore
-/// that needs it and has none, or finds no snapshot there, is refused. The
+/// that needs it and has none, or finds no snapshot there, is refused. Its
+/// chain is walked on a second thread while the Dolos chain is, from the head's
+/// sequence, and dropped when the restore turns out not to want it. The
 /// preflight sizes the staging of both against `registry`'s scratch
 /// directory, so the two are opened with the same one.
 ///
@@ -270,19 +272,44 @@ where
 
     let record = crate::restore::pinned(&node)?;
 
+    // The head's sequence, which is all the blocks walk needs to start beside
+    // the Dolos one. A resume has read the head already.
+    let mut sequence = None;
+
     if let Some(record) = &record {
         let head = match point.pull(registry) {
-            Ok(head) => head.read_inscription()?.digest()?,
+            Ok(head) => head.read_inscription()?,
             Err(error) if is_absent(&error) => return Err(crate::restore::gone(record.clone())),
             Err(error) => return Err(error),
         };
 
-        if head != record.inscription_digest {
+        if head.digest()? != record.inscription_digest {
             return Err(crate::restore::gone(record.clone()));
         }
+
+        sequence = Some(head.sequence);
+    } else if blocks.is_some() {
+        // A pull fails as the resolve, which starts with one, would.
+        sequence = Some(match point {
+            Point::Epoch(epoch) => epoch,
+            Point::Latest => point.pull(registry)?.read_inscription()?.sequence,
+        });
     }
 
-    let snapshot = match point.resolve(registry) {
+    let (resolved, early) = match (blocks, sequence) {
+        (Some(blocks), Some(sequence)) => std::thread::scope(|scope| {
+            let walk = scope.spawn(|| walk_blocks(blocks, sequence, observer));
+            let resolved = point.resolve(registry);
+            let walked = walk
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+
+            (resolved, Some((sequence, walked)))
+        }),
+        _ => (point.resolve(registry), None),
+    };
+
+    let snapshot = match resolved {
         Ok(snapshot) => snapshot,
         Err(error) => {
             return Err(match record {
@@ -298,13 +325,20 @@ where
         crate::restore::blocks_wanted(chain, node.max_history)?,
         blocks,
     ) {
-        (Some(reference), Some(blocks)) => Some(resolve_blocks(
-            blocks,
-            reference,
-            chain.head().sequence,
-            observer,
-        )?),
+        (Some(reference), Some(blocks)) => {
+            let sequence = chain.head().sequence;
+
+            let walked = match early {
+                Some((walked_at, walked)) if walked_at == sequence => walked,
+                // The moving tag moved between the two reads of the head.
+                _ => walk_blocks(blocks, sequence, observer),
+            };
+
+            Some(blocks_found(blocks, reference, sequence, walked)?)
+        }
         // Wanted and not given: the plan refuses it, naming the reference.
+        // Not wanted: a blocks walk that ran beside the Dolos one, and any
+        // error it met, is dropped.
         _ => None,
     };
 
@@ -325,16 +359,25 @@ where
 }
 
 /// The blocks snapshot at `sequence` in `registry`, resolved through its
-/// chain, or [`Error::BlocksMissing`] when the repository holds none there.
-fn resolve_blocks(
+/// chain. [`blocks_found`] reads the result once the restore knows it wants it.
+fn walk_blocks(
+    registry: &Registry,
+    sequence: u64,
+    observer: &Observer,
+) -> Result<Snapshot, stelae::Error> {
+    registry.observe(observer.clone());
+    registry.resolve_sequence(&stelae_blocks::BlocksProfile, sequence)
+}
+
+/// A [`walk_blocks`] result as the restore's: [`Error::BlocksMissing`],
+/// naming `reference`, when the repository holds no snapshot at `sequence`.
+fn blocks_found(
     registry: &Registry,
     reference: Digest,
     sequence: u64,
-    observer: &Observer,
+    walked: Result<Snapshot, stelae::Error>,
 ) -> Result<Snapshot, Error> {
-    registry.observe(observer.clone());
-
-    match registry.resolve_sequence(&stelae_blocks::BlocksProfile, sequence) {
+    match walked {
         Ok(snapshot) => Ok(snapshot),
         Err(error) if error.is_absent() => Err(Error::BlocksMissing {
             reference,
@@ -344,6 +387,177 @@ fn resolve_blocks(
             ),
         }),
         Err(error) => Err(error.into()),
+    }
+}
+
+/// What a restore of the snapshot at `point` reads, resolved and checked before
+/// anything is written: the snapshot through its chain and, when the restore
+/// reads one, the blocks snapshot at its sequence.
+///
+/// [`Checked::restore`] reads exactly these, so a restore run after a step
+/// that has to wait for the check (a `--force` clearing the node) walks no
+/// chain again, and a moving tag that moves in between is not read.
+pub struct Checked {
+    snapshot: Snapshot,
+    blocks: Option<Snapshot>,
+    scratch_dir: Option<PathBuf>,
+}
+
+impl std::fmt::Debug for Checked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Checked")
+            .field("sequence", &self.sequence())
+            .field("blocks", &self.blocks.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Checked {
+    /// The head's sequence: the epoch `point` named when it was checked.
+    pub fn sequence(&self) -> u64 {
+        self.chain().head().sequence
+    }
+
+    /// sha256 of the head's canonical inscription.
+    pub fn identity(&self) -> Digest {
+        self.chain().identity()
+    }
+
+    fn chain(&self) -> &Chain {
+        self.snapshot
+            .chain()
+            .expect("a checked snapshot was resolved through its chain")
+    }
+
+    /// Restore the checked snapshot, reading its blocks from the checked
+    /// blocks snapshot: [`restore_registry`] from the point on where the chain
+    /// is resolved, with no manifest or inscription read again. Only layers
+    /// are pulled, staged in the directory the repository was opened with.
+    ///
+    /// **Never call this from inside an async context.** See [`open`].
+    pub fn restore<A, S>(
+        &self,
+        node: Restoring<'_>,
+        target: Target<'_, A, S>,
+        observer: &Observer,
+    ) -> Result<(crate::restore::Plan, Outlook, Summary), Error>
+    where
+        A: ArchiveStore,
+        S: StateStore,
+    {
+        // Both snapshots share their connection's observer with the
+        // repository they were resolved from.
+        self.snapshot.observe(observer.clone());
+
+        let chain = self.chain();
+
+        let paired = match (
+            crate::restore::blocks_wanted(chain, node.max_history)?,
+            &self.blocks,
+        ) {
+            (Some(_), Some(blocks)) => {
+                blocks.observe(observer.clone());
+                Some((blocks, crate::restore::chain_of(blocks.chain())?))
+            }
+            // Wanted and not checked: the plan refuses it, naming the
+            // reference, as `restore_registry` leaves it to.
+            _ => None,
+        };
+
+        crate::restore::restore_snapshot(
+            &self.snapshot,
+            chain,
+            paired,
+            node,
+            self.scratch_dir.as_deref(),
+            target,
+            observer,
+        )
+    }
+}
+
+/// Resolve what a restore of the snapshot at `point` in `registry` reads,
+/// pulling no layer: the snapshot through its chain and, when
+/// [`crate::restore::blocks_wanted`] names one, the blocks snapshot at its
+/// sequence in `blocks`.
+///
+/// Each failure keeps its own error: no snapshot in the repository
+/// ([`Error::NoSnapshot`]), none at the point ([`Error::NoSnapshotAt`]), a gone
+/// tip, a broken chain, missing blocks, and a registry that does not answer.
+///
+/// `observer` hears the check's retried manifest and inscription reads, which
+/// a restore of the [`Checked`] does not make again.
+///
+/// **Never call this from inside an async context.** See [`open`].
+pub fn check(
+    registry: &Registry,
+    point: Point,
+    blocks: Option<&Registry>,
+    max_history: Option<u64>,
+    observer: &Observer,
+) -> Result<Checked, Error> {
+    // Attached before the first read, as `restore_registry` attaches it.
+    registry.observe(observer.clone());
+
+    if let Some(blocks) = blocks {
+        blocks.observe(observer.clone());
+    }
+
+    let snapshot = match point.resolve(registry) {
+        Ok(snapshot) => snapshot,
+        Err(error) if is_absent(&error) => return Err(absent(registry, point)),
+        Err(error) => return Err(error),
+    };
+
+    let chain = crate::restore::chain_of(snapshot.chain())?;
+    let sequence = chain.head().sequence;
+
+    let blocks = match (crate::restore::blocks_wanted(chain, max_history)?, blocks) {
+        (Some(reference), Some(blocks)) => {
+            let walked = blocks.resolve_sequence(&stelae_blocks::BlocksProfile, sequence);
+            Some(blocks_found(blocks, reference, sequence, walked)?)
+        }
+        (Some(reference), None) => {
+            return Err(Error::BlocksMissing {
+                reference,
+                reason: "no blocks repository was given".to_owned(),
+            })
+        }
+        (None, _) => None,
+    };
+
+    Ok(Checked {
+        snapshot,
+        blocks,
+        scratch_dir: registry.scratch_dir().map(Path::to_path_buf),
+    })
+}
+
+/// The refusal for a `point` whose head `registry` does not hold: an epoch tag
+/// in a repository that holds a latest one names the latest, and any other is
+/// a repository that holds no snapshot.
+fn absent(registry: &Registry, point: Point) -> Error {
+    let repository = registry.repository().to_string();
+
+    let Point::Epoch(sequence) = point else {
+        return Error::NoSnapshot { repository };
+    };
+
+    let latest = match registry.pull_latest(&DolosProfile) {
+        Ok(latest) => match latest.read_inscription() {
+            Ok(inscription) => inscription.sequence,
+            Err(error) => return error.into(),
+        },
+        Err(error) if error.is_absent() => return Error::NoSnapshot { repository },
+        // The latest snapshot is there, and only its tip is not.
+        Err(stelae::Error::TipGone { sequence, .. }) => sequence,
+        Err(error) => return error.into(),
+    };
+
+    Error::NoSnapshotAt {
+        repository,
+        sequence,
+        latest,
     }
 }
 
@@ -407,6 +621,25 @@ impl SnapshotRepository {
     /// layers.
     pub fn inspect(&self, point: Point) -> Result<Inspected, Error> {
         inspect(&self.registry, point)
+    }
+
+    /// Resolve what a restore at `point` reads, reading blocks from `blocks`,
+    /// without pulling a layer, with `observer` hearing its retries; see
+    /// [`check`].
+    pub fn check(
+        &self,
+        point: Point,
+        blocks: Option<&SnapshotRepository>,
+        max_history: Option<u64>,
+        observer: &Observer,
+    ) -> Result<Checked, Error> {
+        check(
+            &self.registry,
+            point,
+            blocks.map(|blocks| &blocks.registry),
+            max_history,
+            observer,
+        )
     }
 
     /// Stream and verify every layer named by the published document.

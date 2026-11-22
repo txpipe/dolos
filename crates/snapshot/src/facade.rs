@@ -7,7 +7,7 @@
 
 pub use crate::{
     prepare::{Bundle, Finalizing, IndexTail, Request as PrepareRequest, Store as BundleStore},
-    registry::{Auth, Point, Preview, Published, Repository, SnapshotRepository, Tuning},
+    registry::{Auth, Checked, Point, Preview, Published, Repository, SnapshotRepository, Tuning},
     restore::{execute as restore, Input as RestoreInput, RestoreOutcome, Restoring, Target},
     source::{Selection, SnapshotSource, StoreSnapshot},
     staging::{Budget as StagingBudget, Staged},

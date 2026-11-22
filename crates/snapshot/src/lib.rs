@@ -758,6 +758,25 @@ pub enum Error {
     )]
     TipGone { sequence: u64, tag: String },
 
+    /// A repository that holds no snapshot at all. A registry answers a
+    /// repository it does not know and one nothing was published to alike.
+    #[error(
+        "the repository {repository} holds no snapshot: it does not exist, or nothing has been \
+         published to it"
+    )]
+    NoSnapshot { repository: String },
+
+    /// A point that names no snapshot in a repository that holds others.
+    #[error(
+        "the repository {repository} holds no snapshot at epoch-{sequence}; the latest it holds \
+         is epoch-{latest}"
+    )]
+    NoSnapshotAt {
+        repository: String,
+        sequence: u64,
+        latest: u64,
+    },
+
     /// A Dolos snapshot whose closed epochs' blocks are in a blocks snapshot
     /// this restore has no repository for, or whose repository does not
     /// hold it.

@@ -416,7 +416,7 @@ where
         )
         .route(
             "/accounts/{stake_address}/addresses/assets",
-            get(routes::accounts::by_stake_addresses_assets::<D>),
+            get(routes::accounts::by_stake_addresses_assets::<D>).layer(heavy.clone()),
         )
         .route(
             "/accounts/{stake_address}/addresses/total",
@@ -448,11 +448,11 @@ where
         )
         .route(
             "/addresses/{address}",
-            get(routes::addresses::by_address::<D>),
+            get(routes::addresses::by_address::<D>).layer(heavy.clone()),
         )
         .route(
             "/addresses/{address}/extended",
-            get(routes::addresses::extended::<D>),
+            get(routes::addresses::extended::<D>).layer(heavy.clone()),
         )
         .route(
             "/addresses/{address}/utxos",
@@ -872,7 +872,7 @@ mod route_prefix_tests {
             json!({
                 "status_code": 400,
                 "error": "Bad Request",
-                "message": "Invalid path.",
+                "message": "Invalid path. Please check https://docs.txpipe.io/dolos/apis/minibf",
             }),
             "{path}"
         );
@@ -945,6 +945,9 @@ mod tests {
         "/blocks/latest/nope",
         "/blocks/epoch/2/slot",
         "/blocks//latest",
+        "/blocks//txs/cbor",
+        "/blocks/",
+        "/blocks//",
     ];
 
     #[tokio::test]
@@ -967,9 +970,40 @@ mod tests {
                 json!({
                     "status_code": 400,
                     "error": "Bad Request",
-                    "message": "Invalid path.",
+                    "message": "Invalid path. Please check https://docs.txpipe.io/dolos/apis/minibf",
                 }),
                 "unexpected body for {path}"
+            );
+        }
+    }
+
+    /// An empty block segment is a malformed hash on the routes Blockfrost
+    /// answers that way. `/blocks//txs/cbor` is an invalid path there, see
+    /// `UNMATCHED_PATHS`. Checked against live Blockfrost on 2026-11-18.
+    #[tokio::test]
+    async fn an_empty_block_hash_is_malformed() {
+        let app = TestApp::new();
+
+        for path in [
+            "/blocks//txs",
+            "/blocks//txs?count=1",
+            "/blocks//addresses",
+            "/blocks//next",
+            "/blocks//previous",
+        ] {
+            let (status, bytes) = app.get_bytes(path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+
+            let body: Value = serde_json::from_slice(&bytes)
+                .unwrap_or_else(|_| panic!("no json body for {path}"));
+            assert_eq!(
+                body,
+                json!({
+                    "status_code": 400,
+                    "error": "Bad Request",
+                    "message": "Missing or malformed block hash.",
+                }),
+                "{path}"
             );
         }
     }

@@ -1,7 +1,8 @@
 //! The command tree: every group's and leaf's `--help` against
 //! `tests/fixtures/cli/`, the groups listing exactly the commands of the tree,
-//! the commands that left it refused as unknown, and the CLI reference naming
-//! every command.
+//! the commands that left it refused as unknown, the CLI reference and the
+//! compatibility policy's inventory naming every command, and `--version`
+//! naming the compatibility contract.
 //!
 //! The help fixtures are the default build's. Regenerate them with
 //! `DOLOS_BLESS_CLI=1 cargo test --test cli_tree`.
@@ -262,4 +263,48 @@ fn the_reference_names_every_command() {
     let tree: BTreeSet<String> = TREE.iter().map(|path| path.join(" ")).collect();
 
     assert_eq!(headed, tree);
+}
+
+/// The compatibility policy's inventory has one row per command of the tree,
+/// and none for anything else.
+#[test]
+fn the_compatibility_inventory_names_every_command() {
+    let page =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/content/reference/compatibility.mdx");
+    let page = std::fs::read_to_string(page).unwrap();
+
+    let rows: Vec<String> = page
+        .lines()
+        .skip_while(|line| *line != "## Supported-surface inventory")
+        .skip(1)
+        .take_while(|line| !line.starts_with("## "))
+        .filter_map(|line| line.strip_prefix("| `dolos"))
+        .filter_map(|line| line.split_once('`'))
+        .map(|(name, _)| name.trim().to_owned())
+        .collect();
+
+    let inventory: BTreeSet<String> = rows.iter().cloned().collect();
+    assert_eq!(rows.len(), inventory.len(), "a command has two rows");
+
+    let tree: BTreeSet<String> = TREE.iter().map(|path| path.join(" ")).collect();
+
+    assert_eq!(inventory, tree);
+}
+
+/// `--version` and `-V` name the release and the contract it implements.
+#[test]
+fn the_version_names_the_compatibility_contract() {
+    let expected = format!(
+        "dolos {} (compatibility {})",
+        env!("CARGO_PKG_VERSION"),
+        dolos_core::compat::SUPPORTED_CONTRACTS[0]
+    );
+
+    for flag in ["--version", "-V"] {
+        let output = dolos(&[flag]);
+        assert_eq!(output.status.code(), Some(0), "{flag}");
+
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(stdout.trim_end(), expected, "{flag}");
+    }
 }

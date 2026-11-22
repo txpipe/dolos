@@ -209,7 +209,7 @@ fn restoring(storage: &std::path::Path, magic: u64, resume: bool) -> restore::Re
         resume,
         skip_space_check: false,
         journals: 0,
-        read_ahead: restore::DEFAULT_READ_AHEAD,
+        read_ahead: None,
         source: None,
     }
 }

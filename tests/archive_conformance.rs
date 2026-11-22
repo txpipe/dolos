@@ -926,6 +926,177 @@ fn find_intersect_resolves_an_ebb_by_its_own_hash<B: Backend>() {
 }
 
 // ---------------------------------------------------------------------------
+// Blocks: reads keyed by chain point
+// ---------------------------------------------------------------------------
+
+/// A block, a boundary slot holding two, a gap of empty slots and two blocks
+/// after it: `[before, ebb, main, after_gap, tip]` in chain order.
+fn write_point_chain<S: CoreArchiveStore>(store: &S) -> Vec<(ChainPoint, RawBlock)> {
+    let (ebb, main) = boundary(1);
+    let slot = ebb.0.slot();
+
+    let before = make_conway_block_with_prev(slot - 10, None, 10);
+    let after_gap = make_conway_block_with_prev(slot + 50, main.0.hash(), 11);
+    let tip = make_conway_block_with_prev(slot + 51, after_gap.0.hash(), 12);
+
+    let chain = vec![before, ebb, main, after_gap, tip];
+
+    let writer = store.start_writer().unwrap();
+    for (point, body) in &chain {
+        writer.apply(point, body).unwrap();
+    }
+    writer.commit().unwrap();
+
+    chain
+}
+
+fn raw(blocks: &[&(ChainPoint, RawBlock)]) -> Vec<Vec<u8>> {
+    blocks
+        .iter()
+        .map(|(_, body)| body.as_ref().clone())
+        .collect()
+}
+
+fn after<S: CoreArchiveStore>(store: &S, point: &ChainPoint) -> Option<Vec<u8>> {
+    store
+        .block_after(point)
+        .unwrap()
+        .expect("the point is held")
+        .map(|(_, body)| body)
+}
+
+fn before<S: CoreArchiveStore>(store: &S, point: &ChainPoint) -> Option<Vec<u8>> {
+    store
+        .block_before(point)
+        .unwrap()
+        .expect("the point is held")
+        .map(|(_, body)| body)
+}
+
+fn walk_after<S: CoreArchiveStore>(store: &S, point: &ChainPoint) -> Vec<Vec<u8>> {
+    bodies(store.blocks_after(point).unwrap().expect("held").collect())
+}
+
+fn walk_before<S: CoreArchiveStore>(store: &S, point: &ChainPoint) -> Vec<Vec<u8>> {
+    bodies(store.blocks_before(point).unwrap().expect("held").collect())
+}
+
+fn point_reads_step_across_a_shared_slot<B: Backend>() {
+    use dolos_core::archive::Skippable as _;
+
+    let (store, _guard) = B::open();
+    let chain = write_point_chain(&store);
+    let [first, ebb, main, after_gap, tip] = [0, 1, 2, 3, 4].map(|i| &chain[i]);
+
+    assert_eq!(after(&store, &first.0), Some(raw(&[ebb])[0].clone()));
+    assert_eq!(after(&store, &ebb.0), Some(raw(&[main])[0].clone()));
+    assert_eq!(before(&store, &main.0), Some(raw(&[ebb])[0].clone()));
+    assert_eq!(before(&store, &ebb.0), Some(raw(&[first])[0].clone()));
+
+    assert_eq!(walk_after(&store, &ebb.0), raw(&[main, after_gap, tip]));
+    assert_eq!(
+        walk_after(&store, &first.0),
+        raw(&[ebb, main, after_gap, tip])
+    );
+    assert_eq!(walk_before(&store, &main.0), raw(&[first, ebb]));
+    assert_eq!(walk_before(&store, &after_gap.0), raw(&[first, ebb, main]));
+
+    // walked from the other end, the shared slot still comes out in order
+    let back = bodies(store.blocks_after(&ebb.0).unwrap().unwrap().rev().collect());
+    assert_eq!(back, raw(&[tip, after_gap, main]));
+
+    let front = bodies(
+        store
+            .blocks_before(&after_gap.0)
+            .unwrap()
+            .unwrap()
+            .rev()
+            .collect(),
+    );
+    assert_eq!(front, raw(&[main, ebb, first]));
+
+    // key-only skips count the block sharing the slot
+    let mut walk = store.blocks_after(&first.0).unwrap().unwrap();
+    walk.skip_forward(1);
+    assert_eq!(walk.next().map(|(_, b)| b), Some(raw(&[main])[0].clone()));
+
+    let mut walk = store.blocks_before(&after_gap.0).unwrap().unwrap();
+    walk.skip_backward(1);
+    assert_eq!(
+        walk.next_back().map(|(_, b)| b),
+        Some(raw(&[ebb])[0].clone())
+    );
+}
+
+fn point_reads_cross_a_gap_of_empty_slots<B: Backend>() {
+    let (store, _guard) = B::open();
+    let chain = write_point_chain(&store);
+    let [main, after_gap] = [2, 3].map(|i| &chain[i]);
+
+    assert_eq!(after(&store, &main.0), Some(raw(&[after_gap])[0].clone()));
+    assert_eq!(before(&store, &after_gap.0), Some(raw(&[main])[0].clone()));
+
+    let next = store.block_after(&main.0).unwrap().unwrap().unwrap();
+    assert_eq!(next.0, after_gap.0.slot());
+}
+
+fn point_reads_end_at_the_tip<B: Backend>() {
+    let (store, _guard) = B::open();
+    let chain = write_point_chain(&store);
+    let [after_gap, tip] = [3, 4].map(|i| &chain[i]);
+
+    assert_eq!(after(&store, &tip.0), None);
+    assert!(walk_after(&store, &tip.0).is_empty());
+    assert_eq!(before(&store, &tip.0), Some(raw(&[after_gap])[0].clone()));
+}
+
+fn point_reads_end_at_the_oldest_retained_block<B: Backend>() {
+    let (store, _guard) = B::open();
+    let chain = write_point_chain(&store);
+    let [first, ebb, main] = [0, 1, 2].map(|i| &chain[i]);
+
+    assert_eq!(before(&store, &first.0), None);
+    assert!(walk_before(&store, &first.0).is_empty());
+
+    // prune up to the boundary slot: its boundary block is the oldest left
+    let span = chain[4].0.slot() - first.0.slot();
+    let cut = ebb.0.slot() - first.0.slot();
+    store.prune_history(span - cut, None, None).unwrap();
+
+    assert!(store.block_after(&first.0).unwrap().is_none());
+    assert!(store.blocks_before(&first.0).unwrap().is_none());
+    assert_eq!(before(&store, &ebb.0), None);
+    assert!(walk_before(&store, &ebb.0).is_empty());
+    assert_eq!(walk_before(&store, &main.0), raw(&[ebb]));
+}
+
+fn point_reads_refuse_a_hash_their_slot_does_not_hold<B: Backend>() {
+    let (store, _guard) = B::open();
+    let chain = write_point_chain(&store);
+    let [ebb, after_gap, tip] = [1, 3, 4].map(|i| &chain[i]);
+
+    let unknown = pallas::crypto::hash::Hash::new([9u8; 32]);
+    let points = [
+        // a hash the shared slot does not hold
+        ChainPoint::Specific(ebb.0.slot(), unknown),
+        // a block the archive holds, named at another slot
+        ChainPoint::Specific(after_gap.0.slot(), tip.0.hash().unwrap()),
+        // a slot inside the gap
+        ChainPoint::Specific(ebb.0.slot() + 20, unknown),
+        // no hash names no block
+        ChainPoint::Slot(ebb.0.slot()),
+        ChainPoint::Origin,
+    ];
+
+    for point in &points {
+        assert!(store.block_after(point).unwrap().is_none(), "{point:?}");
+        assert!(store.block_before(point).unwrap().is_none(), "{point:?}");
+        assert!(store.blocks_after(point).unwrap().is_none(), "{point:?}");
+        assert!(store.blocks_before(point).unwrap().is_none(), "{point:?}");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Logs
 // ---------------------------------------------------------------------------
 
@@ -1955,6 +2126,11 @@ macro_rules! full_suite {
                 truncate_front_to_a_hash_its_slot_does_not_hold_keeps_the_slot,
                 remove_before_prunes_every_block_at_a_slot,
                 find_intersect_resolves_an_ebb_by_its_own_hash,
+                point_reads_step_across_a_shared_slot,
+                point_reads_cross_a_gap_of_empty_slots,
+                point_reads_end_at_the_tip,
+                point_reads_end_at_the_oldest_retained_block,
+                point_reads_refuse_a_hash_their_slot_does_not_hold,
                 log_roundtrip,
                 log_namespaces_are_isolated,
                 log_range_is_start_inclusive_end_exclusive,

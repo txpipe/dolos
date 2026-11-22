@@ -29,7 +29,7 @@ Rewriting the configuration does not touch the data in storage. Replacing the st
 
 ### What the node says about an old file
 
-The node checks the file's `compatibility` declaration before anything else, and stops before any store opens:
+The node checks the file's `compatibility` declaration before anything else, and stops before any store opens. The [compatibility policy](../reference/compatibility) states what a declaration promises and which transitions are refused:
 
 | message | cause | remedy |
 | ------- | ----- | ------ |
@@ -201,7 +201,7 @@ To move a node to v2, replace its stores with ones v2 writes:
 
 The check covers the fjall stores. A v1 store kept in redb (a `redb` state backend, or the archive, which v1 keeps in redb by default) is not one v2 can open at all, so it has no identity to check: remove it by hand before bootstrapping v2. The exception is v1's default layout, a fjall state beside a redb archive, with the state in the storage root. Its state is refused, so `--force` clears the root, the archive in it included, once you have removed what it names outside the root. With the state outside the root, remove the redb archive by hand as well: once the state is gone, nothing is left refused, and `--force` clears nothing.
 
-The WAL keeps its own format version: one written by an older release is wiped, and one from a newer release is refused. The mempool and the cache are outside the check. See the [data layer](../architecture/data-layer#store-identity) for where each store keeps its identity.
+The WAL keeps its own format version, and it is transient: a WAL written by another release, older or newer, is wiped once the state and the archive are admitted, never refused for its version, and the node syncs on from the state cursor. The wiped WAL keeps no earlier point to roll back to: if a fork dropped the block at the state cursor while the node was stopped, as a slot battle can drop its last block, the sync stops at once, saying the peer doesn't hold that point, and the node has to be bootstrapped again with `dolos bootstrap --force`. After a crash, though, the WAL can hold blocks the archive or the state still needs; then the new release keeps it as it is and stops, saying so. Start the old release once, so it shuts down cleanly, then start the new one. The mempool and the cache are outside the check. See the [data layer](../architecture/data-layer#store-identity) for where each store keeps its identity.
 
 ## Command line
 
@@ -236,7 +236,7 @@ Along the way, every command that prints a report or records takes `--format tex
 | `dolos data find-seq`, `copy-wal`, `clear-state`; `dolos doctor update-entity` | moved out of the binary to `cargo xtask debug find-seq`, `copy-wal`, `clear-state` and `update-entity` in the Dolos repository; `update-entity` now writes unless `--dry-run` |
 | `dolos data compute-spdd`, `compute-nonce`; `dolos doctor reclaim-avvm`; `dolos eval` | deleted, with no successor |
 | `dolos data import-archive` | removed; see [below](#archive-only-import) |
-| `dolos data export`, `dolos bootstrap snapshot` (`--variant`, `--point`, `--file`, `--download-url`) | removed with the Dolos snapshot format; restore a Stelae snapshot with `dolos bootstrap stelae` |
+| `dolos data export`, `dolos bootstrap snapshot` (`--variant`, `--point`, `--file`, `--download-url`) | removed with the v1 snapshot format; restore a Stelae snapshot with `dolos bootstrap stelae` |
 | `dolos bootstrap relay` | removed: a node with empty stores syncs from genesis under `dolos daemon` or `dolos sync catchup` |
 | `dolos bootstrap mithril`, `dolos bootstrap stelae` | unchanged sources; `mithril` loses `--start-from`, replaced by `--continue` |
 | (none) | `dolos bootstrap immutabledb --source PATH`, replaying a local Cardano node database |

@@ -231,6 +231,9 @@ pub fn run(
     args: &Args,
     feedback: &crate::feedback::Feedback,
 ) -> miette::Result<()> {
+    // on stderr, so a store read as empty is said apart from the report
+    crate::common::setup_tracing_warnings()?;
+
     let stores = crate::common::open_existing_stores(config, dolos::storage::Access::Observe)?;
     let genesis = crate::common::open_genesis(config)?;
 

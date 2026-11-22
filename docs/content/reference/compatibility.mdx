@@ -1,0 +1,134 @@
+---
+title: Compatibility policy
+sidebar:
+  label: Compatibility
+  order: 3
+---
+
+What Dolos promises when you upgrade it: which configurations, stores and command lines a newer binary accepts, what it refuses, and what you do about a refusal. Code review, release QA and the [migration guide](../migration/dolos-v2) cite this page; where another page disagrees with it, this one holds.
+
+## The contract
+
+Each binary major implements one **compatibility identifier**. Dolos 2.x implements `"v2"` from 2.0.0. The binary prints its identifier in `dolos --version`, in every refusal and in its release notes:
+
+```text
+$ dolos --version
+dolos <version> (compatibility <identifier>)
+```
+
+A configuration declares the identifier it was written for (`compatibility = "…"` at the top of `dolos.toml`), and the state and archive stores record the one they were created under. Within one identifier, a newer binary keeps these promises:
+
+- **Configuration.** It accepts a configuration an older binary accepted, and gives it the same meaning.
+- **Persisted data.** It opens a dataset an older binary wrote and keeps using it, with no rebuild, restore or operator-managed migration.
+- **Command line.** It keeps the [supported commands](#supported-surface-inventory), their arguments, the meaning of their exit codes and their documented machine-readable output (`--format json`).
+
+Breaking any of these needs a new major and a new identifier. A configuration or store under any other identifier, or under none, is refused before Dolos reads or writes it, with a message that names the identifier and the next step.
+
+## Prerelease identifiers
+
+Prereleases carry their own identifiers, `v2-alpha.N` and then `v2-beta.N`. A prerelease identifier advances on any breaking change, and nothing converts data or configuration from one to the next: a binary refuses every identifier it does not implement. Neither the lexical order nor the version order of two identifiers implies that one reads the other.
+
+The identifier becomes `"v2"` at the 2.0.0 cut. The binary tagged 2.0.0 is the last release candidate plus that change, so a configuration or store written by any prerelease is refused by 2.0.0 too.
+
+## Downgrades
+
+There is no downgrade guarantee. A 2.x release may change a store's internal format, as long as newer binaries still read the older one. Each store records the minimum internal format needed to read it, and an older binary that does not know that format refuses the store when it opens it, before it reads anything.
+
+Dolos 2.0.x ships no in-place migration. The first release that needs one will define, before it ships, how a migration interrupted by a crash recovers.
+
+## Not covered
+
+- **Network APIs.** The Blockfrost-compatible API, UTxO RPC, TRP and the Ouroboros protocols are versioned by their own specifications. Where an API's pages document its conformance, as [minibf](../apis/minibf)'s do, they are the reference for it.
+- **Rust crates.** The `dolos-*` library crates follow Cargo semver only.
+- **Correctness and security fixes.** A 2.x release may change observed behaviour toward the documented or specified behaviour, or to close a security hole. Its release notes call each such change out.
+- **Resource limits.** New `503` or `504` answers, deadlines and admission refusals are operational, not functional, changes.
+- **Text output.** The text form of a command's output, its `--help` wording, its logs and progress on stderr are for people.
+
+## Transient data
+
+The write-ahead log (WAL), the mempool and the cache's disk tier are outside the contract. Changing their formats needs no new identifier.
+
+When one of them records a version other than the binary's, older or newer, holds data with no version marker, or fails to decode, a writable open resets it, logs one warning and goes on. A command that [observes the stores](cli#how-a-command-opens-the-stores) reads it as empty and leaves it as it is, for the next writable open to reset or, in the case below, keep. A lock, permission or I/O error still fails the open. The reset runs only after the state and archive stores are admitted, so a binary that refuses those stores never wipes the WAL first.
+
+One case is kept, not reset: a WAL that still holds blocks the state or archive needs, as a crash before both stores caught up can leave it. Resetting it would lose those blocks for good, so a writable open leaves the WAL as it is and the start fails with a message that names the store waiting on it. If another release wrote the WAL, start that release once, so it brings the stores together and shuts down cleanly, then start the new one; otherwise rebuild the state from the archive with `dolos data rebuild`, or replace the dataset with `dolos bootstrap --force`.
+
+## Supported-surface inventory
+
+Every command the release binaries carry, one row each. The supported surface is the command, its arguments as its `--help` lists them, its exit codes and, where the table names one, its machine-readable output. [The CLI reference](cli) documents each command in full.
+
+Exit codes mean the same for every command (see [exit codes](cli#exit-codes)): `0` the command did what it was asked, `1` it failed, `2` the command line is malformed or asks for something the command won't do as given, `3` the command ran and found the node or its data unhealthy. A report printed with `--format json` is one JSON object on one line; a stream is one JSON object per record, one per line (JSON Lines).
+
+| command | machine-readable output | exit codes |
+| ------- | ----------------------- | ---------- |
+| `dolos` | none | `0`, `2` |
+| `dolos init` | none | `0`, `1`, `2` |
+| `dolos config` | none | `0`, `2` |
+| `dolos config check` | `--format json`, a report | `0`, `1`, `2` |
+| `dolos config write-genesis` | none | `0`, `1`, `2` |
+| `dolos daemon` | none | `0`, `1`, `2` |
+| `dolos serve` | none | `0`, `1`, `2` |
+| `dolos bootstrap` | none | `0`, `1`, `2` |
+| `dolos bootstrap mithril` | none | `0`, `1`, `2` |
+| `dolos bootstrap stelae` | none | `0`, `1`, `2` |
+| `dolos bootstrap immutabledb` | none | `0`, `1`, `2` |
+| `dolos sync` | none | `0`, `2` |
+| `dolos sync catchup` | none | `0`, `1`, `2` |
+| `dolos sync status` | `--format json`, a report | `0`, `1`, `2`, `3` |
+| `dolos sync recover` | `--format json`, a report | `0`, `1`, `2` |
+| `dolos sync dump` | `--format json`, JSON Lines | `0`, `1`, `2` |
+| `dolos sync rollback` | none | `0`, `1`, `2` |
+| `dolos data` | none | `0`, `2` |
+| `dolos data stats` | `--format json`, a report | `0`, `1`, `2` |
+| `dolos data inspect` | `--format json`, a report | `0`, `1`, `2` |
+| `dolos data dump` | none | `0`, `2` |
+| `dolos data dump state` | `--format json`, JSON Lines | `0`, `1`, `2` |
+| `dolos data dump logs` | `--format json`, JSON Lines | `0`, `1`, `2` |
+| `dolos data dump blocks` | `--format json`, JSON Lines | `0`, `1`, `2` |
+| `dolos data check` | `--format json`, a report | `0`, `1`, `2`, `3` |
+| `dolos data housekeeping` | none | `0`, `1`, `2` |
+| `dolos data reset` | none | `0`, `1`, `2` |
+| `dolos data rebuild` | none | `0`, `1`, `2` |
+| `dolos cache` | none | `0`, `2` |
+| `dolos cache warm` | none | `0`, `1`, `2` |
+| `dolos cache clear` | none | `0`, `1`, `2` |
+| `dolos cache stats` | `--format json`, a report | `0`, `1`, `2` |
+| `dolos cache verify` | `--format json`, a report | `0`, `1`, `2`, `3` |
+| `dolos service` | none | `0`, `2` |
+| `dolos service install` | `--format json`, a report | `0`, `1`, `2` |
+| `dolos service uninstall` | `--format json`, a report | `0`, `1`, `2` |
+
+The groups `dolos`, `config`, `sync`, `data`, `data dump`, `cache` and `service` run nothing themselves: with `--help` they print their help and exit `0`, and named without a subcommand they exit `2`. `bootstrap` named alone asks for a source on a terminal, and without one exits `1`.
+
+Outside the contract:
+
+- `cargo xtask` and every one of its subcommands, which are development tools that never ship in the `dolos` binary.
+- Builds with the `debug` feature, and builds from source that leave out default features.
+- Any command not in the table above.
+
+## Transition matrix
+
+What the current binary does with a configuration or a dataset written by another release. A refused transition leaves the refused configuration and stores as they were.
+
+### Refused
+
+| written by | refused by | remediation |
+| ---------- | ---------- | ----------- |
+| Dolos v1.6.x | the configuration gate: the file has the v1 shape and no `compatibility`; then the store identity: its stores record none | write a v2 configuration (`dolos init`, or by hand from the [migration guide](../migration/dolos-v2)), then fill empty stores with `dolos bootstrap stelae`, `dolos bootstrap mithril` or `dolos bootstrap immutabledb`, or re-sync with `dolos daemon` |
+| Dolos v1.7.0-alpha.* | the configuration gate, as for v1.6.x; then the store identity: its stores record none | as for v1.6.x |
+| Dolos v2.0.0-alpha.0 | the configuration gate: the file has the v2.0.0-alpha.0 shape and no `compatibility`; then the store identity: its stores record none | as for v1.6.x |
+| a prerelease identifier the binary does not implement, `v2-alpha.2` and every other `v2-alpha.N` or `v2-beta.N` included | the configuration gate (`unsupported compatibility`), then the store identity, which names the identifier the store records | declare the binary's identifier in the configuration, then refill the stores as for v1.6.x |
+| a store holding data but recording no identity | the store identity | refill the store as for v1.6.x |
+
+`dolos init` writes a new configuration and refuses to overwrite a file that does not load, so move the old file aside first. A refused store stays refused until it is replaced: `bootstrap` with `--force` clears the storage root before it fills it, and `dolos data reset --yes` clears it for a re-sync from genesis. No configuration edit gets a refused store past the check.
+
+### Supported
+
+| from | to | verification |
+| ---- | -- | ------------ |
+| 2.0.0 | any later 2.x | verified by archived fixtures from 2.0.0 (`tests/compat_fixtures.rs`, pending: the harness is not in this release yet) |
+
+## How releases keep it
+
+From 2.0.0, each stable minor release archives a small fixture: a configuration, a short-chain dataset and the golden output of the supported commands. CI opens every archived fixture with the current build, so a change that breaks an older release's configuration, data or command output fails before it merges. That CI job is pending: it arrives with the fixture harness.
+
+The release coordinator owns the check: archiving the fixture at each stable minor and confirming, in the release preflight, that every archived fixture still opens.
