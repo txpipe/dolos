@@ -14,7 +14,7 @@ use dolos_testing::{
 };
 use pallas::codec::utils::AnyCbor;
 use pallas::network::{
-    facades::{NodeClient, NodeServer},
+    facades::{NodeClient, NodeServer, DEFAULT_HANDSHAKE_TIMEOUT},
     miniprotocols::{
         chainsync::{BlockContent, NextResponse},
         localstate::{self, queries_v16 as q16},
@@ -104,7 +104,10 @@ where
     let listener = UnixListener::bind(&path).unwrap();
 
     let server = tokio::spawn(async move {
-        let connection = NodeServer::accept(&listener, MAGIC).await.unwrap();
+        let connection =
+            NodeServer::accept_with_timeout(&listener, MAGIC, DEFAULT_HANDSHAKE_TIMEOUT)
+                .await
+                .unwrap();
 
         serve(connection).await
     });

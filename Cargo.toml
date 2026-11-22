@@ -137,6 +137,8 @@ tar = "0.4"
 dolos-redb3 = { path = "crates/redb3" }
 memmap2 = "0.9"
 tower = { workspace = true, features = ["util"] }
+# Paused time, for the accept loops' handshake deadline tests.
+tokio = { workspace = true, features = ["test-util"] }
 http-body-util = "0.1"
 # `tests/stelae_restore.rs` pairs a Dolos snapshot with a blocks repository
 # through `crates/snapshot/tests/paired`. These repeat dolos-snapshot's stelae pin
@@ -265,7 +267,7 @@ readme = "README.md"
 authors = ["TxPipe <hello@txpipe.io>"]
 
 [workspace.dependencies]
-pallas = { version = "1.4.0", features = ["hardano", "phase2", "unstable"] }
+pallas = { version = "=1.5.0-rc.3", features = ["hardano", "phase2", "unstable"] }
 # pallas = { git = "https://github.com/txpipe/pallas.git", rev = "a7b5a86", features = ["hardano", "phase2", "unstable"] }
 # pallas = { path = "../pallas/pallas", features = ["hardano", "phase2", "unstable"] }
 
@@ -321,6 +323,14 @@ tracing-opentelemetry = "0.33"
 # repository states in its own manifests. Moving this line is a
 # byte-compatibility question, not a dependency bump.
 minicbor = { version = "0.26", features = ["std"] }
+
+# Temporary: the published Tx3 0.23 crates and tx3-sdk 0.13 require Pallas
+# `^1.0.0`, which does not match a pre-release. These branches change only that
+# requirement. Remove this section once Pallas 1.5.0 final is on crates.io.
+[patch.crates-io]
+tx3-cardano = { git = "https://github.com/tx3-lang/tx3.git", rev = "d8dee49b271fd8df67dd3db1480b061739339462" }
+tx3-resolver = { git = "https://github.com/tx3-lang/tx3.git", rev = "d8dee49b271fd8df67dd3db1480b061739339462" }
+tx3-sdk = { git = "https://github.com/tx3-lang/rust-sdk.git", rev = "e193bd4227e877a9ab48fac441a5fbc8d656efce" }
 
 [workspace.metadata.release]
 push = false

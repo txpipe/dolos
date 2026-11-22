@@ -1,5 +1,5 @@
 use dolos_core::config::OuroborosConfig;
-use pallas::network::facades::NodeServer;
+use pallas::network::facades::{NodeServer, DEFAULT_HANDSHAKE_TIMEOUT};
 use tokio::{net::UnixListener, task::JoinHandle};
 use tokio_util::task::TaskTracker;
 use tracing::{debug, info, instrument, warn};
@@ -22,6 +22,9 @@ pub struct DriverConfig {
 
 #[cfg(test)]
 mod session_tests;
+
+#[cfg(test)]
+mod accept_tests;
 
 async fn handle_session<D: Domain, C: CancelToken>(
     domain: D,
@@ -73,7 +76,12 @@ async fn accept_client_connections<D: Domain, C: CancelToken>(
     info!(addr = %config.service.listen_path.to_string_lossy(), "Ouroboros socket is listening for clients");
 
     loop {
-        let connection = NodeServer::accept(&listener, config.network_magic).await;
+        let connection = NodeServer::accept_with_timeout(
+            &listener,
+            config.network_magic,
+            DEFAULT_HANDSHAKE_TIMEOUT,
+        )
+        .await;
 
         match connection {
             Ok(connection) => {
@@ -87,7 +95,8 @@ async fn accept_client_connections<D: Domain, C: CancelToken>(
                 info!(connections = tasks.len(), "active connections changed");
             }
             Err(error) => {
-                warn!(%error, "error on incoming connection");
+                let cause = std::error::Error::source(&error).map(ToString::to_string);
+                warn!(%error, ?cause, "error on incoming connection");
             }
         }
     }
