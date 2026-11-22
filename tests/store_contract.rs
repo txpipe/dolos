@@ -166,6 +166,16 @@ const OPENERS: &[(&[&str], &[Store])] = &[
     (&["bootstrap", "mithril"], BOTH),
 ];
 
+/// Whether `args` starts the node's full tracing. Under the debug feature its
+/// console subscriber panics in a build without `tokio_unstable` before any
+/// store opens, so a debug build leaves these openers out of the matrix.
+fn traced(args: &[&str]) -> bool {
+    matches!(
+        args,
+        ["daemon"] | ["serve"] | ["sync", "catchup"] | ["data", "housekeeping"]
+    )
+}
+
 /// The commands a config edit is tried with: one that observes, one that
 /// repairs and the node.
 const EDIT_PROBES: [&[&str]; 3] = [&["sync", "status"], &["sync", "recover"], &["daemon"]];
@@ -440,7 +450,11 @@ fn every_opener_refuses(fixture: &Fixture, store: Store, case: Case) -> Vec<Stri
     let path = fixture.path(store).display().to_string();
     let mut failures = Vec::new();
 
-    for (args, opens) in OPENERS.iter().filter(|(_, opens)| opens.contains(&store)) {
+    let openers = OPENERS.iter().filter(|(args, opens)| {
+        opens.contains(&store) && !(cfg!(feature = "debug") && traced(args))
+    });
+
+    for (args, opens) in openers {
         fixture.restore(&before);
 
         let output = fixture.run(args);
@@ -622,6 +636,10 @@ fn assert_creation(layout: Layout) {
 }
 
 #[test]
+#[cfg_attr(
+    feature = "debug",
+    ignore = "the debug feature's console subscriber panics a daemon built without tokio_unstable"
+)]
 fn creation_records_the_contract_in_every_layout() {
     for layout in LAYOUTS {
         assert_creation(layout);
