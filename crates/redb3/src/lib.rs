@@ -10,6 +10,9 @@ pub mod mempool;
 pub mod state;
 pub mod wal;
 
+#[cfg(test)]
+mod test_logs;
+
 pub use redb;
 
 #[derive(Debug, thiserror::Error)]
