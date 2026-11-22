@@ -153,6 +153,24 @@ jobs:
           save-if: false
       - run: cargo test --workspace --all-targets --all-features --exclude dolos-minibf --exclude dolos-minikupo --exclude dolos-trp
 
+  # Forward upgrades: every fixture a stable release archived under
+  # tests/fixtures/compat/archive/, and one written by this build, must still
+  # open with this build (docs/content/reference/compatibility.mdx).
+  compat-fixtures:
+    name: Compatibility fixtures
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.91
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-ubuntu-latest
+          save-if: false
+      - run: cargo test --test compat_fixtures
+
   # Keep the snapshot profile independently embeddable. The workspace build
   # can unify features through the Dolos binary, while an external consumer
   # compiles this package on its own. This check guards that headless shape.

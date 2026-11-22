@@ -125,10 +125,10 @@ What the current binary does with a configuration or a dataset written by anothe
 
 | from | to | verification |
 | ---- | -- | ------------ |
-| 2.0.0 | any later 2.x | verified by archived fixtures from 2.0.0 (`tests/compat_fixtures.rs`, pending: the harness is not in this release yet) |
+| 2.0.0 | any later 2.x | verified by archived fixtures from 2.0.0 (`tests/compat_fixtures.rs`) |
 
 ## How releases keep it
 
-From 2.0.0, each stable minor release archives a small fixture: a configuration, a short-chain dataset and the golden output of the supported commands. CI opens every archived fixture with the current build, so a change that breaks an older release's configuration, data or command output fails before it merges. That CI job is pending: it arrives with the fixture harness.
+From 2.0.0, each stable minor release archives a small fixture: a configuration, a short-chain dataset and the golden output of the supported commands. CI's `compat-fixtures` job opens every archived fixture with the current build, so a change that breaks an older release's configuration, data or command output fails before it merges. `tests/fixtures/compat/archive/README.md` holds the archiving step.
 
 The release coordinator owns the check: archiving the fixture at each stable minor and confirming, in the release preflight, that every archived fixture still opens.
