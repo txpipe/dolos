@@ -1536,6 +1536,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "gasket",
+ "gasket-otel",
  "hex",
  "http",
  "http-body",
@@ -2246,6 +2247,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.100",
+]
+
+[[package]]
+name = "gasket-otel"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6c1244dc5eee15484bcc037dd0f4fe0f252863d02f91173c351c0045ae30092"
+dependencies = [
+ "gasket",
+ "opentelemetry",
 ]
 
 [[package]]

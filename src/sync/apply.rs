@@ -5,7 +5,7 @@ use gasket::{framework::*, messaging::Message};
 use tokio::sync::watch;
 use tracing::{debug, info};
 
-use super::{SyncLimit, SyncProgress};
+use super::{metrics::MetricsFlush, SyncLimit, SyncProgress};
 use crate::{adapters::DomainAdapter, prelude::*};
 
 pub type UpstreamPort = gasket::messaging::InputPort<PullEvent>;
@@ -38,17 +38,22 @@ pub struct Stage {
 
     housekeeping_interval: std::time::Duration,
 
+    /// Exports the sync's final readings before the stage ends on its own.
+    final_export: MetricsFlush,
+
     pub upstream: UpstreamPort,
 
+    /// Blocks rolled forward.
     #[metric]
-    block_count: gasket::metrics::Counter,
+    blocks: gasket::metrics::Counter,
 
+    /// Rollbacks that undid at least one block.
     #[metric]
-    wal_count: gasket::metrics::Counter,
+    rollbacks: gasket::metrics::Counter,
 
     /// Housekeeping rounds over, each with the target check after it.
     #[metric]
-    housekeeping_count: gasket::metrics::Counter,
+    housekeeping_runs: gasket::metrics::Counter,
 }
 
 impl Stage {
@@ -63,10 +68,21 @@ impl Stage {
             limit,
             progress,
             housekeeping_interval,
+            final_export: MetricsFlush::default(),
             upstream: Default::default(),
-            block_count: Default::default(),
-            wal_count: Default::default(),
-            housekeeping_count: Default::default(),
+            blocks: Default::default(),
+            rollbacks: Default::default(),
+            housekeeping_runs: Default::default(),
+        }
+    }
+
+    /// Flush `export` before the stage ends on its own: the bridge reads a
+    /// stage only while it runs, so its last counts would miss the export at
+    /// exit.
+    pub fn with_final_export(self, export: MetricsFlush) -> Self {
+        Self {
+            final_export: export,
+            ..self
         }
     }
 
@@ -74,6 +90,10 @@ impl Stage {
         debug!("handling roll forward");
 
         match self.domain.roll_forward(block) {
+            Ok(_) => {
+                self.blocks.inc(1);
+                Ok(())
+            }
             Err(DomainError::StopEpochReached) => {
                 info!("stop epoch reached");
                 self.progress.mark_stop_epoch_reached();
@@ -86,7 +106,11 @@ impl Stage {
     fn on_rollback(&self, point: &ChainPoint) -> Result<(), WorkerError> {
         debug!(slot = &point.slot(), "handling rollback");
 
-        self.domain.rollback(point).or_panic()?;
+        // A session starts by rolling back to its intersection, which undoes
+        // nothing: only a rollback that undid blocks counts.
+        if self.domain.rollback(point).or_panic()? > 0 {
+            self.rollbacks.inc(1);
+        }
 
         Ok(())
     }
@@ -144,6 +168,7 @@ impl gasket::framework::Worker<Stage> for Worker {
 
     async fn schedule(&mut self, stage: &mut Stage) -> Result<WorkSchedule<WorkUnit>, WorkerError> {
         if stage.progress.succeeded(stage.limit) {
+            stage.final_export.flush();
             return Ok(WorkSchedule::Done);
         }
 
@@ -179,7 +204,7 @@ impl gasket::framework::Worker<Stage> for Worker {
         }
 
         if let WorkUnit::Housekeeping = unit {
-            stage.housekeeping_count.inc(1);
+            stage.housekeeping_runs.inc(1);
         }
 
         Ok(())

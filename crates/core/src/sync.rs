@@ -13,9 +13,10 @@ use std::sync::Arc;
 use tracing::{debug, info, instrument, warn};
 
 use crate::{
-    telemetry::storage::time_commit, wal::ChainOrdered, ArchiveStore as _, ArchiveWriter as _,
-    BlockSlot, ChainLogic, ChainPoint, Domain, DomainError, EntityMap, MempoolStore, RawBlock,
-    StateStore, StateWriter as _, TipEvent, WalStore, WorkUnit,
+    telemetry::{storage::time_commit, sync as metrics},
+    wal::ChainOrdered,
+    ArchiveStore as _, ArchiveWriter as _, BlockSlot, ChainLogic, ChainPoint, Domain, DomainError,
+    EntityMap, MempoolStore, RawBlock, StateStore, StateWriter as _, TipEvent, WalStore, WorkUnit,
 };
 
 const MEMPOOL_DROP_THRESHOLD: u32 = 2;
@@ -55,7 +56,10 @@ pub trait SyncExt: Domain {
     /// undoing each block's effects on state, UTxOs (tags included), and the
     /// archive's index entries; the archive's blocks and logs are then cut
     /// with `truncate_front`, and the WAL drops the entries undone.
-    fn rollback(&self, to: &ChainPoint) -> Result<(), DomainError>;
+    ///
+    /// Returns the number of blocks undone, which is zero when `to` is
+    /// already the tip, as it is at the start of every upstream session.
+    fn rollback(&self, to: &ChainPoint) -> Result<usize, DomainError>;
 }
 
 impl<D: Domain> SyncExt for D {
@@ -104,7 +108,7 @@ impl<D: Domain> SyncExt for D {
     }
 
     #[instrument(skip_all, fields(rollback_to = %to))]
-    fn rollback(&self, to: &ChainPoint) -> Result<(), DomainError> {
+    fn rollback(&self, to: &ChainPoint) -> Result<usize, DomainError> {
         // Keys sort the entries of one slot by hash, so a block the chain
         // puts after `to` at its slot can sort below it: read from the slot's
         // first key.
@@ -178,7 +182,11 @@ impl<D: Domain> SyncExt for D {
         // undone at its slot, or drop one the chain puts before it.
         self.wal().remove_points(&undone)?;
 
-        Ok(())
+        if !undone.is_empty() {
+            metrics::record_rollback(undone.len());
+        }
+
+        Ok(undone.len())
     }
 }
 
@@ -206,23 +214,28 @@ pub(crate) fn drain_pending_work<D: Domain>(
 /// 3. `finalize()` - Shard-agnostic teardown
 /// 4. `notify_tip()` - Notify tip subscribers
 ///
+/// Its duration is recorded under the unit's name, whether it succeeds or
+/// not.
+///
 /// This function is public primarily for testing scenarios where direct
 /// work unit execution is needed (e.g., manual genesis initialization).
 #[instrument(skip_all, name = "work_unit", fields(name = %work.name()))]
 pub fn execute_work_unit<D: Domain>(domain: &D, work: &mut D::WorkUnit) -> Result<(), DomainError> {
-    debug!("executing work unit");
+    metrics::time_work_unit(work.name(), || {
+        debug!("executing work unit");
 
-    run_lifecycle(domain, work, true)?;
+        run_lifecycle(domain, work, true)?;
 
-    update_mempool(domain, work);
+        update_mempool(domain, work);
 
-    // Notify tip events to subscribers
-    for event in work.tip_events() {
-        domain.notify_tip(event);
-    }
+        // Notify tip events to subscribers
+        for event in work.tip_events() {
+            domain.notify_tip(event);
+        }
 
-    debug!("work unit completed");
-    Ok(())
+        debug!("work unit completed");
+        Ok(())
+    })
 }
 
 /// Run the work-unit phase lifecycle: initialize, the per-shard loop, then

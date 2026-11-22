@@ -52,6 +52,7 @@ dolos-trp = { path = "crates/trp", optional = true }
 # gasket = { git = "https://github.com/construkts/gasket-rs.git", features = ["derive"] }
 gasket = { version = "^0.12", features = ["derive"] }
 # gasket = { path = "../../construkts/gasket-rs/gasket", features = ["derive"] }
+gasket-otel = "0.12"
 
 clap = { version = "4.5.37", features = ["derive", "env"] }
 log = "0.4.18"

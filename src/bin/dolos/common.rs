@@ -20,6 +20,7 @@ use dolos::core::Genesis;
 use dolos::engine::{DomainBuildError, DomainBuilder};
 use dolos::prelude::*;
 use dolos::storage;
+use dolos::sync::metrics::MetricsFlush;
 
 pub type Stores = storage::Stores<dolos_cardano::CardanoDelta>;
 
@@ -262,6 +263,19 @@ pub struct TracingGuard {
     provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
     meters: Option<opentelemetry_sdk::metrics::SdkMeterProvider>,
     _process: Option<crate::telemetry::process::ProcessMetrics>,
+}
+
+impl TracingGuard {
+    /// A handle that exports the pending metrics on demand, within a bound.
+    ///
+    /// The guard's flush on drop comes after a command dropped the sources of
+    /// its observable instruments: flush first, while they still report.
+    pub fn metrics_flush(&self) -> MetricsFlush {
+        self.meters
+            .clone()
+            .map(MetricsFlush::new)
+            .unwrap_or_default()
+    }
 }
 
 impl Drop for TracingGuard {
@@ -526,11 +540,13 @@ pub fn mempool_metrics(domain: &DomainAdapter) -> MempoolMetrics {
     }
 }
 
-/// Run the pipeline until it ends or `exit` is cancelled, then tear it down.
-/// Returns the stages that ended on their own when one did, which is a
-/// failure: `exit` is then cancelled, so the rest of the process winds down.
+/// Run the pipeline until it ends or `exit` is cancelled, then flush the
+/// metrics while its series still report, and tear it down. Returns the
+/// stages that ended on their own when one did, which is a failure: `exit` is
+/// then cancelled, so the rest of the process winds down.
 pub async fn run_pipeline(
-    pipeline: gasket::daemon::Daemon,
+    pipeline: dolos::sync::metrics::ExportedDaemon,
+    flush: MetricsFlush,
     exit: CancellationToken,
 ) -> Option<Vec<String>> {
     let ended = loop {
@@ -554,6 +570,13 @@ pub async fn run_pipeline(
             }
         }
     };
+
+    // The exporter may need the runtime's workers, so the flush waits off
+    // them, and at most its bound, so a stalled collector delays the teardown
+    // by no more than that.
+    if let Err(err) = tokio::task::spawn_blocking(move || flush.flush()).await {
+        warn!(%err, "failed to flush metrics");
+    }
 
     debug!("shutting down pipeline");
     pipeline.teardown();
@@ -697,6 +720,156 @@ mod tests {
         ) -> Result<(), gasket::framework::WorkerError> {
             Ok(())
         }
+    }
+
+    struct IdleStage;
+
+    impl gasket::framework::Stage for IdleStage {
+        type Unit = ();
+        type Worker = IdleWorker;
+
+        fn name(&self) -> &str {
+            "idle"
+        }
+    }
+
+    struct IdleWorker;
+
+    #[async_trait::async_trait(?Send)]
+    impl gasket::framework::Worker<IdleStage> for IdleWorker {
+        async fn bootstrap(_: &IdleStage) -> Result<Self, gasket::framework::WorkerError> {
+            Ok(Self)
+        }
+
+        async fn schedule(
+            &mut self,
+            _: &mut IdleStage,
+        ) -> Result<gasket::framework::WorkSchedule<()>, gasket::framework::WorkerError> {
+            Ok(gasket::framework::WorkSchedule::Idle)
+        }
+
+        async fn execute(
+            &mut self,
+            _: &(),
+            _: &mut IdleStage,
+        ) -> Result<(), gasket::framework::WorkerError> {
+            Ok(())
+        }
+    }
+
+    /// The stage series stop reporting at the teardown, before the guard's
+    /// flush on exit, so the pipeline exports them first.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn running_the_pipeline_exports_its_stage_series_before_the_teardown() {
+        use opentelemetry::metrics::MeterProvider as _;
+
+        let exporter = opentelemetry_sdk::metrics::InMemoryMetricExporter::default();
+        let meters = crate::telemetry::meter_provider(
+            exporter.clone(),
+            Duration::from_secs(3600),
+            opentelemetry_sdk::Resource::builder_empty().build(),
+        );
+        let guard = TracingGuard {
+            provider: None,
+            meters: Some(meters.clone()),
+            _process: None,
+        };
+
+        let tether = gasket::runtime::spawn_stage(IdleStage, gasket::runtime::Policy::default());
+        let pipeline = dolos::sync::metrics::ExportedDaemon::on(
+            &meters.meter("test"),
+            gasket::daemon::Daemon::new(vec![tether]),
+        );
+
+        let exit = CancellationToken::new();
+        exit.cancel();
+        assert_eq!(
+            run_pipeline(pipeline, guard.metrics_flush(), exit).await,
+            None
+        );
+
+        let exported: Vec<String> = exporter
+            .get_finished_metrics()
+            .unwrap()
+            .iter()
+            .flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+            .map(|metric| metric.name().to_string())
+            .collect();
+        assert!(
+            exported.contains(&"dolos.sync.stage.ticks".to_string()),
+            "{exported:?}"
+        );
+
+        drop(guard);
+        drop(meters);
+    }
+
+    /// An exporter whose exports never finish, like one whose collector
+    /// drops every connection attempt.
+    struct StalledExporter;
+
+    impl opentelemetry_sdk::metrics::exporter::PushMetricExporter for StalledExporter {
+        async fn export(
+            &self,
+            _: &opentelemetry_sdk::metrics::data::ResourceMetrics,
+        ) -> opentelemetry_sdk::error::OTelSdkResult {
+            std::future::pending().await
+        }
+
+        fn force_flush(&self) -> opentelemetry_sdk::error::OTelSdkResult {
+            Ok(())
+        }
+
+        fn shutdown_with_timeout(&self, _: Duration) -> opentelemetry_sdk::error::OTelSdkResult {
+            Ok(())
+        }
+
+        fn temporality(&self) -> opentelemetry_sdk::metrics::Temporality {
+            opentelemetry_sdk::metrics::Temporality::Cumulative
+        }
+    }
+
+    /// A collector that never answers delays the teardown by the flush's
+    /// bound, not for as long as the exporter waits on it.
+    #[test]
+    fn a_stalled_collector_delays_the_teardown_by_the_flush_bound_at_most() {
+        use opentelemetry::metrics::MeterProvider as _;
+
+        let meters = crate::telemetry::meter_provider(
+            StalledExporter,
+            Duration::from_secs(3600),
+            opentelemetry_sdk::Resource::builder_empty().build(),
+        );
+
+        let tether = gasket::runtime::spawn_stage(IdleStage, gasket::runtime::Policy::default());
+        let pipeline = dolos::sync::metrics::ExportedDaemon::on(
+            &meters.meter("test"),
+            gasket::daemon::Daemon::new(vec![tether]),
+        );
+        let flush = MetricsFlush::new(meters).within(Duration::from_millis(200));
+
+        // On a runtime of its own, which a flush that never returns would
+        // keep from shutting down: this thread is left behind instead.
+        let (done, finished) = std::sync::mpsc::channel();
+        let started = std::time::Instant::now();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let exit = CancellationToken::new();
+            exit.cancel();
+            done.send(runtime.block_on(run_pipeline(pipeline, flush, exit)))
+                .unwrap();
+        });
+
+        let ended = finished
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the pipeline was never torn down");
+        assert_eq!(ended, None);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

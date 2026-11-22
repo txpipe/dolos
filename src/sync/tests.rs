@@ -91,7 +91,7 @@ impl Stages {
             .filter_map(|tether| tether.read_metrics().ok())
             .flatten()
             .find_map(|(name, reading)| match (name, reading) {
-                ("housekeeping_count", Reading::Count(count)) => Some(count),
+                ("housekeeping_runs", Reading::Count(count)) => Some(count),
                 _ => None,
             })
             .unwrap_or(0)
@@ -124,6 +124,7 @@ fn start(
         peer.address().to_string(),
         limit,
         domain.clone(),
+        Default::default(),
     )
     .unwrap();
 
@@ -904,6 +905,7 @@ fn a_connection_dropped_in_the_handshake_is_no_refusal() {
         accepting_and_closing().to_string(),
         SyncLimit::CatchUp,
         domain.clone(),
+        Default::default(),
     )
     .unwrap();
 
@@ -1778,4 +1780,42 @@ fn retries_back_off_as_configured() {
     assert_eq!(retry::backoff(&retry, 4), Duration::from_secs(32));
     assert_eq!(retry::backoff(&retry, 5), Duration::from_secs(60));
     assert_eq!(retry::backoff(&retry, 1000), Duration::from_secs(60));
+}
+
+#[test]
+fn the_tip_lag_is_the_clock_minus_the_tip_slot_time() {
+    use pallas::interop::utxorpc::LedgerContext as _;
+    use std::time::UNIX_EPOCH;
+
+    let temp = tempfile::tempdir().unwrap();
+    let (_, domain) = domain_over(temp.path(), no_backoff(0));
+
+    let recorder = dolos_testing::metrics::MetricsRecorder::default();
+    let now = UNIX_EPOCH + Duration::from_secs(2_000_000_000);
+    let progress = Arc::new(SyncProgress::default());
+    let gauges =
+        metrics::SyncGauges::over_on(&recorder.meter("test"), &progress, &domain, move || now);
+
+    // An empty store has no tip, so no lag.
+    let points = recorder.collect();
+    assert_eq!(points.value("dolos.sync.tip.lag", &[]), None);
+    assert_eq!(points.value("dolos.sync.caught_up", &[]), Some(0.0));
+
+    let mut parent = None;
+    for slot in 1..=3 {
+        let (point, block) = make_conway_block_with_prev(slot, parent, slot);
+        parent = point.hash();
+        domain.roll_forward(block).unwrap();
+    }
+
+    let tip_time = domain.get_slot_timestamp(3).unwrap();
+    assert_eq!(
+        recorder.collect().value("dolos.sync.tip.lag", &[]),
+        Some(2_000_000_000.0 - tip_time as f64)
+    );
+
+    // The gauges report nothing once dropped.
+    drop(gauges);
+    let points = recorder.collect();
+    assert_eq!(points.value("dolos.sync.caught_up", &[]), None);
 }

@@ -13,9 +13,9 @@ Every metric series Dolos exports, by area. Dolos pushes its metrics over OTLP t
 
 - A name the OpenTelemetry semantic conventions define is used as they define it: `http.server.request.duration`, `http.server.active_requests`, `rpc.server.call.duration` and the `process.*` series of the [process](#process) section. The request count is the count of the duration histogram; there is no separate request counter.
 - Every other name sits under `dolos.`, dotted by area and then by subject: `dolos.query.*`, `dolos.cache.*`, `dolos.storage.*`, `dolos.sync.*`, `dolos.build.*`. Dolos's own additions to a standard family mirror its path, as in `dolos.http.server.request.dropped`.
-- The attributes Dolos defines are bare lowercase keys from one vocabulary: `surface`, `store`, `keyspace`, `namespace`, `tier`, `outcome` for any result, and `version` and `git_sha` for the build. Request series also carry the semantic-convention attributes of their family (`http.route`, `rpc.method`, …), and the process CPU time its `cpu.mode`. The resource attributes Dolos defines sit under `dolos.`.
-- Latencies are histograms in seconds, sizes are in bytes, and counts carry a unit annotation such as `{request}` or `{entry}`. `dolos.build.info` is the one series without a unit.
-- The meter is the crate that records: `dolos-core`, `dolos-fjall`, `dolos-minibf`, `dolos-minikupo`, `dolos-grpc` and `dolos-trp`, plus `dolos`, the binary's own, for the [process](#process) series. Queries need not name it: the `surface` attribute tells the serving surfaces apart.
+- The attributes Dolos defines are bare lowercase keys from one vocabulary: `surface`, `store`, `keyspace`, `namespace`, `tier`, `stage` and `work_unit` for the sync, `outcome` for any result, and `version` and `git_sha` for the build. Request series also carry the semantic-convention attributes of their family (`http.route`, `rpc.method`, …), and the process CPU time its `cpu.mode`. The resource attributes Dolos defines sit under `dolos.`.
+- Latencies are histograms in seconds, sizes are in bytes, and counts carry a unit annotation such as `{request}` or `{entry}`. `dolos.build.info`, `dolos.sync.caught_up` and the sync stages' own counters and gauges carry no unit.
+- The meter is the crate that records: `dolos-core`, `dolos-fjall`, `dolos-minibf`, `dolos-minikupo`, `dolos-grpc` and `dolos-trp`, plus `dolos`, the node's own, for the [sync](#sync) and [process](#process) series. Queries need not name it: the `surface` attribute tells the serving surfaces apart.
 
 ### Prometheus names
 
@@ -123,8 +123,29 @@ The query limiter bounds the blocking query work of the whole process, whichever
 | ------ | ----- | ---------- | ------ | ------- |
 | `dolos.sync.tip.slot`<br />`dolos_sync_tip_slot` | `dolos-core` | gauge, `{slot}` | none | Slot of the newest archived block |
 | `dolos.sync.tip.block_number`<br />`dolos_sync_tip_block_number` | `dolos-core` | gauge, `{block}` | none | Block number of the newest archived block |
+| `dolos.sync.tip.lag`<br />`dolos_sync_tip_lag_seconds` | `dolos` | gauge, `s` | none | Wall clock minus the time of the newest archived block's slot |
+| `dolos.sync.caught_up`<br />`dolos_sync_caught_up` | `dolos` | gauge, none | none | 1 once the stores committed the upstream tip, else 0 |
+| `dolos.sync.upstream.sessions`<br />`dolos_sync_upstream_sessions_total` | `dolos` | counter, `{session}` | `outcome` | Sessions with the upstream peer, by outcome |
+| `dolos.sync.upstream.last_delivery.age`<br />`dolos_sync_upstream_last_delivery_age_seconds` | `dolos` | gauge, `s` | none | Time since the upstream peer last delivered |
+| `dolos.sync.work_unit.duration`<br />`dolos_sync_work_unit_duration_seconds` | `dolos-core` | histogram, `s` | `work_unit` | How long each sync work unit took |
+| `dolos.sync.rollback.depth`<br />`dolos_sync_rollback_depth` | `dolos-core` | histogram, `{block}` | none | Blocks each rollback undid, when it undid any |
+| `dolos.sync.stage.blocks`<br />`dolos_sync_stage_blocks_total` | `dolos` | counter | `stage` | Blocks the stage sent on (`pull`, `emulator`) or rolled forward (`apply`) |
+| `dolos.sync.stage.upstream_tip_slot`<br />`dolos_sync_stage_upstream_tip_slot` | `dolos` | gauge | `stage` | Slot of the tip the upstream (`pull`) or the emulator last reported |
+| `dolos.sync.stage.rollbacks`<br />`dolos_sync_stage_rollbacks_total` | `dolos` | counter | `stage` | Rollbacks the apply stage applied that undid at least one block |
+| `dolos.sync.stage.housekeeping_runs`<br />`dolos_sync_stage_housekeeping_runs_total` | `dolos` | counter | `stage` | Housekeeping rounds the apply stage ran |
+| `dolos.sync.stage.ticks`<br />`dolos_sync_stage_ticks_total` | `dolos` | counter, `{tick}` | `stage` | State-machine ticks of the stage |
+| `dolos.sync.stage.units`<br />`dolos_sync_stage_units_total` | `dolos` | counter, `{unit}` | `stage` | Work units the stage executed |
+| `dolos.sync.stage.retries`<br />`dolos_sync_stage_retries_total` | `dolos` | counter, `{retry}` | `stage` | Retries the stage took in any phase |
+| `dolos.sync.stage.phase`<br />`dolos_sync_stage_phase` | `dolos` | gauge, `{phase}` | `stage` | Phase of the stage: 0 bootstrap, 1 working, 2 teardown, 3 ended |
+| `dolos.sync.stage.busy_time`<br />`dolos_sync_stage_busy_time_seconds_total` | `dolos` | counter, `s` | `stage` | Time the stage spent executing work units |
 
-The slot and block number of the newest block in the archive, under the `dolos-core` meter. An empty archive reports neither. They replace the `dolos_slot` and `dolos_block_number` series of MiniBF's former `/metrics` route.
+- The tip slot and block number are those of the newest block in the archive, under the `dolos-core` meter. An empty archive reports neither. They replace the `dolos_slot` and `dolos_block_number` series of MiniBF's former `/metrics` route. The tip lag is measured against that block too, and an empty archive reports none.
+- The other series are reported while a sync runs, by `daemon` and `sync catchup`. `stage` is `pull` (or `emulator` on a devnet), `apply` and, while following, `submit`.
+- `dolos.sync.caught_up` turns 1 once the WAL and the state committed the tip the peer reported when chain-sync first reached it, and stays 1.
+- A session's `outcome` is `connected` when it connected and found its intersection, `failed` for an attempt that did not, and `lost` for a connected session that ended. Rising `failed` with no `connected` means the peer is unreachable; rising `lost` means it keeps dropping sessions.
+- The delivery age counts from the last time a session delivered blocks or reached the peer's tip, a rollback the peer sends at the tip included. It is not reported before the first delivery. At the tip it grows until the next block, so read it against the network's block interval.
+- `work_unit` is the unit's name: `roll` (a batch of blocks), `rupd` (the reward update), `ewrap` and `estart` (the epoch boundary), `genesis` and `forced_stop`. A slow apply stage shows as long `roll` units; a slow peer as a delivery age that grows while `dolos.sync.tip.lag` does.
+- The rollback depth has the bucket boundaries 1, 2, 3, 5, 10, 20, 50, 100, 500 and 2160 blocks. Every session starts with a rollback to its intersection, which undoes nothing: such a rollback records no depth sample and does not count in `dolos.sync.stage.rollbacks`.
 
 ## Cache
 
