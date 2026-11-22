@@ -37,7 +37,7 @@ Each Fjall store, state and archive, reports its compaction backlog as an OpenTe
 | --------------------------- | ----- | ------------------- |
 | `dolos.storage.l0_runs_max` | gauge | `store`, `keyspace` |
 
-The value is the largest number of L0 runs in any of the store's keyspaces, and `keyspace` names that keyspace. `store` is `state` or `archive`. Fjall halts a keyspace's writes at 30 L0 runs until compaction catches up, so a value climbing toward 30 means compaction is falling behind the writes. The gauge is read when the meter collects, never on a write, and a store opened read-only does not report it. Like the [cache metrics](./cache#metrics), it is exported over OTLP by a node with a [`[telemetry]`](../configuration/schema#telemetry) section, and the [metric reference](../reference/metrics#storage) lists it with the other series.
+The value is the largest number of L0 runs in any of the store's keyspaces, and `keyspace` names that keyspace. `store` is `state` or `archive`. Fjall halts a keyspace's writes at 30 L0 runs until compaction catches up, so a value climbing toward 30 means compaction is falling behind the writes. The gauge is read when the meter collects, never on a write, and a store opened read-only does not report it. Like the [cache metrics](./cache#metrics), it is exported over OTLP by a node with a [`[telemetry]`](../configuration/schema#telemetry) section. The [metric reference](../reference/metrics#storage) lists it with the stores' other series (active and completed compactions, compaction time, queued flushes, disk usage), and its [compaction query](../reference/metrics#compaction-falling-behind) reads them together.
 
 ## Query latency
 
@@ -69,7 +69,7 @@ The most common uptime risks are:
 - undersized CPU, memory, or storage for the traffic being served
 - overly aggressive debug or trace logging in production
 
-For high uptime, use a stable upstream peer, keep enough free disk for both current state and expected growth, and monitor sync progress together with API health.
+For high uptime, use a stable upstream peer, keep enough free disk for both current state and expected growth, and monitor sync progress together with API health. The metric reference has queries for a node that fell [behind the tip](../reference/metrics#behind-the-tip), an [upstream that stalled](../reference/metrics#upstream-stalled), the [sync stage that is slow](../reference/metrics#who-is-slow) and [disk growth](../reference/metrics#disk-growth); `process.uptime` [finds restarts](../reference/metrics#process).
 
 ## Failure recovery
 
@@ -104,5 +104,5 @@ Epoch boundaries are a useful stress case because they concentrate heavier ledge
 - Use Mithril when you want a fast cold start without depending on a published Stelae snapshot.
 - Choose the smallest storage mode that satisfies your product requirements.
 - Keep storage caches conservative at first, then tune with real measurements.
-- Monitor sync position, API latency, disk growth, and restart behavior under realistic traffic.
+- Monitor sync position, API latency, disk growth, and restart behavior under realistic traffic; the [metric reference](../reference/metrics#example-queries) has a query for each.
 - Validate production sizing with your own query mix, not only synthetic benchmarks.

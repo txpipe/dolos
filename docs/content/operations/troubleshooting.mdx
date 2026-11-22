@@ -54,7 +54,7 @@ CARDANO-004: crash detected mid-boundary; resuming on the next boundary trigger
 
 **Meaning.** The node stopped while a boundary's sharded work was partway done. On the next block that triggers the boundary, dolos resumes from the last committed shard.
 
-**What to do.** Let it run, then **watch the following boundary**. Resume is not yet fully idempotent (see #1018), so verify the next epoch's data looks consistent. Persisted inconsistency surfaces later as `CARDANO-001` or `CARDANO-002`.
+**What to do.** Let it run, then **watch the following boundary**: the `ewrap` and `estart` [work unit durations](../reference/metrics#sync) show when it runs and how long each half takes. Resume is not yet fully idempotent (see #1018), so verify the next epoch's data looks consistent. Persisted inconsistency surfaces later as `CARDANO-001` or `CARDANO-002`.
 
 ## CARDANO-005 — boundary half-closed at startup, resuming (warning)
 

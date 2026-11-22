@@ -174,7 +174,7 @@ When metric exports start failing, Dolos logs one warning naming the error, and 
 - A submission's `outcome` is `accepted`, `invalid` (phase-1 validation), `script_failed` (phase-2 validation), `duplicate` or `error`. Every submit API records it: gRPC, TRP and MiniBF.
 - A stale transaction is one the node stops offering upstream after three offers no peer acknowledged. It counts once.
 
-A node with a [`[telemetry]`](../configuration/schema#telemetry) section exports these metrics over OTLP.
+A node with a [`[telemetry]`](../configuration/schema#telemetry) section exports these metrics over OTLP. The [metric reference](../reference/metrics#mempool) lists them with their Prometheus names, and has a query for [transactions not confirming](../reference/metrics#transactions-not-confirming).
 
 ## Relation to Logging
 
