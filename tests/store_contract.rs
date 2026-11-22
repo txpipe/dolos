@@ -638,7 +638,7 @@ fn assert_creation(layout: Layout) {
 #[test]
 #[cfg_attr(
     feature = "debug",
-    ignore = "the debug feature's console subscriber panics a daemon built without tokio_unstable"
+    ignore = "the debug feature's console subscriber panics a housekeeping run built without tokio_unstable"
 )]
 fn creation_records_the_contract_in_every_layout() {
     for layout in LAYOUTS {
