@@ -436,8 +436,25 @@ pub struct ArchiveIndex {
 fn found_in_storage(config: &RootConfig) -> Result<Found, Error> {
     let mut found = Found::default();
 
+    // With either store refused, the other database is read over a view: a
+    // writable open would change its files before the refusal stops the
+    // command. What is not a database yet opens as it always has.
+    let refused = admit_existing_stores(config).is_err_and(|error| is_refusal(&error));
+    let access = |database: &Path| {
+        if refused && dolos_fjall::database_exists(database) {
+            Access::Observe
+        } else {
+            Access::Mutate
+        }
+    };
+
     if let Some(path) = config.storage.state_path().filter(|path| path.exists()) {
-        match open_state_store(config) {
+        let opened = match access(&path) {
+            Access::Observe => open_state_at(config, &path, Access::Observe),
+            Access::Mutate => open_state_store(config),
+        };
+
+        match opened {
             Ok(state) => match state.read_cursor() {
                 Ok(cursor) => {
                     found.node = cursor.is_some();
@@ -477,7 +494,7 @@ fn found_in_storage(config: &RootConfig) -> Result<Found, Error> {
     if let Some(path) = config.storage.archive_path().filter(|path| path.exists()) {
         // Any failure but the identity's is left to the command that uses the
         // archive, as before stores recorded identities, and counts as data.
-        let (holds_data, newest) = match open_archive_index(config) {
+        let (holds_data, newest) = match open_archive_index(config, access(&path.join("index"))) {
             Ok(archive) => (
                 archive.holds_data().unwrap_or(true),
                 archive.newest_block_location().ok().flatten(),
@@ -513,14 +530,23 @@ fn found_in_storage(config: &RootConfig) -> Result<Found, Error> {
 }
 
 /// The archive opened to read its index alone, with its segments in its own
-/// directory, so a `blocks_path` that is gone isn't created.
-fn open_archive_index(config: &RootConfig) -> Result<ArchiveStoreBackend, ArchiveError> {
-    ArchiveStoreBackend::open(
-        config.storage.archive_path().unwrap_or_default(),
-        None,
-        dolos_cardano::model::build_log_schema(),
-        config.storage.archive.kind,
-    )
+/// directory, so a `blocks_path` that is gone isn't created; over a view
+/// under [`Access::Observe`].
+fn open_archive_index(
+    config: &RootConfig,
+    access: Access,
+) -> Result<ArchiveStoreBackend, ArchiveError> {
+    let path = config.storage.archive_path().unwrap_or_default();
+    let schema = dolos_cardano::model::build_log_schema();
+
+    match (access, config.storage.archive.kind) {
+        (Access::Observe, StoreType::Fjall { preset }) => {
+            let view =
+                dolos_fjall::archive::ArchiveStore::open_view(schema, &path, None, preset.into())?;
+            ArchiveStoreBackend::admitted_fjall(view, &path, access)
+        }
+        (_, kind) => ArchiveStoreBackend::open(path, None, schema, kind),
+    }
 }
 
 /// The segment file under `dir` that `location` names, when it is missing or
@@ -917,19 +943,65 @@ pub fn open_archive_store(config: &RootConfig) -> Result<ArchiveStoreBackend, Er
     }
 
     let path = config.storage.archive_path().unwrap_or_default();
+    admit_archive_at(config, &path)?;
+    open_admitted_archive_store(config)
+}
+
+pub fn open_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error> {
+    admit_state_at(config, &config.storage.state_path().unwrap_or_default())?;
+    open_admitted_state_store(config)
+}
+
+/// [`open_archive_store`], with the archive there already admitted.
+fn open_admitted_archive_store(config: &RootConfig) -> Result<ArchiveStoreBackend, Error> {
+    if !config.keeps_archive() {
+        return Ok(ArchiveStoreBackend::noop());
+    }
+
+    let path = config.storage.archive_path().unwrap_or_default();
     ensure_store_path(&path)?;
     open_archive_at(config, &path, Access::Mutate)
 }
 
-pub fn open_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error> {
+/// [`open_state_store`], with the state there already admitted.
+fn open_admitted_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error> {
     let path = config.storage.state_path().unwrap_or_default();
     ensure_store_path(&path)?;
     open_state_at(config, &path, Access::Mutate)
 }
 
+/// [`admit`] the archive at `path`, when its index is there, over a
+/// read-only view, before a writable open changes its files.
+fn admit_archive_at(config: &RootConfig, path: &Path) -> Result<(), Error> {
+    match config.storage.archive.kind {
+        StoreType::Fjall { preset } => ArchiveStoreBackend::admit_existing(
+            &dolos_cardano::model::build_log_schema(),
+            path,
+            config.storage.blocks_path().as_deref(),
+            preset.into(),
+            |e| fjall_failure(path, e, ArchiveError::from),
+        ),
+        StoreType::Ephemeral => Ok(()),
+    }
+}
+
+/// [`admit`] the state at `path`, when it is there, over a read-only view,
+/// before a writable open changes its files.
+fn admit_state_at(config: &RootConfig, path: &Path) -> Result<(), Error> {
+    match config.storage.state.kind {
+        StoreType::Fjall { preset } => {
+            StateStoreBackend::admit_existing(path, preset.into(), |e| {
+                fjall_failure(path, e, StateError::from)
+            })
+        }
+        StoreType::Ephemeral => Ok(()),
+    }
+}
+
 /// [`ArchiveStoreBackend::open`], read-only over a view under
 /// [`Access::Observe`], with a lock another handle holds reported as
-/// [`Error::InUse`].
+/// [`Error::InUse`]. Under [`Access::Mutate`] the caller admits an archive
+/// already there first ([`admit_archive_at`]).
 fn open_archive_at(
     config: &RootConfig,
     path: &Path,
@@ -950,13 +1022,6 @@ fn open_archive_at(
                     preset.into(),
                 ),
                 Access::Mutate => {
-                    ArchiveStoreBackend::admit_existing(
-                        &schema,
-                        path,
-                        blocks,
-                        preset.into(),
-                        |e| fjall_failure(path, e, ArchiveError::from),
-                    )?;
                     dolos_fjall::archive::ArchiveStore::open(schema, path, blocks, preset.into())
                 }
             }
@@ -970,7 +1035,8 @@ fn open_archive_at(
 
 /// [`StateStoreBackend::open`], read-only over a view under
 /// [`Access::Observe`], with a lock another handle holds reported as
-/// [`Error::InUse`].
+/// [`Error::InUse`]. Under [`Access::Mutate`] the caller admits a state
+/// already there first ([`admit_state_at`]).
 fn open_state_at(
     config: &RootConfig,
     path: &Path,
@@ -980,12 +1046,7 @@ fn open_state_at(
         StoreType::Fjall { preset } => {
             let store = match access {
                 Access::Observe => dolos_fjall::StateStore::open_view(path, preset.into()),
-                Access::Mutate => {
-                    StateStoreBackend::admit_existing(path, preset.into(), |e| {
-                        fjall_failure(path, e, StateError::from)
-                    })?;
-                    dolos_fjall::StateStore::open(path, preset.into())
-                }
+                Access::Mutate => dolos_fjall::StateStore::open(path, preset.into()),
             }
             .map_err(|error| fjall_failure(path, error, StateError::from))?;
 
@@ -1067,8 +1128,10 @@ pub fn open_data_stores<D>(config: &RootConfig) -> Result<Stores<D>, Error>
 where
     D: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
 {
-    let state = open_state_store(config)?;
-    let archive = open_archive_store(config)?;
+    admit_existing_stores(config)?;
+
+    let state = open_admitted_state_store(config)?;
+    let archive = open_admitted_archive_store(config)?;
     let positions = replay_positions(&state, &archive);
     let needed = needed_blocks(config, &state, &archive);
 
@@ -1080,6 +1143,29 @@ where
         archive,
         mempool: open_mempool_store(config)?,
     })
+}
+
+/// [`admit`] the state and the archive that are there, each over a
+/// read-only view, before either opens writable: a writable open changes its
+/// store's files, which a refusal of the other store must not cost. Stores
+/// not there yet are left to the open that creates them.
+fn admit_existing_stores(config: &RootConfig) -> Result<(), Error> {
+    admit_state_at(config, &config.storage.state_path().unwrap_or_default())?;
+
+    if config.keeps_archive() {
+        admit_archive_at(config, &config.storage.archive_path().unwrap_or_default())?;
+    }
+
+    Ok(())
+}
+
+/// Whether `error` is a store's identity or format refusal.
+fn is_refusal(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::StateError(StateError::IncompatibleStore(_))
+            | Error::ArchiveError(ArchiveError::IncompatibleStore(_))
+    )
 }
 
 /// What a command does with the stores it opens.
@@ -1167,6 +1253,10 @@ where
 {
     existing(&config.storage.path)?;
 
+    if access == Access::Mutate {
+        admit_existing_stores(config)?;
+    }
+
     let state = existing_state(config, access)?;
 
     let archive = existing_archive(config, access)?;
@@ -1220,6 +1310,11 @@ pub fn open_existing_archive(
     access: Access,
 ) -> Result<ArchiveStoreBackend, OpenError> {
     existing(&config.storage.path)?;
+
+    if access == Access::Mutate && config.keeps_archive() {
+        admit_archive_at(config, &config.storage.archive_path().unwrap_or_default())?;
+    }
+
     existing_archive(config, access)
 }
 
@@ -1232,9 +1327,15 @@ pub fn open_existing_state(
     access: Access,
 ) -> Result<StateStoreBackend, OpenError> {
     existing(&config.storage.path)?;
+
+    if access == Access::Mutate {
+        admit_state_at(config, &config.storage.state_path().unwrap_or_default())?;
+    }
+
     existing_state(config, access)
 }
 
+/// The state, admitted by the caller under [`Access::Mutate`].
 fn existing_state(config: &RootConfig, access: Access) -> Result<StateStoreBackend, OpenError> {
     let path = config.storage.state_path().unwrap_or_default();
 
@@ -1245,6 +1346,7 @@ fn existing_state(config: &RootConfig, access: Access) -> Result<StateStoreBacke
     Ok(open_state_at(config, &path, access)?)
 }
 
+/// The archive, admitted by the caller under [`Access::Mutate`].
 fn existing_archive(config: &RootConfig, access: Access) -> Result<ArchiveStoreBackend, OpenError> {
     if !config.keeps_archive() {
         return Ok(ArchiveStoreBackend::noop());
@@ -5132,7 +5234,7 @@ mod tests {
         unreadable_archive.storage.archive.path = Some(elsewhere.join("archive/archive"));
         written_state(&unreadable_archive, None);
         written_unreadable_archive(&unreadable_archive);
-        assert!(open_archive_index(&unreadable_archive)
+        assert!(open_archive_index(&unreadable_archive, Access::Mutate)
             .unwrap()
             .holds_data()
             .is_err());
