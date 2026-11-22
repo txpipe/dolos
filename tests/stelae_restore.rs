@@ -170,9 +170,12 @@ fn a_forced_restore_replaces_a_store_this_release_refuses() {
         assert!(!refused.status.success());
 
         let stderr = String::from_utf8_lossy(&refused.stderr);
-        assert!(stderr.contains("no compatibility identity"), "{stderr}");
         assert!(
-            stderr.contains("dolos bootstrap stelae --force"),
+            reports(&refused.stderr, "no compatibility identity"),
+            "{stderr}"
+        );
+        assert!(
+            reports(&refused.stderr, "dolos bootstrap stelae --force"),
             "{stderr}"
         );
     }
