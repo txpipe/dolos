@@ -5,7 +5,7 @@ use tokio::net::TcpListener;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, info, instrument, warn};
 
-use crate::{adapters::DomainAdapter, prelude::*};
+use crate::{adapters::DomainAdapter, prelude::*, serve::accept::AcceptFailure};
 
 mod blockfetch;
 mod chainsync;
@@ -66,7 +66,8 @@ async fn accept_peer_connections<D: Domain, C: CancelToken>(
 
 /// Serve every peer that completes the handshake on `listener`. A connection
 /// that fails the handshake, or misses its deadline, is logged and dropped,
-/// and the loop goes on to the next one.
+/// and the loop goes on to the next one. When the listener itself fails to
+/// accept, the loop logs it and waits a moment before accepting again.
 async fn serve_peers<D: Domain, C: CancelToken>(
     domain: D,
     listener: &TcpListener,
@@ -82,8 +83,10 @@ async fn serve_peers<D: Domain, C: CancelToken>(
         let peer = match peer {
             Ok(peer) => peer,
             Err(error) => {
+                let failure = AcceptFailure::of(&error);
                 let cause = std::error::Error::source(&error).map(ToString::to_string);
-                warn!(%error, ?cause, "error on incoming connection");
+                warn!(%error, ?cause, ?failure, "error on incoming connection");
+                failure.settle().await;
                 continue;
             }
         };

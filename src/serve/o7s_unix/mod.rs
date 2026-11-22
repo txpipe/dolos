@@ -4,6 +4,7 @@ use tokio::{net::UnixListener, task::JoinHandle};
 use tokio_util::task::TaskTracker;
 use tracing::{debug, info, instrument, warn};
 
+use super::accept::AcceptFailure;
 use crate::prelude::*;
 
 mod chainsync;
@@ -95,8 +96,10 @@ async fn accept_client_connections<D: Domain, C: CancelToken>(
                 info!(connections = tasks.len(), "active connections changed");
             }
             Err(error) => {
+                let failure = AcceptFailure::of(&error);
                 let cause = std::error::Error::source(&error).map(ToString::to_string);
-                warn!(%error, ?cause, "error on incoming connection");
+                warn!(%error, ?cause, ?failure, "error on incoming connection");
+                failure.settle().await;
             }
         }
     }
