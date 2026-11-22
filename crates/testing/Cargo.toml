@@ -20,5 +20,9 @@ futures-core = { workspace = true }
 futures-util = { workspace = true }
 itertools = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+toml = "0.8.13"
+tar = "0.4"
+zstd = "0.14"
 opentelemetry.workspace = true
 opentelemetry_sdk = { workspace = true, features = ["testing"] }

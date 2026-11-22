@@ -1826,9 +1826,13 @@ dependencies = [
  "pallas",
  "rand 0.9.3",
  "serde",
+ "serde_json",
+ "tar",
  "tempfile",
  "tokio",
  "tokio-stream",
+ "toml 0.8.20",
+ "zstd",
 ]
 
 [[package]]

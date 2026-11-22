@@ -5,6 +5,7 @@ use xtask::perf::measure::PeakAlloc;
 use xtask::{debug, perf, store};
 
 mod bootstrap;
+mod compat;
 mod config;
 mod ground_truth;
 mod test_instance;
@@ -47,6 +48,10 @@ enum Commands {
     #[command(subcommand)]
     TestInstance(test_instance::TestInstanceCmd),
 
+    /// Forward-upgrade fixtures for the compatibility harness
+    #[command(subcommand)]
+    Compat(compat::Cmd),
+
     /// Maintainer tooling over a stopped node's stores
     #[command(subcommand)]
     Debug(debug::Cmd),
@@ -73,6 +78,7 @@ fn main() -> Result<()> {
         Commands::BootstrapMithrilLocal(args) => bootstrap::run(&sh, &args)?,
         Commands::GroundTruth(cmd) => ground_truth::run(cmd)?,
         Commands::TestInstance(cmd) => test_instance::run(&sh, cmd)?,
+        Commands::Compat(cmd) => compat::run(&sh, cmd)?,
         Commands::Debug(cmd) => debug::run(cmd)?,
         Commands::Store(cmd) => store::run(cmd)?,
     }
