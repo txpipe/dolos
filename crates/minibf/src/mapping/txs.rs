@@ -75,6 +75,12 @@ impl<'a> IntoModel<TxContentUtxoInputsInner> for UtxoInputModelBuilder<'a> {
         };
 
         if let Some(o) = self.as_output {
+            #[allow(
+                deprecated,
+                reason = "Pallas 1.5 deprecates script_ref; moving to multi_era_script_ref is a separate change"
+            )]
+            let script_ref = o.script_ref();
+
             out = TxContentUtxoInputsInner {
                 address: o.address().into_model()?,
                 amount: o
@@ -83,7 +89,7 @@ impl<'a> IntoModel<TxContentUtxoInputsInner> for UtxoInputModelBuilder<'a> {
                     .into_iter()
                     .filter(|x| x.unit == "lovelace" || !self.is_collateral)
                     .collect(),
-                reference_script_hash: o.script_ref().map(|h| h.into_model()).transpose()?,
+                reference_script_hash: script_ref.map(|h| h.into_model()).transpose()?,
                 data_hash: o.datum().map(|x| match x {
                     DatumOption::Hash(x) => x.to_string(),
                     DatumOption::Data(x) => x.original_hash().to_string(),
@@ -875,8 +881,14 @@ impl TxModelBuilder<'_> {
 
         let fee = redeemer_fee(&units, prices)?;
 
+        #[allow(
+            deprecated,
+            reason = "Pallas 1.5 deprecates tag; moving to multi_era_tag is a separate change"
+        )]
+        let tag = redeemer.tag();
+
         let out = TxContentRedeemersInner {
-            purpose: tx_redeemer_purpose(redeemer.tag()),
+            purpose: tx_redeemer_purpose(tag),
             tx_index: redeemer.index() as i32,
             // TODO: we should change this in Pallas to ensure that we have a KeepRaw wrapping the
             // redeemer data

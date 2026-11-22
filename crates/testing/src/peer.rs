@@ -451,7 +451,7 @@ async fn handshake((bearer, socket): (Bearer, Option<TcpStream>), magic: u64, sh
 
     match peer
         .handshake()
-        .handshake(VersionTable::v7_and_above(magic))
+        .handshake_negotiated(VersionTable::v7_and_above(magic))
         .await
     {
         Ok(Some(_)) => {
