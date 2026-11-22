@@ -377,7 +377,18 @@ impl CacheDiskTier for RedbCacheTier {
 
             wx.open_table(VERSIONS)?.insert(namespace, version)?;
             Ok(())
-        })
+        })?;
+
+        if let Some(found) = known {
+            warn!(
+                namespace,
+                found,
+                expected = version,
+                "cache namespace kept under another format version, its entries were wiped"
+            );
+        }
+
+        Ok(())
     }
 
     fn get(&self, namespace: &str, key: &[u8]) -> Result<Option<CacheEntry>, CacheError> {
@@ -658,6 +669,7 @@ fn wipe(wx: &WriteTransaction, namespace: &str) -> Result<(), redb::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_logs::warned_while;
 
     const MIB: u64 = 1024 * 1024;
 
@@ -723,6 +735,32 @@ mod tests {
 
         tier.put("ns", b"c", b"4", 1).unwrap();
         assert_eq!(tier.keys("ns").unwrap(), [Bytes::from("c")]);
+    }
+
+    /// Only a namespace kept under another version, older or newer, is wiped
+    /// with a warning, which names it and both versions.
+    #[test]
+    fn a_new_format_version_logs_one_warning_naming_the_namespace() {
+        let tier = RedbCacheTier::memory(MIB).unwrap();
+
+        let warned = warned_while(|| {
+            tier.open_namespace("ns", 1).unwrap();
+            tier.open_namespace("ns", 1).unwrap();
+            tier.open_namespace("other", 1).unwrap();
+        });
+        assert!(warned.is_empty(), "{warned:?}");
+
+        for (found, expected) in [(1, 2), (2, 1)] {
+            let warned = warned_while(|| tier.open_namespace("ns", expected).unwrap());
+
+            assert_eq!(warned.len(), 1, "{found} to {expected}: {warned:?}");
+            assert!(
+                warned[0].contains(&format!(
+                    "namespace=\"ns\" found={found} expected={expected} "
+                )),
+                "{found} to {expected}: {warned:?}"
+            );
+        }
     }
 
     #[test]
