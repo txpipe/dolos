@@ -50,7 +50,7 @@ dolos-minikupo = { path = "crates/minikupo", optional = true }
 dolos-trp = { path = "crates/trp", optional = true }
 
 # gasket = { git = "https://github.com/construkts/gasket-rs.git", features = ["derive"] }
-gasket = { version = "^0.9", features = ["derive"] }
+gasket = { version = "^0.12", features = ["derive"] }
 # gasket = { path = "../../construkts/gasket-rs/gasket", features = ["derive"] }
 
 clap = { version = "4.5.37", features = ["derive", "env"] }

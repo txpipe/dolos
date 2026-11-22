@@ -563,12 +563,12 @@ pub async fn run_pipeline(
 
 /// The names of the pipeline's stages that have ended.
 pub fn ended_stages(pipeline: &gasket::daemon::Daemon) -> Vec<String> {
-    use gasket::runtime::{StagePhase, TetherState};
+    use gasket::runtime::TetherState;
 
     pipeline
         .tethers()
         .filter(|tether| {
-            !matches!(tether.check_state(), TetherState::Alive(phase) if phase != StagePhase::Ended)
+            !matches!(tether.check_state(), TetherState::Alive(phase) if phase.end_cause().is_none())
         })
         .map(|tether| tether.name().to_string())
         .collect()
@@ -663,6 +663,66 @@ mod tests {
     use tokio::task::JoinHandle;
 
     use super::*;
+
+    struct FailingStage;
+
+    impl gasket::framework::Stage for FailingStage {
+        type Unit = ();
+        type Worker = FailingWorker;
+
+        fn name(&self) -> &str {
+            "failing"
+        }
+    }
+
+    struct FailingWorker;
+
+    #[async_trait::async_trait(?Send)]
+    impl gasket::framework::Worker<FailingStage> for FailingWorker {
+        async fn bootstrap(_: &FailingStage) -> Result<Self, gasket::framework::WorkerError> {
+            Ok(Self)
+        }
+
+        async fn schedule(
+            &mut self,
+            _: &mut FailingStage,
+        ) -> Result<gasket::framework::WorkSchedule<()>, gasket::framework::WorkerError> {
+            Err(gasket::framework::WorkerError::Panic)
+        }
+
+        async fn execute(
+            &mut self,
+            _: &(),
+            _: &mut FailingStage,
+        ) -> Result<(), gasket::framework::WorkerError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_stage_that_ends_with_an_error_counts_as_ended() {
+        let tether = gasket::runtime::spawn_stage(FailingStage, gasket::runtime::Policy::default());
+        let pipeline = gasket::daemon::Daemon::new(vec![tether]);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !pipeline.has_ended() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the stage never ended"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        assert_eq!(ended_stages(&pipeline), vec!["failing".to_string()]);
+        let state = pipeline.tethers().next().unwrap().check_state();
+        assert_eq!(
+            state.end_cause(),
+            Some(gasket::runtime::EndCause::Errored),
+            "{state:?}"
+        );
+
+        pipeline.teardown();
+    }
 
     #[test]
     fn the_log_filter_adds_targets_over_the_level() {
