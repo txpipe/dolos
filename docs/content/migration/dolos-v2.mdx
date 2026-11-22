@@ -236,7 +236,7 @@ Along the way, every command that prints a report or records takes `--format tex
 | `dolos data find-seq`, `copy-wal`, `clear-state`; `dolos doctor update-entity` | moved out of the binary to `cargo xtask debug find-seq`, `copy-wal`, `clear-state` and `update-entity` in the Dolos repository; `update-entity` now writes unless `--dry-run` |
 | `dolos data compute-spdd`, `compute-nonce`; `dolos doctor reclaim-avvm`; `dolos eval` | deleted, with no successor |
 | `dolos data import-archive` | removed; see [below](#archive-only-import) |
-| `dolos data export`, `dolos bootstrap snapshot` (`--variant`, `--point`, `--file`, `--download-url`) | removed with the Dolos snapshot format; restore a Stelae snapshot with `dolos bootstrap stelae` |
+| `dolos data export`, `dolos bootstrap snapshot` (`--variant`, `--point`, `--file`, `--download-url`) | removed with the v1 snapshot format; restore a Stelae snapshot with `dolos bootstrap stelae` |
 | `dolos bootstrap relay` | removed: a node with empty stores syncs from genesis under `dolos daemon` or `dolos sync catchup` |
 | `dolos bootstrap mithril`, `dolos bootstrap stelae` | unchanged sources; `mithril` loses `--start-from`, replaced by `--continue` |
 | (none) | `dolos bootstrap immutabledb --source PATH`, replaying a local Cardano node database |
