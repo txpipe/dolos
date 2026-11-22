@@ -137,12 +137,12 @@ The query limiter bounds the blocking query work of the whole process, whichever
 | `dolos.sync.stage.units`<br />`dolos_sync_stage_units_total` | `dolos` | counter, `{unit}` | `stage` | Work units the stage executed |
 | `dolos.sync.stage.retries`<br />`dolos_sync_stage_retries_total` | `dolos` | counter, `{retry}` | `stage` | Retries the stage took in any phase |
 | `dolos.sync.stage.phase`<br />`dolos_sync_stage_phase` | `dolos` | gauge, `{phase}` | `stage` | Phase of the stage: 0 bootstrap, 1 working, 2 teardown, 3 ended |
-| `dolos.sync.stage.busy_time`<br />`dolos_sync_stage_busy_time_seconds_total` | `dolos` | counter, `s` | `stage` | Time the stage spent executing work units |
+| `dolos.sync.stage.busy_time`<br />`dolos_sync_stage_busy_time_seconds_total` | `dolos` | counter, `s` | `stage` | Time the stage spent executing work units, which for `pull` includes its waits |
 
 - The tip slot and block number are those of the newest block in the archive, under the `dolos-core` meter. An empty archive reports neither. They replace the `dolos_slot` and `dolos_block_number` series of MiniBF's former `/metrics` route. The tip lag is measured against that block too, and an empty archive reports none.
 - The other series are reported while a sync runs, by `daemon` and `sync catchup`. `stage` is `pull` (or `emulator` on a devnet), `apply` and, while following, `submit`.
-- The `dolos.sync.stage.*` series are the pipeline runtime's own per-stage counters and gauges, exported under the `dolos` meter with the stage's name in `stage`. `dolos.sync.stage.phase` is where the stage is in its life: `0` bootstrap (it is setting up, such as connecting to the peer), `1` working, `2` teardown, `3` ended. A stage that ends on its own while `daemon` runs is a failure: the node stops the rest of the pipeline and exits. `busy_time` grows only while the stage executes a unit of work, not while it waits for its input, so its `rate()` is the share of time the stage is busy.
-- `dolos.sync.caught_up` turns 1 once the WAL and the state committed the tip the peer reported when chain-sync first reached it, and stays 1.
+- The `dolos.sync.stage.*` series are the pipeline runtime's own per-stage counters and gauges, exported under the `dolos` meter with the stage's name in `stage`. `dolos.sync.stage.phase` is where the stage is in its life: `0` bootstrap (it is setting up, such as connecting to the peer), `1` working, `2` teardown, `3` ended. A stage that ends on its own while `daemon` runs is a failure: the node stops the rest of the pipeline and exits. `busy_time` grows while the stage executes a unit of work, and its `rate()` is the share of time spent there. For `apply` and `submit` that excludes waiting for their input, so it is the share of time they are busy. `pull` waits inside its units: for the peer's next block at the tip, for room in the apply stage's queue and for the backoff between attempts, so its busy time stays near 1 on a healthy node and does not tell a slow peer.
+- `dolos.sync.caught_up` turns 1 once the WAL and the state committed the tip the peer reported when chain-sync first reached it, and stays 1 until the process exits. It is kept in memory, so it is 0 again after every start, however close to the tip the store is.
 - A session's `outcome` is `connected` when it connected and found its intersection, `failed` for an attempt that did not, and `lost` for a connected session that ended. Rising `failed` with no `connected` means the peer is unreachable; rising `lost` means it keeps dropping sessions.
 - The delivery age counts from the last time a session delivered blocks or reached the peer's tip, a rollback the peer sends at the tip included. It is not reported before the first delivery. At the tip it grows until the next block, so read it against the network's block interval.
 - `work_unit` is the unit's name: `roll` (a batch of blocks), `rupd` (the reward update), `ewrap` and `estart` (the epoch boundary), `genesis` and `forced_stop`. A slow apply stage shows as long `roll` units; a slow peer as a delivery age that grows while `dolos.sync.tip.lag` does.
@@ -162,7 +162,7 @@ What the mempool holds, what becomes of each submitted transaction, and how long
 
 - `dolos.mempool.txs` is reported from startup. The transitions, the confirmation time and the submission time appear with the first transaction the node receives, so until then a query on them returns nothing rather than zero.
 - In `dolos.mempool.txs`, `pending` is a transaction queued and not yet propagated; `inflight` covers the propagated, acknowledged and confirmed stages, until the transaction is finalized or dropped.
-- A transition's `state` is the stage reached: `pending`, `propagated`, `acknowledged`, `confirmed`, `finalized`, `dropped`, `rolled_back` (a rollback undid its confirmation, and it goes back to pending) or `unknown`. Each new confirmation of a transaction already confirmed is not counted again. Events the node missed under load are counted as `unknown`.
+- A transition's `state` is the stage reached: `pending`, `propagated`, `acknowledged`, `confirmed`, `finalized`, `dropped`, `rolled_back` (a rollback undid its confirmation, and it goes back to pending; only the in-memory mempool counts it, and with `persistent = true` the transaction is counted as `pending` again) or `unknown`. Each new confirmation of a transaction already confirmed is not counted again. Events the node missed under load are counted as `unknown`.
 - The confirmation time has the bucket boundaries 5, 10, 20, 30, 60, 120, 300, 600, 1800 and 3600 seconds. A transaction finalized in the block that confirms it is timed at finalization. The time is kept in memory only, so a transaction received before a restart is not timed, and one confirmed again after a rollback is not timed twice. When the node misses events under load, it checks the transactions it is timing against the mempool, so a confirmation it missed is timed when it notices, a little late.
 - A submission's `outcome` is `accepted`, `invalid` (phase-1 validation), `script_failed` (phase-2 validation), `duplicate` or `error`. Every submit API records it: gRPC, TRP and MiniBF.
 - A stale transaction is one the node stops offering upstream after three offers no peer acknowledged. It counts once, and is reported by the submit stage of a following sync.
@@ -299,7 +299,14 @@ A node that had caught up and fell behind:
   and on (service_instance_id) (max by (service_instance_id) (dolos_sync_caught_up) == 1)
 ```
 
-Before the node first catches up its lag is expected, so the `caught_up` condition leaves a node syncing from scratch out. At the tip the lag moves between zero and the gap since the last block (on mainnet, blocks are about 20 seconds apart on average, with gaps of a few minutes), so set the threshold well above that.
+Before the node first catches up its lag is expected, so the `caught_up` condition leaves a node syncing from scratch out. The flag is 0 again after every start, so this alert is also silent for a node that restarted behind the tip: down for a while, crash-looping, or unable to reach its peer. Pair it with a lag that is high and not shrinking, whatever the flag says:
+
+```text
+(max by (service_instance_id) (dolos_sync_tip_lag_seconds) > 300)
+  and on (service_instance_id) (deriv(max by (service_instance_id) (dolos_sync_tip_lag_seconds)[30m:1m]) >= 0)
+```
+
+A node syncing from scratch has its lag fall quickly, so it stays out of this one; a node stuck or falling behind does not. At the tip the lag moves between zero and the gap since the last block (on mainnet, blocks are about 20 seconds apart on average, with gaps of a few minutes), so set the threshold well above that.
 
 ### Upstream stalled
 
@@ -311,7 +318,7 @@ max by (service_instance_id) (dolos_sync_upstream_last_delivery_age_seconds) > 3
 sum by (service_instance_id, outcome) (increase(dolos_sync_upstream_sessions_total[15m]))
 ```
 
-A delivery age that keeps growing past the network's longest normal gap between blocks means no session is delivering. With it, `failed` sessions and no `connected` ones mean the peer is unreachable; `lost` sessions mean it keeps dropping them. A lag that grows while the delivery age stays low means the node receives blocks but applies them slowly: see the next query.
+A delivery age that keeps growing past the network's longest normal gap between blocks means no session is delivering. The age is not reported before a session first delivers, so for a node that cannot reach its peer from the start, the sessions query is the signal: `failed` sessions and no `connected` ones. With it, `failed` sessions and no `connected` ones mean the peer is unreachable; `lost` sessions mean it keeps dropping them. A lag that grows while the delivery age stays low means the node receives blocks but applies them slowly: see the next query.
 
 ### Who is slow
 
@@ -324,7 +331,7 @@ histogram_quantile(0.99,
   sum by (service_instance_id, work_unit, le) (rate(dolos_sync_work_unit_duration_seconds_bucket[5m])))
 ```
 
-A stage near 1 is busy all the time and holds the others back; near 0 it waits for its input. A busy `apply` with long `roll` units is a slow ledger or store, and a busy `pull` with an idle `apply` a slow peer. `ewrap` and `estart` units are long by nature: they run once per epoch boundary.
+An `apply` near 1 is busy all the time and holds the pipeline back; near 0 it waits for blocks. A busy `apply` with long `roll` units is a slow ledger or store. `pull` reads near 1 whether the peer, the apply stage or nothing at all is slow, because its units include their waits, so do not read it here: a slow peer shows as a growing delivery age with a growing lag (see [Upstream stalled](#upstream-stalled)). `ewrap` and `estart` units are long by nature: they run once per epoch boundary.
 
 ### Compaction falling behind
 
