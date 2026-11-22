@@ -8,10 +8,12 @@
 //!   ./dolos.toml ./root
 //! ```
 //!
-//! The destination is a network root: the stele goes into its `dolos/`
-//! layout and the closed epochs' blocks into `blocks/`, which the stele names
-//! in `position.blocks`. It must not already hold a stele. Progress rendering
-//! and destination cleanup remain host responsibilities.
+//! The destination is a network root: the Dolos snapshot goes into its
+//! `dolos/` layout and the closed epochs' blocks into `blocks/`, which the
+//! Dolos snapshot names in `position.blocks`. A destination that already holds
+//! a layout is appended to: the new inscription names the latest one as its
+//! `previous` and lists only its own diff. Progress rendering and destination
+//! cleanup remain host responsibilities.
 //!
 //! The stores must stand on the first block of an epoch, with the archive
 //! ending there, as a sync stopped at that epoch leaves them; any other cut is
@@ -23,10 +25,8 @@ use std::{error::Error, path::Path, sync::Arc};
 use dolos::engine::ReplayWorkspace;
 use dolos_cardano::networks::ResolvedNetwork;
 use dolos_snapshot::{
-    export::First,
     facade::{Selection, SnapshotSource as _},
     progress::Observer,
-    read_position,
 };
 
 type AnyError = Box<dyn Error + Send + Sync + 'static>;
@@ -50,18 +50,14 @@ fn main() -> Result<(), AnyError> {
         let inscription =
             snapshot.publish_directory(Path::new(&destination), &plan, &Observer::silent())?;
 
-        // Reproduction uses the same plan and encoders and writes nothing. The
-        // digest names the blocks snapshot the published stele does.
+        // Reproduction uses the same plan and encoders and writes nothing.
         snapshot.verify_reproduction(&inscription, &plan)?;
-        let plan = match read_position(&inscription.position)?.blocks {
-            Some(blocks) => plan.with_blocks(blocks),
-            None => plan,
-        };
-        let document = snapshot.digest_document(&plan, &First)?;
 
+        // The identity is the published inscription's: after an append it
+        // names its predecessor and lists only this sequence's diff.
         eprintln!("sequence: {}", plan.sequence);
-        eprintln!("layers:   {}", document.layers);
-        eprintln!("identity: {}", document.identity);
+        eprintln!("layers:   {}", inscription.layers().count());
+        eprintln!("identity: {}", inscription.digest()?);
         Ok(())
     })();
 
