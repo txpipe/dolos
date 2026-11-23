@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [unreleased]
+## [2.0.0-beta.1] - 2026-11-23
 
 ### 🚀 Features
 
@@ -102,6 +102,13 @@ All notable changes to this project will be documented in this file.
 - *(telemetry)* Export build info, uptime and Linux process metrics (#1630)
 - *(mempool)* Export size, lifecycle, confirmation and submission metrics (#1632)
 - *(telemetry)* Export storage disk, compaction, range, commit and housekeeping metrics (#1633)
+- *(storage)* [**breaking**] Move to contract v2-beta.1 and record a store's internal format (#1646)
+- *(xtask)* Add store relabel to overwrite a store's identity and format (#1650)
+- *(storage)* Reset an incompatible mempool or cache file instead of failing to start (#1647)
+- *(wal)* Reset an unreadable WAL at open, after state and archive are admitted (#1649)
+- *(snapshot)* Grow the blocks stream's read-ahead share with depth, fit the default to a staging budget (#1657)
+- *(snapshot)* Read 64 layers ahead by default (#1659)
+- *(telemetry)* Export sync stage, tip lag, rollback and upstream metrics (#1668)
 
 ### 🐛 Bug Fixes
 
@@ -158,6 +165,21 @@ All notable changes to this project will be documented in this file.
 - *(core)* Catch-up and rollback follow the cursor and chain order, not the slot (#1608)
 - *(core)* The archive and sync status keep a same-slot block pair apart (#1621)
 - *(minibf)* /network never serves the previous epoch's pots after a boundary (#1620)
+- *(minibf)* Honour order=desc on account rewards (#1643)
+- *(minibf)* Skip invalid-tx pool updates and order same-block pools by certificate (#1644)
+- *(minibf)* [**breaking**] Report only the configured public URL at the root, drop revision (#1648)
+- *(minibf)* Check an anchor's content type and word its errors as Blockfrost (#1645)
+- *(cardano)* Join CIP-68 byte-string parts (#1623)
+- *(minibf)* Correct account transaction address order (#1627)
+- *(minibf)* Drop delegations that a pool retirement removed (#1611)
+- *(minibf)* Convert metadata to JSON at any nesting depth (#1589)
+- *(minibf)* Blocks edge cases, walking the archive by chain point (#1651)
+- *(minibf)* Read address and account summaries off the async workers (#1654)
+- *(minibf)* Show paid byron transaction fees (#1655)
+- *(cli)* Refuse to run on an interrupted snapshot restore (#1661)
+- *(bootstrap)* Check a registry source before --force clears the node (#1660)
+- *(deps)* Bump url to 2.5.9 for RUSTSEC-2026-0592 (#1664)
+- *(cache)* Warn when a namespace's format version change wipes it (#1671)
 
 ### 🚜 Refactor
 
@@ -206,6 +228,12 @@ All notable changes to this project will be documented in this file.
 - *(snapshot)* Describe the diff chain in the profile, ADR-004 and the docs (#1629)
 - *(agents)* Never edit the changelog by hand, git-cliff generates it (#1640)
 - *(telemetry)* Add the metric reference and a telemetry page (#1639)
+- *(agents)* The full checks are the merge bar, not every local run (#1652)
+- *(reference)* The compatibility policy, and --version names the contract (#1642)
+- *(snapshot)* Freeze the profile again for the diff chain (#1658)
+- *(snapshot)* Settle the snapshot wording in help, example and guide (#1662)
+- *(compat)* State restore stamping and that there is no release registry (#1669)
+- *(telemetry)* Add the mempool and storage series and node health queries to the metric reference (#1672)
 
 ### 🔧 Continuous Integration
 
@@ -221,6 +249,7 @@ All notable changes to this project will be documented in this file.
 - *(cardano)* Rotate ESTART accounts in one streamed pass (#1495)
 - *(cardano)* Read staged stats and first scripts from the staged floor (#1548)
 - *(snapshot)* Ingest block and log layers as sorted runs, with larger restore batches (#1615)
+- *(snapshot)* Resolve the blocks chain beside the Dolos chain (#1656)
 
 ### 🧪 Testing
 
@@ -228,6 +257,10 @@ All notable changes to this project will be documented in this file.
 - *(cardano)* Drop oversized payment stats fixture (#1550)
 - *(epoch_pots)* Cover the Conway hard forks on every network (#1581)
 - *(cardano)* Replay every delta variant from the WAL (#1609)
+- *(compat)* Refuse datasets written by published releases, before any write (#1653)
+- *(storage)* The store-contract enforcement matrix, and admit both stores before either opens writable (#1663)
+- *(compat)* Archive forward-upgrade fixtures and open them in CI (#1666)
+- *(bootstrap)* Match the forced-restore refusal across wrapped lines (#1670)
 
 ### ⚙️ Miscellaneous Tasks
 
@@ -236,6 +269,7 @@ All notable changes to this project will be documented in this file.
 - Bump rustls to 0.23.46 (#1439)
 - *(build)* Keep only line tables in dev and test debuginfo (#1459)
 - *(fjall)* Pin fjall 3.1.13 (#1597)
+- *(changelog)* Regenerate with git-cliff (#1641)
 
 ## [2.0.0-alpha.0] - 2026-09-11
 
