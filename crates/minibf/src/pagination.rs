@@ -3,7 +3,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use dolos_core::{ArchiveStore as _, BlockSlot, Domain};
+use dolos_core::{ArchiveStore as _, BlockSlot, ChainError, Domain, DomainError};
 use pallas::ledger::traverse::MultiEraBlock;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -262,21 +262,32 @@ impl Pagination {
         &self,
         domain: &Facade<D>,
     ) -> Result<(BlockSlot, BlockSlot), Error> {
-        let start_slot = match self.from.as_ref() {
-            Some(x) => match slot_by_number(domain, x.number).await? {
-                Some(slot) => slot,
-                None if past_tip(domain, x.number)? => return Ok(EMPTY_SLOTS),
-                None => 0,
-            },
-            None => 0,
+        let from = self.from.as_ref().map(|x| x.number);
+        let to = self.to.as_ref().map(|x| x.number);
+
+        let (from, to) = if from.is_some() || to.is_some() {
+            domain
+                .query()
+                .run_blocking(move |domain| {
+                    let from = from.map(|x| resolve_height(&domain, x)).transpose()?;
+                    let to = to.map(|x| resolve_height(&domain, x)).transpose()?;
+                    Ok((from, to))
+                })
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        } else {
+            (None, None)
         };
-        let end_slot = match self.to.as_ref() {
-            Some(x) => match slot_by_number(domain, x.number).await? {
-                Some(slot) => slot,
-                None if past_tip(domain, x.number)? => domain.get_tip_slot()?,
-                None => return Ok(EMPTY_SLOTS),
-            },
-            None => domain.get_tip_slot()?,
+
+        let start_slot = match from {
+            Some(Height::Slot(slot)) => slot,
+            Some(Height::PastTip) => return Ok(EMPTY_SLOTS),
+            Some(Height::BelowHistory) | None => 0,
+        };
+        let end_slot = match to {
+            Some(Height::Slot(slot)) => slot,
+            Some(Height::PastTip) | None => domain.get_tip_slot()?,
+            Some(Height::BelowHistory) => return Ok(EMPTY_SLOTS),
         };
 
         Ok((start_slot, end_slot))
@@ -286,32 +297,54 @@ impl Pagination {
 /// A reversed slot range, which holds no block.
 const EMPTY_SLOTS: (BlockSlot, BlockSlot) = (1, 0);
 
-async fn slot_by_number<D: Domain>(
-    domain: &Facade<D>,
-    number: u64,
-) -> Result<Option<BlockSlot>, StatusCode> {
-    domain
-        .query()
-        .slot_by_number(number)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+/// Where a requested block height falls in the archive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Height {
+    Slot(BlockSlot),
+    PastTip,
+    BelowHistory,
 }
 
-/// Whether `number` is above the tip block's height. An empty archive has
-/// every height past its tip.
-fn past_tip<D: Domain>(domain: &Facade<D>, number: u64) -> Result<bool, StatusCode> {
-    let tip = domain
-        .archive()
-        .get_tip()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+/// Resolves a height to its block's slot or, on a miss, classifies it against
+/// the archive tip. An empty archive has every height past its tip.
+fn resolve_height<D: Domain>(domain: &D, number: u64) -> Result<Height, DomainError> {
+    let archive = domain.archive();
 
-    let Some((_, body)) = tip else {
-        return Ok(true);
+    classify_height(
+        number,
+        |n| Ok(archive.slot_by_block_number(n)?),
+        || {
+            let Some((_, body)) = archive.get_tip()? else {
+                return Ok(None);
+            };
+            let block = MultiEraBlock::decode(&body)
+                .map_err(|e| DomainError::ChainError(ChainError::DecodingError(e)))?;
+            Ok(Some(block.number()))
+        },
+    )
+}
+
+/// On a miss, the tip is read before the height is looked up again, so a block
+/// committed after the first miss is found rather than taken for one below the
+/// history.
+fn classify_height(
+    number: u64,
+    lookup: impl Fn(u64) -> Result<Option<BlockSlot>, DomainError>,
+    tip_height: impl FnOnce() -> Result<Option<u64>, DomainError>,
+) -> Result<Height, DomainError> {
+    if let Some(slot) = lookup(number)? {
+        return Ok(Height::Slot(slot));
+    }
+
+    let Some(tip) = tip_height()? else {
+        return Ok(Height::PastTip);
     };
 
-    let block = MultiEraBlock::decode(&body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(number > block.number())
+    match lookup(number)? {
+        Some(slot) => Ok(Height::Slot(slot)),
+        None if number > tip => Ok(Height::PastTip),
+        None => Ok(Height::BelowHistory),
+    }
 }
 
 #[cfg(test)]
@@ -365,6 +398,52 @@ mod tests {
             .ok()
             .unwrap();
         assert!(start > end, "to below a pruned window is an empty range");
+    }
+
+    #[test]
+    fn classify_height_finds_a_block_committed_after_the_first_miss() {
+        use std::cell::Cell;
+
+        let lookups = Cell::new(0);
+        let committed = Cell::new(false);
+        let height = classify_height(
+            10,
+            |_| {
+                lookups.set(lookups.get() + 1);
+                Ok(committed.get().then_some(500))
+            },
+            || {
+                committed.set(true);
+                Ok(Some(10))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(height, Height::Slot(500));
+        assert_eq!(lookups.get(), 2);
+    }
+
+    #[test]
+    fn classify_height_misses_against_the_tip() {
+        let miss = |_| Ok(None);
+
+        assert_eq!(
+            classify_height(11, miss, || Ok(Some(10))).unwrap(),
+            Height::PastTip
+        );
+        assert_eq!(
+            classify_height(10, miss, || Ok(Some(10))).unwrap(),
+            Height::BelowHistory
+        );
+        assert_eq!(
+            classify_height(0, miss, || Ok(Some(10))).unwrap(),
+            Height::BelowHistory
+        );
+        // an empty archive has every height past its tip
+        assert_eq!(
+            classify_height(0, miss, || Ok(None)).unwrap(),
+            Height::PastTip
+        );
     }
 
     #[test]
