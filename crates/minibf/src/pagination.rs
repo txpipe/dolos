@@ -326,7 +326,9 @@ fn resolve_height<D: Domain>(domain: &D, number: u64) -> Result<Height, DomainEr
 
 /// On a miss, the tip is read before the height is looked up again, so a block
 /// committed after the first miss is found rather than taken for one below the
-/// history.
+/// history. A miss at or below the tip counts as below the history only when
+/// the tip's own height is indexed: a rollback drops the undone heights from
+/// the index before it drops their blocks, and those heights are past the tip.
 fn classify_height(
     number: u64,
     lookup: impl Fn(u64) -> Result<Option<BlockSlot>, DomainError>,
@@ -340,11 +342,15 @@ fn classify_height(
         return Ok(Height::PastTip);
     };
 
-    match lookup(number)? {
-        Some(slot) => Ok(Height::Slot(slot)),
-        None if number > tip => Ok(Height::PastTip),
-        None => Ok(Height::BelowHistory),
+    if let Some(slot) = lookup(number)? {
+        return Ok(Height::Slot(slot));
     }
+
+    if number >= tip || lookup(tip)?.is_none() {
+        return Ok(Height::PastTip);
+    }
+
+    Ok(Height::BelowHistory)
 }
 
 #[cfg(test)]
@@ -426,23 +432,45 @@ mod tests {
     #[test]
     fn classify_height_misses_against_the_tip() {
         let miss = |_| Ok(None);
+        // only the tip block, at height 10, is indexed
+        let tip_only = |n| Ok((n == 10).then_some(500));
 
         assert_eq!(
             classify_height(11, miss, || Ok(Some(10))).unwrap(),
             Height::PastTip
         );
         assert_eq!(
-            classify_height(10, miss, || Ok(Some(10))).unwrap(),
+            classify_height(9, tip_only, || Ok(Some(10))).unwrap(),
             Height::BelowHistory
         );
         assert_eq!(
-            classify_height(0, miss, || Ok(Some(10))).unwrap(),
+            classify_height(0, tip_only, || Ok(Some(10))).unwrap(),
             Height::BelowHistory
         );
         // an empty archive has every height past its tip
         assert_eq!(
             classify_height(0, miss, || Ok(None)).unwrap(),
             Height::PastTip
+        );
+    }
+
+    /// Mid-rollback the undone heights are gone from the index while the old
+    /// tip block is still the archive tip: they read as past the tip.
+    #[test]
+    fn classify_height_during_a_rollback_is_past_the_tip() {
+        // heights 8..=10 undone from the index, tip block 10 not yet removed
+        let rolled_back = |n| Ok((n < 8).then_some(n * 100));
+
+        for number in 8..=10 {
+            assert_eq!(
+                classify_height(number, rolled_back, || Ok(Some(10))).unwrap(),
+                Height::PastTip,
+                "height {number}"
+            );
+        }
+        assert_eq!(
+            classify_height(7, rolled_back, || Ok(Some(10))).unwrap(),
+            Height::Slot(700)
         );
     }
 
