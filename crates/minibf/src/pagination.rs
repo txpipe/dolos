@@ -3,7 +3,8 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use dolos_core::{BlockSlot, Domain};
+use dolos_core::{ArchiveStore as _, BlockSlot, Domain};
+use pallas::ledger::traverse::MultiEraBlock;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -252,10 +253,11 @@ impl Pagination {
         false
     }
 
-    /// The inclusive slot range the `from` / `to` heights bound. Heights are
-    /// contiguous, so a height with no block lies past the tip: a `from` there
-    /// gives a reversed range, which every slot walk reads as empty, and a
-    /// `to` there reads to the tip, as on Blockfrost.
+    /// The inclusive slot range the `from` / `to` heights bound. A height with
+    /// no block is past the tip or below the retained history (the Byron
+    /// boundary block or a pruned window). Past the tip, `from` gives an empty
+    /// range and `to` reads to the tip, as on Blockfrost; below it, `from`
+    /// reads from the earliest block and `to` gives an empty range.
     pub async fn start_and_end_slots<D: Domain>(
         &self,
         domain: &Facade<D>,
@@ -263,14 +265,16 @@ impl Pagination {
         let start_slot = match self.from.as_ref() {
             Some(x) => match slot_by_number(domain, x.number).await? {
                 Some(slot) => slot,
-                None => return Ok(EMPTY_SLOTS),
+                None if past_tip(domain, x.number)? => return Ok(EMPTY_SLOTS),
+                None => 0,
             },
             None => 0,
         };
         let end_slot = match self.to.as_ref() {
             Some(x) => match slot_by_number(domain, x.number).await? {
                 Some(slot) => slot,
-                None => domain.get_tip_slot()?,
+                None if past_tip(domain, x.number)? => domain.get_tip_slot()?,
+                None => return Ok(EMPTY_SLOTS),
             },
             None => domain.get_tip_slot()?,
         };
@@ -293,10 +297,75 @@ async fn slot_by_number<D: Domain>(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
+/// Whether `number` is above the tip block's height. An empty archive has
+/// every height past its tip.
+fn past_tip<D: Domain>(domain: &Facade<D>, number: u64) -> Result<bool, StatusCode> {
+    let tip = domain
+        .archive()
+        .get_tip()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let Some((_, body)) = tip else {
+        return Ok(true);
+    };
+
+    let block = MultiEraBlock::decode(&body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(number > block.number())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use http_body_util::BodyExt;
+
+    fn bounded(from: Option<u64>, to: Option<u64>) -> Pagination {
+        Pagination::try_from(PaginationParameters {
+            from: from.map(|x| x.to_string()),
+            to: to.map(|x| x.to_string()),
+            count: None,
+            page: None,
+            order: None,
+        })
+        .unwrap()
+    }
+
+    /// A height with no block resolves by which side of the history it lies
+    /// on: past the tip, or below the first retained block.
+    #[tokio::test]
+    async fn start_and_end_slots_bounds_without_a_block() {
+        let app = crate::test_support::TestApp::new();
+        let facade = app.facade();
+        let tip = app.tip_height().await;
+        let tip_slot = facade.get_tip_slot().unwrap();
+        let range = |from, to| {
+            let facade = facade.clone();
+            async move { bounded(from, to).start_and_end_slots(&facade).await.ok() }
+        };
+
+        let (start, end) = range(Some(tip + 1), None).await.unwrap();
+        assert!(start > end, "from past the tip is an empty range");
+        assert_eq!(range(None, Some(tip + 1)).await, Some((0, tip_slot)));
+
+        // synthetic heights start at 1, as Byron main blocks do
+        assert_eq!(range(Some(0), None).await, Some((0, tip_slot)));
+        let (start, end) = range(None, Some(0)).await.unwrap();
+        assert!(start > end, "to below the history is an empty range");
+
+        let pruned = crate::test_support::TestApp::new_pruned();
+        let facade = pruned.facade();
+        let gone = pruned.vectors().blocks[0].block_number;
+        let tip_slot = facade.get_tip_slot().unwrap();
+
+        let from_gone = bounded(Some(gone), None).start_and_end_slots(&facade).await;
+        assert_eq!(from_gone.ok(), Some((0, tip_slot)));
+        let (start, end) = bounded(None, Some(gone))
+            .start_and_end_slots(&facade)
+            .await
+            .ok()
+            .unwrap();
+        assert!(start > end, "to below a pruned window is an empty range");
+    }
 
     #[test]
     fn test_should_skip() {

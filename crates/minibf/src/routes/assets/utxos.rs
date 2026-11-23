@@ -241,8 +241,39 @@ mod tests {
         }
 
         let at_tip = get(format!("from={tip}&to={tip}")).await;
+        assert!(!at_tip.is_empty(), "the asset has UTxOs in the tip block");
         assert!(at_tip.iter().all(|x| x.block_height as u64 == tip));
         assert_eq!(get(format!("from={tip}")).await, at_tip);
+    }
+
+    /// A height below the retained history reads from its start for `from`
+    /// and holds nothing for `to`, also on this state-backed walk, which has
+    /// no per-row height filter.
+    #[tokio::test]
+    async fn assets_by_subject_utxos_bounds_below_history() {
+        let full = TestApp::new();
+        let asset = full.vectors().asset_unit.clone();
+        let listing = |query: &str| format!("/assets/{asset}/utxos?{query}");
+
+        // synthetic heights start at 1, so 0 has no block
+        let (status, bytes) = full.get_bytes(&listing("from=0")).await;
+        assert_eq!(status, StatusCode::OK);
+        let from_zero = parse_utxos(&bytes);
+        let (_, bytes) = full.get_bytes(&listing("")).await;
+        assert!(!from_zero.is_empty());
+        assert_eq!(from_zero, parse_utxos(&bytes));
+
+        let pruned = TestApp::new_pruned();
+        let gone = pruned.vectors().blocks[0].block_number;
+
+        let (status, bytes) = pruned.get_bytes(&listing(&format!("to={gone}"))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(parse_utxos(&bytes).is_empty());
+
+        let (status, bytes) = pruned.get_bytes(&listing(&format!("from={gone}"))).await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, all) = pruned.get_bytes(&listing("")).await;
+        assert_eq!(parse_utxos(&bytes), parse_utxos(&all));
     }
 
     /// Blockfrost reads `from` / `to` here as plain heights: an `:index` cuts

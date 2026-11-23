@@ -141,6 +141,12 @@ mod tests {
         assert!(!at_tip.is_empty(), "the address has txs in the tip block");
         assert!(at_tip.iter().all(|x| x.block_height as u64 == tip));
         assert_eq!(get(format!("from={tip}")).await, at_tip);
+
+        // synthetic heights start at 1, as Byron main blocks do: `from=0` is
+        // all history
+        let from_zero = get("from=0&count=2".to_string()).await;
+        assert!(!from_zero.is_empty());
+        assert_eq!(from_zero, get("count=2".to_string()).await);
     }
 
     #[tokio::test]
