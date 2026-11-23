@@ -811,6 +811,16 @@ impl TestApp {
             .expect("app built from synthetic blocks")
     }
 
+    /// Height of the tip block, as `/blocks/latest` reports it.
+    pub async fn tip_height(&self) -> u64 {
+        let (status, bytes) = self.get_bytes("/blocks/latest").await;
+        assert_eq!(status, StatusCode::OK, "/blocks/latest");
+        let block: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("failed to parse latest block");
+
+        block["height"].as_u64().expect("latest block height")
+    }
+
     /// The entries the totals cache holds in memory, if it is registered.
     pub fn cache_entries(&self) -> Option<u64> {
         let stats = self.facade.inner.cache().stats().expect("cache stats");

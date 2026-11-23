@@ -3,7 +3,8 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use dolos_core::{BlockSlot, Domain};
+use dolos_core::{ArchiveStore as _, BlockSlot, ChainError, Domain, DomainError};
+use pallas::ledger::traverse::MultiEraBlock;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -252,37 +253,276 @@ impl Pagination {
         false
     }
 
+    /// The inclusive slot range the `from` / `to` heights bound. A height with
+    /// no block is past the tip or below the retained history (the Byron
+    /// boundary block or a pruned window). Past the tip, `from` gives an empty
+    /// range and `to` reads to the tip, as on Blockfrost; below it, `from`
+    /// reads from the earliest block and `to` gives an empty range.
     pub async fn start_and_end_slots<D: Domain>(
         &self,
         domain: &Facade<D>,
     ) -> Result<(BlockSlot, BlockSlot), Error> {
-        let start_slot = match self.from.as_ref() {
-            Some(x) => domain
+        let from = self.from.as_ref().map(|x| x.number);
+        let to = self.to.as_ref().map(|x| x.number);
+
+        let (from, to) = if from.is_some() || to.is_some() {
+            domain
                 .query()
-                .slot_by_number(x.number)
+                .run_blocking(move |domain| {
+                    let from = from.map(|x| resolve_height(&domain, x)).transpose()?;
+                    let to = to.map(|x| resolve_height(&domain, x)).transpose()?;
+                    Ok((from, to))
+                })
                 .await
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                .ok_or(StatusCode::BAD_REQUEST)?,
-            None => 0,
+        } else {
+            (None, None)
         };
-        let end_slot = match self.to.as_ref() {
-            Some(x) => domain
-                .query()
-                .slot_by_number(x.number)
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                .ok_or(StatusCode::BAD_REQUEST)?,
-            None => domain.get_tip_slot()?,
+
+        let start_slot = match from {
+            Some(Height::Slot(slot)) => slot,
+            Some(Height::PastTip) => return Ok(EMPTY_SLOTS),
+            Some(Height::BelowHistory) | None => 0,
+        };
+        let end_slot = match to {
+            Some(Height::Slot(slot)) => slot,
+            Some(Height::PastTip) | None => domain.get_tip_slot()?,
+            Some(Height::BelowHistory) => return Ok(EMPTY_SLOTS),
         };
 
         Ok((start_slot, end_slot))
     }
 }
 
+/// A reversed slot range, which holds no block.
+const EMPTY_SLOTS: (BlockSlot, BlockSlot) = (1, 0);
+
+/// Where a requested block height falls in the archive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Height {
+    Slot(BlockSlot),
+    PastTip,
+    BelowHistory,
+}
+
+/// Resolves a height to its block's slot or, on a miss, classifies it against
+/// the lowest height the archive indexes. An empty archive has every height
+/// past its tip.
+fn resolve_height<D: Domain>(domain: &D, number: u64) -> Result<Height, DomainError> {
+    let archive = domain.archive();
+
+    classify_height(
+        number,
+        |n| Ok(archive.slot_by_block_number(n)?),
+        || {
+            let Some((_, body)) = archive.get_range(None, None)?.next() else {
+                return Ok(None);
+            };
+            let block = MultiEraBlock::decode(&body)
+                .map_err(|e| DomainError::ChainError(ChainError::DecodingError(e)))?;
+            Ok(Some(first_indexed_height(&block)))
+        },
+    )
+}
+
+/// The lowest height the oldest retained block makes indexable. An
+/// epoch-boundary block reports the previous main block's number and is not
+/// indexed under it, so the first indexed height is the next one.
+fn first_indexed_height(block: &MultiEraBlock) -> u64 {
+    match block {
+        MultiEraBlock::EpochBoundary(_) => block.number() + 1,
+        _ => block.number(),
+    }
+}
+
+/// A miss below the lowest indexed height is below the retained history (the
+/// Byron boundary block or a pruned window); any other miss is past the tip.
+/// Heights are contiguous from the lowest indexed one, so a miss above it is
+/// either past the tip or a height a rollback is undoing: a rollback drops the
+/// undone heights from the index before it drops their blocks, and never
+/// moves the oldest block. On a miss the lowest height is read before the
+/// height is looked up again, so a block committed after the first miss is
+/// found rather than answered as past the tip.
+fn classify_height(
+    number: u64,
+    lookup: impl Fn(u64) -> Result<Option<BlockSlot>, DomainError>,
+    lowest_height: impl FnOnce() -> Result<Option<u64>, DomainError>,
+) -> Result<Height, DomainError> {
+    if let Some(slot) = lookup(number)? {
+        return Ok(Height::Slot(slot));
+    }
+
+    let Some(lowest) = lowest_height()? else {
+        return Ok(Height::PastTip);
+    };
+
+    if let Some(slot) = lookup(number)? {
+        return Ok(Height::Slot(slot));
+    }
+
+    if number < lowest {
+        return Ok(Height::BelowHistory);
+    }
+
+    Ok(Height::PastTip)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use http_body_util::BodyExt;
+
+    fn bounded(from: Option<u64>, to: Option<u64>) -> Pagination {
+        Pagination::try_from(PaginationParameters {
+            from: from.map(|x| x.to_string()),
+            to: to.map(|x| x.to_string()),
+            count: None,
+            page: None,
+            order: None,
+        })
+        .unwrap()
+    }
+
+    /// A height with no block resolves by which side of the history it lies
+    /// on: past the tip, or below the first retained block.
+    #[tokio::test]
+    async fn start_and_end_slots_bounds_without_a_block() {
+        let app = crate::test_support::TestApp::new();
+        let facade = app.facade();
+        let tip = app.tip_height().await;
+        let tip_slot = facade.get_tip_slot().unwrap();
+        let range = |from, to| {
+            let facade = facade.clone();
+            async move { bounded(from, to).start_and_end_slots(&facade).await.ok() }
+        };
+
+        let (start, end) = range(Some(tip + 1), None).await.unwrap();
+        assert!(start > end, "from past the tip is an empty range");
+        assert_eq!(range(None, Some(tip + 1)).await, Some((0, tip_slot)));
+
+        // synthetic heights start at 1, as Byron main blocks do
+        assert_eq!(range(Some(0), None).await, Some((0, tip_slot)));
+        let (start, end) = range(None, Some(0)).await.unwrap();
+        assert!(start > end, "to below the history is an empty range");
+
+        let pruned = crate::test_support::TestApp::new_pruned();
+        let facade = pruned.facade();
+        let gone = pruned.vectors().blocks[0].block_number;
+        let tip_slot = facade.get_tip_slot().unwrap();
+
+        let from_gone = bounded(Some(gone), None).start_and_end_slots(&facade).await;
+        assert_eq!(from_gone.ok(), Some((0, tip_slot)));
+        let (start, end) = bounded(None, Some(gone))
+            .start_and_end_slots(&facade)
+            .await
+            .ok()
+            .unwrap();
+        assert!(start > end, "to below a pruned window is an empty range");
+    }
+
+    #[test]
+    fn classify_height_finds_a_block_committed_after_the_first_miss() {
+        use std::cell::Cell;
+
+        let lookups = Cell::new(0);
+        let committed = Cell::new(false);
+        let height = classify_height(
+            10,
+            |_| {
+                lookups.set(lookups.get() + 1);
+                Ok(committed.get().then_some(500))
+            },
+            || {
+                committed.set(true);
+                Ok(Some(1))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(height, Height::Slot(500));
+        assert_eq!(lookups.get(), 2);
+    }
+
+    #[test]
+    fn classify_height_misses_against_the_lowest_height() {
+        let miss = |_| Ok(None);
+        // heights 5..=10 indexed, a window pruned below 5
+        let window = |n| Ok((5..=10).contains(&n).then_some(n * 100));
+
+        for number in [11, 99_999_999] {
+            assert_eq!(
+                classify_height(number, window, || Ok(Some(5))).unwrap(),
+                Height::PastTip,
+                "height {number}"
+            );
+        }
+        for number in [0, 4] {
+            assert_eq!(
+                classify_height(number, window, || Ok(Some(5))).unwrap(),
+                Height::BelowHistory,
+                "height {number}"
+            );
+        }
+        assert_eq!(
+            classify_height(5, window, || Ok(Some(5))).unwrap(),
+            Height::Slot(500)
+        );
+        // an archive holding only the genesis boundary block indexes from 1
+        assert_eq!(
+            classify_height(0, miss, || Ok(Some(1))).unwrap(),
+            Height::BelowHistory
+        );
+        // an empty archive has every height past its tip
+        assert_eq!(
+            classify_height(0, miss, || Ok(None)).unwrap(),
+            Height::PastTip
+        );
+    }
+
+    /// Mid-rollback the undone heights are gone from the index while the old
+    /// tip block is still the archive tip: they read as past the tip, and the
+    /// heights below the retained history still read as below it.
+    #[test]
+    fn classify_height_during_a_rollback_is_past_the_tip() {
+        // heights 5..=7 indexed; 8..=10 undone from the index, their blocks
+        // not yet removed
+        let rolled_back = |n| Ok((5..8).contains(&n).then_some(n * 100));
+
+        for number in 8..=10 {
+            assert_eq!(
+                classify_height(number, rolled_back, || Ok(Some(5))).unwrap(),
+                Height::PastTip,
+                "height {number}"
+            );
+        }
+        for number in [0, 4] {
+            assert_eq!(
+                classify_height(number, rolled_back, || Ok(Some(5))).unwrap(),
+                Height::BelowHistory,
+                "height {number}"
+            );
+        }
+        assert_eq!(
+            classify_height(7, rolled_back, || Ok(Some(5))).unwrap(),
+            Height::Slot(700)
+        );
+    }
+
+    /// A boundary block reports the previous main block's number and is not
+    /// indexed under it; a main block is indexed under its own.
+    #[test]
+    fn first_indexed_height_skips_a_boundary_block() {
+        use pallas::crypto::hash::Hash;
+
+        let (_, raw) =
+            dolos_testing::blocks::make_byron_ebb_with_difficulty(0, Hash::new([0; 32]), 0);
+        let ebb = MultiEraBlock::decode(&raw).unwrap();
+        assert_eq!(first_indexed_height(&ebb), 1);
+
+        let (_, raw) = dolos_testing::blocks::make_byron_block(0, 21_599, 6, Hash::new([0; 32]));
+        let byron = MultiEraBlock::decode(&raw).unwrap();
+        assert_eq!(first_indexed_height(&byron), 6);
+    }
 
     #[test]
     fn test_should_skip() {
