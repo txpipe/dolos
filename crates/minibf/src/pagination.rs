@@ -252,31 +252,45 @@ impl Pagination {
         false
     }
 
+    /// The inclusive slot range the `from` / `to` heights bound. Heights are
+    /// contiguous, so a height with no block lies past the tip: a `from` there
+    /// gives a reversed range, which every slot walk reads as empty, and a
+    /// `to` there reads to the tip, as on Blockfrost.
     pub async fn start_and_end_slots<D: Domain>(
         &self,
         domain: &Facade<D>,
     ) -> Result<(BlockSlot, BlockSlot), Error> {
         let start_slot = match self.from.as_ref() {
-            Some(x) => domain
-                .query()
-                .slot_by_number(x.number)
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                .ok_or(StatusCode::BAD_REQUEST)?,
+            Some(x) => match slot_by_number(domain, x.number).await? {
+                Some(slot) => slot,
+                None => return Ok(EMPTY_SLOTS),
+            },
             None => 0,
         };
         let end_slot = match self.to.as_ref() {
-            Some(x) => domain
-                .query()
-                .slot_by_number(x.number)
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                .ok_or(StatusCode::BAD_REQUEST)?,
+            Some(x) => match slot_by_number(domain, x.number).await? {
+                Some(slot) => slot,
+                None => domain.get_tip_slot()?,
+            },
             None => domain.get_tip_slot()?,
         };
 
         Ok((start_slot, end_slot))
     }
+}
+
+/// A reversed slot range, which holds no block.
+const EMPTY_SLOTS: (BlockSlot, BlockSlot) = (1, 0);
+
+async fn slot_by_number<D: Domain>(
+    domain: &Facade<D>,
+    number: u64,
+) -> Result<Option<BlockSlot>, StatusCode> {
+    domain
+        .query()
+        .slot_by_number(number)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 #[cfg(test)]

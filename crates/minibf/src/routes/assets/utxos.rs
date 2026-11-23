@@ -209,13 +209,40 @@ mod tests {
         let to_pivot = parse_utxos(&bytes);
         assert!(to_pivot.iter().all(|x| x.block_height <= pivot));
         assert_eq!(from_pivot.len() + to_pivot.len(), all.len() + within.len());
+    }
 
-        // a height the chain does not hold is a 400, as on the other
-        // `from` / `to` listings
-        for query in ["from=99999999", "to=99999999"] {
-            let path = format!("/assets/{asset}/utxos?{query}");
-            assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    /// A height past the tip: `from` there is an empty page, `to` there reads
+    /// to the tip; `from` and `to` at the tip still hold the tip's block.
+    #[tokio::test]
+    async fn assets_by_subject_utxos_bounds_past_tip() {
+        let app = TestApp::new();
+        let asset = app.vectors().asset_unit.as_str();
+        let tip = app.tip_height().await;
+        let get = |query: String| {
+            let app = &app;
+            async move {
+                let (status, bytes) = app
+                    .get_bytes(&format!("/assets/{asset}/utxos?{query}"))
+                    .await;
+                assert_eq!(status, StatusCode::OK, "{query}");
+                parse_utxos(&bytes)
+            }
+        };
+
+        for order in ["asc", "desc"] {
+            assert!(get(format!("from=99999999&order={order}")).await.is_empty());
+            assert!(get(format!("from={}&order={order}", tip + 1))
+                .await
+                .is_empty());
+            assert_eq!(
+                get(format!("to=99999999&order={order}")).await,
+                get(format!("order={order}")).await
+            );
         }
+
+        let at_tip = get(format!("from={tip}&to={tip}")).await;
+        assert!(at_tip.iter().all(|x| x.block_height as u64 == tip));
+        assert_eq!(get(format!("from={tip}")).await, at_tip);
     }
 
     /// Blockfrost reads `from` / `to` here as plain heights: an `:index` cuts
