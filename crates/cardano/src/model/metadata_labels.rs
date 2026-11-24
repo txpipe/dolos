@@ -87,12 +87,21 @@ impl dolos_core::EntityDelta for MetadataLabelTxInc {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::testing::any_metadata_label_state;
     use super::*;
     use crate::model::testing::{assert_delta_roundtrip, assert_delta_serde_roundtrip};
+    use crate::model::testing::{replay_case, ReplayCase};
     use dolos_core::{EntityDelta, EntityKey, KeyError, StateEntity};
     use proptest::prelude::*;
+
+    /// One case per delta this module owns, for `model::replay_tests`.
+    pub(crate) fn replay_cases() -> Vec<ReplayCase> {
+        vec![replay_case((
+            prop::option::of(any_metadata_label_state()),
+            any_metadata_label_tx_inc(),
+        ))]
+    }
 
     #[test]
     fn entity_key_round_trips_the_label() {

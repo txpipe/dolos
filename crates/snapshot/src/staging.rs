@@ -28,7 +28,7 @@ use stelae::{
     frame::CanonicalCbor,
     inscription::LayerDescriptor,
     progress::{Event, Observer},
-    transport::{RecordSink, SteleWriter},
+    transport::{RecordSink, SnapshotWriter},
     Profile as _,
 };
 use xxhash_rust::xxh3::Xxh3;
@@ -264,7 +264,6 @@ pub struct Staged {
     frontier_epoch: u64,
     live: bool,
     summary: ChainSummary,
-    mutable_slots: u64,
     budget: Budget,
     families: BTreeMap<Family, Marker>,
     report: Report,
@@ -325,8 +324,8 @@ pub fn stage_watched<A: ArchiveStore>(
 
 /// [`stage_watched`] for a batch that may be restarting on its own `root`: runs
 /// of the same source are reused while they hold every window asked for, which
-/// shrinks as layers are recorded and steles commit, and were staged for every
-/// one of `captures`, which only shrinks as well.
+/// shrinks as layers are recorded and snapshots commit, and were staged for
+/// every one of `captures`, which only shrinks as well.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn stage_restarting<A: ArchiveStore>(
     root: &Path,
@@ -402,7 +401,6 @@ fn stage_runs<A: ArchiveStore>(
         frontier_epoch,
         live: request.live,
         summary: summary.clone(),
-        mutable_slots,
         budget,
         families: BTreeMap::new(),
         report: Report::default(),
@@ -710,24 +708,15 @@ fn sweep_killed_spools(base: &Path) {
     }
 }
 
-/// The runs of a batch, plus any windows one publication staged for itself
-/// because its predecessor forecast them and then declined them.
+/// The runs of a batch, as one publication of it reads them.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Runs<'a> {
     batch: &'a Staged,
-    declined: Option<&'a Staged>,
 }
 
 impl<'a> Runs<'a> {
-    pub(crate) fn new(batch: &'a Staged, declined: Option<&'a Staged>) -> Self {
-        Self { batch, declined }
-    }
-
-    fn holding(&self, family: Family, epoch: u64) -> &'a Staged {
-        match self.declined {
-            Some(declined) if declined.records(family, epoch).is_some() => declined,
-            _ => self.batch,
-        }
+    pub(crate) fn new(batch: &'a Staged) -> Self {
+        Self { batch }
     }
 
     pub(crate) fn publishes(
@@ -736,33 +725,19 @@ impl<'a> Runs<'a> {
         epoch: u64,
         sequence: u64,
     ) -> Result<bool, Error> {
-        self.holding(family, epoch)
-            .publishes(family, epoch, sequence)
+        self.batch.publishes(family, epoch, sequence)
     }
 
-    pub(crate) fn write_layer_ticking<W: SteleWriter>(
+    pub(crate) fn write_layer_ticking<W: SnapshotWriter>(
         &self,
-        stele: &W,
+        snapshot: &W,
         family: Family,
         epoch: u64,
         sequence: u64,
         tick: &mut dyn FnMut(),
     ) -> Result<Option<LayerDescriptor>, Error> {
-        self.holding(family, epoch)
-            .write_layer_ticking(stele, family, epoch, sequence, tick)
-    }
-}
-
-/// Windows staged beside a batch's runs, removed when dropped.
-#[derive(Debug)]
-pub(crate) struct Declined {
-    staged: Staged,
-    _dir: tempfile::TempDir,
-}
-
-impl Declined {
-    pub(crate) fn staged(&self) -> &Staged {
-        &self.staged
+        self.batch
+            .write_layer_ticking(snapshot, family, epoch, sequence, tick)
     }
 }
 
@@ -771,40 +746,10 @@ impl Staged {
         self.report
     }
 
-    /// Stage `epochs` from the same view, under this root and on the same
-    /// terms.
-    ///
-    /// For the one case a batch cannot foresee: [`stelae_driver::Predecessor`]
-    /// may forecast a recorded layer that `adopt` then declines, because its
-    /// blob is gone, and only `adopt` finds that out.
-    pub(crate) fn stage_declined<A: ArchiveStore>(
-        &self,
-        archive: &A,
-        epochs: BTreeMap<Family, BTreeSet<u64>>,
-        observer: &Observer,
-    ) -> Result<Declined, Error> {
-        let dir = tempfile::Builder::new()
-            .prefix("declined-")
-            .tempdir_in(&self.root)
-            .map_err(io)?;
-
-        let staged = stage_watched(
-            dir.path(),
-            archive,
-            &self.summary,
-            self.mutable_slots,
-            &Request {
-                network_magic: self.network_magic,
-                frontier: self.frontier.clone(),
-                store_contract: self.store_contract.clone(),
-                epochs,
-                live: false,
-            },
-            self.budget,
-            observer,
-        )?;
-
-        Ok(Declined { staged, _dir: dir })
+    /// The chain the runs were staged over: what the diff chain's rule reads
+    /// its epoch bounds from.
+    pub(crate) fn summary(&self) -> &ChainSummary {
+        &self.summary
     }
 
     /// The epoch of the frontier the runs were staged at.
@@ -858,20 +803,20 @@ impl Staged {
     ///
     /// The run is checked against its marker as it streams; a mismatch fails
     /// before the sink is finished, so no descriptor is produced.
-    pub fn write_layer<W: SteleWriter>(
+    pub fn write_layer<W: SnapshotWriter>(
         &self,
-        stele: &W,
+        snapshot: &W,
         family: Family,
         epoch: u64,
         sequence: u64,
     ) -> Result<Option<LayerDescriptor>, Error> {
-        self.write_layer_ticking(stele, family, epoch, sequence, &mut || {})
+        self.write_layer_ticking(snapshot, family, epoch, sequence, &mut || {})
     }
 
     /// [`Staged::write_layer`], calling `tick` once per record.
-    pub(crate) fn write_layer_ticking<W: SteleWriter>(
+    pub(crate) fn write_layer_ticking<W: SnapshotWriter>(
         &self,
-        stele: &W,
+        snapshot: &W,
         family: Family,
         epoch: u64,
         sequence: u64,
@@ -892,7 +837,7 @@ impl Staged {
         .scope(marker.identity.network_magic);
 
         let mut sink =
-            stele.layer_sink(&DolosProfile, &scope.layer_spec(kind)?, COMPRESSION_LEVEL)?;
+            snapshot.layer_sink(&DolosProfile, &scope.layer_spec(kind)?, COMPRESSION_LEVEL)?;
         let path = run_path(&self.root, kind, epoch);
 
         replay(&path, run, |record| {
@@ -905,9 +850,9 @@ impl Staged {
 
     /// [`Staged::write_layer`] for each of `layers`, at most
     /// [`Budget::workers`] at once, in input order.
-    pub fn write_layers<W: SteleWriter + Sync>(
+    pub fn write_layers<W: SnapshotWriter + Sync>(
         &self,
-        stele: &W,
+        snapshot: &W,
         layers: &[(Family, u64)],
         sequence: u64,
     ) -> Result<Vec<Option<LayerDescriptor>>, Error> {
@@ -925,7 +870,7 @@ impl Staged {
                             return;
                         };
 
-                        let outcome = self.write_layer(stele, family, epoch, sequence);
+                        let outcome = self.write_layer(snapshot, family, epoch, sequence);
                         failed.fetch_or(outcome.is_err(), Ordering::Relaxed);
 
                         outcomes.lock().unwrap_or_else(|e| e.into_inner())[at] = Some(outcome);

@@ -25,8 +25,9 @@ pub enum TestFault {
     /// succeeds.
     ///
     /// The narrow one, for a caller that has to reach a specific write and
-    /// would never get there if opening the store failed too — a stele restore
-    /// above all, which writes tags alongside each incoming UTxO batch.
+    /// would never get there if opening the store failed too — a snapshot
+    /// restore above all, which writes tags alongside each incoming UTxO
+    /// batch.
     StateTagsApplyError,
     /// Only reads and scans of this namespace fail; every other state call
     /// succeeds.
@@ -99,6 +100,12 @@ impl FaultyToyDomain {
     /// How many entity scans the state store has started.
     pub fn entity_scans(&self) -> usize {
         self.state.scans.load(Ordering::SeqCst)
+    }
+
+    /// How many tx hashes the archive has looked up by
+    /// [`ArchiveStore::slot_by_tx_hash`].
+    pub fn tx_lookups(&self) -> usize {
+        self.archive.tx_lookups.load(Ordering::SeqCst)
     }
 
     /// Runs `hook` after every [`StateStore::utxos_by_tag_page`] read, with the
@@ -420,6 +427,7 @@ pub struct FaultyArchiveStore {
     inner: MemoryArchiveStore,
     fault: TestFault,
     commits: Arc<AtomicU32>,
+    tx_lookups: Arc<AtomicUsize>,
     entity_slots_hook: Arc<Mutex<Option<EntitySlotsHook>>>,
     each_entity_slots_hook: Arc<Mutex<Option<EachEntitySlotsHook>>>,
     read_logs_hook: Arc<Mutex<Option<ReadLogsHook>>>,
@@ -435,6 +443,7 @@ impl FaultyArchiveStore {
             inner,
             fault,
             commits,
+            tx_lookups: Default::default(),
             entity_slots_hook: Default::default(),
             each_entity_slots_hook: Default::default(),
             read_logs_hook: Default::default(),
@@ -526,6 +535,46 @@ impl ArchiveStore for FaultyArchiveStore {
         self.inner.get_range(from, to)
     }
 
+    fn blocks_after<'a>(
+        &self,
+        point: &ChainPoint,
+    ) -> Result<Option<Self::BlockIter<'a>>, ArchiveError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.blocks_after(point)
+    }
+
+    fn blocks_before<'a>(
+        &self,
+        point: &ChainPoint,
+    ) -> Result<Option<Self::BlockIter<'a>>, ArchiveError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.blocks_before(point)
+    }
+
+    fn block_after(
+        &self,
+        point: &ChainPoint,
+    ) -> Result<Option<Option<(BlockSlot, BlockBody)>>, ArchiveError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.block_after(point)
+    }
+
+    fn block_before(
+        &self,
+        point: &ChainPoint,
+    ) -> Result<Option<Option<(BlockSlot, BlockBody)>>, ArchiveError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.block_before(point)
+    }
+
     fn find_intersect(&self, intersect: &[ChainPoint]) -> Result<Option<ChainPoint>, ArchiveError> {
         if self.should_fault() {
             return Err(self.fault_err());
@@ -585,6 +634,7 @@ impl ArchiveStore for FaultyArchiveStore {
         if self.should_fault() {
             return Err(self.fault_err());
         }
+        self.tx_lookups.fetch_add(1, Ordering::SeqCst);
         self.inner.slot_by_tx_hash(hash)
     }
 
@@ -774,6 +824,13 @@ impl WalStore for FaultyWalStore {
             return Err(self.fault_err());
         }
         self.inner.truncate_front(after)
+    }
+
+    fn remove_points(&self, points: &[ChainPoint]) -> Result<(), WalError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        WalStore::remove_points(&self.inner, points)
     }
 
     fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, WalError> {

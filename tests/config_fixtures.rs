@@ -7,8 +7,10 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use dolos_cardano::networks::{KnownNetwork, ResolvedNetwork};
+use dolos_core::compat::SUPPORTED_CONTRACTS;
 use dolos_core::config::{
     load, load_checked, override_variables, ArchiveStoreConfig, CacheConfig, ChainConfig,
     ConfigError, CustomUtxo, FjallPreset, GenesisConfig, HistoryConfig, HistoryMode, HistoryWindow,
@@ -80,7 +82,7 @@ fn the_ordinary_example_parses() {
     ));
 
     assert_eq!(config, expected);
-    assert_eq!(config.compatibility().as_str(), "v2-alpha.2");
+    assert_eq!(config.compatibility().as_str(), "v2-beta.1");
 }
 
 #[test]
@@ -145,6 +147,8 @@ fn the_full_reference_parses() {
 
     let serve = &config.serve;
     assert_eq!(serve.max_concurrent_queries, 32);
+    assert_eq!(serve.max_concurrent_heavy_scans, 32);
+    assert_eq!(serve.heavy_scan_queue_seconds, 5);
 
     let grpc = serve.grpc.as_ref().unwrap();
     assert_eq!(grpc.listen_address, "[::]:50051");
@@ -175,10 +179,12 @@ fn the_full_reference_parses() {
         minibf.ipfs_gateways(),
         ["https://ipfs.io", "https://gateway.pinata.cloud"]
     );
+    assert_eq!(minibf.request_timeout(), Duration::from_secs(120));
 
     let minikupo = serve.minikupo.as_ref().unwrap();
     assert_eq!(minikupo.listen_address, "[::]:1442".parse().unwrap());
     assert!(minikupo.permissive_cors());
+    assert_eq!(minikupo.request_timeout(), Duration::from_secs(120));
 
     let ouroboros = serve.ouroboros.as_ref().unwrap();
     assert_eq!(ouroboros.listen_path, PathBuf::from("./dolos.socket"));
@@ -202,6 +208,7 @@ fn the_full_reference_parses() {
         Some(TelemetryConfig {
             otlp_endpoint: "http://localhost:4317".into(),
             service_name: "dolos-mainnet".into(),
+            ..Default::default()
         })
     );
 }
@@ -288,6 +295,8 @@ fn omitted_sections_take_their_defaults() {
     assert!(!config.mempool.persistent);
     assert_eq!(config.mempool.retain_confirmed_blocks, 6);
     assert_eq!(config.serve.max_concurrent_queries, 32);
+    assert_eq!(config.serve.max_concurrent_heavy_scans, 32);
+    assert_eq!(config.serve.heavy_scan_queue_seconds, 5);
     assert!(config.serve.grpc.is_none() && config.serve.minibf.is_none());
     assert!(config.relay.is_none());
     assert_eq!(config.logging.level, tracing::Level::INFO);
@@ -349,6 +358,18 @@ fn each_rule_refuses_its_fixture() {
              `serve.max_concurrent_queries`",
         ),
         (
+            "no-heavy-scans",
+            "`serve.max_concurrent_heavy_scans` must be between 1 and 64, found 0",
+        ),
+        (
+            "long-heavy-scan-queue",
+            "`serve.heavy_scan_queue_seconds` must be between 0 and 60, found 61",
+        ),
+        (
+            "zero-request-timeout",
+            "`serve.minikupo.request_timeout_seconds` must be between 1 and 3600, found 0",
+        ),
+        (
             "ephemeral-store-with-a-path",
             "an ephemeral store takes no other field; remove `path`",
         ),
@@ -401,7 +422,7 @@ fn compatibility_is_checked_first() {
     assert!(matches!(missing, ConfigError::MissingCompatibility));
     let message = missing.to_string();
     assert!(message.contains("`compatibility`"), "{message}");
-    assert!(message.contains("\"v2-alpha.2\""), "{message}");
+    assert!(message.contains("\"v2-beta.1\""), "{message}");
 
     let malformed = load(Some(&fixture("compatibility/malformed.toml"))).unwrap_err();
     assert!(matches!(malformed, ConfigError::MalformedCompatibility(_)));
@@ -410,6 +431,7 @@ fn compatibility_is_checked_first() {
     for (file, declared) in [
         ("compatibility/unsupported.toml", "v2-alpha.0"),
         ("compatibility/previous-alpha.toml", "v2-alpha.1"),
+        ("compatibility/previous-prerelease.toml", "v2-alpha.2"),
     ] {
         let unsupported = load(Some(&fixture(file))).unwrap_err();
         assert!(matches!(
@@ -418,11 +440,11 @@ fn compatibility_is_checked_first() {
         ));
         let message = unsupported.to_string();
         assert!(message.contains(&format!("\"{declared}\"")), "{message}");
-        assert!(message.contains("supports \"v2-alpha.2\""), "{message}");
+        assert!(message.contains("supports \"v2-beta.1\""), "{message}");
     }
 
     let supported = load(Some(&fixture("ordinary.toml"))).unwrap();
-    assert_eq!(supported.compatibility().as_str(), "v2-alpha.2");
+    assert_eq!(supported.compatibility().as_str(), "v2-beta.1");
 }
 
 #[test]
@@ -435,7 +457,13 @@ fn older_files_point_to_the_migration_guide() {
         let error = load(Some(&fixture(name))).unwrap_err();
 
         assert!(matches!(error, ConfigError::LegacyShape), "{name}: {error}");
-        assert!(error.to_string().contains(MIGRATION_GUIDE_URL), "{name}");
+
+        let message = error.to_string();
+        assert!(message.contains(MIGRATION_GUIDE_URL), "{name}: {message}");
+        assert!(
+            message.contains(&format!("compatibility = \"{}\"", SUPPORTED_CONTRACTS[0])),
+            "{name}: {message}"
+        );
     }
 }
 
@@ -987,7 +1015,7 @@ fn config_check_prints_the_network_and_stores() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("dolos.toml"),
-        "compatibility = \"v2-alpha.2\"\n\n[chain]\nprotocol = \"cardano\"\nnetwork = \"PreView\"\n\n[storage.cache]\nenabled = false\n",
+        "compatibility = \"v2-beta.1\"\n\n[chain]\nprotocol = \"cardano\"\nnetwork = \"PreView\"\n\n[storage.cache]\nenabled = false\n",
     )
     .unwrap();
     assert_check_prints(
@@ -999,7 +1027,7 @@ fn config_check_prints_the_network_and_stores() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("other.toml"),
-        "compatibility = \"v2-alpha.2\"\n\n[chain]\nprotocol = \"cardano\"\nnetwork = \"preview\"\n\n[history]\nmode = \"none\"\n",
+        "compatibility = \"v2-beta.1\"\n\n[chain]\nprotocol = \"cardano\"\nnetwork = \"preview\"\n\n[history]\nmode = \"none\"\n",
     )
     .unwrap();
     assert_check_prints(
@@ -1151,7 +1179,7 @@ fn as_config_file(block: &str) -> String {
         return block.to_string();
     }
 
-    let mut file = String::from("compatibility = \"v2-alpha.2\"\n\n");
+    let mut file = String::from("compatibility = \"v2-beta.1\"\n\n");
 
     if !block.lines().any(|line| line.trim() == "[chain]") {
         file.push_str("[chain]\nprotocol = \"cardano\"\nnetwork = \"mainnet\"\n\n");
@@ -1395,6 +1423,9 @@ fn nested_environment_variables_override_the_file() {
         ("DOLOS_UPSTREAM__PEER_ADDRESS", "relay.example:3001"),
         ("DOLOS_SERVE__MINIBF__LISTEN_ADDRESS", "127.0.0.1:4000"),
         ("DOLOS_SERVE__MAX_CONCURRENT_QUERIES", "8"),
+        ("DOLOS_SERVE__MAX_CONCURRENT_HEAVY_SCANS", "2"),
+        ("DOLOS_SERVE__HEAVY_SCAN_QUEUE_SECONDS", "0"),
+        ("DOLOS_SERVE__MINIBF__REQUEST_TIMEOUT_SECONDS", "30"),
         ("DOLOS_MITHRIL_AGGREGATOR", "https://aggregator.example"),
         ("DOLOS_COMPATIBILITY", "v2-alpha.0"),
     ]
@@ -1411,7 +1442,18 @@ fn nested_environment_variables_override_the_file() {
         "127.0.0.1:4000".parse().unwrap()
     );
     assert_eq!(config.serve.max_concurrent_queries, 8);
-    assert_eq!(config.compatibility().as_str(), "v2-alpha.2");
+    assert_eq!(config.serve.max_concurrent_heavy_scans, 2);
+    assert_eq!(config.serve.heavy_scan_queue_seconds, 0);
+    assert_eq!(
+        config.serve.minibf.as_ref().unwrap().request_timeout(),
+        Duration::from_secs(30)
+    );
+
+    let limiter = config.serve.query_limiter();
+    assert_eq!(limiter.cap(), 8);
+    assert_eq!(limiter.heavy_limit(), 2);
+    assert_eq!(limiter.heavy_queue(), Duration::ZERO);
+    assert_eq!(config.compatibility().as_str(), "v2-beta.1");
 }
 
 #[test]
@@ -1852,7 +1894,7 @@ fn a_variable_wrong_on_its_own_is_named() {
         (
             write(
                 "chainless.toml",
-                "compatibility = \"v2-alpha.2\"\n".to_string(),
+                "compatibility = \"v2-beta.1\"\n".to_string(),
             ),
             &[("DOLOS_CHAIN__NETWROK", "preview")][..],
             "DOLOS_CHAIN__NETWROK",

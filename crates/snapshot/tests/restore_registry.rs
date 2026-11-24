@@ -1,4 +1,4 @@
-//! Restoring a node from a stele in a registry.
+//! Restoring a node from a snapshot in a registry.
 //!
 //! Everything here needs a **registry**, and spawns one: `docker run` of an OCI
 //! Distribution server, torn down on the way out. So everything here is
@@ -14,17 +14,17 @@
 //!
 //! ## The four properties
 //!
-//! 1. **A registry restore is a directory restore.** The same stele, published
-//!    both ways and restored both ways, produces store sets that are equal —
-//!    cursors, entities, the whole UTxO set, the archive, index records and the
-//!    live-UTxO tag queries. The transport is where the bytes come from and
-//!    nothing else, and this is the assertion that says so.
+//! 1. **A registry restore is a directory restore.** The same snapshot,
+//!    published both ways and restored both ways, produces store sets that are
+//!    equal — cursors, entities, the whole UTxO set, the archive, index records
+//!    and the live-UTxO tag queries. The transport is where the bytes come from
+//!    and nothing else, and this is the assertion that says so.
 //! 2. **A killed restore resumes over the wire**, refetching only what it had
 //!    not committed. Counted by the driver, not inferred from a duration.
 //! 3. **A node pre-seeded with epochs fetches only what it lacks** when a newer
-//!    stele arrives — ADR-004's second delta assertion for this phase. Over a
-//!    registry, so what is *not* refetched is genuinely not downloaded.
-//! 4. **A point names a stele.** `epoch-N` resolves to that sequence and
+//!    snapshot arrives — ADR-004's second delta assertion for this phase. Over
+//!    a registry, so what is *not* refetched is genuinely not downloaded.
+//! 4. **A point names a snapshot.** `epoch-N` resolves to that sequence and
 //!    `latest` to the newest, which is what makes a repository holding a
 //!    history restorable at any of them.
 //! 5. **Credentials are what opens the repository.** The fixture's registry
@@ -36,7 +36,7 @@
 //! 6. **The envelope is a Stelae snapshot's.** A publish writes the manifest
 //!    `artifactType` `application/vnd.stelae.snapshot.v1`, read off the wire
 //!    and held against a literal rather than the protocol's constant; the
-//!    retired `application/vnd.stelae.stele.v1` is refused before a store is
+//!    retired `application/vnd.stelae.snapshot.v1` is refused before a store is
 //!    touched.
 //!
 //! ## Why the interruption is a layer boundary
@@ -44,9 +44,11 @@
 //! The same discipline `tests/restore.rs` states: the reader refuses a `diffId`
 //! the test named, so the interruption lands where the test meant it to. A kill
 //! after a wall-clock delay would sometimes interrupt nothing over a loopback
-//! registry — the fixture stele is kilobytes — and pass for the wrong reason.
+//! registry — the fixture snapshot is kilobytes — and pass for the wrong
+//! reason.
 
 mod node;
+mod recorder;
 mod registry_fixture;
 mod watcher;
 
@@ -62,25 +64,27 @@ use dolos_snapshot::{
     restore::{self, default_budget, progress_path_in, Checkpoint},
     state_layer_count, Error, LOG_NAMESPACES, NAMESPACES, UTXOS,
 };
-use dolos_testing::toy_domain::{MemoryStores, ToyDomain, ToyStores};
+use dolos_testing::toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores};
 use node::{harness, plan_at_boundary, Blank};
+use recorder::{contents_digest, Journal, Op, RecordedArchive, RecordedState};
 use registry_fixture::{Distribution, Fixture};
 use stelae::{
     frame::Limits,
     inscription::LayerDescriptor,
-    oci::{Auth, Registry, Stele},
+    oci::{Auth, Registry, Snapshot},
     plan::RestoreProgress,
     progress::{Observer, Outcome},
     transport::BlobIndex,
-    Digest, LayerReader, Profile, SteleReader,
+    Digest, LayerReader, Profile, SnapshotReader,
 };
 
 use watcher::Watcher;
 
-/// Layers epoch 0 contributes: `blocks`, `indexes`, and the two log layers the
-/// harness seeds — `log-account-epochs` and `log-epochs`. The third log kind
-/// has no records in the window, so it has no layer.
-const EPOCH_0: usize = 4;
+/// Layers epoch 0 contributes: `indexes`, and the two log layers the harness
+/// seeds — `log-account-epochs` and `log-epochs`. The third log kind has no
+/// records in the window, so it has no layer. Its blocks belong to the blocks
+/// profile, which these publishes name no snapshot of.
+const EPOCH_0: usize = 3;
 
 /// Layers epoch 1 — the boundary sliver — contributes: `blocks` and `indexes`.
 /// Its logs would key at `epoch_start(1)`, and the harness writes none there.
@@ -97,7 +101,7 @@ const PER_PUBLISH: usize = EPOCH_0 + EPOCH_1 + state_layer_count();
 /// The harness ledger and the two plans it publishes.
 ///
 /// The same shape as `node::Node` and for the same reason: each plan stands on
-/// its own boundary, in its own stores, so the two steles share epoch 0's
+/// its own boundary, in its own stores, so the two snapshots share epoch 0's
 /// layers exactly and differ in epoch 1 and their tips. That is the shape the
 /// resume rule is about.
 struct Node {
@@ -115,8 +119,8 @@ impl Node {
 
         let magic = u64::from(domain.genesis().network_magic());
 
-        let first = plan_at_boundary(&earlier, 1, Default::default());
-        let second = plan_at_boundary(&domain, 2, Default::default());
+        let first = plan_at_boundary(&earlier, 1);
+        let second = plan_at_boundary(&domain, 2);
 
         Self {
             earlier,
@@ -136,7 +140,7 @@ impl Node {
         }
     }
 
-    fn publish(&self, repository: &Registry, plan: &Plan) {
+    fn publish(&self, repository: &Registry, plan: &Plan) -> registry::Published {
         let stores = self.stores(plan);
 
         registry::publish(
@@ -144,10 +148,9 @@ impl Node {
             plan,
             stores.archive(),
             stores.state(),
-            None,
             &Observer::silent(),
         )
-        .unwrap();
+        .unwrap()
     }
 }
 
@@ -190,13 +193,14 @@ fn restore_watched(
     registry::restore_registry(
         repository,
         point,
+        None,
         restoring(storage, magic, resume),
         target(blank),
         observer,
     )
 }
 
-/// What the node reading a stele knows about itself.
+/// What the node reading a snapshot knows about itself.
 fn restoring(storage: &std::path::Path, magic: u64, resume: bool) -> restore::Restoring<'_> {
     restore::Restoring {
         network_magic: magic,
@@ -204,6 +208,9 @@ fn restoring(storage: &std::path::Path, magic: u64, resume: bool) -> restore::Re
         storage_path: storage,
         resume,
         skip_space_check: false,
+        journals: 0,
+        read_ahead: None,
+        source: None,
     }
 }
 
@@ -216,7 +223,82 @@ fn target<B: ToyStores>(blank: &Blank<B>) -> restore::Target<'_, impl ArchiveSto
 // Done criterion 1
 // ---------------------------------------------------------------------------
 
-/// A stele restored from a registry is the stele restored from a directory.
+/// Six snapshots published into one repository resolve to the layers a lineage
+/// started at the sixth boundary lists, digest for digest, and restore what it
+/// restores: the same records of every kind, into the same stores.
+#[test]
+#[ignore]
+fn a_six_snapshot_chain_restores_what_a_lineage_started_at_its_head_does() {
+    let fixture = Fixture::spawn();
+    let domain = harness::<MemoryStores>();
+    let magic = u64::from(domain.genesis().network_magic());
+
+    let publish = |repository: &Registry, plan: &Plan| {
+        registry::publish(
+            registry::Publishing::new(repository),
+            plan,
+            domain.archive(),
+            domain.state(),
+            &Observer::silent(),
+        )
+        .unwrap()
+    };
+
+    let chain = fixture.repository("dolos/chain");
+
+    for sequence in 1..=6 {
+        let published = publish(&chain, &plan_at_boundary(&domain, sequence));
+
+        assert_eq!(
+            published.inscription.previous.map(|link| link.sequence),
+            Some(sequence - 1).filter(|previous| *previous > 0),
+        );
+    }
+
+    let alone = fixture.repository("dolos/lineage-start");
+    let started = publish(&alone, &plan_at_boundary(&domain, 6));
+    assert!(started.inscription.previous.is_none());
+
+    let resolved = Point::Latest.resolve(&chain).unwrap();
+    let resolved = resolved.chain().unwrap();
+
+    let keyed = |layers: &mut dyn Iterator<Item = &LayerDescriptor>| {
+        layers
+            .map(|layer| (layer.kind.clone(), layer.scope.to_string(), layer.diff_id))
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+
+    assert_eq!(resolved.inscriptions().len(), 6);
+    assert_eq!(
+        keyed(&mut resolved.descriptors()),
+        keyed(&mut started.inscription.layers())
+    );
+
+    let restore = |repository: &Registry| {
+        let blank = Blank::<MemoryStores>::open();
+        let storage = tempfile::tempdir().unwrap();
+        let summary = restore_from(
+            repository,
+            Point::Latest,
+            storage.path(),
+            magic,
+            &blank,
+            false,
+        )
+        .unwrap();
+
+        (summary, blank)
+    };
+
+    let (by_chain, from_chain) = restore(&chain);
+    let (by_start, from_start) = restore(&alone);
+
+    assert_eq!(by_chain, by_start);
+    assert_stores_match(&from_chain, &from_start);
+}
+
+/// A snapshot restored from a registry is the snapshot restored from a
+/// directory.
 ///
 /// The comparison the local slice established, now across the transport
 /// boundary: the same node published both ways, restored both ways, and the two
@@ -234,19 +316,18 @@ fn a_registry_restore_is_a_directory_restore() {
     let repository = fixture.repository(repository_name);
     node.publish(&repository, &node.first);
 
-    // The same stele, written to a directory.
+    // The same snapshot, written to a directory.
     let dir = tempfile::tempdir().unwrap();
     let from_dir = Blank::<MemoryStores>::open();
 
     {
-        let stele = stelae::dir::SteleDir::create(dir.path()).unwrap();
+        let snapshot = stelae::dir::SnapshotDir::create(dir.path()).unwrap();
 
         dolos_snapshot::export::export(
-            &stele,
+            &snapshot,
             &node.first,
             node.earlier.archive(),
             node.earlier.state(),
-            None,
             &dolos_snapshot::export::First,
             &Observer::silent(),
         )
@@ -257,6 +338,7 @@ fn a_registry_restore_is_a_directory_restore() {
 
     let (_, _, by_dir) = restore::restore_dir(
         dir.path(),
+        None,
         restoring(dir_storage.path(), node.magic, false),
         target(&from_dir),
         &Observer::silent(),
@@ -272,6 +354,7 @@ fn a_registry_restore_is_a_directory_restore() {
         RestoreInput::Repository {
             repository: &source,
             point: Point::Latest,
+            blocks: None,
         },
         restoring(registry_storage.path(), node.magic, false),
         target(&from_registry),
@@ -282,7 +365,7 @@ fn a_registry_restore_is_a_directory_restore() {
 
     assert_eq!(
         by_registry, by_dir,
-        "the two transports restored different amounts of the same stele"
+        "the two transports restored different amounts of the same snapshot"
     );
 
     assert_eq!(by_registry.layers_fetched, PER_PUBLISH);
@@ -292,7 +375,7 @@ fn a_registry_restore_is_a_directory_restore() {
 
     // And the records are the published node's, not merely each other's — the
     // check that both transports did not reproduce one wrong thing. The cursor
-    // included: a stele stands where its stores stood.
+    // included: a snapshot stands where its stores stood.
     assert_eq!(
         from_registry.state().read_cursor().unwrap(),
         node.earlier.state().read_cursor().unwrap(),
@@ -307,8 +390,8 @@ fn a_registry_restore_is_a_directory_restore() {
 
     assert_eq!(
         blocks_of(&from_registry.archive),
-        blocks_of(node.earlier.archive()),
-        "the blocks the node published"
+        boundary_blocks_of(node.earlier.archive(), &node.first),
+        "the boundary window's blocks the node published"
     );
 
     for ns in NAMESPACES {
@@ -347,10 +430,10 @@ fn a_killed_registry_restore_resumes_where_it_stopped() {
     let storage = tempfile::tempdir().unwrap();
     let blank = Blank::<MemoryStores>::open();
 
-    let stele = Point::Latest.pull(&repository).unwrap();
-    let identity = stele.read_inscription().unwrap().digest().unwrap();
-    let plan = restore::plan(&stele, node.magic, None).unwrap();
-    let index = stele.blob_index().unwrap();
+    let snapshot = Point::Latest.resolve(&repository).unwrap();
+    let identity = snapshot.chain().unwrap().identity();
+    let plan = restore::plan(snapshot.chain().unwrap(), None, node.magic, None).unwrap();
+    let index = snapshot.blob_index().unwrap();
 
     let epoch_layers: Vec<Digest> = plan.immutable_layers().map(|l| l.diff_id).collect();
     assert!(epoch_layers.len() >= 2);
@@ -361,13 +444,15 @@ fn a_killed_registry_restore_resumes_where_it_stopped() {
 
     let err = restore::restore(
         &Interrupted {
-            inner: &stele,
+            inner: &snapshot,
             stop_at: epoch_layers[1],
         },
         &index,
+        None,
         &plan,
         target(&blank),
         default_budget(),
+        restore::DEFAULT_READ_AHEAD,
         &mut checkpoint,
         &Observer::silent(),
     )
@@ -437,9 +522,9 @@ fn a_killed_registry_restore_resumes_where_it_stopped() {
 // ---------------------------------------------------------------------------
 
 /// A node that already holds epochs fetches only the layers it lacks, and a
-/// point names which stele it is catching up to.
+/// point names which snapshot it is catching up to.
 ///
-/// The repository holds two steles. A restore of the first is interrupted at
+/// The repository holds two snapshots. A restore of the first is interrupted at
 /// its tip, so the node holds epoch 0's layers and no cursor. Resuming against
 /// the *second* — a newer inscription, a longer history, a different tip —
 /// keeps epoch 0's layers and downloads epoch 1's plus the sixteen shards. That
@@ -460,9 +545,9 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
 
     // Sequence 1, interrupted at its first state shard: every epoch layer it
     // carries commits, the tip does not.
-    let first = Point::Epoch(1).pull(&repository).unwrap();
-    let identity = first.read_inscription().unwrap().digest().unwrap();
-    let plan = restore::plan(&first, node.magic, None).unwrap();
+    let first = Point::Epoch(1).resolve(&repository).unwrap();
+    let identity = first.chain().unwrap().identity();
+    let plan = restore::plan(first.chain().unwrap(), None, node.magic, None).unwrap();
     let index = first.blob_index().unwrap();
 
     let shards: Vec<Digest> = plan.tip_layers().map(|l| l.diff_id).collect();
@@ -477,9 +562,11 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
             stop_at: shards[0],
         },
         &index,
+        None,
         &plan,
         target(&blank),
         default_budget(),
+        restore::DEFAULT_READ_AHEAD,
         &mut checkpoint,
         &Observer::silent(),
     )
@@ -514,15 +601,16 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
         "epoch 0's layers were kept across the inscription change"
     );
 
+    // Epoch 1 closed at sequence 2, so its blocks left the snapshot.
     assert_eq!(
         resumed.layers_fetched,
-        2 * EPOCH_1 + state_layer_count(),
-        "epoch 1's and epoch 2's two layers each and every state layer, and nothing else"
+        (EPOCH_1 - 1) + EPOCH_1 + state_layer_count(),
+        "epoch 1's indexes, epoch 2's two layers and every state layer, and nothing else"
     );
 
     // The point resolved to what it claimed. `latest` is sequence 2 here, and
-    // `epoch-1` is still the stele the first half of this test read.
-    let latest = Point::Latest.pull(&repository).unwrap();
+    // `epoch-1` is still the snapshot the first half of this test read.
+    let latest = Point::Latest.resolve(&repository).unwrap();
     assert_eq!(latest.read_inscription().unwrap().sequence, 2);
     assert_eq!(
         Point::Epoch(1)
@@ -536,17 +624,17 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
     );
 
     eprintln!(
-        "delta restore: {} layers already held, {} fetched (of {} in the stele)",
+        "delta restore: {} layers already held, {} fetched (of {} in the snapshot)",
         resumed.layers_skipped,
         resumed.layers_fetched,
-        latest.read_inscription().unwrap().layers.len(),
+        latest.chain().unwrap().layers().len(),
     );
 }
 
-/// A point that names no stele fails as a refusal, not as a partial restore.
+/// A point that names no snapshot fails as a refusal, not as a partial restore.
 #[test]
 #[ignore]
-fn a_point_that_names_no_stele_is_refused() {
+fn a_point_that_names_no_snapshot_is_refused() {
     let fixture = Fixture::spawn();
     let node = Node::build();
 
@@ -623,6 +711,7 @@ fn a_publish_writes_the_snapshot_envelope_and_restores() {
         RestoreInput::Repository {
             repository: &source,
             point: Point::Latest,
+            blocks: None,
         },
         restoring(storage.path(), node.magic, false),
         target(&blank),
@@ -641,8 +730,8 @@ fn a_publish_writes_the_snapshot_envelope_and_restores() {
 
     assert_eq!(
         blocks_of(&blank.archive),
-        blocks_of(node.earlier.archive()),
-        "the blocks the node published"
+        boundary_blocks_of(node.earlier.archive(), &node.first),
+        "the boundary window's blocks the node published"
     );
 }
 
@@ -676,6 +765,7 @@ fn a_retired_envelope_is_refused_before_the_stores_are_touched() {
             RestoreInput::Repository {
                 repository: &source,
                 point,
+                blocks: None,
             },
             restoring(storage, node.magic, false),
             target(blank),
@@ -737,7 +827,7 @@ fn a_retired_envelope_is_refused_before_the_stores_are_touched() {
 /// with — and a node handing none does not get in.
 ///
 /// This is the consumer half of the access policy the registry exists under:
-/// pulling a stele costs nothing and identifies nobody, and is still refused
+/// pulling a snapshot costs nothing and identifies nobody, and is still refused
 /// without a credential. Where a node's credentials come from is the `dolos`
 /// binary's business and is tested there; what is tested here is that they
 /// reach the wire and decide the outcome.
@@ -756,8 +846,8 @@ fn a_node_authenticates_with_the_credentials_it_was_given() {
 
     let reader = fixture.repository_as("dolos/credentialed", registry_fixture::credentials());
 
-    let stele = Point::Latest.pull(&reader).unwrap();
-    println!("with the right credentials: {stele:?}");
+    let snapshot = Point::Latest.pull(&reader).unwrap();
+    println!("with the right credentials: {snapshot:?}");
 
     // Without them, and with the wrong ones, the repository refuses — and the
     // refusal is an error rather than an empty repository. `latest` reading a
@@ -798,11 +888,11 @@ fn a_node_authenticates_with_the_credentials_it_was_given() {
 /// so the interrupted run committed exactly the layers ahead of that one and
 /// nothing of it.
 struct Interrupted<'a> {
-    inner: &'a Stele,
+    inner: &'a Snapshot,
     stop_at: Digest,
 }
 
-impl SteleReader for Interrupted<'_> {
+impl SnapshotReader for Interrupted<'_> {
     type Blob = std::fs::File;
 
     fn read_inscription(&self) -> Result<stelae::inscription::Inscription, stelae::Error> {
@@ -990,6 +1080,17 @@ fn blocks_of<A: ArchiveStore>(store: &A) -> Vec<(u64, Vec<u8>)> {
     store.get_range(None, None).unwrap().collect()
 }
 
+/// The blocks of `store` from `plan`'s boundary window on: all a snapshot
+/// carries when its publish names no blocks snapshot.
+fn boundary_blocks_of<A: ArchiveStore>(store: &A, plan: &Plan) -> Vec<(u64, Vec<u8>)> {
+    let cut = plan.epochs.last().unwrap().start_slot;
+
+    blocks_of(store)
+        .into_iter()
+        .filter(|(slot, _)| *slot >= cut)
+        .collect()
+}
+
 fn logs_of<A: ArchiveStore>(store: &A, ns: &'static str) -> Vec<(LogKey, Vec<u8>)> {
     store
         .iter_logs(ns, dolos_core::KeyRange::all())
@@ -1114,12 +1215,12 @@ fn a_resumed_registry_restore_reports_what_it_skipped() {
     // The interruption, at the second epoch layer the driver reaches — the same
     // deterministic placement `a_killed_registry_restore_resumes_where_it_stopped`
     // uses, and for the same reason: a wall-clock kill against a loopback
-    // registry holding a kilobyte-scale stele interrupts nothing.
+    // registry holding a kilobyte-scale snapshot interrupts nothing.
     {
-        let stele = Point::Latest.pull(&repository).unwrap();
-        let identity = stele.read_inscription().unwrap().digest().unwrap();
-        let plan = restore::plan(&stele, node.magic, None).unwrap();
-        let index = stele.blob_index().unwrap();
+        let snapshot = Point::Latest.resolve(&repository).unwrap();
+        let identity = snapshot.chain().unwrap().identity();
+        let plan = restore::plan(snapshot.chain().unwrap(), None, node.magic, None).unwrap();
+        let index = snapshot.blob_index().unwrap();
 
         let epoch_layers: Vec<Digest> = plan.immutable_layers().map(|l| l.diff_id).collect();
         assert!(epoch_layers.len() >= 2);
@@ -1129,13 +1230,15 @@ fn a_resumed_registry_restore_reports_what_it_skipped() {
 
         restore::restore(
             &Interrupted {
-                inner: &stele,
+                inner: &snapshot,
                 stop_at: epoch_layers[1],
             },
             &index,
+            None,
             &plan,
             target(&blank),
             default_budget(),
+            restore::DEFAULT_READ_AHEAD,
             &mut checkpoint,
             &Observer::silent(),
         )
@@ -1174,4 +1277,322 @@ fn a_resumed_registry_restore_reports_what_it_skipped() {
         outlook.remaining.compressed_bytes,
         "a resumed run reports the bytes it still had to move, not the original total"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Resuming through the source record
+// ---------------------------------------------------------------------------
+
+/// A repository in the fixture, opened for a restore, with the source a
+/// restore records for it.
+struct Recorded {
+    repository: registry::SnapshotRepository,
+    source: restore::Source,
+    magic: u64,
+}
+
+impl Recorded {
+    fn open(fixture: &Fixture, name: &str, magic: u64) -> Self {
+        Self {
+            repository: fixture.snapshot_repository(name),
+            source: restore::Source::Repo(
+                format!("oci://{}/{name}", fixture.address())
+                    .parse()
+                    .unwrap(),
+            ),
+            magic,
+        }
+    }
+
+    fn restoring<'a>(
+        &'a self,
+        storage: &'a std::path::Path,
+        resume: bool,
+    ) -> restore::Restoring<'a> {
+        restore::Restoring {
+            source: Some(&self.source),
+            ..restoring(storage, self.magic, resume)
+        }
+    }
+
+    fn restore<B: ToyStores>(
+        &self,
+        point: Point,
+        storage: &std::path::Path,
+        blank: &Blank<B>,
+        resume: bool,
+    ) -> Result<restore::RestoreOutcome, Error> {
+        restore::execute(
+            RestoreInput::Repository {
+                repository: &self.repository,
+                point,
+                blocks: None,
+            },
+            self.restoring(storage, resume),
+            target(blank),
+            None,
+        )
+    }
+
+    /// A recorded restore of `point` into `blank` through stores that stop at
+    /// the `call`-th commit or persist; `None` runs it through, and returns
+    /// the calls it made.
+    fn stopped_at(
+        &self,
+        point: Point,
+        storage: &std::path::Path,
+        blank: &Blank<FjallStores>,
+        call: Option<usize>,
+    ) -> Vec<Op> {
+        let journal = match call {
+            Some(call) => Journal::crashing_at(progress_path_in(storage), call),
+            None => Journal::new(progress_path_in(storage)),
+        };
+
+        let archive = RecordedArchive {
+            inner: blank.archive.clone(),
+            journal: journal.clone(),
+        };
+        let state = RecordedState {
+            inner: blank.state().clone(),
+            journal: journal.clone(),
+        };
+
+        let outcome = restore::execute(
+            RestoreInput::Repository {
+                repository: &self.repository,
+                point,
+                blocks: None,
+            },
+            self.restoring(storage, false),
+            restore::Target::new(&archive, &state),
+            None,
+        );
+
+        assert_eq!(outcome.is_ok(), call.is_none(), "{:?}", outcome.err());
+
+        journal.take().into_iter().map(|entry| entry.op).collect()
+    }
+}
+
+fn source_record(storage: &std::path::Path) -> Option<restore::SourceRecord> {
+    restore::SourceRecord::load(&restore::source_path_in(storage)).unwrap()
+}
+
+/// Stopped over the wire at an epoch layer, in the tip and at the cursor
+/// commit, and resumed through the record into the node an uninterrupted
+/// restore builds, on the fjall pair. The resume reads the recorded epoch
+/// although `latest` has moved on, and refuses to read `latest` instead.
+#[test]
+#[ignore]
+fn a_stopped_registry_restore_resumes_through_its_record() {
+    let fixture = Fixture::spawn();
+    let node = Node::build();
+    let name = "dolos/record-resume";
+
+    node.publish(&fixture.repository(name), &node.first);
+    let source = Recorded::open(&fixture, name, node.magic);
+
+    let control = Blank::<FjallStores>::open();
+    let ops = source.stopped_at(
+        Point::Latest,
+        tempfile::tempdir().unwrap().path(),
+        &control,
+        None,
+    );
+    let control = contents_digest(&control.archive, control.state());
+
+    let first = |op: Op| ops.iter().position(|at| *at == op).unwrap() + 1;
+    let cursor_commit = ops.iter().rposition(|at| *at == Op::StateCommit).unwrap() + 1;
+    let stops = [
+        first(Op::ArchivePersist) + 1,
+        first(Op::StateCommit),
+        cursor_commit,
+    ];
+
+    for (index, stop) in stops.into_iter().enumerate() {
+        let storage = tempfile::tempdir().unwrap();
+        let blank = Blank::<FjallStores>::open();
+
+        // `latest` names the first snapshot until the first stop has moved it.
+        let point = match index {
+            0 => Point::Latest,
+            _ => Point::Epoch(node.first.sequence),
+        };
+
+        source.stopped_at(point, storage.path(), &blank, Some(stop));
+
+        let record = source_record(storage.path()).expect("no source record");
+        assert_eq!(record.source, source.source.to_string());
+        assert_eq!(record.sequence, node.first.sequence);
+
+        if index == 0 {
+            // `latest` moves to the next snapshot.
+            node.publish(&fixture.repository(name), &node.second);
+
+            let error = source
+                .restore(Point::Latest, storage.path(), &blank, true)
+                .unwrap_err();
+
+            assert!(
+                matches!(error, Error::Resume(restore::ResumeRefusal::Gone(_))),
+                "{error:?}"
+            );
+        }
+
+        let recorded = RestoreProgress::load(&progress_path_in(storage.path()))
+            .unwrap()
+            .map_or(0, |progress| progress.completed.len());
+
+        let resumed = source
+            .restore(Point::Epoch(record.sequence), storage.path(), &blank, true)
+            .unwrap();
+
+        assert_eq!(
+            resumed.summary.layers_skipped, recorded,
+            "stopped at {stop}"
+        );
+        assert_eq!(source_record(storage.path()), None);
+        assert_eq!(
+            contents_digest(&blank.archive, blank.state()),
+            control,
+            "stopped at call {stop}"
+        );
+    }
+}
+
+/// A recorded restore of a head that links to an earlier snapshot, stopped and
+/// resumed: the record names the head, and the resume reads that head's chain
+/// into the node an uninterrupted restore builds.
+#[test]
+#[ignore]
+fn a_stopped_restore_of_a_chained_head_resumes_through_its_record() {
+    let fixture = Fixture::spawn();
+    let node = Node::build();
+    let name = "dolos/record-resume-chain";
+
+    let first = node.publish(&fixture.repository(name), &node.first);
+    let head = node.publish(&fixture.repository(name), &node.second);
+    assert_eq!(
+        head.inscription.previous.unwrap().sequence,
+        first.inscription.sequence
+    );
+
+    let source = Recorded::open(&fixture, name, node.magic);
+
+    let control = Blank::<FjallStores>::open();
+    let ops = source.stopped_at(
+        Point::Latest,
+        tempfile::tempdir().unwrap().path(),
+        &control,
+        None,
+    );
+    let control = contents_digest(&control.archive, control.state());
+
+    // The tip's first commit, with the epoch layers before it recorded.
+    let stop = ops.iter().position(|at| *at == Op::StateCommit).unwrap() + 1;
+
+    let storage = tempfile::tempdir().unwrap();
+    let blank = Blank::<FjallStores>::open();
+    source.stopped_at(Point::Latest, storage.path(), &blank, Some(stop));
+
+    let record = source_record(storage.path()).expect("no source record");
+    assert_eq!(record.sequence, node.second.sequence);
+    assert_eq!(record.inscription_digest, head.identity);
+
+    let recorded = RestoreProgress::load(&progress_path_in(storage.path()))
+        .unwrap()
+        .map_or(0, |progress| progress.completed.len());
+    assert!(recorded > 0, "the stop recorded no layer to skip");
+
+    let resumed = source
+        .restore(Point::Epoch(record.sequence), storage.path(), &blank, true)
+        .unwrap();
+
+    assert_eq!(resumed.summary.layers_skipped, recorded);
+    assert_eq!(source_record(storage.path()), None);
+    assert_eq!(contents_digest(&blank.archive, blank.state()), control);
+}
+
+/// Interrupt a recorded restore of the repository's first snapshot at its tip,
+/// returning the records it left.
+fn interrupted_over_the_wire(source: &Recorded, blank: &Blank<FjallStores>) -> tempfile::TempDir {
+    let ops = source.stopped_at(
+        Point::Epoch(1),
+        tempfile::tempdir().unwrap().path(),
+        &Blank::<FjallStores>::open(),
+        None,
+    );
+    let tip = ops.iter().position(|at| *at == Op::StateCommit).unwrap() + 1;
+
+    let storage = tempfile::tempdir().unwrap();
+    source.stopped_at(Point::Epoch(1), storage.path(), blank, Some(tip));
+
+    assert!(source_record(storage.path()).is_some());
+
+    storage
+}
+
+/// The recorded epoch tag taken out of the repository is refused, before a
+/// store is touched.
+#[test]
+#[ignore]
+fn a_resume_whose_epoch_tag_is_gone_is_refused() {
+    let fixture = Fixture::spawn();
+    let node = Node::build();
+    let name = "dolos/record-untagged";
+
+    node.publish(&fixture.repository(name), &node.first);
+    let source = Recorded::open(&fixture, name, node.magic);
+
+    let blank = Blank::<FjallStores>::open();
+    let storage = interrupted_over_the_wire(&source, &blank);
+    let before = contents_digest(&blank.archive, blank.state());
+
+    Distribution::new(&fixture).delete_manifest(name, &Point::Epoch(1).to_string());
+
+    let error = source
+        .restore(Point::Epoch(1), storage.path(), &blank, true)
+        .unwrap_err();
+
+    let Error::Resume(restore::ResumeRefusal::Gone(record)) = &error else {
+        panic!("{error:?}");
+    };
+
+    assert_eq!(Some(record.clone()), source_record(storage.path()));
+    assert!(error.to_string().contains("is no longer in"), "{error}");
+    assert_eq!(contents_digest(&blank.archive, blank.state()), before);
+}
+
+/// Another snapshot under the recorded epoch tag is refused, before a store is
+/// touched.
+#[test]
+#[ignore]
+fn a_resume_with_another_snapshot_under_its_tag_is_refused() {
+    let fixture = Fixture::spawn();
+    let node = Node::build();
+    let name = "dolos/record-retagged";
+
+    node.publish(&fixture.repository(name), &node.first);
+    let source = Recorded::open(&fixture, name, node.magic);
+
+    let blank = Blank::<FjallStores>::open();
+    let storage = interrupted_over_the_wire(&source, &blank);
+    let before = contents_digest(&blank.archive, blank.state());
+
+    node.publish(&fixture.repository(name), &node.second);
+
+    let distribution = Distribution::new(&fixture);
+    let second = distribution.manifest(name, &Point::Epoch(2).to_string());
+    distribution.put_manifest(name, &Point::Epoch(1).to_string(), &second);
+
+    let error = source
+        .restore(Point::Epoch(1), storage.path(), &blank, true)
+        .unwrap_err();
+
+    assert!(
+        matches!(error, Error::Resume(restore::ResumeRefusal::Gone(_))),
+        "{error:?}"
+    );
+    assert_eq!(contents_digest(&blank.archive, blank.state()), before);
 }

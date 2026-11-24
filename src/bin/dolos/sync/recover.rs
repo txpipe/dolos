@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use dolos::prelude::*;
 
-use super::{applied, relative_to_wal, Positions};
+use super::{applied, position, relative_to_wal, Positions};
 use crate::output::{emit, FormatArgs, Usage};
 
 #[derive(Debug, clap::Args)]
@@ -123,7 +123,11 @@ impl Recovery {
                         .iter()
                         .any(|step| step.store == RecoveredStore::Archive);
 
-                let archive = if replayed { target } else { positions.archive };
+                let archive = if replayed {
+                    target
+                } else {
+                    positions.archive()
+                };
 
                 if positions.archive_kept && archive != target {
                     vec![relative_to_wal("archive", archive, target)]
@@ -214,7 +218,7 @@ fn discard_refusal(positions: &Positions) -> Option<String> {
     }
 
     if positions.archive_kept
-        && positions.archive < positions.state()
+        && positions.archive() < positions.state()
         && !positions.archive_refills()
     {
         let archive = match positions.archive {
@@ -244,8 +248,16 @@ fn slot(slot: Option<BlockSlot>) -> String {
 
 impl fmt::Display for Recovery {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "wal        {}", slot(applied(self.plan.wal.as_ref())))?;
-        writeln!(f, "state      {}", slot(applied(self.plan.state.as_ref())))?;
+        writeln!(
+            f,
+            "wal        {}",
+            position(applied(self.plan.wal.as_ref()))
+        )?;
+        writeln!(
+            f,
+            "state      {}",
+            position(applied(self.plan.state.as_ref()))
+        )?;
         writeln!(f, "archive    {}", slot(self.plan.archive))?;
 
         for step in &self.plan.steps {
@@ -281,12 +293,12 @@ impl fmt::Display for Recovery {
             Action::DiscardWal => write!(
                 f,
                 "action     reset the WAL to the state cursor at {}, losing its rollback history",
-                slot(applied(self.plan.state.as_ref()))
+                position(applied(self.plan.state.as_ref()))
             ),
             Action::SeedWal => write!(
                 f,
                 "action     seed the WAL, which holds no block, at the state cursor at {}",
-                slot(applied(self.plan.state.as_ref()))
+                position(applied(self.plan.state.as_ref()))
             ),
             Action::NeedsDiscard => write!(f, "action     refused: {DISCARD_HELP}"),
             Action::Refuse => write!(
@@ -299,6 +311,8 @@ impl fmt::Display for Recovery {
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
+    crate::common::refuse_interrupted_restore(config)?;
+
     crate::common::setup_tracing_warnings()?;
 
     let access = if args.dry_run {
@@ -403,7 +417,9 @@ mod tests {
                 is_block: true,
             }),
             state: Some(point(state)),
+            stacked: vec![],
             archive,
+            archive_blocks: usize::from(archive.is_some()),
             archive_kept: true,
             archive_rolling: false,
         }
@@ -415,7 +431,7 @@ mod tests {
         let start = positions.wal_start.as_ref().unwrap().slot();
 
         let stores = [
-            (RecoveredStore::State, positions.state()),
+            (RecoveredStore::State, positions.state().map(|at| at.slot)),
             (RecoveredStore::Archive, positions.archive),
         ];
 
@@ -496,7 +512,9 @@ mod tests {
             wal_history: None,
             rollback_floor: None,
             state: Some(state),
+            stacked: vec![],
             archive,
+            archive_blocks: usize::from(archive.is_some()),
             archive_kept: true,
             archive_rolling: false,
         };
@@ -546,7 +564,9 @@ mod tests {
 
         let gap = recovery.gap.unwrap();
         assert!(
-            gap.contains("state, at slot 250, is ahead of the WAL tip at slot 200"),
+            gap.contains(
+                "state, at slot 250 (its block not applied), is ahead of the WAL tip at slot 200"
+            ),
             "{gap}"
         );
         assert!(gap.contains("no block hash"), "{gap}");
@@ -664,6 +684,52 @@ mod tests {
         assert!(recovery.refusal.unwrap().contains("no block hash"));
     }
 
+    /// A cursor holding only a slot, as ESTART leaves it at an epoch's first
+    /// block before that block rolls, stands past every block before the slot
+    /// and short of the one at it.
+    #[test]
+    fn a_cursor_without_a_hash_stands_before_its_slot_block() {
+        let at_slot = applied(Some(&ChainPoint::Slot(200))).unwrap();
+
+        assert!(at_slot < applied(Some(&point(200))).unwrap());
+        assert!(at_slot > applied(Some(&point(199))).unwrap());
+        assert_eq!(at_slot.to_string(), "slot 200 (its block not applied)");
+    }
+
+    /// The state at the WAL tip's slot without its block: the stores
+    /// disagree, and recovery replays the block the plan finds.
+    #[test]
+    fn a_state_at_the_tip_slot_without_its_block_is_replayed() {
+        let mut short = positions(100, 200, 200, Some(200));
+        short.state = Some(ChainPoint::Slot(200));
+
+        let disagreements = short.disagreements();
+        assert_eq!(disagreements.len(), 1, "{disagreements:?}");
+        assert!(
+            disagreements[0].contains("(its block not applied), is behind the WAL tip"),
+            "{disagreements:?}"
+        );
+
+        let plan = RecoveryPlan {
+            wal: short.wal_tip.clone(),
+            state: short.state.clone(),
+            archive: Some(200),
+            covers_lag: true,
+            steps: vec![RecoveryStep {
+                store: RecoveredStore::State,
+                from: Some(200),
+                to: point(200),
+                entries: 1,
+                covered: true,
+            }],
+        };
+
+        let recovery = Recovery::decide(plan, &short, false);
+        assert_eq!(recovery.action, Action::Replay);
+        assert_eq!(recovery.gap, None);
+        assert!(recovery.remains.is_empty(), "{:?}", recovery.remains);
+    }
+
     /// A state lag beside an emptied rolling archive: the WAL brings both
     /// stores to its tip, so nothing is discarded, flag or not.
     #[test]
@@ -726,7 +792,9 @@ mod tests {
             wal_history: None,
             rollback_floor: None,
             state: None,
+            stacked: vec![],
             archive: None,
+            archive_blocks: 0,
             archive_kept: true,
             archive_rolling: false,
         };

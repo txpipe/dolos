@@ -3,8 +3,9 @@
 //! Enough of the distribution API for a publish and a restore over plaintext
 //! HTTP: monolithic blob uploads, blob `HEAD`/`GET`, manifest `PUT`/`GET`. A
 //! scripted fault cuts a blob `GET` off partway, or answers a manifest `GET`
-//! with a `503`. No container, so the suites using it run under plain
-//! `cargo test`.
+//! with a `503`, and a layer blob can wait before its first byte, for a time
+//! or for another layer's `GET`. No container, so the suites using it run
+//! under plain `cargo test`.
 //!
 //! **A trimmed copy of `stelae/tests/fault_registry`**, for the reason
 //! `registry_fixture` gives: `stelae` must never depend on a `dolos-*` package,
@@ -22,6 +23,7 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use stelae::Digest;
@@ -48,12 +50,14 @@ impl Script {
 struct State {
     blobs: HashMap<String, Vec<u8>>,
     manifests: HashMap<String, (String, Vec<u8>)>,
-    /// Layer digests of the last manifest stored, in manifest order.
+    /// Layer digests of every manifest stored, in the order they were put.
     layers: Vec<String>,
     /// Config blob digest of the last manifest stored.
     config: Option<String>,
     /// Manifest `GET`s still to be answered with a `503`.
     manifest_faults: usize,
+    /// Manifest `GET`s still to be refused with a `403`, ahead of the `503`s.
+    manifest_denials: usize,
     /// Manifest `GET`s received.
     manifest_gets: usize,
     /// Cut-offs keyed by blob digest.
@@ -61,6 +65,20 @@ struct State {
     /// `GET`s per blob digest.
     gets: HashMap<String, usize>,
     uploads: usize,
+    /// The wait before a layer blob's first byte, by digest.
+    delays: HashMap<String, Duration>,
+    /// Layer blobs whose first byte waits for another layer's `GET` to arrive.
+    holds: HashMap<String, String>,
+    /// Layer blob `GET`s in the order they arrived, and in the order their
+    /// answers were done.
+    arrived: Vec<String>,
+    served: Vec<String>,
+    /// Layer blob `GET`s being answered now, and the most there were at once.
+    active: usize,
+    peak: usize,
+    /// The same, by the repository each `GET` named.
+    active_in: HashMap<String, usize>,
+    peak_in: HashMap<String, usize>,
 }
 
 pub struct FaultRegistry {
@@ -99,7 +117,7 @@ impl FaultRegistry {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// The layer blob digests of the manifest last pushed.
+    /// The layer blob digests of every manifest pushed.
     pub fn layers(&self) -> Vec<String> {
         self.state().layers.clone()
     }
@@ -112,6 +130,30 @@ impl FaultRegistry {
     /// Answer the next `times` manifest `GET`s with a `503`.
     pub fn fail_next_manifest(&self, times: usize) {
         self.state().manifest_faults += times;
+    }
+
+    /// Refuse the next `times` manifest `GET`s with a `403` and a `DENIED`
+    /// error, as a registry turning a token away answers.
+    pub fn deny_next_manifest(&self, times: usize) {
+        self.state().manifest_denials += times;
+    }
+
+    /// Drop `tag` from the repository `name`, as a registry's retention
+    /// deletes one; the manifest stays under its digest.
+    pub fn untag(&self, name: &str, tag: &str) {
+        let removed = self.state().manifests.remove(&format!("{name}/{tag}"));
+        assert!(removed.is_some(), "{name} holds no tag {tag}");
+    }
+
+    /// Drop every tag from the repository `name`, the moving one included;
+    /// its manifests stay under their digests.
+    pub fn untag_all(&self, name: &str) {
+        let prefix = format!("{name}/");
+
+        self.state().manifests.retain(|key, _| {
+            key.strip_prefix(&prefix)
+                .is_none_or(|reference| reference.starts_with("sha256:"))
+        });
     }
 
     /// How many manifest `GET`s the registry received.
@@ -153,6 +195,52 @@ impl FaultRegistry {
     /// How many `GET`s the blob `digest` received.
     pub fn gets(&self, digest: &str) -> usize {
         self.state().gets.get(digest).copied().unwrap_or(0)
+    }
+
+    /// Wait `delay` before the first byte of every `GET` of these blobs.
+    pub fn delay(&self, digests: &[String], delay: Duration) {
+        let mut state = self.state();
+        for digest in digests {
+            state.delays.insert(digest.clone(), delay);
+        }
+    }
+
+    /// Hold the first byte of every `GET` of the blob `digest` until a `GET`
+    /// of the layer blob `until` has arrived: an order between two requests a
+    /// test needs, rather than a wait it hopes is long enough.
+    pub fn hold(&self, digest: &str, until: &str) {
+        self.state()
+            .holds
+            .insert(digest.to_owned(), until.to_owned());
+    }
+
+    /// Layer blob `GET`s in the order they arrived.
+    pub fn arrived(&self) -> Vec<String> {
+        self.state().arrived.clone()
+    }
+
+    /// Layer blob `GET`s in the order their answers were done.
+    pub fn served(&self) -> Vec<String> {
+        self.state().served.clone()
+    }
+
+    /// The most layer blob `GET`s answered at once.
+    pub fn peak(&self) -> usize {
+        self.state().peak
+    }
+
+    /// The most layer blob `GET`s of the repository `name` answered at once.
+    pub fn peak_in(&self, name: &str) -> usize {
+        self.state().peak_in.get(name).copied().unwrap_or(0)
+    }
+
+    /// Forget the layer `GET`s logged so far, and the peaks.
+    pub fn forget(&self) {
+        let mut state = self.state();
+        state.arrived.clear();
+        state.served.clear();
+        state.peak = state.active;
+        state.peak_in = state.active_in.clone();
     }
 }
 
@@ -285,6 +373,7 @@ fn handle(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
     }
 
     if let Some(index) = rest.find("/blobs/") {
+        let repository = rest[..index].to_owned();
         let digest = rest[index + "/blobs/".len()..].to_owned();
         let head = request.method == "HEAD";
 
@@ -300,7 +389,42 @@ fn handle(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
             (blob, cut)
         };
 
-        return match blob {
+        // Only layer `GET`s are logged and delayed, so a test reads the order a
+        // restore fetched its layers in without the config blob in it.
+        let layer = !head && lock().layers.contains(&digest);
+        if layer {
+            let (delay, hold) = {
+                let mut state = lock();
+                state.arrived.push(digest.clone());
+                state.active += 1;
+                state.peak = state.peak.max(state.active);
+
+                let active = state.active_in.entry(repository.clone()).or_default();
+                *active += 1;
+                let active = *active;
+                let peak = state.peak_in.entry(repository.clone()).or_default();
+                *peak = (*peak).max(active);
+                (
+                    state.delays.get(&digest).copied(),
+                    state.holds.get(&digest).cloned(),
+                )
+            };
+
+            // Bounded, so a test whose other request never comes fails on its
+            // own assertion rather than hanging.
+            if let Some(until) = hold {
+                let deadline = Instant::now() + Duration::from_secs(30);
+                while !lock().arrived.contains(&until) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+
+            if let Some(delay) = delay {
+                std::thread::sleep(delay);
+            }
+        }
+
+        let answered = match blob {
             None => respond(&stream, 404, &[], 0, b""),
             Some(blob) if head => {
                 let mut stream = &stream;
@@ -316,10 +440,24 @@ fn handle(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
             Some(blob) if cut => respond(&stream, 200, &[], blob.len(), &blob[..blob.len() / 2]),
             Some(blob) => respond(&stream, 200, &[], blob.len(), &blob),
         };
+
+        if layer {
+            let mut state = lock();
+            state.active -= 1;
+            *state.active_in.get_mut(&repository).unwrap() -= 1;
+            state.served.push(digest);
+        }
+
+        return answered;
     }
 
     if let Some(index) = rest.find("/manifests/") {
-        let reference = rest[index + "/manifests/".len()..].to_owned();
+        // Keyed by repository: two repositories each hold their own `epoch-N`.
+        let reference = format!(
+            "{}/{}",
+            &rest[..index],
+            &rest[index + "/manifests/".len()..]
+        );
 
         if request.method == "PUT" {
             let media_type = request
@@ -331,15 +469,22 @@ fn handle(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
             let parsed: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
 
             let mut state = lock();
-            state.layers = parsed["layers"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|layer| layer["digest"].as_str().unwrap().to_owned())
-                .collect();
+
+            // A publish puts a tip manifest and then a diff manifest, so the
+            // layers of every manifest put are the layers.
+            for layer in parsed["layers"].as_array().into_iter().flatten() {
+                let digest = layer["digest"].as_str().unwrap().to_owned();
+
+                if !state.layers.contains(&digest) {
+                    state.layers.push(digest);
+                }
+            }
+
             state.config = parsed["config"]["digest"].as_str().map(str::to_owned);
             let entry = (media_type, request.body);
-            state.manifests.insert(digest.clone(), entry.clone());
+            state
+                .manifests
+                .insert(format!("{}/{digest}", &rest[..index]), entry.clone());
             state.manifests.insert(reference, entry);
             drop(state);
 
@@ -353,17 +498,32 @@ fn handle(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
             );
         }
 
-        let (manifest, failed) = {
+        let (manifest, denied, failed) = {
             let mut state = lock();
-            let failed = request.method == "GET" && {
-                state.manifest_gets += 1;
-                let failed = state.manifest_faults > 0;
-                state.manifest_faults = state.manifest_faults.saturating_sub(1);
-                failed
-            };
+            let get = request.method == "GET";
 
-            (state.manifests.get(&reference).cloned(), failed)
+            if get {
+                state.manifest_gets += 1;
+            }
+
+            let denied = get && state.manifest_denials > 0;
+            let failed = get && !denied && state.manifest_faults > 0;
+
+            if denied {
+                state.manifest_denials -= 1;
+            }
+
+            if failed {
+                state.manifest_faults -= 1;
+            }
+
+            (state.manifests.get(&reference).cloned(), denied, failed)
         };
+
+        if denied {
+            let body = br#"{"errors":[{"code":"DENIED","message":"denied"}]}"#;
+            return respond(&stream, 403, &[], body.len(), body);
+        }
 
         if failed {
             return respond(&stream, 503, &[], 0, b"");

@@ -10,7 +10,7 @@ use dolos_testing::blocks::make_conway_block_with_prev;
 use dolos_testing::peer::{PeerFixture, PeerOptions};
 use gasket::messaging::OutputPort;
 use gasket::metrics::Reading;
-use gasket::runtime::{StagePhase, Tether, TetherState};
+use gasket::runtime::{Tether, TetherState};
 use itertools::Itertools as _;
 
 use super::*;
@@ -91,7 +91,7 @@ impl Stages {
             .filter_map(|tether| tether.read_metrics().ok())
             .flatten()
             .find_map(|(name, reading)| match (name, reading) {
-                ("housekeeping_count", Reading::Count(count)) => Some(count),
+                ("housekeeping_runs", Reading::Count(count)) => Some(count),
                 _ => None,
             })
             .unwrap_or(0)
@@ -109,7 +109,7 @@ impl Stages {
 }
 
 fn is_ended(tether: &Tether) -> bool {
-    !matches!(tether.check_state(), TetherState::Alive(phase) if phase != StagePhase::Ended)
+    !matches!(tether.check_state(), TetherState::Alive(phase) if phase.end_cause().is_none())
 }
 
 fn start(
@@ -124,6 +124,7 @@ fn start(
         peer.address().to_string(),
         limit,
         domain.clone(),
+        Default::default(),
     )
     .unwrap();
 
@@ -710,6 +711,163 @@ fn a_peer_that_holds_none_of_the_wal_is_given_up_once_retries_run_out() {
             .contains("holds none of the WAL's recent points"),
         "{failure}"
     );
+    assert!(!failure.stranded, "{failure}");
+}
+
+/// The block at `slot` on a chain other than the peer fixture's.
+fn off_the_peer(slot: u64) -> ChainPoint {
+    make_conway_block_with_prev(slot, None, 0).0
+}
+
+/// Leave the WAL holding `points` alone, oldest first, as a reset or a
+/// bootstrap leaves it holding one.
+fn wal_holding(domain: &DomainAdapter, points: &[ChainPoint]) {
+    let (first, rest) = points.split_first().expect("a point");
+    domain.wal().reset_to(first).unwrap();
+
+    let entries = rest
+        .iter()
+        .map(|point| (point.clone(), dolos_core::LogValue::origin()))
+        .collect();
+    domain.wal().append_entries(entries).unwrap();
+}
+
+/// A WAL holding one point alone, which the peer, past it, does not hold, as
+/// after a fork dropped the block a reset WAL was seeded at: no retry can
+/// help, so the pull stage gives up at the first answer, retries left.
+#[test]
+fn a_lone_wal_point_a_peer_past_it_lacks_is_given_up_at_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, domain) = domain_over(temp.path(), no_backoff(3));
+
+    let dropped = off_the_peer(30);
+    wal_holding(&domain, std::slice::from_ref(&dropped));
+
+    let peer = peer(PeerOptions {
+        initial_blocks: 31,
+        ..Default::default()
+    });
+
+    let (progress, stages) = catch_up(&config, &peer, &domain);
+
+    assert!(stages.ended("pull"));
+    stages.teardown();
+
+    assert!(!progress.succeeded(SyncLimit::CatchUp));
+    assert_eq!(peer.intersects(), 1, "no retry");
+    assert_eq!(wal_tip(&domain), Some(dropped.clone()));
+
+    let failure = progress
+        .upstream_failure()
+        .expect("the upstream was given up");
+    assert!(failure.stranded, "{failure}");
+    assert!(!failure.refused, "{failure}");
+
+    for said in [
+        format!("the WAL holds only {dropped}, with no earlier point"),
+        format!("the peer, past it at {}, does not hold it", peer.tip()),
+    ] {
+        assert!(failure.message.contains(&said), "{said:?} in {failure}");
+    }
+}
+
+/// A peer behind the WAL's one point, or at its slot, may yet hold it, and a
+/// WAL holding more points than it offers may hold one the peer does: each is
+/// an ordinary failed intersection, retried.
+#[test]
+fn a_wal_point_the_peer_may_yet_hold_is_retried() {
+    let cases = [
+        ("a peer behind the one point", vec![off_the_peer(30)], 29),
+        ("a peer at the one point's slot", vec![off_the_peer(30)], 30),
+        (
+            "a WAL holding two points, one offered",
+            vec![off_the_peer(20), off_the_peer(30)],
+            31,
+        ),
+        // Its oldest point is offered last, and isn't all it holds.
+        (
+            "a WAL holding three points, two offered",
+            vec![off_the_peer(10), off_the_peer(20), off_the_peer(30)],
+            31,
+        ),
+    ];
+
+    for (case, points, blocks) in cases {
+        let temp = tempfile::tempdir().unwrap();
+        let (config, domain) = domain_over(temp.path(), no_backoff(1));
+        wal_holding(&domain, &points);
+
+        let peer = peer(PeerOptions {
+            initial_blocks: blocks,
+            ..Default::default()
+        });
+
+        let (progress, stages) = catch_up(&config, &peer, &domain);
+
+        assert!(stages.ended("pull"), "{case}");
+        stages.teardown();
+
+        assert_eq!(peer.intersects(), 2, "{case}: one attempt and one retry");
+
+        let failure = progress.upstream_failure().expect(case);
+        assert!(!failure.stranded, "{case}: {failure}");
+        assert!(
+            failure
+                .message
+                .contains("holds none of the WAL's recent points"),
+            "{case}: {failure}"
+        );
+    }
+}
+
+/// A WAL holding one point alone that the peer holds, as a reset or a
+/// bootstrap leaves it, is the usual start: the sync intersects there and
+/// goes on, giving up nothing.
+#[test]
+fn a_lone_wal_point_the_peer_holds_syncs_on_from_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, domain) = domain_over(temp.path(), no_backoff(3));
+
+    let behind = peer(PeerOptions {
+        initial_blocks: 30,
+        ..Default::default()
+    });
+
+    let (progress, stages) = catch_up(&config, &behind, &domain);
+    stages.teardown();
+    assert!(progress.succeeded(SyncLimit::CatchUp));
+
+    // Empty the WAL and seed it at the state cursor, as a start does after a
+    // reset.
+    let seed = behind.tip();
+    assert_eq!(state_cursor(&domain), Some(seed.clone()));
+
+    let held = domain
+        .wal()
+        .iter_logs(None, None)
+        .unwrap()
+        .map(|(point, _)| point)
+        .collect_vec();
+    domain.wal().remove_points(&held).unwrap();
+    wal_holding(&domain, std::slice::from_ref(&seed));
+
+    // The fixture's chain is the same at every length, so this peer holds
+    // the seed.
+    let ahead = peer(PeerOptions {
+        initial_blocks: 40,
+        ..Default::default()
+    });
+
+    let (progress, stages) = catch_up(&config, &ahead, &domain);
+    stages.teardown();
+
+    if let Some(failure) = progress.upstream_failure() {
+        panic!("the sync gave up: {failure}");
+    }
+
+    assert!(progress.succeeded(SyncLimit::CatchUp));
+    assert_eq!(ahead.intersects(), 1);
+    assert_eq!(state_cursor(&domain), Some(ahead.tip()));
 }
 
 #[test]
@@ -747,6 +905,7 @@ fn a_connection_dropped_in_the_handshake_is_no_refusal() {
         accepting_and_closing().to_string(),
         SyncLimit::CatchUp,
         domain.clone(),
+        Default::default(),
     )
     .unwrap();
 
@@ -1621,4 +1780,42 @@ fn retries_back_off_as_configured() {
     assert_eq!(retry::backoff(&retry, 4), Duration::from_secs(32));
     assert_eq!(retry::backoff(&retry, 5), Duration::from_secs(60));
     assert_eq!(retry::backoff(&retry, 1000), Duration::from_secs(60));
+}
+
+#[test]
+fn the_tip_lag_is_the_clock_minus_the_tip_slot_time() {
+    use pallas::interop::utxorpc::LedgerContext as _;
+    use std::time::UNIX_EPOCH;
+
+    let temp = tempfile::tempdir().unwrap();
+    let (_, domain) = domain_over(temp.path(), no_backoff(0));
+
+    let recorder = dolos_testing::metrics::MetricsRecorder::default();
+    let now = UNIX_EPOCH + Duration::from_secs(2_000_000_000);
+    let progress = Arc::new(SyncProgress::default());
+    let gauges =
+        metrics::SyncGauges::over_on(&recorder.meter("test"), &progress, &domain, move || now);
+
+    // An empty store has no tip, so no lag.
+    let points = recorder.collect();
+    assert_eq!(points.value("dolos.sync.tip.lag", &[]), None);
+    assert_eq!(points.value("dolos.sync.caught_up", &[]), Some(0.0));
+
+    let mut parent = None;
+    for slot in 1..=3 {
+        let (point, block) = make_conway_block_with_prev(slot, parent, slot);
+        parent = point.hash();
+        domain.roll_forward(block).unwrap();
+    }
+
+    let tip_time = domain.get_slot_timestamp(3).unwrap();
+    assert_eq!(
+        recorder.collect().value("dolos.sync.tip.lag", &[]),
+        Some(2_000_000_000.0 - tip_time as f64)
+    );
+
+    // The gauges report nothing once dropped.
+    drop(gauges);
+    let points = recorder.collect();
+    assert_eq!(points.value("dolos.sync.caught_up", &[]), None);
 }

@@ -12,6 +12,10 @@ pub trait WalStore: Clone + Send + Sync + 'static {
 
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), WalError>;
 
+    /// Remove the entries at `points` in one commit, skipping any the WAL
+    /// does not hold.
+    fn remove_points(&self, points: &[ChainPoint]) -> Result<(), WalError>;
+
     fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, WalError>;
 
     fn locate_point(&self, around: BlockSlot) -> Result<Option<ChainPoint>, WalError>;
@@ -116,6 +120,144 @@ pub trait WalStore: Clone + Send + Sync + 'static {
 
         Ok(None)
     }
+}
+
+/// The block bytes of a WAL entry, for [`ChainOrdered`].
+pub(crate) trait EntryBlock {
+    fn block_bytes(&self) -> &[u8];
+}
+
+impl<D: EntityDelta> EntryBlock for LogValue<D> {
+    fn block_bytes(&self) -> &[u8] {
+        &self.block
+    }
+}
+
+impl EntryBlock for RawBlock {
+    fn block_bytes(&self) -> &[u8] {
+        self
+    }
+}
+
+/// WAL entries in chain order, or in reverse chain order over a reversed
+/// read. Keys sort the entries of one slot by hash, but a Byron boundary block
+/// and the main block that shares its slot chain one after the other: within
+/// a slot, a block comes after the entry its parent hash names.
+pub(crate) struct ChainOrdered<I: Iterator> {
+    entries: std::iter::Peekable<I>,
+    pending: std::collections::VecDeque<I::Item>,
+    reversed: bool,
+}
+
+impl<I, T> ChainOrdered<I>
+where
+    I: Iterator<Item = (ChainPoint, T)>,
+    T: EntryBlock,
+{
+    pub(crate) fn forward(entries: I) -> Self {
+        Self::new(entries, false)
+    }
+
+    /// Over a reversed read, as a rollback walks the WAL.
+    pub(crate) fn backward(entries: I) -> Self {
+        Self::new(entries, true)
+    }
+
+    fn new(entries: I, reversed: bool) -> Self {
+        Self {
+            entries: entries.peekable(),
+            pending: Default::default(),
+            reversed,
+        }
+    }
+}
+
+impl<I, T> Iterator for ChainOrdered<I>
+where
+    I: Iterator<Item = (ChainPoint, T)>,
+    T: EntryBlock,
+{
+    type Item = (ChainPoint, T);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(entry) = self.pending.pop_front() {
+            return Some(entry);
+        }
+
+        let first = self.entries.next()?;
+        let slot = first.0.slot();
+
+        let Some(second) = self.entries.next_if(|(point, _)| point.slot() == slot) else {
+            return Some(first);
+        };
+
+        let mut group = vec![first, second];
+        while let Some(entry) = self.entries.next_if(|(point, _)| point.slot() == slot) {
+            group.push(entry);
+        }
+
+        // Key order first, so entries that don't chain to each other (the
+        // Origin entry beside a block at slot 0) keep it.
+        if self.reversed {
+            group.reverse();
+        }
+
+        let mut links: Vec<_> = group
+            .into_iter()
+            .map(|entry| (parent_hash(entry.1.block_bytes()), entry))
+            .collect();
+
+        let mut ordered = Vec::with_capacity(links.len());
+
+        while !links.is_empty() {
+            let next = links
+                .iter()
+                .position(|(parent, _)| {
+                    !links
+                        .iter()
+                        .any(|(_, (point, _))| parent.is_some() && point.hash() == *parent)
+                })
+                .unwrap_or(0);
+
+            ordered.push(links.remove(next).1);
+        }
+
+        if self.reversed {
+            ordered.reverse();
+        }
+
+        self.pending.extend(ordered);
+        self.pending.pop_front()
+    }
+}
+
+/// The points `wal` holds at `slot`, in chain order: one for an ordinary
+/// slot, and at a Byron boundary block's slot, the main block chained onto it
+/// after it.
+pub fn chain_at_slot<W: WalStore>(wal: &W, slot: BlockSlot) -> Result<Vec<ChainPoint>, WalError> {
+    let entries = wal
+        .iter_blocks(Some(ChainPoint::Slot(slot)), None)?
+        .take_while(|(point, _)| point.slot() == slot);
+
+    Ok(ChainOrdered::forward(entries)
+        .map(|(point, _)| point)
+        .filter(|point| *point != ChainPoint::Origin)
+        .collect())
+}
+
+/// The hash a block names as its parent; none for a synthetic entry or bytes
+/// that don't decode.
+pub(crate) fn parent_hash(block: &[u8]) -> Option<BlockHash> {
+    pallas::ledger::traverse::MultiEraBlock::decode(block)
+        .ok()
+        .and_then(|block| block.header().previous_hash())
+}
+
+/// The hash of a block's header; none for bytes that don't decode.
+pub(crate) fn block_hash(block: &[u8]) -> Option<BlockHash> {
+    pallas::ledger::traverse::MultiEraBlock::decode(block)
+        .ok()
+        .map(|block| block.hash())
 }
 
 /// What [`verify_integrity`] found walking a WAL's prev-hash chain.
@@ -573,6 +715,125 @@ mod integrity_tests {
                 "blocks": 1,
                 "failures": [{"kind": "undecodable", "slot": 7, "error": "bad"}],
             })
+        );
+    }
+}
+
+#[cfg(test)]
+mod chain_order_tests {
+    use std::sync::Arc;
+
+    use dolos_testing::blocks::{byron_ebb_slot, make_byron_ebb, make_conway_block_with_prev};
+    use pallas::crypto::hash::Hash;
+
+    use super::*;
+
+    /// The boundary block opening Byron epoch 1, the main block numbered
+    /// `number` chained onto it at the same slot, and the block after both,
+    /// in WAL key order behind the Origin entry. `number` picks the main
+    /// block's hash, so either of the pair can sort first.
+    fn wal(number: u64) -> (Vec<(ChainPoint, RawBlock)>, [ChainPoint; 3]) {
+        let slot = byron_ebb_slot(1);
+        let (ebb_point, ebb) = make_byron_ebb(1, Hash::new([7u8; 32]));
+        let (main_point, main) = make_conway_block_with_prev(slot, ebb_point.hash(), number);
+        let (next_point, next) =
+            make_conway_block_with_prev(slot + 20, main_point.hash(), number + 1);
+
+        // The fixture's points are the `dolos-core` it links, not this build.
+        let ours = |slot, hash: Option<Hash<32>>| ChainPoint::Specific(slot, hash.unwrap());
+        let ebb_point = ours(slot, ebb_point.hash());
+        let main_point = ours(slot, main_point.hash());
+        let next_point = ours(slot + 20, next_point.hash());
+
+        let mut entries = vec![
+            (ChainPoint::Origin, Arc::new(vec![])),
+            (ebb_point.clone(), ebb),
+            (main_point.clone(), main),
+            (next_point.clone(), next),
+        ];
+        entries.sort_by_key(|(point, _)| point.clone().into_bytes());
+
+        (entries, [ebb_point, main_point, next_point])
+    }
+
+    fn points(entries: impl Iterator<Item = (ChainPoint, RawBlock)>) -> Vec<ChainPoint> {
+        entries.map(|(point, _)| point).collect()
+    }
+
+    #[test]
+    fn a_boundary_block_comes_before_the_block_sharing_its_slot() {
+        let ebb_first = (0..).find(|n| {
+            let (_, [ebb, main, _]) = wal(*n);
+            ebb.into_bytes() < main.into_bytes()
+        });
+        let main_first = (0..).find(|n| {
+            let (_, [ebb, main, _]) = wal(*n);
+            main.into_bytes() < ebb.into_bytes()
+        });
+
+        for number in [ebb_first.unwrap(), main_first.unwrap()] {
+            let (entries, [ebb, main, next]) = wal(number);
+            let chain = vec![ChainPoint::Origin, ebb, main, next];
+
+            assert_eq!(
+                points(ChainOrdered::forward(entries.clone().into_iter())),
+                chain,
+                "main block numbered {number}"
+            );
+
+            let mut reversed = chain;
+            reversed.reverse();
+
+            assert_eq!(
+                points(ChainOrdered::backward(entries.into_iter().rev())),
+                reversed,
+                "main block numbered {number}"
+            );
+        }
+    }
+
+    /// Entries that don't chain to each other keep their key order: the
+    /// Origin entry beside a block at slot 0.
+    #[test]
+    fn entries_that_do_not_chain_keep_their_key_order() {
+        let (point, block) = make_conway_block_with_prev(0, None, 0);
+        let point = ChainPoint::Specific(0, point.hash().unwrap());
+
+        let entries = vec![
+            (ChainPoint::Origin, Arc::new(vec![])),
+            (point.clone(), block),
+        ];
+
+        assert_eq!(
+            points(ChainOrdered::forward(entries.clone().into_iter())),
+            vec![ChainPoint::Origin, point.clone()]
+        );
+        assert_eq!(
+            points(ChainOrdered::backward(entries.into_iter().rev())),
+            vec![point, ChainPoint::Origin]
+        );
+    }
+
+    /// The Origin entry comes first beside a block at slot 0 that names a
+    /// parent the WAL doesn't hold, as a Byron chain's first boundary block
+    /// names the genesis hash.
+    #[test]
+    fn origin_comes_before_a_slot_zero_block_naming_a_parent() {
+        let (point, block) = make_byron_ebb(0, Hash::new([7u8; 32]));
+        let point = ChainPoint::Specific(byron_ebb_slot(0), point.hash().unwrap());
+
+        let entries = vec![
+            (ChainPoint::Origin, Arc::new(vec![])),
+            (point.clone(), block),
+        ];
+
+        assert_eq!(
+            points(ChainOrdered::forward(entries.clone().into_iter())),
+            vec![ChainPoint::Origin, point.clone()]
+        );
+        assert_eq!(
+            points(ChainOrdered::backward(entries.into_iter().rev())),
+            vec![point, ChainPoint::Origin]
         );
     }
 }

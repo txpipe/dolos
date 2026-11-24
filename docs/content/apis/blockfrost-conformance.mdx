@@ -75,7 +75,7 @@ On mainnet, five forms of `/epochs/{epoch}/blocks/{pool_id}` for one epoch and p
    yarn install
    ```
 
-3. Write `endpoints-allowlist.json` at the suite's root: a JSON array of the endpoint paths to run. The suite skips every test of an endpoint not in it. Take the paths from the [Coverage](./minibf#coverage) table and use Blockfrost's parameter names, or the suite refuses the file and runs nothing: `{subject}` is `{asset}`, `{epoch}` is `{number}`, a pool's `{id}` is `{pool_id}`, and `{tx_hash}` under `/txs/` is `{hash}`. These runs left out three endpoints: `/tx/submit`, which needs a funded wallet, `/metrics`, which the suite has no tests for (Dolos's own `/metrics` serves Prometheus metrics, not Blockfrost's usage metrics), and `/scripts/{script_hash}/utxos`. The suite does test the last one, so you can include it.
+3. Write `endpoints-allowlist.json` at the suite's root: a JSON array of the endpoint paths to run. The suite skips every test of an endpoint not in it. Take the paths from the [Coverage](./minibf#coverage) table and use Blockfrost's parameter names, or the suite refuses the file and runs nothing: `{subject}` is `{asset}`, `{epoch}` is `{number}`, a pool's `{id}` is `{pool_id}`, and `{tx_hash}` under `/txs/` is `{hash}`. These runs left out three endpoints: `/tx/submit`, which needs a funded wallet, `/metrics`, which the suite has no tests for and Dolos does not serve, and `/scripts/{script_hash}/utxos`. The suite does test the last one, so you can include it.
 4. Export the settings and run the network's tests:
 
    ```shell

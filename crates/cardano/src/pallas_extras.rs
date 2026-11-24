@@ -460,8 +460,13 @@ where
     F: FnMut(&MultiEraInput<'_>) -> Result<Option<Address>, E>,
 {
     let index = redeemer.index() as usize;
+    #[allow(
+        deprecated,
+        reason = "Pallas 1.5 deprecates tag; moving to multi_era_tag is a separate change"
+    )]
+    let tag = redeemer.tag();
 
-    match redeemer.tag() {
+    match tag {
         RedeemerTag::Spend => {
             let inputs = tx.inputs_sorted_set();
             let Some(input) = inputs.get(index) else {
@@ -711,6 +716,10 @@ pub fn aux_native_scripts<'a>(tx: &'a MultiEraTx<'_>) -> Vec<Cow<'a, [u8]>> {
     match written {
         None => vec![],
         Some(Ok(scripts)) => scripts.into_iter().map(Cow::Borrowed).collect(),
+        #[allow(
+            deprecated,
+            reason = "Pallas 1.5 deprecates aux_native_scripts; moving to multi_era_aux_native_scripts is a separate change"
+        )]
         Some(Err(_)) => tx
             .aux_native_scripts()
             .iter()
@@ -1031,7 +1040,12 @@ mod tests {
             })
             .expect("resolution failed");
 
-            assert_eq!(resolved, Some(script), "purpose {:?}", redeemer.tag());
+            #[allow(
+                deprecated,
+                reason = "Pallas 1.5 deprecates tag; moving to multi_era_tag is a separate change"
+            )]
+            let tag = redeemer.tag();
+            assert_eq!(resolved, Some(script), "purpose {:?}", tag);
         }
     }
 
@@ -1041,6 +1055,10 @@ mod tests {
         let tx = MultiEraTx::decode_for_era(Era::Conway, &bytes).expect("decodable tx");
 
         let redeemers = tx.redeemers();
+        #[allow(
+            deprecated,
+            reason = "Pallas 1.5 deprecates tag; moving to multi_era_tag is a separate change"
+        )]
         let spend = redeemers
             .iter()
             .find(|x| matches!(x.tag(), RedeemerTag::Spend))

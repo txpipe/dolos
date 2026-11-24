@@ -474,7 +474,7 @@ checksum = "90dbd31c98227229239363921e60fcf5e558e43ec69094d46fc4996f08d1d5bc"
 dependencies = [
  "bitcoin_hashes",
  "rand 0.8.6",
- "rand_core 0.5.1",
+ "rand_core 0.6.4",
  "serde",
  "unicode-normalization",
 ]
@@ -1504,7 +1504,7 @@ dependencies = [
 
 [[package]]
 name = "dolos"
-version = "2.0.0-alpha.0"
+version = "2.0.0-beta.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1536,8 +1536,11 @@ dependencies = [
  "futures-core",
  "futures-util",
  "gasket",
+ "gasket-otel",
  "hex",
  "http",
+ "http-body",
+ "http-body-util",
  "hyper",
  "indicatif",
  "inquire",
@@ -1552,14 +1555,22 @@ dependencies = [
  "opentelemetry_sdk",
  "pallas",
  "paste",
+ "pin-project-lite",
+ "prost 0.13.5",
+ "prost-types 0.13.5",
  "protoc-wkt",
  "rayon",
  "redb-extras",
+ "reqwest 0.13.5",
  "rustls",
  "serde",
  "serde_json",
  "serial_test",
  "stats_alloc",
+ "stelae",
+ "stelae-blocks",
+ "stelae-driver",
+ "tar",
  "tempfile",
  "thiserror 2.0.21",
  "tikv-jemallocator",
@@ -1572,6 +1583,8 @@ dependencies = [
  "tonic-web",
  "tower 0.4.13",
  "tower-http 0.6.8",
+ "tower-layer",
+ "tower-service",
  "tracing",
  "tracing-log",
  "tracing-opentelemetry",
@@ -1580,13 +1593,14 @@ dependencies = [
  "unicase",
  "unicode-normalization",
  "vergen-gitcl",
+ "whoami",
  "xxhash-rust",
  "zstd",
 ]
 
 [[package]]
 name = "dolos-cardano"
-version = "2.0.0-alpha.0"
+version = "2.0.0-beta.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1616,7 +1630,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-core"
-version = "2.0.0-alpha.0"
+version = "2.0.0-beta.1"
 dependencies = [
  "bytes",
  "config",
@@ -1627,6 +1641,7 @@ dependencies = [
  "hex",
  "itertools 0.14.0",
  "opentelemetry",
+ "opentelemetry_sdk",
  "pallas",
  "proptest",
  "rayon",
@@ -1646,13 +1661,15 @@ dependencies = [
 
 [[package]]
 name = "dolos-fjall"
-version = "2.0.0-alpha.0"
+version = "2.0.0-beta.1"
 dependencies = [
  "bincode 1.3.3",
  "dolos-core",
  "dolos-flatfiles",
  "dolos-testing",
  "fjall",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "pallas",
  "same-file",
  "smallvec",
@@ -1664,7 +1681,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-flatfiles"
-version = "2.0.0-alpha.0"
+version = "2.0.0-beta.1"
 dependencies = [
  "rayon",
  "sha2 0.10.9",
@@ -1674,10 +1691,11 @@ dependencies = [
 
 [[package]]
 name = "dolos-minibf"
-version = "2.0.0-alpha.0"
+version = "2.0.0-beta.1"
 dependencies = [
  "axum 0.8.4",
  "base58",
+ "base64 0.22.1",
  "bech32 0.11.1",
  "blockfrost-openapi",
  "chrono",
@@ -1696,6 +1714,7 @@ dependencies = [
  "num-bigint",
  "num-rational",
  "num-traits",
+ "opentelemetry",
  "pallas",
  "reqwest 0.12.28",
  "serde",
@@ -1709,7 +1728,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-minikupo"
-version = "2.0.0-alpha.0"
+version = "2.0.0-beta.1"
 dependencies = [
  "axum 0.8.4",
  "base58",
@@ -1719,6 +1738,7 @@ dependencies = [
  "dolos-testing",
  "hex",
  "http-body-util",
+ "opentelemetry",
  "pallas",
  "serde",
  "serde_json",
@@ -1730,7 +1750,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-mithril"
-version = "2.0.0-alpha.0"
+version = "2.0.0-beta.1"
 dependencies = [
  "mithril-client",
  "rustls",
@@ -1740,7 +1760,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-redb3"
-version = "2.0.0-alpha.0"
+version = "2.0.0-beta.1"
 dependencies = [
  "bincode 1.3.3",
  "bytes",
@@ -1764,7 +1784,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-snapshot"
-version = "2.0.0-alpha.0"
+version = "2.0.0-beta.1"
 dependencies = [
  "dolos-cardano",
  "dolos-core",
@@ -1778,6 +1798,7 @@ dependencies = [
  "serde",
  "serde_json",
  "stelae",
+ "stelae-blocks",
  "stelae-driver",
  "tempfile",
  "thiserror 2.0.21",
@@ -1789,7 +1810,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-testing"
-version = "2.0.0-alpha.0"
+version = "2.0.0-beta.1"
 dependencies = [
  "bech32 0.9.1",
  "crc32fast",
@@ -1801,17 +1822,23 @@ dependencies = [
  "futures-util",
  "hex",
  "itertools 0.14.0",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "pallas",
  "rand 0.9.3",
  "serde",
+ "serde_json",
+ "tar",
  "tempfile",
  "tokio",
  "tokio-stream",
+ "toml 0.8.20",
+ "zstd",
 ]
 
 [[package]]
 name = "dolos-trp"
-version = "2.0.0-alpha.0"
+version = "2.0.0-beta.1"
 dependencies = [
  "base64 0.22.1",
  "bincode 1.3.3",
@@ -1822,6 +1849,7 @@ dependencies = [
  "itertools 0.14.0",
  "jsonrpsee",
  "opentelemetry",
+ "opentelemetry_sdk",
  "pallas",
  "rand 0.9.3",
  "serde",
@@ -2002,9 +2030,8 @@ checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
 
 [[package]]
 name = "fjall"
-version = "3.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40cb1eb0cef3792900897b32c8282f6417bc978f6af46400a2f14bf0e649ae30"
+version = "3.1.13"
+source = "git+https://github.com/txpipe/fjall?rev=ae794ad448d90214c3491df4c50f59f0fe15cf90#ae794ad448d90214c3491df4c50f59f0fe15cf90"
 dependencies = [
  "byteorder-lite",
  "byteview",
@@ -2074,9 +2101,9 @@ checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.1"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e13624c2627564efccf4934284bdd98cbaa14e79b0b5a141218e507b3a823456"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -2196,9 +2223,9 @@ dependencies = [
 
 [[package]]
 name = "gasket"
-version = "0.9.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37057b6b0b48bb9bdcd4c2bc8ec51090a6cd754744caf28d44b813584473be3a"
+checksum = "4dceef5bf697fce670432aa547d57847b07cb62b956c50752d74f42ffb29b67b"
 dependencies = [
  "async-trait",
  "crossbeam",
@@ -2213,13 +2240,23 @@ dependencies = [
 
 [[package]]
 name = "gasket-derive"
-version = "0.9.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00c4883f898206041f02b010ab10400715e89e7845c63410f6bad162a3841174"
+checksum = "fcca62f09206877df06e23bfe18a8d9fdb63426c81ca4360253dd19d746739f0"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.100",
+]
+
+[[package]]
+name = "gasket-otel"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6c1244dc5eee15484bcc037dd0f4fe0f252863d02f91173c351c0045ae30092"
+dependencies = [
+ "gasket",
+ "opentelemetry",
 ]
 
 [[package]]
@@ -2724,9 +2761,9 @@ checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
 
 [[package]]
 name = "idna"
-version = "1.0.3"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "686f825264d630750a544639377bae737628043f20d38bbc029e8f29ea968a7e"
+checksum = "3b0875f23caa03898994f6ddc501886a45c7d3d62d04d2d90788d47be1b1e4de"
 dependencies = [
  "idna_adapter",
  "smallvec",
@@ -3184,9 +3221,9 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "lsm-tree"
-version = "3.1.0"
+version = "3.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc5fa40c207eed45c811085aaa1b0a25fead22e298e286081cd4b98785fe759b"
+checksum = "5498808f4d41cf785079d3ef3f28716f1b4364af1b512f3097bfb651bded1b3e"
 dependencies = [
  "byteorder-lite",
  "byteview",
@@ -3206,9 +3243,9 @@ dependencies = [
 
 [[package]]
 name = "lz4_flex"
-version = "0.11.6"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
+checksum = "7ef0d4ed8669f8f8826eb00dc878084aa8f253506c4fd5e8f58f5bce72ddb97e"
 dependencies = [
  "twox-hash",
 ]
@@ -3991,9 +4028,9 @@ checksum = "1036865bb9422d3300cf723f657c2851d0e9ab12567854b1f4eba3d77decf564"
 
 [[package]]
 name = "pallas"
-version = "1.4.0"
+version = "1.5.0-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b50be09dc955210e81885126145e3a2d86d7d764b085b8426e9f8630db86bfb"
+checksum = "dfb92ccf1b252530452965eae92b2c0a154e3d0f9a90e4753b2639cb8b1ead34"
 dependencies = [
  "pallas-addresses",
  "pallas-codec",
@@ -4010,9 +4047,9 @@ dependencies = [
 
 [[package]]
 name = "pallas-addresses"
-version = "1.4.0"
+version = "1.5.0-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7da690b8fc6776782e0a0b069cddcebed114807e7373b46620f6d8e899cd2ee5"
+checksum = "84c239845e5aea059cf85d17de8b6971fb8f6575ef0a9d4b2a45a2c10ad6fcc3"
 dependencies = [
  "base58",
  "bech32 0.11.1",
@@ -4026,9 +4063,9 @@ dependencies = [
 
 [[package]]
 name = "pallas-codec"
-version = "1.4.0"
+version = "1.5.0-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02127db5290c42ea6f6138896acf6196c8a6783d9d26dfe6870fd5ea0ce31440"
+checksum = "08458513d43d89daed59d9c6732f0c1ae346c00eb4d08d1c432097d792ef22df"
 dependencies = [
  "hex",
  "minicbor 0.26.4",
@@ -4038,9 +4075,9 @@ dependencies = [
 
 [[package]]
 name = "pallas-configs"
-version = "1.4.0"
+version = "1.5.0-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31a3e03564d380b5710c38619143621f8d5258fd933f701685e51fd4bf46cfdc"
+checksum = "9d8245ccee40e4fb45005e7b8386cc480a6f4697da2065957b64f80c809518ee"
 dependencies = [
  "base64 0.22.1",
  "num-rational",
@@ -4054,9 +4091,9 @@ dependencies = [
 
 [[package]]
 name = "pallas-crypto"
-version = "1.4.0"
+version = "1.5.0-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02480d918380d37a4e21c1d84c984f79bdc5e439f1de97ee1e08f1451b26f1c5"
+checksum = "0ee7b5abbe8a5b13aaf05625272a9a5a9adc3ea97b2911c13986611fa069b803"
 dependencies = [
  "cryptoxide 0.4.4",
  "hex",
@@ -4068,9 +4105,9 @@ dependencies = [
 
 [[package]]
 name = "pallas-hardano"
-version = "1.4.0"
+version = "1.5.0-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd0286efce0dc398a8443010271811ed227463b70875fb810c746052bc0e9f61"
+checksum = "c1019328eb4511bbacc915ca95b08a0a971abf5c8f0b3aec829c8206e468ffab"
 dependencies = [
  "binary-layout",
  "hex",
@@ -4089,9 +4126,9 @@ dependencies = [
 
 [[package]]
 name = "pallas-network"
-version = "1.4.0"
+version = "1.5.0-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d54e2357923b8db5fde4de5aba8807a653ecb4e21e62829014a36fbd13f11748"
+checksum = "5d2b304bb852d1ed46eb2ac979e1ed75ad0a2e57b2477e20475ab2919404a073"
 dependencies = [
  "byteorder",
  "hex",
@@ -4107,9 +4144,9 @@ dependencies = [
 
 [[package]]
 name = "pallas-primitives"
-version = "1.4.0"
+version = "1.5.0-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd1f296363961ee9e62a0979ee03d425aae8247d54705dc5efe07a4e06c11aa4"
+checksum = "9683e36342262c9461c2b9552515a5c46b06dc9a39f43538ab57bfa361c18b41"
 dependencies = [
  "hex",
  "pallas-codec",
@@ -4120,9 +4157,9 @@ dependencies = [
 
 [[package]]
 name = "pallas-traverse"
-version = "1.4.0"
+version = "1.5.0-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbb8352327793e8f6d614b3026a9de6bbc2f6bf0ecbf236f2fcf9ef8a4aafc12"
+checksum = "4dc897fa303b261b73950cfb8748aa328c9fc37b76669da5bd37754b8bcc3c1b"
 dependencies = [
  "hex",
  "itertools 0.14.0",
@@ -4137,9 +4174,9 @@ dependencies = [
 
 [[package]]
 name = "pallas-txbuilder"
-version = "1.4.0"
+version = "1.5.0-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad0b77784383398d2ba3c4467884ce8599dadffc15da1402e70e98a663441b66"
+checksum = "fea8e49340077f91e42eb52b83dc47de959eca4ad1397d0bca18f01b45a041de"
 dependencies = [
  "hex",
  "pallas-addresses",
@@ -4154,9 +4191,9 @@ dependencies = [
 
 [[package]]
 name = "pallas-utxorpc"
-version = "1.4.0"
+version = "1.5.0-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d78d88317fcf967eaae5971e4cbe8859da1faac238d1bff871ed7017ef19444"
+checksum = "0e7db9e093c9ac90070a7fe1c1c336768b05ba690a95c4ba9bdcd8eaee01effe"
 dependencies = [
  "pallas-codec",
  "pallas-crypto",
@@ -4169,9 +4206,9 @@ dependencies = [
 
 [[package]]
 name = "pallas-validate"
-version = "1.4.0"
+version = "1.5.0-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e9db4444fee6e5cb698ae248a97d1e8100f00896de5d879f189026a62370f20"
+checksum = "fc75d92505ba105a5836c3c87394a8d999308550b4aa9a291206a66e08d05255"
 dependencies = [
  "amaru-uplc",
  "chrono",
@@ -4261,9 +4298,9 @@ dependencies = [
 
 [[package]]
 name = "percent-encoding"
-version = "2.3.1"
+version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3148f5046208a5d56bcfc03053e3ca6334e51da8dfb19b6cdc8b306fae3283e"
+checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "petgraph"
@@ -5726,8 +5763,8 @@ checksum = "5c0e04424e733e69714ca1bbb9204c1a57f09f5493439520f9f68c132ad25eec"
 
 [[package]]
 name = "stelae"
-version = "0.5.2"
-source = "git+https://github.com/txpipe/stelae?rev=7b18c6f3e3166cef48d5c569b5908f85a82dd1e8#7b18c6f3e3166cef48d5c569b5908f85a82dd1e8"
+version = "0.6.0"
+source = "git+https://github.com/txpipe/stelae?rev=b2735ed829cbafdc57273a42871510aa564b00b3#b2735ed829cbafdc57273a42871510aa564b00b3"
 dependencies = [
  "bytes",
  "futures-util",
@@ -5748,12 +5785,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "stelae-blocks"
+version = "0.6.0"
+source = "git+https://github.com/txpipe/stelae?rev=b2735ed829cbafdc57273a42871510aa564b00b3#b2735ed829cbafdc57273a42871510aa564b00b3"
+dependencies = [
+ "minicbor 0.26.4",
+ "serde_json",
+ "stelae",
+ "stelae-driver",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "stelae-driver"
-version = "0.5.2"
-source = "git+https://github.com/txpipe/stelae?rev=7b18c6f3e3166cef48d5c569b5908f85a82dd1e8#7b18c6f3e3166cef48d5c569b5908f85a82dd1e8"
+version = "0.6.0"
+source = "git+https://github.com/txpipe/stelae?rev=b2735ed829cbafdc57273a42871510aa564b00b3#b2735ed829cbafdc57273a42871510aa564b00b3"
 dependencies = [
  "fs4",
- "minicbor 0.26.4",
  "serde",
  "serde_json",
  "stelae",
@@ -6313,11 +6361,13 @@ dependencies = [
  "pin-project",
  "sync_wrapper",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tower 0.5.2",
  "tower-layer",
  "tower-service",
  "tracing",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -6443,6 +6493,7 @@ dependencies = [
  "http-body",
  "iri-string",
  "pin-project-lite",
+ "tokio",
  "tower 0.5.2",
  "tower-layer",
  "tower-service",
@@ -6565,8 +6616,7 @@ checksum = "9ea3136b675547379c4bd395ca6b938e5ad3c3d20fad76e7fe85f9e0d011419c"
 [[package]]
 name = "tx3-cardano"
 version = "0.23.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a581b7e2051be3ce376d896e3a05e5ac4f74f486f9de1848f3df2c308776d21"
+source = "git+https://github.com/tx3-lang/tx3.git?rev=d8dee49b271fd8df67dd3db1480b061739339462#d8dee49b271fd8df67dd3db1480b061739339462"
 dependencies = [
  "hex",
  "pallas",
@@ -6580,8 +6630,7 @@ dependencies = [
 [[package]]
 name = "tx3-resolver"
 version = "0.23.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b88d2b04041e34fbe0358a7b7c187ea61556e9e73322ee60aeb3e9283cc99116"
+source = "git+https://github.com/tx3-lang/tx3.git?rev=d8dee49b271fd8df67dd3db1480b061739339462#d8dee49b271fd8df67dd3db1480b061739339462"
 dependencies = [
  "approx",
  "base64 0.22.1",
@@ -6599,8 +6648,7 @@ dependencies = [
 [[package]]
 name = "tx3-sdk"
 version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16120896b5d73621383f4980b3047769de90aea90fe26f500152d61d2287ddaa"
+source = "git+https://github.com/tx3-lang/rust-sdk.git?rev=e193bd4227e877a9ab48fac441a5fbc8d656efce#e193bd4227e877a9ab48fac441a5fbc8d656efce"
 dependencies = [
  "base64 0.22.1",
  "bech32 0.11.1",
@@ -6749,13 +6797,14 @@ checksum = "6d49784317cd0d1ee7ec5c716dd598ec5b4483ea832a2dced265471cc0f690ae"
 
 [[package]]
 name = "url"
-version = "2.5.4"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32f8b686cadd1473f4bd0117a5d28d36b1ade384ea9b5069a1c40aefed7fda60"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",
  "percent-encoding",
+ "serde",
 ]
 
 [[package]]
@@ -7338,6 +7387,7 @@ dependencies = [
  "dolos-minibf",
  "dolos-redb3",
  "dolos-testing",
+ "fjall",
  "hdrhistogram",
  "hex",
  "itertools 0.14.0",

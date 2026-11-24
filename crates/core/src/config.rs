@@ -11,7 +11,9 @@ use std::{
     collections::BTreeMap,
     fmt::Display,
     net::SocketAddr,
+    num::NonZeroU64,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
@@ -607,7 +609,7 @@ impl Default for CacheConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct StorageConfig {
     /// Root directory for the stores, relative to the working directory. Also
-    /// holds `scratch/`, where a stele transfer over an OCI registry stages
+    /// holds `scratch/`, where a snapshot transfer over an OCI registry stages
     /// layers in flight.
     pub path: PathBuf,
     #[serde(skip_serializing_if = "is_default")]
@@ -907,7 +909,8 @@ pub struct MinibfConfig {
     permissive_cors: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_registry_url: Option<String>,
-    /// The URL clients reach this API at.
+    /// The URL clients reach this API at, reported as `url` by `/`. Unset,
+    /// `/` carries no `url`; the bind address is never reported instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -916,6 +919,8 @@ pub struct MinibfConfig {
     route_prefix: Option<RoutePrefix>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ipfs_gateways: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request_timeout_seconds: Option<u64>,
 }
 
 impl MinibfConfig {
@@ -928,7 +933,19 @@ impl MinibfConfig {
             max_scan_items: None,
             route_prefix: None,
             ipfs_gateways: None,
+            request_timeout_seconds: None,
         }
+    }
+
+    pub fn with_request_timeout_seconds(mut self, seconds: u64) -> Self {
+        self.request_timeout_seconds = Some(seconds);
+        self
+    }
+
+    /// How long a request may take, admission wait included, before it is
+    /// answered 504.
+    pub fn request_timeout(&self) -> Duration {
+        request_timeout(self.request_timeout_seconds)
     }
 
     pub fn with_permissive_cors(mut self, permissive_cors: bool) -> Self {
@@ -979,6 +996,8 @@ pub struct MinikupoConfig {
     pub listen_address: SocketAddr,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissive_cors: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request_timeout_seconds: Option<u64>,
 }
 
 impl MinikupoConfig {
@@ -986,7 +1005,19 @@ impl MinikupoConfig {
         Self {
             listen_address,
             permissive_cors: None,
+            request_timeout_seconds: None,
         }
+    }
+
+    pub fn with_request_timeout_seconds(mut self, seconds: u64) -> Self {
+        self.request_timeout_seconds = Some(seconds);
+        self
+    }
+
+    /// How long a request may take, admission wait included, before it is
+    /// answered 504.
+    pub fn request_timeout(&self) -> Duration {
+        request_timeout(self.request_timeout_seconds)
     }
 
     pub fn with_permissive_cors(mut self, permissive_cors: bool) -> Self {
@@ -1053,6 +1084,16 @@ fn default_max_scan_items() -> u64 {
     3000
 }
 
+/// The request deadline of the HTTP APIs, in seconds.
+pub const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 120;
+
+/// The request deadlines an HTTP API accepts, in seconds.
+pub const REQUEST_TIMEOUT_SECONDS: std::ops::RangeInclusive<u64> = 1..=3600;
+
+fn request_timeout(seconds: Option<u64>) -> Duration {
+    Duration::from_secs(seconds.unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECONDS))
+}
+
 fn default_ipfs_gateways() -> Vec<String> {
     // The main public gateway is first. A fallback gateway is second. If the
     // first gateway returns HTTP 429, the resolver uses the fallback.
@@ -1103,6 +1144,13 @@ pub struct ServeConfig {
     /// Blocking query work the node runs at once, across every API.
     #[serde(deserialize_with = "whole_number")]
     pub max_concurrent_queries: usize,
+    /// Heavy-scan requests the node serves at once, across every API.
+    #[serde(deserialize_with = "whole_number")]
+    pub max_concurrent_heavy_scans: usize,
+    /// How long a heavy-scan request waits for a slot before it is answered
+    /// 503, in seconds.
+    #[serde(deserialize_with = "whole_number")]
+    pub heavy_scan_queue_seconds: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grpc: Option<GrpcConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1119,6 +1167,8 @@ impl Default for ServeConfig {
     fn default() -> Self {
         Self {
             max_concurrent_queries: QueryLimiter::DEFAULT_CAP,
+            max_concurrent_heavy_scans: QueryLimiter::DEFAULT_HEAVY_LIMIT,
+            heavy_scan_queue_seconds: QueryLimiter::DEFAULT_HEAVY_QUEUE.as_secs() as usize,
             grpc: None,
             minibf: None,
             minikupo: None,
@@ -1130,6 +1180,17 @@ impl Default for ServeConfig {
 
 impl ServeConfig {
     pub const MAX_CONCURRENT_QUERIES: std::ops::RangeInclusive<usize> = 1..=64;
+    pub const MAX_CONCURRENT_HEAVY_SCANS: std::ops::RangeInclusive<usize> = 1..=64;
+    pub const HEAVY_SCAN_QUEUE_SECONDS: std::ops::RangeInclusive<usize> = 0..=60;
+
+    /// The query limiter these settings describe.
+    pub fn query_limiter(&self) -> QueryLimiter {
+        QueryLimiter::with_heavy_scans(
+            self.max_concurrent_queries,
+            self.max_concurrent_heavy_scans,
+            Duration::from_secs(self.heavy_scan_queue_seconds as u64),
+        )
+    }
 
     pub fn is_default(&self) -> bool {
         *self == Self::default()
@@ -1169,20 +1230,45 @@ impl LoggingConfig {
     }
 }
 
-/// OTLP trace export, on when the section is present.
+/// The OTLP transport both exporters use.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum OtlpProtocol {
+    #[default]
+    Grpc,
+    /// Protobuf over HTTP, posted under the endpoint's `/v1/traces` and
+    /// `/v1/metrics`.
+    HttpProtobuf,
+}
+
+/// OTLP trace and metric export, on when the section is present.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct TelemetryConfig {
     pub otlp_endpoint: String,
+    pub otlp_protocol: OtlpProtocol,
     pub service_name: String,
+    /// Metrics can be turned off while traces stay on.
+    pub metrics: bool,
+    pub metrics_interval_seconds: NonZeroU64,
 }
 
 impl Default for TelemetryConfig {
     fn default() -> Self {
         Self {
             otlp_endpoint: "http://localhost:4317".to_string(),
+            otlp_protocol: OtlpProtocol::Grpc,
             service_name: "dolos".to_string(),
+            metrics: true,
+            metrics_interval_seconds: NonZeroU64::new(60).unwrap(),
         }
+    }
+}
+
+impl TelemetryConfig {
+    /// How often the metrics are exported.
+    pub fn metrics_interval(&self) -> Duration {
+        Duration::from_secs(self.metrics_interval_seconds.get())
     }
 }
 
@@ -1342,6 +1428,59 @@ impl RootConfig {
             ));
         }
 
+        let heavy = self.serve.max_concurrent_heavy_scans;
+        if !ServeConfig::MAX_CONCURRENT_HEAVY_SCANS.contains(&heavy) {
+            return Err(ConfigError::invalid(
+                ["serve.max_concurrent_heavy_scans"],
+                format!(
+                    "`serve.max_concurrent_heavy_scans` must be between {} and {}, found {heavy}",
+                    ServeConfig::MAX_CONCURRENT_HEAVY_SCANS.start(),
+                    ServeConfig::MAX_CONCURRENT_HEAVY_SCANS.end(),
+                ),
+            ));
+        }
+
+        let queue = self.serve.heavy_scan_queue_seconds;
+        if !ServeConfig::HEAVY_SCAN_QUEUE_SECONDS.contains(&queue) {
+            return Err(ConfigError::invalid(
+                ["serve.heavy_scan_queue_seconds"],
+                format!(
+                    "`serve.heavy_scan_queue_seconds` must be between {} and {}, found {queue}",
+                    ServeConfig::HEAVY_SCAN_QUEUE_SECONDS.start(),
+                    ServeConfig::HEAVY_SCAN_QUEUE_SECONDS.end(),
+                ),
+            ));
+        }
+
+        let timeouts = [
+            (
+                "serve.minibf.request_timeout_seconds",
+                self.serve
+                    .minibf
+                    .as_ref()
+                    .and_then(|c| c.request_timeout_seconds),
+            ),
+            (
+                "serve.minikupo.request_timeout_seconds",
+                self.serve
+                    .minikupo
+                    .as_ref()
+                    .and_then(|c| c.request_timeout_seconds),
+            ),
+        ];
+        for (field, seconds) in timeouts {
+            if let Some(seconds) = seconds.filter(|s| !REQUEST_TIMEOUT_SECONDS.contains(s)) {
+                return Err(ConfigError::invalid(
+                    [field],
+                    format!(
+                        "`{field}` must be between {} and {}, found {seconds}",
+                        REQUEST_TIMEOUT_SECONDS.start(),
+                        REQUEST_TIMEOUT_SECONDS.end(),
+                    ),
+                ));
+            }
+        }
+
         let (state, archive) = (&self.storage.state, &self.storage.archive);
         let stray: Vec<(&str, &str)> = [
             (
@@ -1434,14 +1573,20 @@ pub enum ConfigError {
 
     #[error(
         "this is a Dolos v1 or v2.0.0-alpha.0 configuration, which this release does not read; \
-         rewrite it as described in the migration guide at {MIGRATION_GUIDE_URL}"
+         rewrite it as described in the migration guide at {MIGRATION_GUIDE_URL}, with \
+         `compatibility = \"{}\"` at the top",
+        Compatibility::current()
     )]
     LegacyShape,
 
     #[error("`compatibility` must be a string such as \"{current}\", found {0}", current = Compatibility::current())]
     MalformedCompatibility(String),
 
-    #[error("unsupported `compatibility = \"{0}\"`; this release supports {supported}", supported = supported_contracts())]
+    #[error(
+        "unsupported `compatibility = \"{0}\"`; this release supports {supported}; see the \
+         migration guide at {MIGRATION_GUIDE_URL}",
+        supported = supported_contracts()
+    )]
     UnsupportedCompatibility(String),
 
     #[error(
@@ -1494,21 +1639,20 @@ impl ConfigError {
 }
 
 /// Sections an older configuration carried that are now inputs of the
-/// commands that read them, and where each one went.
+/// commands that read them, or gone, and what became of each one.
 const MOVED_TO_ARGUMENTS: [(&str, &str); 3] = [
     (
         "mithril",
-        "`dolos bootstrap mithril --aggregator --genesis-vkey`",
+        "moved to `dolos bootstrap mithril --aggregator --genesis-vkey`",
     ),
     (
         "snapshot",
-        "`stelae-publisher digest --state-epochs-file` (and `verify --reproduce`), one epoch per \
-         line; the download URL has no successor",
+        "is gone: its state epochs and download URL have no successor",
     ),
     (
         "stelae",
-        "`--registry-user` / `DOLOS_STELAE_USER`, `DOLOS_STELAE_PASSWORD`, `DOLOS_STELAE_TOKEN` \
-         and `--registry-credentials-file` on `dolos bootstrap stelae`",
+        "moved to `--registry-user` / `DOLOS_STELAE_USER`, `DOLOS_STELAE_PASSWORD`, \
+         `DOLOS_STELAE_TOKEN` and `--registry-credentials-file` on `dolos bootstrap stelae`",
     ),
 ];
 
@@ -2010,7 +2154,7 @@ fn reject_moved_sections(document: &::config::Config) -> Result<(), ConfigError>
     let moved: Vec<String> = MOVED_TO_ARGUMENTS
         .iter()
         .filter(|(section, _)| document.get::<::config::Value>(section).is_ok())
-        .map(|(section, destination)| format!("[{section}] moved to {destination}"))
+        .map(|(section, fate)| format!("[{section}] {fate}"))
         .collect();
 
     if moved.is_empty() {
@@ -2137,15 +2281,15 @@ mod tests {
     #[test]
     fn compatibility_accepts_only_the_supported_contracts() {
         assert_eq!(
-            Compatibility::parse("v2-alpha.2").unwrap().as_str(),
-            "v2-alpha.2"
+            Compatibility::parse("v2-beta.1").unwrap().as_str(),
+            "v2-beta.1"
         );
         assert_eq!(Compatibility::current().as_str(), SUPPORTED_CONTRACTS[0]);
 
-        for refused in ["v2-alpha.0", "v2-alpha.1"] {
+        for refused in ["v2-alpha.0", "v2-alpha.1", "v2-alpha.2"] {
             let message = Compatibility::parse(refused).unwrap_err().to_string();
             assert!(message.contains(refused), "{message}");
-            assert!(message.contains("\"v2-alpha.2\""), "{message}");
+            assert!(message.contains("\"v2-beta.1\""), "{message}");
         }
     }
 

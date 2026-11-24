@@ -154,6 +154,10 @@ where
         }
 
         // only txs with spend redeemers need input resolution
+        #[allow(
+            deprecated,
+            reason = "Pallas 1.5 deprecates tag; moving to multi_era_tag is a separate change"
+        )]
         let spending = with_redeemers.iter().copied().filter(|tx| {
             tx.redeemers()
                 .iter()
@@ -191,6 +195,10 @@ where
                     continue;
                 }
 
+                #[allow(
+                    deprecated,
+                    reason = "Pallas 1.5 deprecates tag; moving to multi_era_tag is a separate change"
+                )]
                 let purpose = script_redeemer_purpose(redeemer.tag());
 
                 let prices = prices_for_epoch(domain, &chain, epoch, &mut prices_by_epoch)?;

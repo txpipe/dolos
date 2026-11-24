@@ -1,4 +1,4 @@
-use dolos::sync::SyncLimit;
+use dolos::sync::{metrics::ExportedDaemon, SyncLimit};
 use dolos_core::config::RootConfig;
 use futures_util::stream::FuturesUnordered;
 use miette::{Context, IntoDiagnostic};
@@ -9,20 +9,33 @@ pub struct Args {}
 
 #[tokio::main]
 pub async fn run(config: RootConfig, _args: &Args) -> miette::Result<()> {
-    let _tracing = crate::common::setup_tracing(&config.logging, config.telemetry.as_ref())?;
+    crate::common::refuse_interrupted_restore(&config)?;
+
+    let telemetry = crate::common::setup_tracing(&config)?;
 
     let domain = crate::common::setup_domain(&config)?;
+    let _limiter_gauges =
+        dolos_core::telemetry::queries::LimiterGauges::register(&domain.query_limiter);
+
+    let _mempool_metrics = crate::common::mempool_metrics(&domain);
 
     let exit = crate::common::hook_exit_token();
 
-    let sync = dolos::sync::pipeline(&config, SyncLimit::Follow, domain.clone())
-        .into_diagnostic()
-        .context("bootstrapping sync pipeline")?;
+    let sync = dolos::sync::pipeline(
+        &config,
+        SyncLimit::Follow,
+        domain.clone(),
+        telemetry.metrics_flush(),
+    )
+    .into_diagnostic()
+    .context("bootstrapping sync pipeline")?;
 
     let progress = sync.progress;
+    let _sync_gauges = sync.gauges;
 
     let sync = tokio::spawn(crate::common::run_pipeline(
-        gasket::daemon::Daemon::new(sync.tethers),
+        ExportedDaemon::new(gasket::daemon::Daemon::new(sync.tethers)),
+        telemetry.metrics_flush(),
         exit.clone(),
     ));
 

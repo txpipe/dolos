@@ -582,7 +582,9 @@ fn a_rollback_that_drops_estarts_rows_warns() {
 
     assert!(!logged(&domain)[&opened].is_empty());
 
-    let said = logs_of(|| domain.rollback(&ChainPoint::Slot(start)).unwrap());
+    let said = logs_of(|| {
+        domain.rollback(&ChainPoint::Slot(start)).unwrap();
+    });
 
     assert!(
         !logged(&domain).contains_key(&opened),

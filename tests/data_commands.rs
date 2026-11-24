@@ -482,6 +482,53 @@ fn check_exits_3_on_a_cursor_mismatch() {
     );
 }
 
+/// A WAL this release can't read is checked as an empty one, with one
+/// warning on stderr saying so, and left as it was.
+#[test]
+fn check_warns_of_a_wal_it_reads_as_empty() {
+    use dolos_redb3::redb::TableDefinition;
+
+    let node = Node::new();
+    node.sync();
+
+    // An import writes no WAL; seed it at the cursor, as a rebuild does.
+    {
+        let stores =
+            dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&node.config).unwrap();
+        let cursor = stores.state.read_cursor().unwrap().unwrap();
+        stores.wal.reset_to(&cursor).unwrap();
+    }
+
+    let wal = node.config.wal_path().unwrap();
+
+    {
+        let db = dolos_redb3::redb::Database::create(&wal).unwrap();
+        let wx = db.begin_write().unwrap();
+        wx.open_table(TableDefinition::<&str, u32>::new("wal_metadata"))
+            .unwrap()
+            .insert("version", dolos_redb3::wal::CURRENT_WAL_VERSION + 1)
+            .unwrap();
+        wx.commit().unwrap();
+    }
+
+    let before = std::fs::read(&wal).unwrap();
+
+    let json = dolos(
+        &node,
+        &["data", "check", "--check", "cursors", "--format", "json"],
+    );
+    assert_eq!(json.status.code(), Some(3), "{}", stderr(&json));
+
+    let said = stderr(&json);
+    assert_eq!(said.matches("reads it as empty").count(), 1, "{said}");
+    assert!(said.contains(&wal.display().to_string()), "{said}");
+
+    let report: serde_json::Value = serde_json::from_str(stdout(&json).trim()).unwrap();
+    assert_eq!(report["checks"][0]["check"], "cursors");
+
+    assert!(std::fs::read(&wal).unwrap() == before, "the WAL changed");
+}
+
 #[test]
 fn the_dumps_refuse_what_they_cannot_print() {
     let (node, _) = populated();

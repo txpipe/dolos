@@ -60,6 +60,10 @@ impl MempoolStore for Mempool {
         vec![]
     }
 
+    fn count(&self) -> dolos_core::MempoolCount {
+        dolos_core::MempoolCount::default()
+    }
+
     fn mark_inflight(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
         Ok(())
     }

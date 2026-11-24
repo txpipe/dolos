@@ -77,8 +77,14 @@ struct Positions {
     /// past Origin.
     rollback_floor: Option<RollbackFloor>,
     state: Option<ChainPoint>,
+    /// The blocks the WAL holds after another at their slot, the main block
+    /// of a Byron boundary pair, with how many of the slot's blocks each
+    /// applies; read at the WAL tip's and the state's slots.
+    stacked: Vec<(ChainPoint, usize)>,
     /// The archive's tip slot: `None` while it is empty, or not kept.
     archive: Option<BlockSlot>,
+    /// How many blocks the archive holds at its tip slot.
+    archive_blocks: usize,
     /// Whether the dataset keeps an archive; see [`archive_kept`].
     archive_kept: bool,
     /// Whether the archive keeps only the latest blocks
@@ -104,7 +110,7 @@ impl Positions {
             .context("reading the WAL start")?
             .map(|(point, _)| point);
 
-        let wal_tip = stores
+        let mut wal_tip = stores
             .wal
             .find_tip()
             .into_diagnostic()
@@ -128,13 +134,52 @@ impl Positions {
             .context("reading the archive tip")?
             .map(|(slot, _)| slot);
 
+        let archive_blocks = match archive {
+            Some(slot) => stores
+                .archive
+                .get_blocks_by_slot(&slot)
+                .into_diagnostic()
+                .context("reading the archive tip")?
+                .len(),
+            None => 0,
+        };
+
+        let slots: std::collections::BTreeSet<_> = [&wal_tip, &state]
+            .into_iter()
+            .flatten()
+            .map(|point| point.slot())
+            .collect();
+
+        let mut stacked = Vec::new();
+        for slot in slots {
+            let chain = dolos_core::wal::chain_at_slot(&stores.wal, slot)
+                .into_diagnostic()
+                .context("reading the WAL")?;
+
+            // Keys sort a slot's entries by hash, so the last key there can be
+            // a boundary block the chain puts first.
+            if chain.len() > 1 && wal_tip.as_ref().is_some_and(|tip| tip.slot() == slot) {
+                wal_tip = chain.last().cloned();
+            }
+
+            stacked.extend(
+                chain
+                    .into_iter()
+                    .enumerate()
+                    .skip(1)
+                    .map(|(at, point)| (point, at + 1)),
+            );
+        }
+
         Ok(Self {
             wal_start,
             wal_tip,
             wal_history,
             rollback_floor,
             state,
+            stacked,
             archive,
+            archive_blocks,
             archive_kept: archive_kept(config),
             archive_rolling: config.history.max_slots().is_some(),
         })
@@ -147,14 +192,34 @@ impl Positions {
         self.archive_kept && self.archive_rolling && self.archive.is_none()
     }
 
-    /// The slot the WAL tip has applied the chain through.
-    fn wal(&self) -> Option<BlockSlot> {
-        applied(self.wal_tip.as_ref())
+    /// How far the WAL tip has applied the chain.
+    fn wal(&self) -> Option<Applied> {
+        self.applied(self.wal_tip.as_ref())
     }
 
-    /// The slot the state has applied the chain through.
-    fn state(&self) -> Option<BlockSlot> {
-        applied(self.state.as_ref())
+    /// How far the state has applied the chain.
+    fn state(&self) -> Option<Applied> {
+        self.applied(self.state.as_ref())
+    }
+
+    /// How far the archive has applied the chain: through the blocks at its
+    /// tip.
+    fn archive(&self) -> Option<Applied> {
+        self.archive.map(|slot| Applied {
+            slot,
+            blocks: self.archive_blocks.max(1),
+        })
+    }
+
+    /// [`applied`], counting the blocks before `point` at its slot.
+    fn applied(&self, point: Option<&ChainPoint>) -> Option<Applied> {
+        let mut at = applied(point)?;
+
+        if let Some((_, blocks)) = self.stacked.iter().find(|(held, _)| Some(held) == point) {
+            at.blocks = *blocks;
+        }
+
+        Some(at)
     }
 
     /// What keeps the state, and the archive when it is kept, from standing at
@@ -167,8 +232,8 @@ impl Positions {
             found.push(relative_to_wal("state", self.state(), wal));
         }
 
-        if self.archive_kept && self.archive != wal {
-            found.push(relative_to_wal("archive", self.archive, wal));
+        if self.archive_kept && self.archive() != wal {
+            found.push(relative_to_wal("archive", self.archive(), wal));
         }
 
         found
@@ -177,8 +242,35 @@ impl Positions {
     /// Whether the archive is the one store away from the WAL tip, and ahead
     /// of it: only a sync past the archive tip brings the others to it.
     fn only_archive_ahead(&self) -> bool {
-        self.state() == self.wal() && self.archive_kept && self.archive > self.wal()
+        self.state() == self.wal() && self.archive_kept && self.archive() > self.wal()
     }
+}
+
+/// How far a store has applied the chain, ordered as the chain is: through
+/// the blocks at `slot`, or, for a cursor that holds only a slot (ESTART's,
+/// at an epoch's first block), up to them and not through them. A Byron
+/// boundary block and the main block chained onto it share a slot, and the
+/// main block comes second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Applied {
+    slot: BlockSlot,
+    /// How many of the blocks at `slot` are applied.
+    blocks: usize,
+}
+
+impl std::fmt::Display for Applied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.blocks {
+            0 => write!(f, "slot {} (its block not applied)", self.slot),
+            1 => write!(f, "slot {}", self.slot),
+            n => write!(f, "slot {} (its first {n} blocks applied)", self.slot),
+        }
+    }
+}
+
+/// `at`, or `empty` for a store that has applied nothing.
+fn position(at: Option<Applied>) -> String {
+    at.map_or("empty".to_string(), |at| at.to_string())
 }
 
 /// Where the WAL's unbroken history starts (see [`Positions::wal_history`]),
@@ -210,26 +302,29 @@ fn history_start<W: WalStore>(
     Ok((history, floor))
 }
 
-/// The slot a store has applied the chain through: none for no position, or
+/// How far a store at `point` has applied the chain: none for no position, or
 /// for Origin, where nothing is applied yet.
-fn applied(point: Option<&ChainPoint>) -> Option<BlockSlot> {
+fn applied(point: Option<&ChainPoint>) -> Option<Applied> {
     match point {
         None | Some(ChainPoint::Origin) => None,
-        Some(point) => Some(point.slot()),
+        Some(point) => Some(Applied {
+            slot: point.slot(),
+            blocks: usize::from(point.is_fully_defined()),
+        }),
     }
 }
 
 /// `store`, at `at`, said against the WAL tip at `wal`.
-fn relative_to_wal(store: &str, at: Option<BlockSlot>, wal: Option<BlockSlot>) -> String {
+fn relative_to_wal(store: &str, at: Option<Applied>, wal: Option<Applied>) -> String {
     let store = match at {
-        Some(slot) => format!("the {store}, at slot {slot},"),
+        Some(at) => format!("the {store}, at {at},"),
         None => format!("the {store}, empty,"),
     };
 
     let relation = if at < wal { "behind" } else { "ahead of" };
 
     match wal {
-        Some(slot) => format!("{store} is {relation} the WAL tip at slot {slot}"),
+        Some(wal) => format!("{store} is {relation} the WAL tip at {wal}"),
         None => format!("{store} is {relation} the WAL, which is empty"),
     }
 }

@@ -156,8 +156,7 @@ impl FlatFileStore {
 
     /// The file holding `segment_id`'s frames.
     pub fn segment_path(&self, segment_id: u32) -> PathBuf {
-        self.segments_dir
-            .join(format!("{segment_id:06}.{SEGMENT_EXTENSION}"))
+        self.segments_dir.join(segment_filename(segment_id))
     }
 
     pub fn resource_stats(&self) -> ResourceStats {
@@ -583,6 +582,12 @@ fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> io::Result
         }
     }
     Ok(())
+}
+
+/// The name of the file holding `segment_id`'s frames, in whichever directory
+/// holds the store's segments.
+pub fn segment_filename(segment_id: u32) -> String {
+    format!("{segment_id:06}.{SEGMENT_EXTENSION}")
 }
 
 /// The segment number a file name denotes, if it is a segment file.

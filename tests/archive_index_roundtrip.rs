@@ -1053,7 +1053,7 @@ fn mib(bytes: u64) -> f64 {
 /// [`LAYER_SINK_BYTES`](dolos_snapshot::export::LAYER_SINK_BYTES) is what a
 /// publish's memory is sized on, so the number has to come from somewhere other
 /// than a guess about zstd's internals. Sinks are opened one at a time against
-/// a real stele and each is given records to compress, because a compression
+/// a real snapshot and each is given records to compress, because a compression
 /// context that has never compressed anything has not yet allocated its
 /// window — a measurement taken before that would say a sink is nearly free.
 ///
@@ -1064,13 +1064,13 @@ fn mib(bytes: u64) -> f64 {
 #[test]
 #[ignore = "measurement, not an assertion"]
 fn measure_layer_sink_residency() {
-    use dolos_snapshot::transport::{RecordSink as _, SteleWriter as _};
+    use dolos_snapshot::transport::{RecordSink as _, SnapshotWriter as _};
     use dolos_snapshot::{DolosProfile, EpochScope, Scope as _, COMPRESSION_LEVEL, INDEXES};
 
     const SINKS: u64 = 32;
 
     let temp = tempfile::tempdir().expect("tempdir");
-    let stele = dolos_snapshot::dir::SteleDir::create(temp.path()).expect("create stele");
+    let snapshot = dolos_snapshot::dir::SnapshotDir::create(temp.path()).expect("create snapshot");
 
     // A record for every sink to chew on, built once: the point is the
     // compressor's resident state, not the bytes handed to it.
@@ -1094,7 +1094,7 @@ fn measure_layer_sink_residency() {
         .layer_spec(INDEXES)
         .expect("layer spec");
 
-        let mut sink = stele
+        let mut sink = snapshot
             .layer_sink(&DolosProfile, &spec, COMPRESSION_LEVEL)
             .expect("layer sink");
 
@@ -1128,7 +1128,7 @@ fn measure_layer_sink_residency() {
 /// The whole-publish figure: what a first publish of a store this deep costs,
 /// staging its index in one traversal.
 ///
-/// The stele is written for real — compressed, framed and landed in a
+/// The snapshot is written for real — compressed, framed and landed in a
 /// directory — because the claim is about a publish and not about a loop. Only
 /// the index store is seeded: `blocks`, `log-*` and `state-*` are already
 /// O(range) and would add the same constant to both arms while making the run
@@ -1231,16 +1231,15 @@ fn publish_staged<S: CoreArchiveStore>(
         &summary,
         Network::for_magic(dolos_snapshot::MAINNET_MAGIC),
         tip.clone(),
-        Default::default(),
+        EPOCH_LEN / 2,
     )
     .expect("plan");
 
     let inscription = dolos_snapshot::export::publish(
-        temp.path().join("stele"),
+        temp.path().join("snapshot"),
         &plan,
         store,
         &state,
-        None,
         &dolos_snapshot::progress::Observer::silent(),
     )
     .expect("publish");

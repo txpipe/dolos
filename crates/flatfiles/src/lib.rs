@@ -14,7 +14,8 @@ mod store;
 
 pub use codec::{frame_bound, BUNDLED_DICTIONARY, COMPRESSION_LEVEL, MAX_BODY_BYTES};
 pub use store::{
-    parse_segment_filename, AppendStats, FlatFileStore, ResourceStats, ENCODE_WINDOW_BYTES,
+    parse_segment_filename, segment_filename, AppendStats, FlatFileStore, ResourceStats,
+    ENCODE_WINDOW_BYTES,
 };
 
 /// Number of slots per segment file (one Cardano epoch).

@@ -12,7 +12,7 @@
 //! So the sets are checked in both directions, and the *fixture* is checked
 //! against them too: a golden digest only freezes what its input contains, and
 //! an addition upstream has to break a test here rather than quietly widen what
-//! a stele may hold.
+//! a snapshot may hold.
 
 mod common;
 
@@ -185,11 +185,11 @@ fn the_golden_state_layers_cover_every_namespace() {
     }
 }
 
-/// Every state kind appears in the golden stele, so every state kind string is
-/// frozen by a published digest — the state half of
-/// `the_golden_stele_covers_every_log_kind`.
+/// Every state kind appears in the golden snapshot, so every state kind string
+/// is frozen by a published digest — the state half of
+/// `the_golden_snapshot_covers_every_log_kind`.
 #[test]
-fn the_golden_stele_covers_every_state_kind() {
+fn the_golden_snapshot_covers_every_state_kind() {
     let present: BTreeSet<&str> = common::all_layers()
         .iter()
         .filter_map(|(kind, _, _)| state_ns_for(kind).map(|_| *kind))
@@ -202,7 +202,7 @@ fn the_golden_stele_covers_every_state_kind() {
 
     assert_eq!(
         present, expected,
-        "the golden stele no longer freezes every state kind"
+        "the golden snapshot no longer freezes every state kind"
     );
 }
 
@@ -288,10 +288,10 @@ fn log_kinds_derive_from_their_namespaces() {
     }
 }
 
-/// Every log kind appears in the golden stele, so every log kind string is
+/// Every log kind appears in the golden snapshot, so every log kind string is
 /// frozen by a published digest.
 #[test]
-fn the_golden_stele_covers_every_log_kind() {
+fn the_golden_snapshot_covers_every_log_kind() {
     let present: BTreeSet<&str> = common::all_layers()
         .iter()
         .filter_map(|(kind, _, _)| log_ns_for(kind).map(|_| *kind))
@@ -301,7 +301,7 @@ fn the_golden_stele_covers_every_log_kind() {
 
     assert_eq!(
         present, expected,
-        "the golden stele no longer freezes every log kind"
+        "the golden snapshot no longer freezes every log kind"
     );
 
     for (_, ns) in LOG_KINDS {
@@ -351,10 +351,10 @@ fn entity_kinds_derive_from_their_names() {
     assert!(entity_layer_for(EntityKind::new("datum", 32)).is_none());
 }
 
-/// Every entity kind appears in the golden stele, so every entity kind string
-/// and id width is frozen by a published digest.
+/// Every entity kind appears in the golden snapshot, so every entity kind
+/// string and id width is frozen by a published digest.
 #[test]
-fn the_golden_stele_covers_every_entity_kind() {
+fn the_golden_snapshot_covers_every_entity_kind() {
     let present: BTreeSet<&str> = common::all_layers()
         .iter()
         .filter_map(|(kind, _, _)| entity_kind_for(kind).map(|_| *kind))
@@ -364,7 +364,7 @@ fn the_golden_stele_covers_every_entity_kind() {
 
     assert_eq!(
         present, expected,
-        "the golden stele no longer freezes every entity kind"
+        "the golden snapshot no longer freezes every entity kind"
     );
 
     for (_, kind) in ENTITY_KINDS {
@@ -399,7 +399,7 @@ fn state_kinds_derive_from_their_namespaces() {
         kinds.push(kind);
     }
 
-    // The pre-0056 spellings are not aliases: v2 steles are a fresh lineage.
+    // The pre-0056 spellings are not aliases: v2 snapshots are a fresh lineage.
     for retired in ["pending_rewards", "pending_mirs", "stakes"] {
         assert!(state_kind_for(retired).is_none(), "{retired}");
     }
@@ -432,7 +432,7 @@ fn state_kinds_derive_from_their_namespaces() {
         "STATE_KINDS and the state namespaces disagree"
     );
 
-    // An archive-only log has no state kind: a stele carries no state layer
+    // An archive-only log has no state kind: a snapshot carries no state layer
     // for it.
     for ns in NAMESPACES {
         if ns != UTXOS && !states.contains(ns) {

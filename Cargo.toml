@@ -37,6 +37,7 @@ opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
 opentelemetry-otlp.workspace = true
 tracing-opentelemetry.workspace = true
+whoami = "2.1"
 
 dolos-core = { path = "crates/core" }
 dolos-cardano = { path = "crates/cardano", features = ["include-genesis"] }
@@ -49,8 +50,9 @@ dolos-minikupo = { path = "crates/minikupo", optional = true }
 dolos-trp = { path = "crates/trp", optional = true }
 
 # gasket = { git = "https://github.com/construkts/gasket-rs.git", features = ["derive"] }
-gasket = { version = "^0.9", features = ["derive"] }
+gasket = { version = "^0.12", features = ["derive"] }
 # gasket = { path = "../../construkts/gasket-rs/gasket", features = ["derive"] }
+gasket-otel = "0.12"
 
 clap = { version = "4.5.37", features = ["derive", "env"] }
 log = "0.4.18"
@@ -82,6 +84,12 @@ redb-extras = "0.6.1"
 tonic = { version = "0.12.3", optional = true }
 tonic-web = { version = "0.12.3", optional = true }
 tonic-reflection = { version = "0.12.3", optional = true }
+tower-layer = { version = "0.3", optional = true }
+tower-service = { version = "0.3", optional = true }
+http-body = { version = "1", optional = true }
+pin-project-lite = { version = "0.2", optional = true }
+prost = { version = "0.13", optional = true }
+prost-types = { version = "0.13", optional = true }
 
 # Common HTTP dependencies
 http = "1.3.1"
@@ -92,6 +100,13 @@ rustls = { version = "0.23", default-features = false, features = [
     "logging",
     "std",
     "tls12",
+] }
+
+# The OTLP/HTTP exporter's client. `rustls-no-provider` gives it TLS without
+# reqwest's hard-wired aws-lc-rs provider; it uses the ring provider `main()`
+# installs as the process default (the tests install it themselves).
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls-no-provider",
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -112,15 +127,26 @@ toml = "0.8.13"
 dolos-cardano = { path = "crates/cardano" }
 dolos-core = { path = "crates/core" }
 dolos-testing = { path = "crates/testing" }
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 bech32 = { workspace = true }
 hex = { workspace = true }
 pallas = { workspace = true }
 tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
 stats_alloc = "0.1"
 serial_test = "3"
+tar = "0.4"
 dolos-redb3 = { path = "crates/redb3" }
 memmap2 = "0.9"
 tower = { workspace = true, features = ["util"] }
+# Paused time, for the accept loops' handshake deadline tests.
+tokio = { workspace = true, features = ["test-util"] }
+http-body-util = "0.1"
+# `tests/stelae_restore.rs` pairs a Dolos snapshot with a blocks repository
+# through `crates/snapshot/tests/paired`. These repeat dolos-snapshot's stelae pin
+# (crates/snapshot/Cargo.toml) and move with it.
+stelae = { git = "https://github.com/txpipe/stelae", rev = "b2735ed829cbafdc57273a42871510aa564b00b3" }
+stelae-driver = { git = "https://github.com/txpipe/stelae", rev = "b2735ed829cbafdc57273a42871510aa564b00b3" }
+stelae-blocks = { git = "https://github.com/txpipe/stelae", rev = "b2735ed829cbafdc57273a42871510aa564b00b3" }
 
 [target.'cfg(unix)'.dev-dependencies]
 nix = { version = "0.30.1", features = ["signal", "resource"] }
@@ -153,6 +179,10 @@ name = "mempool"
 path = "tests/mempool.rs"
 
 [[test]]
+name = "mempool_metrics"
+path = "tests/mempool_metrics.rs"
+
+[[test]]
 name = "bootstrap"
 path = "tests/bootstrap.rs"
 
@@ -166,7 +196,18 @@ utils = ["comfy-table", "inquire", "toml"]
 debug = ["console-subscriber", "tokio/tracing"]
 
 # Service features
-grpc = ["tonic", "tonic-web", "tonic-reflection", "tower-http/cors"]
+grpc = [
+    "tonic",
+    "tonic-web",
+    "tonic-reflection",
+    "tower-http/cors",
+    "tower-layer",
+    "tower-service",
+    "http-body",
+    "pin-project-lite",
+    "prost",
+    "prost-types",
+]
 minibf = [
     "dolos-minibf",
     "axum",
@@ -217,7 +258,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2.0.0-alpha.0"
+version = "2.0.0-beta.1"
 edition = "2021"
 repository = "https://github.com/txpipe/dolos"
 homepage = "https://github.com/txpipe/dolos"
@@ -227,7 +268,7 @@ readme = "README.md"
 authors = ["TxPipe <hello@txpipe.io>"]
 
 [workspace.dependencies]
-pallas = { version = "1.4.0", features = ["hardano", "phase2", "unstable"] }
+pallas = { version = "=1.5.0-rc.3", features = ["hardano", "phase2", "unstable"] }
 # pallas = { git = "https://github.com/txpipe/pallas.git", rev = "a7b5a86", features = ["hardano", "phase2", "unstable"] }
 # pallas = { path = "../pallas/pallas", features = ["hardano", "phase2", "unstable"] }
 
@@ -266,7 +307,15 @@ num-rational = "0.4.2"
 num-bigint = "0.4.6"
 opentelemetry = "0.32.0"
 opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.32.0", features = ["grpc-tonic"] }
+opentelemetry-otlp = { version = "0.32.0", features = [
+    "grpc-tonic",
+    "http-proto",
+    "reqwest-blocking-client",
+    "tls-ring",
+    "tls-webpki-roots",
+    "metrics",
+    "trace",
+] }
 tracing-opentelemetry = "0.33"
 
 # `minicbor` is pinned to the 0.26 line that Pallas already pulls in, so the
@@ -275,6 +324,14 @@ tracing-opentelemetry = "0.33"
 # repository states in its own manifests. Moving this line is a
 # byte-compatibility question, not a dependency bump.
 minicbor = { version = "0.26", features = ["std"] }
+
+# Temporary: the published Tx3 0.23 crates and tx3-sdk 0.13 require Pallas
+# `^1.0.0`, which does not match a pre-release. These branches change only that
+# requirement. Remove this section once Pallas 1.5.0 final is on crates.io.
+[patch.crates-io]
+tx3-cardano = { git = "https://github.com/tx3-lang/tx3.git", rev = "d8dee49b271fd8df67dd3db1480b061739339462" }
+tx3-resolver = { git = "https://github.com/tx3-lang/tx3.git", rev = "d8dee49b271fd8df67dd3db1480b061739339462" }
+tx3-sdk = { git = "https://github.com/tx3-lang/rust-sdk.git", rev = "e193bd4227e877a9ab48fac441a5fbc8d656efce" }
 
 [workspace.metadata.release]
 push = false

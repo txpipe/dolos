@@ -3,11 +3,13 @@
 //! This module provides functionality for validating transactions against
 //! the current ledger state and submitting them to the mempool.
 
+use std::time::Instant;
+
 use tracing::{debug, instrument};
 
 use crate::{
-    ChainLogic, Domain, DomainError, MempoolAwareUtxoStore, MempoolStore, MempoolTx, StateStore,
-    TxHash,
+    telemetry::mempool::SubmitMetrics, ChainLogic, Domain, DomainError, MempoolAwareUtxoStore,
+    MempoolStore, MempoolTx, StateStore, TxHash,
 };
 
 static SUBMIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -62,20 +64,35 @@ pub trait SubmitExt: Domain {
         chain: &Self::Chain,
         cbor: &[u8],
     ) -> Result<TxHash, DomainError> {
-        let _guard = match SUBMIT_LOCK.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let started = Instant::now();
+        let result = receive(self, source, chain, cbor);
 
-        let tx = self.validate_tx(chain, cbor)?;
-        let hash = tx.hash;
+        SubmitMetrics::new().record(started.elapsed(), &result);
 
-        debug!(tx.hash = %hash, source=source, "tx received");
-
-        self.mempool().receive(tx)?;
-
-        Ok(hash)
+        result
     }
+}
+
+/// [`SubmitExt::receive_tx`] before it records its duration.
+fn receive<D: Domain>(
+    domain: &D,
+    source: &str,
+    chain: &D::Chain,
+    cbor: &[u8],
+) -> Result<TxHash, DomainError> {
+    let _guard = match SUBMIT_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    let tx = domain.validate_tx(chain, cbor)?;
+    let hash = tx.hash;
+
+    debug!(tx.hash = %hash, source=source, "tx received");
+
+    domain.mempool().receive(tx)?;
+
+    Ok(hash)
 }
 
 impl<D: Domain> SubmitExt for D {}

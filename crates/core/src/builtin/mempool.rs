@@ -13,8 +13,8 @@ use tokio_stream::wrappers::BroadcastStream;
 use tracing::debug;
 
 use crate::{
-    ChainPoint, MempoolError, MempoolEvent, MempoolPage, MempoolStore, MempoolTx, MempoolTxStage,
-    TxHash, TxStatus,
+    ChainPoint, MempoolCount, MempoolError, MempoolEvent, MempoolPage, MempoolStore, MempoolTx,
+    MempoolTxStage, TxHash, TxStatus,
 };
 
 #[derive(Default)]
@@ -116,6 +116,15 @@ impl MempoolStore for EphemeralMempool {
     fn peek_pending(&self) -> Vec<MempoolTx> {
         let state = self.state.read().unwrap();
         state.pending.clone()
+    }
+
+    fn count(&self) -> MempoolCount {
+        let state = self.state.read().unwrap();
+
+        MempoolCount {
+            pending: state.pending.len(),
+            inflight: state.inflight.len() + state.acknowledged.len(),
+        }
     }
 
     fn mark_inflight(&self, hashes: &[TxHash]) -> Result<(), MempoolError> {

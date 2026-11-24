@@ -1,4 +1,4 @@
-//! A stele restore reported as plain lines, for a stderr that is not a
+//! A snapshot restore reported as plain lines, for a stderr that is not a
 //! terminal.
 //!
 //! Bars draw nothing without a terminal, so a restore run from a container's
@@ -19,7 +19,7 @@ use indicatif::BinaryBytes;
 
 use dolos_snapshot::progress::{Event, Observer, Outcome, Progress};
 
-use super::SteleProgress;
+use super::SnapshotProgress;
 
 /// How often a periodic line is written once the first layer has started.
 pub const PERIOD: Duration = Duration::from_secs(30);
@@ -80,7 +80,7 @@ impl Report {
             } => {
                 self.total = total;
                 self.open
-                    .push((index, SteleProgress::describe(kind, scope)));
+                    .push((index, SnapshotProgress::describe(kind, scope)));
 
                 if self.started.is_none() {
                     self.started = Some(at);
@@ -581,6 +581,78 @@ mod tests {
         let line = report.tick(PERIOD).unwrap();
         assert!(line.contains("1/2 layers"), "{line}");
         assert!(line.ends_with(", at blocks epoch 1"), "{line}");
+    }
+
+    /// A restore reading ahead announces and moves blobs for later layers
+    /// while it writes an earlier one: the total received only grows, and
+    /// the line names the layer being written.
+    #[test]
+    fn a_read_ahead_reports_a_growing_total_at_the_layer_being_written() {
+        let mut report = Report::new(began(), PERIOD);
+        let scopes = [0, 1, 2].map(|epoch| serde_json::json!({"epoch": epoch}));
+        let mut received = Vec::new();
+
+        report.on(
+            Event::LayerStarted {
+                index: 0,
+                total: 3,
+                kind: "blocks",
+                scope: &scopes[0],
+            },
+            secs(0),
+        );
+
+        // Three blobs in flight at once, their bytes interleaved.
+        for _ in 0..3 {
+            report.on(
+                Event::Blob {
+                    moved: true,
+                    bytes: 4 << 20,
+                },
+                secs(1),
+            );
+        }
+
+        for (at, mb) in [(5, 1), (10, 2), (15, 1), (20, 3)] {
+            report.on(Event::Bytes(mb << 20), secs(at));
+        }
+
+        report.on(
+            Event::LayerFinished {
+                index: 0,
+                total: 3,
+                kind: "blocks",
+                outcome: Outcome::Transferred,
+            },
+            secs(25),
+        );
+        report.on(
+            Event::LayerStarted {
+                index: 1,
+                total: 3,
+                kind: "blocks",
+                scope: &scopes[1],
+            },
+            secs(25),
+        );
+
+        let line = report.tick(PERIOD).unwrap();
+        received.push(report.bytes);
+
+        assert!(line.contains("1/3 layers"), "{line}");
+        assert!(line.contains("7.00 MiB received"), "{line}");
+        assert!(line.ends_with(", at blocks epoch 1"), "{line}");
+
+        for (at, mb) in [(40, 2), (50, 1)] {
+            report.on(Event::Bytes(mb << 20), secs(at));
+        }
+
+        let line = report.tick(PERIOD * 2).unwrap();
+        received.push(report.bytes);
+
+        assert!(line.contains("10.00 MiB received"), "{line}");
+        assert!(line.ends_with(", at blocks epoch 1"), "{line}");
+        assert!(received.is_sorted(), "{received:?}");
     }
 
     /// A sink the test reads back, one entry per write call. With `fails`,

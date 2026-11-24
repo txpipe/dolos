@@ -44,8 +44,12 @@ where
         SlotOrder::from(pagination.order),
     );
 
-    let mut builder =
-        MetadataHistoryModelBuilder::new(label, pagination.count, pagination.page as usize);
+    let mut builder = MetadataHistoryModelBuilder::new(
+        label,
+        pagination.count,
+        pagination.page as usize,
+        pagination.order,
+    );
 
     let mut stream = Box::pin(stream);
 
@@ -66,8 +70,49 @@ where
 #[cfg(test)]
 pub(super) mod testing {
     use axum::http::StatusCode;
+    use dolos_core::import::ImportExt as _;
+    use dolos_testing::synthetic::SyntheticBlockConfig;
+    use pallas::ledger::{primitives::alonzo, traverse::MultiEraBlock};
 
     use crate::test_support::TestApp;
+
+    /// An app whose chain ends in a block with two transactions carrying the
+    /// synthetic label, with the texts "first" and "second", and their hashes
+    /// in block order.
+    pub fn app_with_metadata_txs() -> (TestApp, [String; 2]) {
+        let mut hashes = Vec::new();
+        let app = TestApp::new_with_cfg_and_setup(
+            SyntheticBlockConfig {
+                block_count: 5,
+                txs_per_block: 3,
+                ..Default::default()
+            },
+            |domain, vectors| {
+                let tip = vectors.blocks.last().expect("synthetic blocks");
+                let label = vectors.metadata_label.parse().expect("metadata label");
+                let metadata = ["first", "second"]
+                    .into_iter()
+                    .map(|text| vec![(label, alonzo::Metadatum::Text(text.into()))])
+                    .collect();
+                let (_, raw) = dolos_testing::blocks::make_conway_block_with_metadata_txs_at(
+                    tip.slot + 1,
+                    tip.block_number + 1,
+                    Some(tip.block_hash.parse().expect("block hash")),
+                    metadata,
+                );
+                hashes = MultiEraBlock::decode(&raw)
+                    .expect("metadata block")
+                    .txs()
+                    .iter()
+                    .map(|tx| tx.hash().to_string())
+                    .collect();
+                domain
+                    .import_blocks(vec![raw])
+                    .expect("import metadata txs");
+            },
+        );
+        (app, hashes.try_into().expect("two metadata txs"))
+    }
 
     pub fn invalid_label() -> &'static str {
         "not-a-number"

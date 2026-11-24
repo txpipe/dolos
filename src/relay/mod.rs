@@ -1,11 +1,11 @@
 use dolos_core::{config::RelayConfig, Driver as _};
 use futures_util::stream::FuturesUnordered;
-use pallas::network::facades::PeerServer;
+use pallas::network::facades::{PeerServer, DEFAULT_HANDSHAKE_TIMEOUT};
 use tokio::net::TcpListener;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, info, instrument, warn};
 
-use crate::{adapters::DomainAdapter, prelude::*};
+use crate::{adapters::DomainAdapter, prelude::*, serve::accept::AcceptFailure};
 
 mod blockfetch;
 mod chainsync;
@@ -15,6 +15,9 @@ mod hanshake;
 // TODO: add tests
 // #[cfg(test)]
 // mod tests;
+
+#[cfg(test)]
+mod accept_tests;
 
 #[derive(Clone)]
 pub struct DriverConfig {
@@ -58,10 +61,35 @@ async fn accept_peer_connections<D: Domain, C: CancelToken>(
 
     info!(addr = &config.service.listen_address, "ouroboros listening");
 
+    serve_peers(domain, &listener, config.network_magic, tasks, cancel).await
+}
+
+/// Serve every peer that completes the handshake on `listener`. A connection
+/// that fails the handshake, or misses its deadline, is logged and dropped,
+/// and the loop goes on to the next one. When the listener itself fails to
+/// accept, the loop logs it and waits a moment before accepting again.
+async fn serve_peers<D: Domain, C: CancelToken>(
+    domain: D,
+    listener: &TcpListener,
+    network_magic: u64,
+    tasks: &mut TaskTracker,
+    cancel: C,
+) -> Result<(), ServeError> {
     loop {
-        let peer = PeerServer::accept(&listener, config.network_magic)
-            .await
-            .map_err(|e| ServeError::Internal(e.into()))?;
+        let peer =
+            PeerServer::accept_with_timeout(listener, network_magic, DEFAULT_HANDSHAKE_TIMEOUT)
+                .await;
+
+        let peer = match peer {
+            Ok(peer) => peer,
+            Err(error) => {
+                let failure = AcceptFailure::of(&error);
+                let cause = std::error::Error::source(&error).map(ToString::to_string);
+                warn!(%error, ?cause, ?failure, "error on incoming connection");
+                failure.settle().await;
+                continue;
+            }
+        };
 
         info!(
             from = ?peer.accepted_address(),

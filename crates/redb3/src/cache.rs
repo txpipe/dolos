@@ -13,10 +13,12 @@ use bytes::Bytes;
 use dolos_core::{cache::Cost, CacheDiskTier, CacheEntry, CacheError};
 use redb::{
     backends::InMemoryBackend, Database, Durability, MultimapTableHandle as _, ReadOnlyTable,
-    ReadTransaction, ReadableDatabase, ReadableTable, TableDefinition, TableError,
-    TableHandle as _, WriteTransaction,
+    ReadTransaction, ReadableDatabase, ReadableTable, ReadableTableMetadata as _, TableDefinition,
+    TableError, TableHandle as _, WriteTransaction,
 };
 use tracing::warn;
+
+use crate::layout::{check_layout, check_unheld, is_corrupt};
 
 /// The database's own page cache. It never shares one with fjall.
 const PAGE_CACHE_BYTES: usize = 32 * 1024 * 1024;
@@ -27,8 +29,16 @@ const MAX_TOUCHED: usize = 4096;
 
 pub const FILE_NAME: &str = "cache.redb";
 
-/// Namespace → format version.
+/// The layout of the file as a whole. Each namespace keeps its own version
+/// besides.
+pub const CACHE_FILE_VERSION: u32 = 1;
+
+/// Namespace → format version, and the file's under [`FILE_VERSION_KEY`].
 const VERSIONS: TableDefinition<&str, u32> = TableDefinition::new("cache-versions");
+
+/// The empty name, which [`open_namespace`](CacheDiskTier::open_namespace)
+/// refuses, so no namespace takes it.
+const FILE_VERSION_KEY: &str = "";
 
 /// Namespace → (entries, bytes).
 const USAGE: TableDefinition<&str, (u64, u64)> = TableDefinition::new("cache-usage");
@@ -101,10 +111,11 @@ struct Inner {
 
 impl RedbCacheTier {
     /// Opens `<dir>/cache.redb`, holding at most `budget` bytes of keys and
-    /// values. A file redb finds corrupt, cut short, or laid out by another
-    /// release is deleted and recreated empty; one another process holds, or
-    /// that fails to open for any other reason, such as its permissions, is
-    /// an error that names it.
+    /// values. A file redb finds corrupt or cut short, one laid out by another
+    /// release, or one recording another [`CACHE_FILE_VERSION`] or none over
+    /// entries is deleted and recreated empty, with one warning; one another
+    /// process holds, or that fails to open for any other reason, such as its
+    /// permissions, is an error that names it.
     pub fn open(dir: impl AsRef<Path>, budget: u64) -> Result<Self, CacheError> {
         let dir = dir.as_ref();
         let path = dir.join(FILE_NAME);
@@ -112,26 +123,59 @@ impl RedbCacheTier {
         std::fs::create_dir_all(dir)
             .map_err(|error| CacheError::Disk(format!("creating {}: {error}", dir.display())))?;
 
+        let found = match Self::create(&path, budget) {
+            Ok(Ok(tier)) => return Ok(tier),
+            Ok(Err(found)) => found,
+            Err(redb::Error::DatabaseAlreadyOpen) => {
+                return Err(CacheError::InUse(path.display().to_string()));
+            }
+            Err(error) if !is_corrupt(&error) => {
+                return Err(CacheError::Disk(format!(
+                    "opening {}: {error}",
+                    path.display()
+                )));
+            }
+            Err(error) => FileVersion::Unreadable(error.to_string()),
+        };
+
+        warn!(
+            path = %path.display(),
+            %found,
+            expected = CACHE_FILE_VERSION,
+            "cache file incompatible, recreating it empty"
+        );
+
+        std::fs::remove_file(&path)
+            .map_err(|error| CacheError::Disk(format!("deleting {}: {error}", path.display())))?;
+
         match Self::create(&path, budget) {
-            Ok(tier) => Ok(tier),
+            Ok(Ok(tier)) => Ok(tier),
+            Ok(Err(found)) => Err(CacheError::Disk(format!(
+                "creating {}: a new file reads as {found}",
+                path.display()
+            ))),
+            Err(error) => Err(CacheError::Disk(format!(
+                "creating {}: {error}",
+                path.display()
+            ))),
+        }
+    }
+
+    /// Fails as [`CacheError::InUse`] while another process holds
+    /// `<dir>/cache.redb`. Unlike [`open`](Self::open) it never creates,
+    /// resets or writes the file, so it can run before the state is admitted.
+    pub fn check_unheld(dir: impl AsRef<Path>) -> Result<(), CacheError> {
+        let path = dir.as_ref().join(FILE_NAME);
+
+        match check_unheld(&path) {
+            Ok(()) => Ok(()),
             Err(redb::Error::DatabaseAlreadyOpen) => {
                 Err(CacheError::InUse(path.display().to_string()))
             }
-            Err(error) if !is_corrupt(&error) => Err(CacheError::Disk(format!(
+            Err(error) => Err(CacheError::Disk(format!(
                 "opening {}: {error}",
                 path.display()
             ))),
-            Err(error) => {
-                warn!(path = %path.display(), %error, "cache file unreadable, recreating it empty");
-
-                std::fs::remove_file(&path).map_err(|error| {
-                    CacheError::Disk(format!("deleting {}: {error}", path.display()))
-                })?;
-
-                Self::create(&path, budget).map_err(|error| {
-                    CacheError::Disk(format!("creating {}: {error}", path.display()))
-                })
-            }
         }
     }
 
@@ -143,10 +187,14 @@ impl RedbCacheTier {
             .create_with_backend(InMemoryBackend::new())
             .map_err(CacheError::disk)?;
 
-        Self::initialized(db, budget).map_err(CacheError::disk)
+        Self::initialized(db, budget)
+            .map_err(CacheError::disk)?
+            .map_err(|found| CacheError::Disk(format!("a new tier reads as {found}")))
     }
 
-    fn create(path: &Path, budget: u64) -> Result<Self, redb::Error> {
+    /// The tier over the file at `path`, or what it records when that is not
+    /// this release's layout.
+    fn create(path: &Path, budget: u64) -> Result<Result<Self, FileVersion>, redb::Error> {
         check_layout(path)?;
 
         let db = Database::builder()
@@ -159,9 +207,13 @@ impl RedbCacheTier {
         Self::initialized(db, budget)
     }
 
-    fn initialized(db: Database, budget: u64) -> Result<Self, redb::Error> {
+    fn initialized(db: Database, budget: u64) -> Result<Result<Self, FileVersion>, redb::Error> {
         let wx = db.begin_write()?;
-        wx.open_table(VERSIONS)?;
+        let mut versions = wx.open_table(VERSIONS)?;
+        let recorded = versions
+            .get(FILE_VERSION_KEY)?
+            .map(|version| version.value());
+        let namespaces = versions.len()?;
         wx.open_table(USAGE)?;
         wx.open_table(CLOCK)?;
         wx.open_table(RANKS)?;
@@ -177,24 +229,38 @@ impl RedbCacheTier {
             )
             .collect();
 
+        let mut holds_namespaces = namespaces > 0;
+
         for name in &names {
             match name.split_once(':') {
                 Some(("cache-data", _)) => drop(wx.open_table(DataTable::new(name))?),
                 Some(("cache-entries", _)) => drop(wx.open_table(EntryTable::new(name))?),
                 Some(("cache-previous", _)) => drop(wx.open_table(KeyTable::new(name))?),
-                _ => {}
+                _ => continue,
+            }
+
+            holds_namespaces = true;
+        }
+
+        match recorded {
+            Some(CACHE_FILE_VERSION) => {}
+            Some(other) => return Ok(Err(FileVersion::Other(other))),
+            None if holds_namespaces => return Ok(Err(FileVersion::Unmarked)),
+            None => {
+                versions.insert(FILE_VERSION_KEY, CACHE_FILE_VERSION)?;
             }
         }
 
+        drop(versions);
         wx.commit()?;
 
-        Ok(Self {
+        Ok(Ok(Self {
             inner: Arc::new(Inner {
                 db,
                 budget,
                 touched: Mutex::default(),
             }),
-        })
+        }))
     }
 
     pub fn budget(&self) -> u64 {
@@ -289,6 +355,10 @@ impl RedbCacheTier {
 
 impl CacheDiskTier for RedbCacheTier {
     fn open_namespace(&self, namespace: &str, version: u32) -> Result<(), CacheError> {
+        if namespace == FILE_VERSION_KEY {
+            return Err(CacheError::UnknownNamespace(namespace.to_string()));
+        }
+
         let known = {
             let rx = self.read()?;
             let versions = rx.open_table(VERSIONS).map_err(CacheError::disk)?;
@@ -307,7 +377,18 @@ impl CacheDiskTier for RedbCacheTier {
 
             wx.open_table(VERSIONS)?.insert(namespace, version)?;
             Ok(())
-        })
+        })?;
+
+        if let Some(found) = known {
+            warn!(
+                namespace,
+                found,
+                expected = version,
+                "cache namespace kept under another format version, its entries were wiped"
+            );
+        }
+
+        Ok(())
     }
 
     fn get(&self, namespace: &str, key: &[u8]) -> Result<Option<CacheEntry>, CacheError> {
@@ -426,91 +507,25 @@ impl CacheDiskTier for RedbCacheTier {
     }
 }
 
-/// redb's page size, which its header must record.
-const REDB_PAGE_SIZE: u32 = 4096;
-
-/// Fails as corrupt if the file is shorter than the layout its header records,
-/// is not a whole number of pages, or records a layout redb cannot read: redb
-/// panics on all three before it reports any error. The header is read under a
-/// shared lock, which conflicts with redb's exclusive one, so a file another
-/// process holds fails as open instead.
-fn check_layout(path: &Path) -> Result<(), redb::Error> {
-    use std::{fs::TryLockError, io::Read as _};
-
-    let mut file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-
-    // a shared lock, since NFS refuses an exclusive one on a read-only handle
-    match file.try_lock_shared() {
-        Ok(()) => {}
-        Err(TryLockError::WouldBlock) => return Err(redb::Error::DatabaseAlreadyOpen),
-        Err(TryLockError::Error(error)) if error.kind() == std::io::ErrorKind::Unsupported => {}
-        Err(TryLockError::Error(error)) => return Err(error.into()),
-    }
-
-    let len = file.metadata()?.len();
-    let mut header = [0; 32];
-
-    // redb reports a file too short for its magic number or its header itself
-    if file.read_exact(&mut header).is_err() || !header.starts_with(b"redb\x1a\x0a\xa9\x0d\x0a") {
-        return Ok(());
-    }
-
-    let field = |offset: usize| {
-        u128::from(u32::from_le_bytes(
-            header[offset..offset + 4].try_into().unwrap(),
-        ))
-    };
-
-    let (page_size, header_pages, max_pages, full_regions, trailing_pages) =
-        (field(12), field(16), field(20), field(24), field(28));
-
-    if page_size != u128::from(REDB_PAGE_SIZE)
-        || max_pages == 0
-        || (full_regions == 0 && trailing_pages == 0)
-    {
-        return Err(redb::Error::Corrupted(
-            "its header records a layout redb cannot read".into(),
-        ));
-    }
-
-    let trailing = if trailing_pages > 0 {
-        (header_pages + trailing_pages) * page_size
-    } else {
-        0
-    };
-
-    let expected = page_size + full_regions * (header_pages + max_pages) * page_size + trailing;
-
-    if u128::from(len) < expected || u128::from(len) % page_size != 0 {
-        return Err(redb::Error::Corrupted(format!(
-            "the file is {len} bytes and its header lays out {expected} in pages of {page_size}"
-        )));
-    }
-
-    Ok(())
+/// What a cache file records in place of this release's
+/// [`CACHE_FILE_VERSION`].
+#[derive(Debug)]
+enum FileVersion {
+    Other(u32),
+    /// No version, over namespaces a release before the file version kept.
+    Unmarked,
+    /// Contents redb cannot read: damage, a cut-short file, or a layout of
+    /// another release.
+    Unreadable(String),
 }
 
-/// Whether an open failed on the file's contents rather than on access to it:
-/// damage, a cut-short file, or a format or table layout of another release.
-/// redb only reads the contents once it holds the file's lock, so no other
-/// process is using a file found corrupt.
-fn is_corrupt(error: &redb::Error) -> bool {
-    match error {
-        redb::Error::Corrupted(_)
-        | redb::Error::UpgradeRequired(_)
-        | redb::Error::TableTypeMismatch { .. }
-        | redb::Error::TypeDefinitionChanged { .. }
-        | redb::Error::TableIsMultimap(_)
-        | redb::Error::TableIsNotMultimap(_) => true,
-        redb::Error::Io(error) => matches!(
-            error.kind(),
-            std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof
-        ),
-        _ => false,
+impl std::fmt::Display for FileVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Other(version) => write!(f, "version {version}"),
+            Self::Unmarked => f.write_str("no version over namespaces"),
+            Self::Unreadable(error) => write!(f, "unreadable ({error})"),
+        }
     }
 }
 
@@ -654,6 +669,7 @@ fn wipe(wx: &WriteTransaction, namespace: &str) -> Result<(), redb::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_logs::warned_while;
 
     const MIB: u64 = 1024 * 1024;
 
@@ -719,6 +735,32 @@ mod tests {
 
         tier.put("ns", b"c", b"4", 1).unwrap();
         assert_eq!(tier.keys("ns").unwrap(), [Bytes::from("c")]);
+    }
+
+    /// Only a namespace kept under another version, older or newer, is wiped
+    /// with a warning, which names it and both versions.
+    #[test]
+    fn a_new_format_version_logs_one_warning_naming_the_namespace() {
+        let tier = RedbCacheTier::memory(MIB).unwrap();
+
+        let warned = warned_while(|| {
+            tier.open_namespace("ns", 1).unwrap();
+            tier.open_namespace("ns", 1).unwrap();
+            tier.open_namespace("other", 1).unwrap();
+        });
+        assert!(warned.is_empty(), "{warned:?}");
+
+        for (found, expected) in [(1, 2), (2, 1)] {
+            let warned = warned_while(|| tier.open_namespace("ns", expected).unwrap());
+
+            assert_eq!(warned.len(), 1, "{found} to {expected}: {warned:?}");
+            assert!(
+                warned[0].contains(&format!(
+                    "namespace=\"ns\" found={found} expected={expected} "
+                )),
+                "{found} to {expected}: {warned:?}"
+            );
+        }
     }
 
     #[test]
@@ -1036,5 +1078,161 @@ mod tests {
             "{error}"
         );
         assert!(path.exists());
+    }
+
+    /// Rewrites the file's version, removing it on `None`.
+    fn mark(dir: &Path, version: Option<u32>) {
+        let db = Database::create(dir.join(FILE_NAME)).unwrap();
+        let wx = db.begin_write().unwrap();
+
+        {
+            let mut versions = wx.open_table(VERSIONS).unwrap();
+
+            match version {
+                Some(version) => versions.insert(FILE_VERSION_KEY, version).unwrap(),
+                None => versions.remove(FILE_VERSION_KEY).unwrap(),
+            };
+        }
+
+        wx.commit().unwrap();
+    }
+
+    fn recorded(dir: &Path) -> Option<u32> {
+        let db = Database::create(dir.join(FILE_NAME)).unwrap();
+        let rx = db.begin_read().unwrap();
+        let versions = rx.open_table(VERSIONS).unwrap();
+        let version = versions.get(FILE_VERSION_KEY).unwrap().map(|v| v.value());
+        version
+    }
+
+    /// A file holding one entry under `ns`, flushed.
+    fn holding_an_entry(dir: &Path) {
+        let tier = RedbCacheTier::open(dir, MIB).unwrap();
+        tier.open_namespace("ns", 1).unwrap();
+        put(&tier, "key", 10, 1);
+        tier.flush().unwrap();
+    }
+
+    #[test]
+    fn a_new_file_records_its_version() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(RedbCacheTier::open(dir.path(), MIB).unwrap());
+
+        assert_eq!(recorded(dir.path()), Some(CACHE_FILE_VERSION));
+    }
+
+    #[test]
+    fn a_file_of_this_version_keeps_its_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        holding_an_entry(dir.path());
+
+        let tier = RedbCacheTier::open(dir.path(), MIB).unwrap();
+        tier.open_namespace("ns", 1).unwrap();
+        assert!(holds(&tier, "key"));
+    }
+
+    #[test]
+    fn a_file_of_another_version_is_recreated_empty() {
+        for version in [0, CACHE_FILE_VERSION + 1] {
+            let dir = tempfile::tempdir().unwrap();
+            holding_an_entry(dir.path());
+            mark(dir.path(), Some(version));
+
+            let tier = RedbCacheTier::open(dir.path(), MIB).unwrap();
+            tier.open_namespace("ns", 1).unwrap();
+            assert!(!holds(&tier, "key"), "version {version}");
+            assert_eq!(tier.total_bytes().unwrap(), 0);
+            drop(tier);
+
+            assert_eq!(recorded(dir.path()), Some(CACHE_FILE_VERSION));
+        }
+    }
+
+    #[test]
+    fn a_file_without_a_version_over_namespaces_is_recreated_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        holding_an_entry(dir.path());
+        mark(dir.path(), None);
+
+        let tier = RedbCacheTier::open(dir.path(), MIB).unwrap();
+        tier.open_namespace("ns", 1).unwrap();
+        assert!(!holds(&tier, "key"));
+        drop(tier);
+
+        assert_eq!(recorded(dir.path()), Some(CACHE_FILE_VERSION));
+    }
+
+    /// As a release before the file version left a cache it never used.
+    #[test]
+    fn a_file_without_a_version_or_namespaces_is_stamped() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(RedbCacheTier::open(dir.path(), MIB).unwrap());
+        mark(dir.path(), None);
+
+        drop(RedbCacheTier::open(dir.path(), MIB).unwrap());
+        assert_eq!(recorded(dir.path()), Some(CACHE_FILE_VERSION));
+    }
+
+    #[test]
+    fn the_file_version_is_no_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let tier = RedbCacheTier::open(dir.path(), MIB).unwrap();
+
+        assert!(matches!(
+            tier.open_namespace(FILE_VERSION_KEY, 1),
+            Err(CacheError::UnknownNamespace(_))
+        ));
+    }
+
+    #[test]
+    fn a_file_held_by_another_handle_is_a_lock_error_and_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        holding_an_entry(dir.path());
+        mark(dir.path(), Some(CACHE_FILE_VERSION + 1));
+
+        let path = dir.path().join(FILE_NAME);
+        // the holder marks the file in use as it opens it
+        let held = Database::create(&path).unwrap();
+        // Windows locks are mandatory: a held file cannot be read through
+        // another handle
+        #[cfg(unix)]
+        let before = std::fs::read(&path).unwrap();
+
+        assert!(matches!(
+            RedbCacheTier::open(dir.path(), MIB),
+            Err(CacheError::InUse(_))
+        ));
+        assert!(matches!(
+            RedbCacheTier::check_unheld(dir.path()),
+            Err(CacheError::InUse(_))
+        ));
+        #[cfg(unix)]
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        drop(held);
+        assert_eq!(recorded(dir.path()), Some(CACHE_FILE_VERSION + 1));
+    }
+
+    #[test]
+    fn the_unheld_check_leaves_a_file_of_another_version_as_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        holding_an_entry(dir.path());
+        mark(dir.path(), Some(CACHE_FILE_VERSION + 1));
+        let path = dir.path().join(FILE_NAME);
+        let before = std::fs::read(&path).unwrap();
+
+        RedbCacheTier::check_unheld(dir.path()).unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(recorded(dir.path()), Some(CACHE_FILE_VERSION + 1));
+    }
+
+    #[test]
+    fn the_unheld_check_creates_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("cache");
+
+        RedbCacheTier::check_unheld(&missing).unwrap();
+
+        assert!(!missing.exists());
     }
 }

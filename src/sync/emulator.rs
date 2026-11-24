@@ -179,19 +179,21 @@ pub struct Stage {
 
     pub downstream: DownstreamPort,
 
+    /// Blocks sent downstream.
     #[metric]
-    block_count: gasket::metrics::Counter,
+    blocks: gasket::metrics::Counter,
 
+    /// The slot of the tip the emulator produced last.
     #[metric]
-    chain_tip: gasket::metrics::Gauge,
+    upstream_tip_slot: gasket::metrics::Gauge,
 }
 
 impl Stage {
     pub fn new(wal: WalAdapter, mempool: MempoolBackend, block_production_interval: u64) -> Self {
         Self {
             downstream: Default::default(),
-            block_count: Default::default(),
-            chain_tip: Default::default(),
+            blocks: Default::default(),
+            upstream_tip_slot: Default::default(),
             block_production_interval,
             wal,
             mempool,
@@ -204,10 +206,12 @@ impl Stage {
             .await
             .or_panic()?;
 
+        self.blocks.inc(1);
+
         Ok(())
     }
 
     fn track_tip(&self, tip: &Tip) {
-        self.chain_tip.set(tip.0.slot_or_default() as i64);
+        self.upstream_tip_slot.set(tip.0.slot_or_default() as i64);
     }
 }

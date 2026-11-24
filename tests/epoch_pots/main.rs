@@ -1,4 +1,5 @@
 mod compare;
+mod matrix;
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -8,6 +9,7 @@ use anyhow::{Context, Result};
 use compare::{compare_csvs_with_ignore, extract_row_from_csv, has_data, write_fixture};
 use csv_diff::diff_row::DiffByteRecord;
 use pallas::ledger::addresses::Network;
+use pallas::ledger::primitives::StakeCredential;
 
 use dolos_cardano::ewrap::AppliedReward;
 use dolos_cardano::model::{EpochState, EraState, PParamKind, PParamValue, PParamsSet};
@@ -152,8 +154,9 @@ fn dump_delegation_csv(
     Ok(())
 }
 
+/// Write the per-account stake gathered from every shard of one RUPD.
 fn dump_stake_csv(
-    snapshot: &StakeSnapshot,
+    accounts: &[(PoolHash, StakeCredential, u64)],
     network: Network,
     out_dir: &Path,
     epoch: u64,
@@ -164,8 +167,8 @@ fn dump_stake_csv(
 
     writeln!(writer, "stake,pool,lovelace")?;
 
-    let mut rows = Vec::new();
-    for (pool, credential, stake) in snapshot.iter_accounts() {
+    let mut rows = Vec::with_capacity(accounts.len());
+    for (pool, credential, stake) in accounts {
         let address = pallas_extras::stake_credential_to_address(network, credential);
         let stake_address = address.to_bech32().map_err(std::io::Error::other)?;
         let pool_bech32 = bech32_pool(pool)?;
@@ -343,18 +346,27 @@ fn write_pparam_row(epoch: &EpochState, path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn dump_eras(state: &impl StateStore, path: &Path) -> Result<()> {
+fn dump_eras(state: &impl StateStore, last_epoch: u64, path: &Path) -> Result<()> {
+    let eras = state
+        .iter_entities_typed::<EraState>(None)
+        .context("iterating eras")?
+        .map(|result| result.map(|(_key, era)| era))
+        .collect::<Result<Vec<_>, _>>()
+        .context("decoding era")?;
+
+    write_eras_csv(&eras, last_epoch, path)
+}
+
+/// Write the eras that start by `last_epoch`, the subject epoch. The replay
+/// stops once the next epoch has started, so an era that begins there is
+/// already in state, past what the ground truth covers.
+fn write_eras_csv(eras: &[EraState], last_epoch: u64, path: &Path) -> Result<()> {
     let mut wtr =
         csv::Writer::from_path(path).with_context(|| format!("creating {}", path.display()))?;
 
     wtr.write_record(["protocol", "start_epoch", "epoch_length", "slot_length"])?;
 
-    let iter = state
-        .iter_entities_typed::<EraState>(None)
-        .context("iterating eras")?;
-
-    for result in iter {
-        let (_key, era) = result.context("decoding era")?;
+    for era in eras.iter().filter(|era| era.start.epoch <= last_epoch) {
         wtr.write_record(&[
             era.protocol.to_string(),
             era.start.epoch.to_string(),
@@ -386,6 +398,10 @@ fn run_epoch_pots_test(
 ) -> Result<()> {
     // stop_epoch = subject + 1 so the subject epoch completes fully
     let stop_epoch = subject_epoch + 1;
+
+    // Delegation, stake and rewards are compared for the subject's
+    // performance epoch, so only that epoch's RUPD and Ewrap are dumped.
+    let performance_epoch = subject_epoch.saturating_sub(2);
 
     let genesis = match network {
         "mainnet" => dolos_cardano::include::mainnet::load(),
@@ -446,6 +462,11 @@ fn run_epoch_pots_test(
     let mut accumulated_applied: Vec<AppliedReward> = Vec::new();
     let mut accumulated_ending_epoch: Option<u64> = None;
 
+    // Each RUPD shard's `load()` replaces the snapshot's per-account map,
+    // so the stake rows are gathered shard by shard and dumped after
+    // finalize.
+    let mut accumulated_stake: Vec<(PoolHash, StakeCredential, u64)> = Vec::new();
+
     harness
         .run(100, |_domain, work, shard_index| {
             // The harness fires this callback once per shard (with
@@ -466,17 +487,30 @@ fn run_epoch_pots_test(
                         }
                     }
                 }
-                CardanoWorkUnit::Rupd(rupd) => {
-                    // Dump delegation and stake from RUPD (snapshot-based data)
+                CardanoWorkUnit::Rupd(rupd) if !post_finalize => {
+                    if shard_index == 0 {
+                        accumulated_stake.clear();
+                    }
                     if let Some(w) = rupd.work() {
-                        if let Some((_, performance_epoch)) = w.stake_epochs() {
+                        if w.stake_epochs().map(|(_, epoch)| epoch) == Some(performance_epoch) {
+                            accumulated_stake.extend(w.snapshot.iter_accounts().map(
+                                |(pool, credential, stake)| (*pool, credential.clone(), *stake),
+                            ));
+                        }
+                    }
+                }
+                CardanoWorkUnit::Rupd(rupd) => {
+                    // Post-finalize: delegation comes from the global pool
+                    // totals, stake from every shard's accounts.
+                    if let Some(w) = rupd.work() {
+                        if w.stake_epochs().map(|(_, epoch)| epoch) == Some(performance_epoch) {
                             if let Err(e) =
                                 dump_delegation_csv(&w.snapshot, &dumps_dir, performance_epoch)
                             {
                                 eprintln!("failed to dump delegation csv: {e}");
                             }
                             if let Err(e) = dump_stake_csv(
-                                &w.snapshot,
+                                &accumulated_stake,
                                 cardano_network,
                                 &dumps_dir,
                                 performance_epoch,
@@ -485,6 +519,7 @@ fn run_epoch_pots_test(
                             }
                         }
                     }
+                    accumulated_stake.clear();
                 }
                 CardanoWorkUnit::Ewrap(shard) if !post_finalize => {
                     if shard_index == 0 {
@@ -502,8 +537,7 @@ fn run_epoch_pots_test(
                 CardanoWorkUnit::Ewrap(_) => {
                     // Post-finalize (Ewrap pass): dump accumulated rewards.
                     if let Some(ending_epoch) = accumulated_ending_epoch.take() {
-                        if ending_epoch >= 1 {
-                            let performance_epoch = ending_epoch - 1;
+                        if ending_epoch >= 1 && ending_epoch - 1 == performance_epoch {
                             if let Err(e) = dump_applied_rewards_csv(
                                 &accumulated_applied,
                                 cardano_network,
@@ -573,7 +607,7 @@ fn run_epoch_pots_test(
         let gt_path = gt_dir.join("eras.csv");
         eprintln!("\nComparing eras");
 
-        dump_eras(harness.state(), &dolos_path)?;
+        dump_eras(harness.state(), subject_epoch, &dolos_path)?;
         write_fixture(gt_eras, &gt_path)?;
 
         match compare_csvs_with_ignore(&dolos_path, &gt_path, &[0], 20, |diff| {
@@ -595,7 +629,6 @@ fn run_epoch_pots_test(
     }
 
     // Delegation, stake, rewards: compare RUPD dumps against ground truth
-    let performance_epoch = subject_epoch.saturating_sub(2);
 
     // Delegation
     {
@@ -829,4 +862,37 @@ fn epoch_tests() {
     if !failures.is_empty() {
         panic!("\nEpoch test failures:\n  - {}", failures.join("\n  - "));
     }
+}
+
+#[test]
+fn eras_dump_stops_at_the_subject_epoch() {
+    use dolos_cardano::model::EraBoundary;
+
+    let era = |protocol, epoch| EraState {
+        start: EraBoundary {
+            epoch,
+            slot: 0,
+            timestamp: 0,
+        },
+        end: None,
+        epoch_length: 432000,
+        slot_length: 1,
+        protocol,
+    };
+    let eras = [era(1, 0), era(9, 507), era(10, 537)];
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("eras.csv");
+    let start_epochs = |last_epoch| {
+        write_eras_csv(&eras, last_epoch, &path).unwrap();
+        csv::Reader::from_path(&path)
+            .unwrap()
+            .records()
+            .map(|record| record.unwrap()[1].to_string())
+            .collect::<Vec<_>>()
+    };
+
+    // The era the replay's last Estart opened is past the subject.
+    assert_eq!(start_epochs(536), ["0", "507"]);
+    assert_eq!(start_epochs(537), ["0", "507", "537"]);
 }

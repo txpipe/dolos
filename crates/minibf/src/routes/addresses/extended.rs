@@ -20,7 +20,9 @@ use crate::{
     Facade,
 };
 
-use super::{amount_for_refs, is_address_in_chain, parse_address, refs_for_parsed_address};
+use super::{
+    amount_for_refs, is_address_in_chain, parse_address, refs_for_parsed_address, SUMMARY_CHUNK,
+};
 
 /// This constant sets how many units of an address ask the off-chain registry
 /// for their metadata at the same time. Each unit needs one request to the
@@ -37,13 +39,13 @@ where
     D: Domain + Clone + Send + Sync + 'static,
 {
     let parsed = parse_address(&address)?;
-    let refs = refs_for_parsed_address(&domain, &parsed)?;
+    let refs = refs_for_parsed_address(&domain, &parsed).await?;
 
     if refs.is_empty() && !is_address_in_chain(&domain, &address).await? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
-    let entries = amount_for_refs(&domain, refs)?;
+    let entries = amount_for_refs(&domain, refs, SUMMARY_CHUNK).await?;
 
     // one max_scan_items for the request's label-100 walks, whatever the
     // number of units it holds, split among the units that walk in the order
@@ -123,7 +125,7 @@ mod tests {
     use super::*;
     use crate::{
         routes::addresses::testing::*,
-        test_support::{TestApp, TestFault},
+        test_support::{health_throughout, TestApp, TestFault, SLOW_READ},
     };
     use blockfrost_openapi::models::{
         address_content::AddressContent, address_content_extended::Type as AddressExtendedType,
@@ -1127,5 +1129,15 @@ mod tests {
 
             assert_eq!(accepted, EXTENDED_ASSET_CONCURRENCY);
         }
+    }
+
+    /// The whole-set load runs on the blocking pool: `/health` answers beside
+    /// a slow one on a single worker.
+    #[tokio::test(flavor = "current_thread")]
+    async fn slow_extended_summary_does_not_stall_health() {
+        let app = TestApp::new_with_fault(Some(TestFault::SlowUtxoReads(SLOW_READ)));
+        let path = format!("/addresses/{}/extended", app.vectors().address);
+
+        assert_eq!(health_throughout(&app, &path).await, StatusCode::OK);
     }
 }

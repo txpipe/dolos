@@ -16,7 +16,7 @@ listen_address = "[::]:3000"
 route_prefix = "/api/v0"
 ```
 
-Every route moves under the prefix, `/health` and `/metrics` included. Left unset, the routes are served at the root.
+Every route moves under the prefix, `/health` included. Left unset, the routes are served at the root.
 
 ## Features
 

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use dolos_core::{BrokenInvariant, ChainError, Genesis, TxOrder, TxoRef};
 use pallas::ledger::{
     primitives::{conway::RationalNumber, Epoch},
-    traverse::{MultiEraBlock, MultiEraCert, MultiEraTx},
+    traverse::{MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraTx},
 };
 
 use super::WorkDeltas;
@@ -13,29 +13,51 @@ use crate::{
 };
 
 /// Lovelace consumed minus lovelace produced, over the inputs and outputs the
-/// tx's validity selects (`consumes` / `produces`).
+/// tx's validity selects (`consumes` / `produces`): what a Byron tx paid as
+/// its fee, or what an invalid tx forfeits as collateral. `coin` gives the
+/// lovelace of the output each consumed input spends. `None` when the tx
+/// produces more than it consumes, which no ledger-valid tx does.
+pub fn consumed_minus_produced<E>(
+    tx: &MultiEraTx,
+    mut coin: impl FnMut(&MultiEraInput) -> Result<Lovelace, E>,
+) -> Result<Option<Lovelace>, E> {
+    let mut consumed: Lovelace = 0;
+
+    for input in tx.consumes() {
+        let Some(total) = consumed.checked_add(coin(&input)?) else {
+            return Ok(None);
+        };
+        consumed = total;
+    }
+
+    let produced = tx
+        .produces()
+        .iter()
+        .try_fold(0 as Lovelace, |total, (_, output)| {
+            total.checked_add(output.value().coin())
+        });
+
+    Ok(produced.and_then(|produced| consumed.checked_sub(produced)))
+}
+
 fn compute_consumed_minus_produced(
     tx: &MultiEraTx,
     utxos: &HashMap<TxoRef, OwnedMultiEraOutput>,
 ) -> Result<Lovelace, ChainError> {
-    let mut total = 0;
+    consumed_minus_produced(tx, |input| {
+        let txo = TxoRef::from(input);
+        let utxo =
+            utxos
+                .get(&txo)
+                .ok_or(ChainError::BrokenInvariant(BrokenInvariant::MissingUtxo(
+                    txo,
+                )))?;
 
-    for input in tx.consumes() {
-        let utxo = utxos
-            .get(&TxoRef::from(&input))
-            .ok_or(ChainError::BrokenInvariant(BrokenInvariant::MissingUtxo(
-                TxoRef::from(&input),
-            )))?;
-        utxo.with_dependent(|_, utxo| {
-            total += utxo.value().coin();
-        });
-    }
-
-    for (_, output) in tx.produces() {
-        total -= output.value().coin();
-    }
-
-    Ok(total)
+        Ok::<_, ChainError>(utxo.with_dependent(|_, utxo| utxo.value().coin()))
+    })?
+    .ok_or(ChainError::BrokenInvariant(BrokenInvariant::UnbalancedTx(
+        tx.hash(),
+    )))
 }
 
 // HACK: There are txs that don't have an explicit value for total collateral
@@ -372,6 +394,36 @@ mod tests {
         assert_ne!(tx.fee_or_compute(), paid);
 
         assert_eq!(define_tx_fees(&tx, &utxos).unwrap(), paid);
+    }
+
+    #[test]
+    fn consumed_minus_produced_refuses_an_unbalanced_tx() {
+        let tx = byron::Tx {
+            inputs: MaybeIndefArray::Def(vec![byron::TxIn::Variant0(CborWrap((
+                Hash::new([1; 32]),
+                0,
+            )))]),
+            outputs: MaybeIndefArray::Def(vec![byron_output(4_000_000)]),
+            attributes: EmptyMap,
+        };
+
+        let payload = byron::TxPayload {
+            transaction: KeepRaw::from(tx),
+            witness: KeepRaw::from(MaybeIndefArray::Def(vec![])),
+        };
+
+        let cbor = minicbor::to_vec(&payload).unwrap();
+        let tx = MultiEraTx::decode_for_era(Era::Byron, &cbor).unwrap();
+
+        let paid = consumed_minus_produced(&tx, |_| Ok::<_, ()>(3_000_000));
+        assert_eq!(paid, Ok(None));
+
+        let paid = consumed_minus_produced(&tx, |_| Ok::<_, ()>(u64::MAX));
+        assert_eq!(paid, Ok(Some(u64::MAX - 4_000_000)));
+
+        // a lookup that fails stops the sum with its own error
+        let paid = consumed_minus_produced(&tx, |_| Err::<Lovelace, _>("missing"));
+        assert_eq!(paid, Err("missing"));
     }
 
     #[test]

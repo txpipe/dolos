@@ -4,7 +4,7 @@ use dolos_core::Domain;
 
 use crate::Facade;
 
-use super::{single_block_content, tip_block};
+use super::{build_block_model, tip_block};
 
 pub async fn latest<D>(State(domain): State<Facade<D>>) -> Result<Json<BlockContent>, StatusCode>
 where
@@ -13,7 +13,7 @@ where
     let tip = tip_block(&domain)?;
     let chain = domain.get_chain_summary()?;
 
-    let model = single_block_content(&domain, &tip, &tip, &chain).await?;
+    let model = build_block_model(&domain, &tip, &tip, &chain).await?;
 
     Ok(Json(model))
 }

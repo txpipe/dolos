@@ -13,6 +13,8 @@ use std::sync::Arc;
 use tracing::{debug, info, instrument, warn};
 
 use crate::{
+    telemetry::{storage::time_commit, sync as metrics},
+    wal::ChainOrdered,
     ArchiveStore as _, ArchiveWriter as _, BlockSlot, ChainLogic, ChainPoint, Domain, DomainError,
     EntityMap, MempoolStore, RawBlock, StateStore, StateWriter as _, TipEvent, WalStore, WorkUnit,
 };
@@ -50,11 +52,14 @@ pub trait SyncExt: Domain {
 
     /// Roll back the chain to a previous point.
     ///
-    /// Iterates WAL entries after the target point in reverse order,
+    /// Iterates WAL entries after the target point in reverse chain order,
     /// undoing each block's effects on state, UTxOs (tags included), and the
     /// archive's index entries; the archive's blocks and logs are then cut
-    /// with `truncate_front`.
-    fn rollback(&self, to: &ChainPoint) -> Result<(), DomainError>;
+    /// with `truncate_front`, and the WAL drops the entries undone.
+    ///
+    /// Returns the number of blocks undone, which is zero when `to` is
+    /// already the tip, as it is at the start of every upstream session.
+    fn rollback(&self, to: &ChainPoint) -> Result<usize, DomainError>;
 }
 
 impl<D: Domain> SyncExt for D {
@@ -103,8 +108,13 @@ impl<D: Domain> SyncExt for D {
     }
 
     #[instrument(skip_all, fields(rollback_to = %to))]
-    fn rollback(&self, to: &ChainPoint) -> Result<(), DomainError> {
-        let undo_blocks = self.wal().iter_logs(Some(to.clone()), None)?;
+    fn rollback(&self, to: &ChainPoint) -> Result<usize, DomainError> {
+        // Keys sort the entries of one slot by hash, so a block the chain
+        // puts after `to` at its slot can sort below it: read from the slot's
+        // first key.
+        let logs = self
+            .wal()
+            .iter_logs(Some(ChainPoint::Slot(to.slot())), None)?;
 
         let writer = self.state().start_writer()?;
         let archive_writer = self.archive().start_writer()?;
@@ -114,12 +124,16 @@ impl<D: Domain> SyncExt for D {
         // re-reading the not-yet-committed store.
         let mut entities: EntityMap<Self::Entity> = EntityMap::default();
 
-        for (point, log) in undo_blocks.rev() {
+        let mut undone = Vec::new();
+
+        for (point, log) in ChainOrdered::backward(logs.rev()) {
             if point == *to {
                 // Final cursor update
                 writer.set_cursor(point.clone())?;
                 break;
             }
+
+            undone.push(point.clone());
 
             crate::state::undo_delta_chunk::<Self>(&mut entities, self.state(), &log.delta)?;
 
@@ -164,9 +178,15 @@ impl<D: Domain> SyncExt for D {
 
         self.archive().truncate_front(to)?;
 
-        self.wal().truncate_front(to)?;
+        // Exactly what was undone: a cut after `to`'s key could keep a block
+        // undone at its slot, or drop one the chain puts before it.
+        self.wal().remove_points(&undone)?;
 
-        Ok(())
+        if !undone.is_empty() {
+            metrics::record_rollback(undone.len());
+        }
+
+        Ok(undone.len())
     }
 }
 
@@ -194,23 +214,28 @@ pub(crate) fn drain_pending_work<D: Domain>(
 /// 3. `finalize()` - Shard-agnostic teardown
 /// 4. `notify_tip()` - Notify tip subscribers
 ///
+/// Its duration is recorded under the unit's name, whether it succeeds or
+/// not.
+///
 /// This function is public primarily for testing scenarios where direct
 /// work unit execution is needed (e.g., manual genesis initialization).
 #[instrument(skip_all, name = "work_unit", fields(name = %work.name()))]
 pub fn execute_work_unit<D: Domain>(domain: &D, work: &mut D::WorkUnit) -> Result<(), DomainError> {
-    debug!("executing work unit");
+    metrics::time_work_unit(work.name(), || {
+        debug!("executing work unit");
 
-    run_lifecycle(domain, work, true)?;
+        run_lifecycle(domain, work, true)?;
 
-    update_mempool(domain, work);
+        update_mempool(domain, work);
 
-    // Notify tip events to subscribers
-    for event in work.tip_events() {
-        domain.notify_tip(event);
-    }
+        // Notify tip events to subscribers
+        for event in work.tip_events() {
+            domain.notify_tip(event);
+        }
 
-    debug!("work unit completed");
-    Ok(())
+        debug!("work unit completed");
+        Ok(())
+    })
 }
 
 /// Run the work-unit phase lifecycle: initialize, the per-shard loop, then
@@ -246,12 +271,12 @@ pub(crate) fn run_lifecycle<D: Domain>(
         work.compute(shard)?;
         if include_wal {
             debug!(phase = "commit_wal", "running phase");
-            work.commit_wal(domain, shard)?;
+            time_commit("wal", || work.commit_wal(domain, shard))?;
         }
         debug!(phase = "commit_state", "running phase");
-        work.commit_state(domain, shard)?;
+        time_commit("state", || work.commit_state(domain, shard))?;
         debug!(phase = "commit_archive", "running phase");
-        work.commit_archive(domain, shard)?;
+        time_commit("archive", || work.commit_archive(domain, shard))?;
     }
 
     debug!(phase = "finalize", "running phase");

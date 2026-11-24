@@ -1,6 +1,6 @@
 //! A registry the tests spawn.
 //!
-//! Shared by the publish and restore-over-a-registry suites, because a stele
+//! Shared by the publish and restore-over-a-registry suites, because a snapshot
 //! published by one is what the other reads and a second copy would be a second
 //! answer to "what is a registry, for a test".
 //!
@@ -63,9 +63,9 @@ fn install_crypto_provider() {
 /// dropped.
 ///
 /// It demands Basic credentials, because the registry these suites exist to
-/// stand in for does: access to a stele repository is free and identity-less,
-/// and still authenticated. An anonymous fixture would leave the credential
-/// plumbing in `registry::open` exercised by unit tests alone.
+/// stand in for does: access to a snapshot repository is free and
+/// identity-less, and still authenticated. An anonymous fixture would leave the
+/// credential plumbing in `registry::open` exercised by unit tests alone.
 pub struct Fixture {
     container: String,
     port: u16,
@@ -93,6 +93,11 @@ impl Fixture {
             .collect();
 
         args.extend(auth_args(auth.path()));
+
+        // So a test can take a snapshot out of a repository, as a registry's
+        // retention does. zot allows it without being told.
+        args.extend(["--env", "REGISTRY_STORAGE_DELETE_ENABLED=true"].map(str::to_owned));
+
         args.push(image.clone());
 
         let run = std::process::Command::new("docker")
@@ -500,6 +505,38 @@ impl Distribution {
         );
 
         assert_eq!(status, 201, "{}", String::from_utf8_lossy(&response));
+    }
+
+    /// Delete the manifest `tag` names, and with it every tag naming it.
+    pub fn delete_manifest(&self, repository: &str, tag: &str) {
+        let accept = (
+            "Accept",
+            "application/vnd.oci.image.manifest.v1+json".to_owned(),
+        );
+
+        let (status, headers, body) = self.request(
+            "GET",
+            &format!("/v2/{repository}/manifests/{tag}"),
+            std::slice::from_ref(&accept),
+            &[],
+        );
+
+        assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+
+        let digest = headers
+            .iter()
+            .find(|(name, _)| name == "docker-content-digest")
+            .map(|(_, value)| value.clone())
+            .unwrap_or_else(|| stelae::Digest::compute(&body).to_string());
+
+        let (status, _, body) = self.request(
+            "DELETE",
+            &format!("/v2/{repository}/manifests/{digest}"),
+            &[accept],
+            &[],
+        );
+
+        assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
     }
 
     /// Upload a blob and return the digest it is addressed by.

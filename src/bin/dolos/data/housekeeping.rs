@@ -14,7 +14,9 @@ pub struct Args {
 
 #[tokio::main]
 pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
-    let _tracing = crate::common::setup_tracing(&config.logging, config.telemetry.as_ref())?;
+    crate::common::refuse_interrupted_restore(config)?;
+
+    let _tracing = crate::common::setup_tracing(config)?;
 
     let domain = setup_domain(config)?;
 
