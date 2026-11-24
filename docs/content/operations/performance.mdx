@@ -35,7 +35,11 @@ A file descriptor is a handle for an open file, a socket, or a similar resource.
 
 Dolos adjusts `RLIMIT_NOFILE` before each command that opens or changes a store. Read-only maintenance commands also do this. Dolos increases the soft limit to the hard limit, but not to more than a ceiling. On Linux, the ceiling is 1048576, the default `fs.nr_open`. On macOS, the ceiling is 10240 (`OPEN_MAX`), the highest soft limit that macOS accepts. Dolos does not change the hard limit and does not decrease a soft limit.
 
-The minimum soft limit is 4096. If macOS refuses the ceiling, Dolos sets the soft limit to 4096. For example, macOS refuses the ceiling when `kern.maxfilesperproc` is less than it. If Dolos cannot set 4096, it stops before it opens a store. The error message gives the limits and the steps that increase them. The help, version, configuration, initialization, and service-management commands do not do this check. Windows has no `RLIMIT_NOFILE`, and Dolos does not do this check on Windows.
+The minimum soft limit is 4096. Read-only commands such as `sync status` also require this limit. You cannot disable this check.
+
+If macOS refuses the ceiling, Dolos sets the soft limit to 4096. For example, macOS refuses the ceiling when `kern.maxfilesperproc` is less than it. If Dolos cannot set 4096, it stops before it opens a store. The error message gives the limits and the steps that increase them. The help, version, configuration, initialization, and service-management commands do not do this check. Windows has no `RLIMIT_NOFILE`, and Dolos does not do this check on Windows.
+
+Tracing records data about program operations. After tracing starts, `dolos daemon` writes a message at the `info` level. The message gives the soft limits before and after the check. It also gives the hard limit, which does not change. If Dolos must use the minimum soft limit because it cannot set the requested limit, `dolos daemon` also writes a warning.
 
 To see the limits, run these commands in the shell that starts Dolos:
 

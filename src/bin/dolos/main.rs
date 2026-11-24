@@ -134,17 +134,18 @@ fn run() -> Result<()> {
     let uses_storage = args.command.uses_storage();
     let load = || -> Result<_> {
         let config = crate::common::load_and_check_config(config_file)?;
-        if uses_storage {
-            crate::limits::prepare()?;
-        }
-        Ok(config)
+        let limits = uses_storage.then(crate::limits::prepare).transpose()?;
+        Ok((config, limits))
     };
 
     match args.command {
-        Command::Daemon(args) => daemon::run(load()?, &args),
-        Command::Sync(args) => sync::run(&load()?, &args, &feedback),
-        Command::Serve(args) => serve::run(load()?, &args),
-        Command::Cache(args) => cache::run(&load()?, &args),
+        Command::Daemon(args) => {
+            let (config, limits) = load()?;
+            daemon::run(config, &args, limits)
+        }
+        Command::Sync(args) => sync::run(&load()?.0, &args, &feedback),
+        Command::Serve(args) => serve::run(load()?.0, &args),
+        Command::Cache(args) => cache::run(&load()?.0, &args),
         Command::Config(args) => config::run(config_file, &args),
         Command::Service(args) => service::run(explicit_config, &args),
 
@@ -152,12 +153,12 @@ fn run() -> Result<()> {
         // configuration, that is why we pass the whole result and let the command logic decide what
         // to do with it.
         #[cfg(feature = "utils")]
-        Command::Init(args) => init::run(load(), config_file, &args),
+        Command::Init(args) => init::run(load().map(|(config, _)| config), config_file, &args),
 
         #[cfg(feature = "utils")]
-        Command::Data(args) => data::run(&load()?, &args, &feedback),
+        Command::Data(args) => data::run(&load()?.0, &args, &feedback),
 
-        Command::Bootstrap(args) => bootstrap::run(&load()?, &args, &feedback),
+        Command::Bootstrap(args) => bootstrap::run(&load()?.0, &args, &feedback),
     }
 }
 

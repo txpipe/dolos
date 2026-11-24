@@ -1,11 +1,18 @@
 #[cfg(unix)]
-pub fn prepare() -> miette::Result<()> {
-    unix::prepare()
+pub use unix::{prepare, Outcome};
+
+#[cfg(not(unix))]
+#[derive(Debug)]
+pub struct Outcome;
+
+#[cfg(not(unix))]
+impl Outcome {
+    pub fn log(&self) {}
 }
 
 #[cfg(not(unix))]
-pub fn prepare() -> miette::Result<()> {
-    Ok(())
+pub fn prepare() -> miette::Result<Outcome> {
+    Ok(Outcome)
 }
 
 #[cfg(unix)]
@@ -46,7 +53,32 @@ mod unix {
         hard.min(ceiling)
     }
 
-    pub(super) fn prepare() -> Result<()> {
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct Outcome {
+        inherited: (rlim_t, rlim_t),
+        applied: (rlim_t, rlim_t),
+        minimum_fallback: Option<rlim_t>,
+    }
+
+    impl Outcome {
+        pub fn log(&self) {
+            tracing::info!(
+                inherited_soft = %self::display(self.inherited.0),
+                inherited_hard = %self::display(self.inherited.1),
+                applied_soft = %self::display(self.applied.0),
+                applied_hard = %self::display(self.applied.1),
+                "RLIMIT_NOFILE soft {} -> {}, hard {}",
+                self::display(self.inherited.0),
+                self::display(self.applied.0),
+                self::display(self.applied.1),
+            );
+            if let Some(minimum) = self.minimum_fallback {
+                tracing::warn!("RLIMIT_NOFILE fell back to the minimum soft limit {minimum}");
+            }
+        }
+    }
+
+    pub fn prepare() -> Result<Outcome> {
         prepare_with(
             required(),
             CEILING,
@@ -89,17 +121,22 @@ mod unix {
         ceiling: rlim_t,
         mut get: impl FnMut() -> nix::Result<(rlim_t, rlim_t)>,
         mut set: impl FnMut(rlim_t, rlim_t) -> nix::Result<()>,
-    ) -> Result<()> {
+    ) -> Result<Outcome> {
         let inherited = get().map_err(|error| {
             miette!(
                 help = guidance(required),
                 "RLIMIT_NOFILE: required soft >= {required}. getrlimit failed: {error}"
             )
         })?;
+        let mut outcome = Outcome {
+            inherited,
+            applied: inherited,
+            minimum_fallback: None,
+        };
         let (soft, hard) = inherited;
         let target = target(hard, ceiling).max(required);
         if soft == RLIM_INFINITY || soft >= target {
-            return Ok(());
+            return Ok(outcome);
         }
         if hard != RLIM_INFINITY && hard < required {
             return Err(failure(required, inherited, "The hard limit is too low."));
@@ -107,14 +144,16 @@ mod unix {
 
         let expected = match set(target, hard) {
             Ok(()) => target,
-            Err(_) if soft >= required => return Ok(()),
+            Err(_) if soft >= required => return Ok(outcome),
             // macOS refuses a soft limit that is more than
             // `kern.maxfilesperproc`. An administrator can set that value to
             // less than `ceiling`, but macOS can still accept the minimum.
             Err(_) if target > required => {
-                set(required, hard).map(|()| required).map_err(|error| {
+                set(required, hard).map_err(|error| {
                     failure(required, inherited, &format!("setrlimit failed: {error}"))
-                })?
+                })?;
+                outcome.minimum_fallback = Some(required);
+                required
             }
             Err(error) => {
                 return Err(failure(
@@ -143,7 +182,8 @@ mod unix {
                 ),
             ));
         }
-        Ok(())
+        outcome.applied = (soft, hard);
+        Ok(outcome)
     }
 
     #[cfg(test)]
@@ -176,7 +216,7 @@ mod unix {
                 }
             }
 
-            fn run(&self, required: rlim_t) -> Result<()> {
+            fn run(&self, required: rlim_t) -> Result<Outcome> {
                 prepare_with(
                     required,
                     CAP,
@@ -228,7 +268,10 @@ mod unix {
                 (1024, RLIM_INFINITY, CAP),
             ] {
                 let fake = Fake::new(soft, hard);
-                fake.run(4096).unwrap();
+                let outcome = fake.run(4096).unwrap();
+                assert_eq!(outcome.inherited, (soft, hard));
+                assert_eq!(outcome.applied, (raised, hard));
+                assert_eq!(outcome.minimum_fallback, None);
                 assert_eq!(fake.limit.get(), (raised, hard), "{soft} {hard}");
                 assert_eq!(fake.sets(), [raised], "{soft} {hard}");
             }
@@ -244,7 +287,10 @@ mod unix {
                 (RLIM_INFINITY, RLIM_INFINITY),
             ] {
                 let fake = Fake::new(inherited.0, inherited.1);
-                fake.run(4096).unwrap();
+                let outcome = fake.run(4096).unwrap();
+                assert_eq!(outcome.inherited, inherited);
+                assert_eq!(outcome.applied, inherited);
+                assert_eq!(outcome.minimum_fallback, None);
                 assert_eq!(fake.limit.get(), inherited);
                 assert!(fake.sets().is_empty(), "{inherited:?}");
             }
@@ -253,7 +299,10 @@ mod unix {
         #[test]
         fn limits_fall_back_to_the_minimum_when_the_target_is_refused() {
             let fake = Fake::refusing_above(1024, RLIM_INFINITY, 8192);
-            fake.run(4096).unwrap();
+            let outcome = fake.run(4096).unwrap();
+            assert_eq!(outcome.inherited, (1024, RLIM_INFINITY));
+            assert_eq!(outcome.applied, (4096, RLIM_INFINITY));
+            assert_eq!(outcome.minimum_fallback, Some(4096));
             assert_eq!(fake.limit.get(), (4096, RLIM_INFINITY));
             assert_eq!(fake.sets(), [CAP, 4096]);
         }
@@ -261,9 +310,120 @@ mod unix {
         #[test]
         fn limits_keep_a_sufficient_soft_limit_when_the_target_is_refused() {
             let fake = Fake::refusing_above(5000, RLIM_INFINITY, 5000);
-            fake.run(4096).unwrap();
+            let outcome = fake.run(4096).unwrap();
+            assert_eq!(outcome.inherited, (5000, RLIM_INFINITY));
+            assert_eq!(outcome.applied, (5000, RLIM_INFINITY));
+            assert_eq!(outcome.minimum_fallback, None);
             assert_eq!(fake.limit.get(), (5000, RLIM_INFINITY));
             assert_eq!(fake.sets(), [CAP]);
+        }
+
+        #[derive(Clone, Default)]
+        struct Logs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+        impl std::io::Write for Logs {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        #[test]
+        fn limits_log_the_outcome_and_warn_only_for_the_minimum_fallback() {
+            use tracing_subscriber::prelude::*;
+
+            for (fake, summary, fallback) in [
+                (
+                    Fake::new(1024, 524288),
+                    "RLIMIT_NOFILE soft 1024 -> 524288, hard 524288",
+                    false,
+                ),
+                (
+                    Fake::new(4096, 4096),
+                    "RLIMIT_NOFILE soft 4096 -> 4096, hard 4096",
+                    false,
+                ),
+                (
+                    Fake::new(RLIM_INFINITY, RLIM_INFINITY),
+                    "RLIMIT_NOFILE soft unlimited -> unlimited, hard unlimited",
+                    false,
+                ),
+                (
+                    Fake::refusing_above(5000, RLIM_INFINITY, 5000),
+                    "RLIMIT_NOFILE soft 5000 -> 5000, hard unlimited",
+                    false,
+                ),
+                (
+                    Fake::refusing_above(1024, RLIM_INFINITY, 8192),
+                    "RLIMIT_NOFILE soft 1024 -> 4096, hard unlimited",
+                    true,
+                ),
+            ] {
+                let logs = Logs::default();
+                let writer = logs.clone();
+                let subscriber = tracing_subscriber::registry().with(
+                    tracing_subscriber::fmt::layer()
+                        .with_ansi(false)
+                        .with_writer(move || writer.clone())
+                        .with_filter(
+                            tracing_subscriber::filter::Targets::new()
+                                .with_target("dolos::limits", tracing::Level::INFO),
+                        ),
+                );
+                let _second = tracing::Dispatch::new(tracing_subscriber::registry());
+                tracing::subscriber::with_default(subscriber, || {
+                    let outcome = fake.run(4096).unwrap();
+                    assert!(logs.0.lock().unwrap().is_empty());
+                    outcome.log();
+                });
+
+                let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+                let lines: Vec<_> = text.lines().collect();
+                assert_eq!(lines.len(), if fallback { 2 } else { 1 }, "{text}");
+                assert!(
+                    lines[0].contains("INFO") && lines[0].contains(summary),
+                    "{text}"
+                );
+                if fallback {
+                    assert!(lines[1].contains("WARN"), "{text}");
+                    assert!(
+                        lines[1].contains("fell back to the minimum soft limit 4096"),
+                        "{text}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn limits_report_the_limits_read_back_instead_of_the_requested_target() {
+            let mut reads = 0;
+            let outcome = prepare_with(
+                4096,
+                CAP,
+                || {
+                    reads += 1;
+                    Ok(if reads == 1 {
+                        (1024, 16384)
+                    } else {
+                        (8192, 16384)
+                    })
+                },
+                |soft, _| {
+                    if soft > 8192 {
+                        Err(Errno::EINVAL)
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .unwrap();
+            assert_eq!(outcome.inherited, (1024, 16384));
+            assert_eq!(outcome.applied, (8192, 16384));
+            assert_eq!(outcome.minimum_fallback, Some(4096));
         }
 
         #[test]
@@ -424,8 +584,10 @@ mod unix {
                     )
                 });
                 assert_eq!(getrlimit(Resource::RLIMIT_NOFILE).unwrap(), (soft, hard));
-                crate::limits::prepare().unwrap();
+                let outcome = crate::limits::prepare().unwrap();
                 let (effective, effective_hard) = getrlimit(Resource::RLIMIT_NOFILE).unwrap();
+                assert_eq!(outcome.inherited, (soft, hard));
+                assert_eq!(outcome.applied, (effective, effective_hard));
                 assert_eq!(effective_hard, hard);
                 let raised = soft.max(target(hard, CEILING).max(required()));
                 if cfg!(target_os = "macos") {
