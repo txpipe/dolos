@@ -44,6 +44,7 @@ pub mod point;
 pub mod state;
 pub mod submit;
 pub mod sync;
+pub mod telemetry;
 pub mod wal;
 pub mod work_unit;
 
@@ -440,6 +441,9 @@ pub enum BrokenInvariant {
     #[error("missing utxo {0:?}")]
     MissingUtxo(TxoRef),
 
+    #[error("tx {0} produces more lovelace than it consumes")]
+    UnbalancedTx(TxHash),
+
     #[error("invalid genesis config")]
     InvalidGenesisConfig,
 
@@ -519,12 +523,30 @@ pub enum WalError {
     #[error("slot not found in chain {0}")]
     SlotNotFound(BlockSlot),
 
-    #[error("WAL version is incompatible: found {found}, expected {expected}")]
-    IncompatibleVersion { found: u32, expected: u32 },
+    /// A WAL this release can't read, which a writable open keeps instead of
+    /// resetting, because a store still needs a block it holds.
+    #[error(
+        "the WAL at {} is kept as it is: this release can't read it ({unreadable}), and {needed}. {}",
+        .path.display(),
+        KEPT_WAL_REMEDY
+    )]
+    Kept {
+        path: std::path::PathBuf,
+        /// Why this release can't read it.
+        unreadable: String,
+        /// Which store needs what it holds.
+        needed: String,
+    },
 
     #[error("IO error: {0}")]
     Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
+
+/// What to do about a [`WalError::Kept`] WAL.
+const KEPT_WAL_REMEDY: &str = "If another release wrote it, start that release once, so it brings \
+     the stores together and shuts down cleanly, then start this one again; otherwise rebuild the \
+     state from the archive with `dolos data rebuild`, or replace the dataset with \
+     `dolos bootstrap --force`";
 
 impl WalError {
     pub fn internal<T>(value: T) -> Self
@@ -568,22 +590,23 @@ impl Genesis {
     /// above 2 means a fast-forwarded start, since Shelley's own band is
     /// `[2, 2]`. `None` is a Byron start that climbs the hard-fork ladder.
     pub fn starting_protocol(&self) -> Result<Option<u16>, ChainError> {
-        let major = match self.force_protocol {
-            Some(forced) => forced as u64,
-            None => {
-                let major = self.shelley.protocol_params.protocol_version.major;
+        let forced = self.force_protocol.map(|forced| forced as u64);
 
-                if major <= 2 {
-                    return Ok(None);
-                }
-
-                major
-            }
+        let Some(major) = forced.or_else(|| self.derived_starting_major()) else {
+            return Ok(None);
         };
 
         u16::try_from(major)
             .map(Some)
             .map_err(|_| ChainError::UnsupportedStartingProtocol(major))
+    }
+
+    /// The start the Shelley genesis alone gives, ignoring `force_protocol`.
+    /// `None` is a Byron start.
+    pub fn derived_starting_major(&self) -> Option<u64> {
+        let major = self.shelley.protocol_params.protocol_version.major;
+
+        (major > 2).then_some(major)
     }
 
     pub fn from_file_paths(
@@ -822,6 +845,23 @@ pub trait ChainLogic: Sized + Send + Sync {
         point: ChainPoint,
     ) -> Result<CatchUpBlockData, ChainError>;
 
+    /// Restore the data that the deltas of a WAL entry lose in the WAL
+    /// encoding, before catch-up applies them again.
+    ///
+    /// A delta can hold data that its `apply` reads but that the WAL does not
+    /// store, because the WAL usually only undoes deltas. Catch-up calls this
+    /// function for each entry that it replays. `state` is the state before
+    /// `block`. The chain uses the block and the state to calculate the data
+    /// again. The default restores nothing.
+    fn prepare_replay<S: StateStore>(
+        _state: &S,
+        _genesis: Arc<Genesis>,
+        _block: &Cbor,
+        _deltas: &mut [Self::Delta],
+    ) -> Result<(), ChainError> {
+        Ok(())
+    }
+
     /// Called by a rollback to `to` before the archive drops every log row
     /// keyed at or after `to`'s slot. No block undo restores rows that
     /// boundary work wrote there, so this is where the chain says so. The
@@ -895,11 +935,33 @@ pub enum DomainError {
         state: Option<ChainPoint>,
     },
 
+    /// The WAL is ahead of the state, but it does not hold all the blocks
+    /// between them. A replay of the WAL thus cannot bring the state to the
+    /// WAL tip.
+    #[error(
+        "the WAL at slot {} does not hold all the blocks after the state at {}",
+        wal.slot(),
+        state.as_ref().map_or("origin".to_string(), |state| format!("slot {}", state.slot()))
+    )]
+    WalGap {
+        wal: ChainPoint,
+        state: Option<ChainPoint>,
+    },
+
+    /// The archive holds blocks but the state has no cursor, as a snapshot
+    /// restore, a state rebuild or a store reset stopped before the state
+    /// was written leaves the stores.
+    #[error("the archive holds blocks up to slot {archive}, but the state has no cursor")]
+    ArchiveWithoutState { archive: BlockSlot },
+
     #[error("{0}")]
     Internal(String),
 
     #[error("wal is empty")]
     WalIsEmpty,
+
+    #[error("no chain overlap at slot {0}")]
+    NoOverlap(BlockSlot),
 
     #[error("forced stop epoch reached")]
     StopEpochReached,
@@ -965,27 +1027,31 @@ pub trait Domain: Send + Sync + Clone + 'static {
     const MAX_PRUNE_SLOTS_PER_HOUSEKEEPING: u64 = 10_000;
     const MAX_PRUNE_INDEX_ROWS_PER_HOUSEKEEPING: u64 = 100_000;
 
+    /// One bounded round of pruning the archive and the WAL to their
+    /// windows; whether both are done.
     fn housekeeping(&self) -> Result<bool, DomainError> {
-        let mut archive_pruned = true;
+        telemetry::storage::time_housekeeping(|| {
+            let mut archive_pruned = true;
 
-        if let Some(max_slots) = self.history_config().max_slots() {
-            info!(max_slots, "pruning archive for excess history");
+            if let Some(max_slots) = self.history_config().max_slots() {
+                info!(max_slots, "pruning archive for excess history");
 
-            archive_pruned = self.archive().prune_history(
-                max_slots,
-                Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING),
-                Some(Self::MAX_PRUNE_INDEX_ROWS_PER_HOUSEKEEPING),
-            )?;
-        }
+                archive_pruned = self.archive().prune_history(
+                    max_slots,
+                    Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING),
+                    Some(Self::MAX_PRUNE_INDEX_ROWS_PER_HOUSEKEEPING),
+                )?;
+            }
 
-        let max_slots = Self::Chain::mutable_slots(self);
-        info!(max_slots, "pruning wal for excess history");
+            let max_slots = Self::Chain::mutable_slots(self);
+            info!(max_slots, "pruning wal for excess history");
 
-        let wal_pruned = self
-            .wal()
-            .prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;
+            let wal_pruned = self
+                .wal()
+                .prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;
 
-        Ok(archive_pruned && wal_pruned)
+            Ok(archive_pruned && wal_pruned)
+        })
     }
 
     /// Run bounded housekeeping rounds until no active or currently due work

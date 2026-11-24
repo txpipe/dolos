@@ -22,7 +22,7 @@
 //! Reachability is the whole membership rule, and it is narrower than "an enum
 //! the governance code touches". `Voter` is not here, for instance: it selects
 //! *which* of a proposal's three vote maps a vote lands in and is never itself
-//! stored in an entity value, so no stele byte depends on its indexes.
+//! stored in an entity value, so no snapshot byte depends on its indexes.
 //!
 //! One reachable enum is covered indirectly instead of by a table of its own:
 //! `EpochPosition` is `pub(super)` to `model::epoch_value` and so unnameable

@@ -8,7 +8,7 @@
 //! State is organized into four keyspaces based on access patterns:
 //!
 //! 1. **`state-cursor`**: Chain position tracking, and the compatibility
-//!    identity the store recorded when it was created
+//!    identity and internal format the store recorded when it was created
 //!
 //! 2. **`state-utxos`**: UTxO set storage Key: `[tx_hash:32][index:4]` (36
 //!    bytes) Value: CBOR `[era, body, slot, tx_index]` (`[era, body]` for a
@@ -45,6 +45,7 @@ pub mod entity_keys;
 pub mod tags;
 pub mod utxos;
 
+use crate::metrics::StoreMetrics;
 use crate::preset::{Preset, Tuning};
 use crate::view::{View, Viewed};
 use crate::Error;
@@ -67,17 +68,20 @@ const CURSOR_KEY: &[u8] = &[0u8];
 /// Key for the compatibility identity, beside the cursor
 const IDENTITY_KEY: &[u8] = b"identity";
 
+/// Key for the internal format the store was written in, beside the identity
+const FORMAT_KEY: &[u8] = b"format";
+
 /// Fjall-based state store implementation with unified entities keyspace.
 ///
 /// Uses 4 keyspaces:
-/// - `cursor`: Chain position tracking and the compatibility identity
+/// - `cursor`: Chain position tracking, the compatibility identity and format
 /// - `utxos`: UTxO set storage
 /// - `entities`: All entity types with namespace hash prefixes
 /// - `tags`: Live-UTxO tags, a projection of `utxos`
 #[derive(Clone)]
 pub struct StateStore {
     db: Database,
-    /// Cursor keyspace (chain position and compatibility identity)
+    /// Cursor keyspace (chain position, compatibility identity and format)
     cursor: Keyspace,
     /// UTxO set keyspace
     utxos: Keyspace,
@@ -86,6 +90,8 @@ pub struct StateStore {
     /// Live-UTxO tags keyspace
     tags: Keyspace,
     preset: Preset,
+    /// The metrics of a writable store.
+    metrics: Option<Arc<StoreMetrics>>,
     /// The mirror a read-only store opened over, dropped after the database
     /// and every iterator over it.
     view: Option<Arc<View>>,
@@ -112,20 +118,30 @@ impl StateStore {
 
     fn open_at(path: &Path, preset: Preset, view: Option<Arc<View>>) -> Result<Self, Error> {
         let tuning = preset.state();
-        let db = crate::open_database(tuning.database.builder(path), path, || {
+        let builder = match view {
+            Some(_) => tuning.database.view_builder(path),
+            None => tuning.database.builder(path),
+        };
+        let db = crate::open_database(builder, path, || {
             view.as_ref()
                 .map_or(path.to_path_buf(), |view| view.source_of(path))
         })?;
 
-        let store = Self {
+        let mut store = Self {
             cursor: db.keyspace(keyspace_names::CURSOR, || tuning.cursor.options())?,
             utxos: db.keyspace(keyspace_names::UTXOS, || tuning.utxos.options())?,
             entities: db.keyspace(keyspace_names::ENTITIES, || tuning.entities.options())?,
             tags: db.keyspace(keyspace_names::TAGS, || tuning.tags.options())?,
             db,
             preset,
+            metrics: None,
             view,
         };
+
+        if store.view.is_none() {
+            let metrics = StoreMetrics::report("state", store.db.clone(), store.keyspaces());
+            store.metrics = Some(Arc::new(metrics));
+        }
 
         tracing::info!(tuning = %store.tuning(), "state store opened");
 
@@ -165,10 +181,30 @@ impl StateStore {
         Ok(value.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
     }
 
-    /// Record the compatibility identity, synced to disk before it returns.
-    pub fn record_identity(&self, identity: &str) -> Result<(), Error> {
+    /// The internal format the store recorded beside its identity, a
+    /// big-endian `u32`; `None` for a store that records none.
+    pub fn format(&self) -> Result<Option<u32>, Error> {
+        let Some(bytes) = self.cursor.get(FORMAT_KEY)? else {
+            return Ok(None);
+        };
+
+        let bytes: [u8; 4] = bytes
+            .as_ref()
+            .try_into()
+            .map_err(|_| Error::Codec(format!("a store format of {} bytes, not 4", bytes.len())))?;
+
+        Ok(Some(u32::from_be_bytes(bytes)))
+    }
+
+    /// Record the compatibility identity and the internal format in one
+    /// batch, synced to disk before it returns.
+    pub fn record_identity(&self, identity: &str, format: u32) -> Result<(), Error> {
         self.writable()?;
-        self.cursor.insert(IDENTITY_KEY, identity.as_bytes())?;
+
+        let mut batch = self.db.batch();
+        batch.insert(&self.cursor, IDENTITY_KEY, identity.as_bytes());
+        batch.insert(&self.cursor, FORMAT_KEY, format.to_be_bytes());
+        batch.commit()?;
         self.db.persist(PersistMode::SyncAll)?;
 
         Ok(())
@@ -197,17 +233,23 @@ impl StateStore {
         Ok(false)
     }
 
+    /// Every keyspace, with its name.
+    fn keyspaces(&self) -> Vec<(&'static str, Keyspace)> {
+        vec![
+            (keyspace_names::CURSOR, self.cursor.clone()),
+            (keyspace_names::UTXOS, self.utxos.clone()),
+            (keyspace_names::ENTITIES, self.entities.clone()),
+            (keyspace_names::TAGS, self.tags.clone()),
+        ]
+    }
+
     /// Per-keyspace disk footprint: `(name, bytes, path)`, the path in the
     /// store's own folder.
     pub fn disk_usage(&self) -> Vec<(&'static str, u64, std::path::PathBuf)> {
-        [
-            (keyspace_names::CURSOR, &self.cursor),
-            (keyspace_names::UTXOS, &self.utxos),
-            (keyspace_names::ENTITIES, &self.entities),
-            (keyspace_names::TAGS, &self.tags),
-        ]
-        .map(|(name, ks)| (name, ks.disk_space(), self.source_of(ks.path())))
-        .to_vec()
+        self.keyspaces()
+            .into_iter()
+            .map(|(name, ks)| (name, ks.disk_space(), self.source_of(ks.path())))
+            .collect()
     }
 
     /// Where `path` is in the store itself, when it is in a view's mirror.
@@ -456,6 +498,20 @@ impl CoreStateStore for StateStore {
 
         Ok(Viewed::new(iter, self.view.as_ref()))
     }
+
+    /// Commits are journaled with [`PersistMode::Buffer`]; this fsyncs the
+    /// journal. A read-only view committed nothing, so it has nothing to sync.
+    fn persist(&self) -> Result<(), StateError> {
+        if self.view.is_some() {
+            return Ok(());
+        }
+
+        self.db
+            .persist(PersistMode::SyncAll)
+            .map_err(Error::Fjall)?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -564,14 +620,60 @@ mod tests {
             let error = store.start_writer().err().unwrap();
             assert!(error.to_string().contains("read-only"), "{error}");
 
-            let error = store.record_identity("other").unwrap_err();
+            let error = store.record_identity("other", 1).unwrap_err();
             assert!(matches!(error, Error::ReadOnly), "{error:?}");
+
+            // Nothing was committed through the view, so there is nothing to sync.
+            store.persist().unwrap();
         }
 
         assert!(
             files(dir.path()) == before,
             "a read-only store changed a file"
         );
+    }
+
+    #[test]
+    fn the_identity_and_format_survive_a_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state");
+
+        {
+            let store = StateStore::open(&path, Preset::Standard).unwrap();
+            assert_eq!(store.identity().unwrap(), None);
+            assert_eq!(store.format().unwrap(), None);
+
+            store.record_identity("v2-beta.1", 7).unwrap();
+        }
+
+        let store = StateStore::open(&path, Preset::Standard).unwrap();
+        assert_eq!(store.identity().unwrap().as_deref(), Some("v2-beta.1"));
+        assert_eq!(store.format().unwrap(), Some(7));
+        assert_eq!(
+            store.cursor.get(FORMAT_KEY).unwrap().unwrap().as_ref(),
+            7u32.to_be_bytes()
+        );
+    }
+
+    /// A cursor committed and persisted is there when the store is reopened
+    /// without a shutdown. The fsync itself shows only after a power loss, so
+    /// this pins that `persist` succeeds on a writable store.
+    #[test]
+    fn a_persisted_commit_survives_a_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state");
+        let point = ChainPoint::Specific(100, pallas::crypto::hash::Hash::new([7; 32]));
+
+        {
+            let store = StateStore::open(&path, Preset::Standard).unwrap();
+            let writer = store.start_writer().unwrap();
+            writer.set_cursor(point.clone()).unwrap();
+            writer.commit().unwrap();
+            store.persist().unwrap();
+        }
+
+        let store = StateStore::open(&path, Preset::Standard).unwrap();
+        assert_eq!(store.read_cursor().unwrap(), Some(point));
     }
 
     /// An iterator drained after its read-only store is dropped reads every
@@ -629,6 +731,40 @@ mod tests {
 
         let _store = StateStore::open(&path, Preset::Standard).unwrap();
         assert_eq!(left(dir.path()), ["state"]);
+    }
+
+    /// A view over a keyspace past its L0 threshold leaves its runs as they
+    /// are: fjall queues a compaction for it on open, and a view has no
+    /// workers to run one in its mirror.
+    #[test]
+    fn a_view_leaves_a_compaction_backlog_alone() {
+        use fjall::AbstractTree;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state");
+        let runs = usize::from(Preset::Standard.state().tags.l0_threshold) + 2;
+
+        {
+            let store = StateStore::open(&path, Preset::Standard).unwrap();
+
+            // Keys at both ends make every table overlap, so each flush is its
+            // own L0 run; a manual flush queues no compaction.
+            for run in 0..runs as u32 {
+                store.tags.insert("a", run.to_be_bytes()).unwrap();
+                store.tags.insert("z", run.to_be_bytes()).unwrap();
+                store.tags.tree.flush_active_memtable(0).unwrap();
+            }
+            assert_eq!(store.tags.tree.l0_run_count(), runs);
+            store.shutdown().unwrap();
+        }
+
+        let view = StateStore::open_view(&path, Preset::Standard).unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        assert_eq!(
+            view.tags.tree.l0_run_count(),
+            runs,
+            "the view compacted its mirror"
+        );
     }
 
     /// A view reports its footprint under the store's own folder, not the

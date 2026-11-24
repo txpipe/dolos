@@ -1,0 +1,396 @@
+---
+title: Metric reference
+sidebar:
+  label: Metrics
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Every metric series Dolos exports, by area. Dolos pushes its metrics over OTLP to the collector named in the [`[telemetry]`](../configuration/schema#telemetry) section; it serves no metrics route of its own. [Telemetry](../operations/tracing) covers the setup.
+
+## Naming
+
+- A name the OpenTelemetry semantic conventions define is used as they define it: `http.server.request.duration`, `http.server.active_requests`, `rpc.server.call.duration` and the `process.*` series of the [process](#process) section. The request count is the count of the duration histogram; there is no separate request counter.
+- Every other name sits under `dolos.`, dotted by area and then by subject: `dolos.query.*`, `dolos.cache.*`, `dolos.storage.*`, `dolos.sync.*`, `dolos.mempool.*`, `dolos.submit.*`, `dolos.build.*`. Dolos's own additions to a standard family mirror its path, as in `dolos.http.server.request.dropped`.
+- The attributes Dolos defines are bare lowercase keys from one vocabulary: `surface`, `store`, `keyspace`, `namespace`, `tier`, `stage` and `work_unit` for the sync, `state` for the mempool, `outcome` for any result, and `version` and `git_sha` for the build. Request series also carry the semantic-convention attributes of their family (`http.route`, `rpc.method`, …), and the process CPU time its `cpu.mode`. The resource attributes Dolos defines sit under `dolos.`.
+- Latencies are histograms in seconds, sizes are in bytes, and counts carry a unit annotation such as `{request}` or `{entry}`. `dolos.build.info`, `dolos.sync.caught_up` and the sync stages' own counters and gauges carry no unit.
+- The meter is the crate that records: `dolos-core`, `dolos-fjall`, `dolos-minibf`, `dolos-minikupo`, `dolos-grpc` and `dolos-trp`, plus `dolos`, the node's own, for the [sync](#sync), [upstream submission](#mempool), [block and WAL storage](#storage) and [process](#process) series. Queries need not name it: the `surface` attribute tells the serving surfaces apart.
+
+### Prometheus names
+
+A collector that exports to Prometheus turns the dots of names and attributes into underscores, appends the unit (`_seconds`, `_bytes`; an annotation such as `{request}` adds nothing) and appends `_total` to counters. A histogram becomes `_bucket`, `_sum` and `_count` series. So `http.server.request.duration` is queried as `http_server_request_duration_seconds_bucket`, `dolos.cache.hits` as `dolos_cache_hits_total` and `http.route` as `http_route`. The tables below give the OTel name of each series with its Prometheus name beneath.
+
+### Histogram boundaries
+
+Every duration histogram has the same bucket boundaries, in seconds: 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10 and 30, plus the `+Inf` bucket. Two histograms have their own: `dolos.mempool.confirmation.duration` (see [mempool](#mempool)) and `dolos.sync.rollback.depth`, which counts blocks (see [sync](#sync)).
+
+### Resource attributes
+
+Every series carries the resource of its process:
+
+| attribute             | value                                                                  |
+| --------------------- | ---------------------------------------------------------------------- |
+| `service.name`        | `telemetry.service_name` (`dolos` by default)                          |
+| `service.instance.id` | the hostname                                                           |
+| `service.version`     | the Dolos version                                                      |
+| `dolos.network`       | `mainnet`, `preprod`, `preview`, or a custom network's magic           |
+
+`OTEL_RESOURCE_ATTRIBUTES` overrides any of them, for example `service.instance.id=dolos-0`. Depending on its settings, a collector puts these attributes on every series as labels (`service_instance_id`, `dolos_network`, …) or only on a `target_info` series, joined to the others through `job` and `instance`. With the attributes as labels, `service.name` and `service.instance.id` also appear as `job` and `instance`, and the SDK adds `telemetry_sdk_*` labels. The [examples](#example-queries) assume labels and say how they change otherwise.
+
+### Export
+
+Metrics are pushed every `telemetry.metrics_interval_seconds` (60 by default) as cumulative sums. Counters only grow, so take their `rate()`; the series marked *up-down counter* below go up and down and are read as gauges. Gauges are read when the export collects them, never on the path they describe.
+
+## Serving
+
+Every request series carries `surface`: `minibf`, `minikupo`, `grpc` or `trp`.
+
+### HTTP: MiniBF and MiniKupo
+
+| series | meter | type, unit | labels | meaning |
+| ------ | ----- | ---------- | ------ | ------- |
+| `http.server.request.duration`<br />`http_server_request_duration_seconds` | `dolos-minibf`, `dolos-minikupo` | histogram, `s` | `surface`, `http.route`, `http.request.method`, `http.response.status_code` | Requests answered and how long each took; its count is the request count |
+| `http.server.active_requests`<br />`http_server_active_requests` | `dolos-minibf`, `dolos-minikupo` | up-down counter, `{request}` | `surface`, `http.route`, `http.request.method` | Requests being answered now |
+| `dolos.http.server.request.dropped`<br />`dolos_http_server_request_dropped_total` | `dolos-minibf`, `dolos-minikupo` | counter, `{request}` | `surface`, `http.route`, `http.request.method` | Requests whose client went away before the answer |
+
+- `http.route` is the route template the request matched, such as `/addresses/{address}/utxos`, with MiniBF's `route_prefix` in front when one is set. A request no route matched is `unmatched`. The values are the routes the [MiniBF](../apis/minibf#coverage) and [MiniKupo](../apis/minikupo#coverage) pages list, with two differences on MiniKupo: its matches route is `/matches/{*pattern}`, and since MiniKupo also serves every route under `/v1`, each route has a second value with `/v1` in front, such as `/v1/metadata/{slot-no}`.
+- `http.request.method` is the standard method (`GET`, `POST`, …), or `_OTHER` for any other.
+- `http.response.status_code` is the status the node answered.
+- The duration runs from the request reaching the node to its response head, the body not included. The request deadline (`request_timeout_seconds`) sits inside this measure, so a request it cut is a duration sample with status `504`, not a drop.
+- A **dropped** request is one whose client went away before the node answered it: it adds one to the dropped counter and records no duration.
+- Active requests count the requests the node is answering now; a request leaves the count once answered or dropped.
+
+### gRPC
+
+| series | meter | type, unit | labels | meaning |
+| ------ | ----- | ---------- | ------ | ------- |
+| `rpc.server.call.duration`<br />`rpc_server_call_duration_seconds` | `dolos-grpc` | histogram, `s` | `surface`, `rpc.service`, `rpc.method`, `rpc.response.status_code` | Calls and their duration; for a stream, the time to its first message |
+| `dolos.rpc.server.active_requests`<br />`dolos_rpc_server_active_requests` | `dolos-grpc` | up-down counter, `{request}` | `surface`, `rpc.service`, `rpc.method` | Calls not yet recorded: unary calls in progress, streams before their first message |
+| `dolos.rpc.server.request.dropped`<br />`dolos_rpc_server_request_dropped_total` | `dolos-grpc` | counter, `{request}` | `surface`, `rpc.service`, `rpc.method` | Calls abandoned by their client before a duration was recorded |
+| `dolos.rpc.server.active_streams`<br />`dolos_rpc_server_active_streams` | `dolos-grpc` | up-down counter, `{stream}` | `surface`, `rpc.service`, `rpc.method` | Server streams open now |
+| `dolos.rpc.server.streams.ended`<br />`dolos_rpc_server_streams_ended_total` | `dolos-grpc` | counter, `{stream}` | `surface`, `rpc.service`, `rpc.method`, `rpc.response.status_code` | Server streams ended, by final status |
+
+- `rpc.service` and `rpc.method` name a method the server registers, such as `utxorpc.v1alpha.query.QueryService` and `ReadUtxos`; the reflection service, `grpc.reflection.v1.ServerReflection`, is one of them. A path that names no registered method is `unknown` in both.
+- `rpc.response.status_code` is the gRPC status name: `OK`, `CANCELLED`, `UNKNOWN`, `INVALID_ARGUMENT`, `DEADLINE_EXCEEDED`, `NOT_FOUND`, `ALREADY_EXISTS`, `PERMISSION_DENIED`, `RESOURCE_EXHAUSTED`, `FAILED_PRECONDITION`, `ABORTED`, `OUT_OF_RANGE`, `UNIMPLEMENTED`, `INTERNAL`, `UNAVAILABLE`, `DATA_LOSS` or `UNAUTHENTICATED`. A code outside that set, or a call that ended without one, is `UNKNOWN`.
+- gRPC and gRPC-web calls are both recorded. Requests of any other kind on the port, such as CORS preflights, are not.
+- A **unary** call's duration runs to the end of its response, when its status is known.
+- A **server-streaming** call's duration is the time to its first response message, recorded with `OK`. A stream that ends before sending a message records its duration at the end, with its final status. From its response head until it ends, the stream counts in `dolos.rpc.server.active_streams`; its end adds one to `dolos.rpc.server.streams.ended` with its final status, `CANCELLED` when the client went away before the server sent one.
+- Active requests count calls until they record their duration: a stream leaves them at its first message and stays in active streams.
+- A **dropped** call is one its client abandoned before it recorded a duration: before a unary call's status, or before a stream's first message.
+
+### TRP
+
+| series | meter | type, unit | labels | meaning |
+| ------ | ----- | ---------- | ------ | ------- |
+| `rpc.server.call.duration`<br />`rpc_server_call_duration_seconds` | `dolos-trp` | histogram, `s` | `surface`, `rpc.method`, `rpc.response.status_code` | Calls and how long each handler took |
+| `dolos.rpc.server.active_requests`<br />`dolos_rpc_server_active_requests` | `dolos-trp` | up-down counter, `{request}` | `surface`, `rpc.method` | Calls being handled now |
+| `dolos.rpc.server.request.dropped`<br />`dolos_rpc_server_request_dropped_total` | `dolos-trp` | counter, `{request}` | `surface`, `rpc.method` | Calls dropped before their result |
+
+- TRP shares the RPC series with gRPC, told apart by `surface="trp"`, and has no `rpc.service`.
+- `rpc.method` is the JSON-RPC method: `trp.resolve`, `trp.submit`, `trp.checkStatus`, `trp.dumpLogs`, `trp.peekPending` or `trp.peekInflight`. The `health` method and unknown methods are not recorded.
+- `rpc.response.status_code` is `OK`, or the JSON-RPC error code of the answer, such as `-32602` for invalid parameters.
+- The duration runs from the method's handler starting to its result. A **dropped** call is one whose handler was dropped before its result, as when the client's connection closes.
+
+## Query limiter
+
+The query limiter bounds the blocking query work of the whole process, whichever surface started it; see `max_concurrent_queries`, `max_concurrent_heavy_scans` and `heavy_scan_queue_seconds` in the [`serve` schema](../configuration/schema#serve). All these series are under the `dolos-core` meter.
+
+| series | meter | type, unit | labels | meaning |
+| ------ | ----- | ---------- | ------ | ------- |
+| `dolos.query.limiter.wait.duration`<br />`dolos_query_limiter_wait_duration_seconds` | `dolos-core` | histogram, `s` | none | Wait for a limiter permit |
+| `dolos.query.heavy.admission.duration`<br />`dolos_query_heavy_admission_duration_seconds` | `dolos-core` | histogram, `s` | `outcome` | Wait for a heavy-scan slot, by outcome |
+| `dolos.query.blocking.duration`<br />`dolos_query_blocking_duration_seconds` | `dolos-core` | histogram, `s` | none | Run time of a blocking closure |
+| `dolos.query.blocking.in_flight`<br />`dolos_query_blocking_in_flight` | `dolos-core` | up-down counter, `{closure}` | none | Blocking closures started and not ended |
+| `dolos.query.blocking.outlived`<br />`dolos_query_blocking_outlived` | `dolos-core` | up-down counter, `{closure}` | none | Of those, closures whose caller went away |
+| `dolos.query.limiter.capacity`<br />`dolos_query_limiter_capacity` | `dolos-core` | gauge, `{permit}` | none | Permits of the limiter |
+| `dolos.query.limiter.in_use`<br />`dolos_query_limiter_in_use` | `dolos-core` | gauge, `{permit}` | none | Permits running closures hold |
+| `dolos.query.heavy.capacity`<br />`dolos_query_heavy_capacity` | `dolos-core` | gauge, `{slot}` | none | Heavy-scan slots |
+| `dolos.query.heavy.admitted`<br />`dolos_query_heavy_admitted` | `dolos-core` | gauge, `{slot}` | none | Heavy-scan slots taken |
+| `dolos.query.heavy.share.capacity`<br />`dolos_query_heavy_share_capacity` | `dolos-core` | gauge, `{permit}` | none | Permits heavy scans may hold together |
+| `dolos.query.heavy.share.in_use`<br />`dolos_query_heavy_share_in_use` | `dolos-core` | gauge, `{permit}` | none | Permits heavy scans hold |
+
+- `dolos.query.limiter.wait.duration` is how long a blocking query waited for its permit, and inside a heavy scan for its permit of the heavy share first. A caller dropped while it waits records nothing.
+- `dolos.query.heavy.admission.duration` is how long a heavy scan waited for a slot. `outcome` is `admitted`, or `rejected` once `heavy_scan_queue_seconds` ran out and the request was answered `503`. Rejections therefore sit at the queue time, or near zero when it is `0`.
+- `dolos.query.blocking.duration` is how long a blocking closure ran, from its start on the blocking pool to its end, panics included.
+- `dolos.query.blocking.in_flight` counts the closures started and not yet ended. `dolos.query.blocking.outlived` counts those among them still running after their caller went away (the request's deadline cut it, or its client left): Dolos cannot stop a closure once it runs, so this work goes on holding its permit, and its heavy slot if any, until it ends.
+- The gauges read the limiter: `limiter.capacity` is `max_concurrent_queries` and `limiter.in_use` the permits running closures hold; `heavy.capacity` is `max_concurrent_heavy_scans` and `heavy.admitted` the slots taken, by live requests and by work that outlived its request; `heavy.share.capacity` is the permits heavy scans may hold together (half the capacity, at least one) and `heavy.share.in_use` the permits they hold. The gauges are reported by `daemon` and `serve`.
+- Only work run under the limiter is counted. Blocking work outside it appears in none of these series: MiniBF's off-chain metadata fetches, and the cache's disk-tier reads and writes around them. The cache's other fills run under the limiter, their disk-tier reads included.
+
+## Sync
+
+| series | meter | type, unit | labels | meaning |
+| ------ | ----- | ---------- | ------ | ------- |
+| `dolos.sync.tip.slot`<br />`dolos_sync_tip_slot` | `dolos-core` | gauge, `{slot}` | none | Slot of the newest archived block |
+| `dolos.sync.tip.block_number`<br />`dolos_sync_tip_block_number` | `dolos-core` | gauge, `{block}` | none | Block number of the newest archived block |
+| `dolos.sync.tip.lag`<br />`dolos_sync_tip_lag_seconds` | `dolos` | gauge, `s` | none | Wall clock minus the time of the newest archived block's slot |
+| `dolos.sync.caught_up`<br />`dolos_sync_caught_up` | `dolos` | gauge, none | none | 1 once the stores committed the upstream tip, else 0 |
+| `dolos.sync.upstream.sessions`<br />`dolos_sync_upstream_sessions_total` | `dolos` | counter, `{session}` | `outcome` | Sessions with the upstream peer, by outcome |
+| `dolos.sync.upstream.last_delivery.age`<br />`dolos_sync_upstream_last_delivery_age_seconds` | `dolos` | gauge, `s` | none | Time since the upstream peer last delivered |
+| `dolos.sync.work_unit.duration`<br />`dolos_sync_work_unit_duration_seconds` | `dolos-core` | histogram, `s` | `work_unit` | How long each sync work unit took |
+| `dolos.sync.rollback.depth`<br />`dolos_sync_rollback_depth` | `dolos-core` | histogram, `{block}` | none | Blocks each rollback undid, when it undid any |
+| `dolos.sync.stage.blocks`<br />`dolos_sync_stage_blocks_total` | `dolos` | counter | `stage` | Blocks the stage sent on (`pull`, `emulator`) or rolled forward (`apply`) |
+| `dolos.sync.stage.upstream_tip_slot`<br />`dolos_sync_stage_upstream_tip_slot` | `dolos` | gauge | `stage` | Slot of the tip the upstream (`pull`) or the emulator last reported |
+| `dolos.sync.stage.rollbacks`<br />`dolos_sync_stage_rollbacks_total` | `dolos` | counter | `stage` | Rollbacks the apply stage applied that undid at least one block |
+| `dolos.sync.stage.housekeeping_runs`<br />`dolos_sync_stage_housekeeping_runs_total` | `dolos` | counter | `stage` | Housekeeping rounds the apply stage ran |
+| `dolos.sync.stage.ticks`<br />`dolos_sync_stage_ticks_total` | `dolos` | counter, `{tick}` | `stage` | State-machine ticks of the stage |
+| `dolos.sync.stage.units`<br />`dolos_sync_stage_units_total` | `dolos` | counter, `{unit}` | `stage` | Work units the stage executed |
+| `dolos.sync.stage.retries`<br />`dolos_sync_stage_retries_total` | `dolos` | counter, `{retry}` | `stage` | Retries the stage took in any phase |
+| `dolos.sync.stage.phase`<br />`dolos_sync_stage_phase` | `dolos` | gauge, `{phase}` | `stage` | Phase of the stage: 0 bootstrap, 1 working, 2 teardown, 3 ended |
+| `dolos.sync.stage.busy_time`<br />`dolos_sync_stage_busy_time_seconds_total` | `dolos` | counter, `s` | `stage` | Time the stage spent executing work units, which for `pull` includes its waits |
+
+- The tip slot and block number are those of the newest block in the archive, under the `dolos-core` meter. An empty archive reports neither. They replace the `dolos_slot` and `dolos_block_number` series of MiniBF's former `/metrics` route. The tip lag is measured against that block too, and an empty archive reports none.
+- The other series are reported while a sync runs, by `daemon` and `sync catchup`. `stage` is `pull` (or `emulator` on a devnet), `apply` and, while following, `submit`.
+- The `dolos.sync.stage.*` series are the pipeline runtime's own per-stage counters and gauges, exported under the `dolos` meter with the stage's name in `stage`. `dolos.sync.stage.phase` is where the stage is in its life: `0` bootstrap (it is setting up, such as connecting to the peer), `1` working, `2` teardown, `3` ended. A stage that ends on its own while `daemon` runs is a failure: the node stops the rest of the pipeline and exits. `busy_time` grows while the stage executes a unit of work, and its `rate()` is the share of time spent there. For `apply` and `submit` that excludes waiting for their input, so it is the share of time they are busy. `pull` waits inside its units: for the peer's next block at the tip, for room in the apply stage's queue and for the backoff between attempts, so while a session is working its busy time stays near 1 and does not tell a slow peer. It reads near 0 while the stage is connecting in bootstrap, backoff included, and in `sync catchup` once the target is fixed and pull has stopped pulling.
+- `dolos.sync.caught_up` turns 1 once the WAL and the state committed the tip the peer reported when chain-sync first reached it, and stays 1 until the process exits. It is kept in memory, so it is 0 again after every start, however close to the tip the store is.
+- A session's `outcome` is `connected` when it connected and found its intersection, `failed` for an attempt that did not, and `lost` for a connected session that ended. Rising `failed` with no `connected` means the peer is unreachable; rising `lost` means it keeps dropping sessions.
+- The delivery age counts from the last time a session delivered blocks or reached the peer's tip, a rollback the peer sends at the tip included. It is not reported before the first delivery. At the tip it grows until the next block, so read it against the network's block interval. Pull counts a batch as delivered only once the apply stage's queue took all of it, so a full queue stops deliveries too: a growing age means a slow peer or an apply stage stuck in a long unit.
+- `work_unit` is the unit's name: `roll` (a batch of blocks), `rupd` (the reward update), `ewrap` and `estart` (the epoch boundary), `genesis` and `forced_stop`. A slow apply stage shows as long `roll` units; a slow peer as a delivery age that grows while `dolos.sync.tip.lag` does, provided apply is not stuck in a long unit. A unit's duration and apply's busy time are recorded only when the unit ends, so an apply stage stalled inside one unit reads as idle until it finishes.
+- The rollback depth has the bucket boundaries 1, 2, 3, 5, 10, 20, 50, 100, 500 and 2160 blocks. Every session starts with a rollback to its intersection, which undoes nothing: such a rollback records no depth sample and does not count in `dolos.sync.stage.rollbacks`.
+
+## Mempool
+
+What the mempool holds, what becomes of each submitted transaction, and how long submissions take. Reported by `daemon` and `serve`.
+
+| series | meter | type, unit | labels | meaning |
+| ------ | ----- | ---------- | ------ | ------- |
+| `dolos.mempool.txs`<br />`dolos_mempool_txs` | `dolos-core` | gauge, `{tx}` | `state` | Transactions the mempool holds, `pending` or `inflight` |
+| `dolos.mempool.transitions`<br />`dolos_mempool_transitions_total` | `dolos-core` | counter, `{tx}` | `state` | Transactions that reached a lifecycle stage, by stage |
+| `dolos.mempool.confirmation.duration`<br />`dolos_mempool_confirmation_duration_seconds` | `dolos-core` | histogram, `s` | none | Time from a transaction first seen pending to its first confirmation |
+| `dolos.submit.duration`<br />`dolos_submit_duration_seconds` | `dolos-core` | histogram, `s` | `outcome` | How long a submission took to validate and enter the mempool, by outcome |
+| `dolos.submit.upstream.stale`<br />`dolos_submit_upstream_stale_total` | `dolos` | counter, `{tx}` | none | Transactions the node stopped offering upstream |
+
+- `dolos.mempool.txs` is reported from startup. The transitions, the confirmation time and the submission time appear with the first transaction the node receives, so until then a query on them returns nothing rather than zero.
+- In `dolos.mempool.txs`, `pending` is a transaction queued and not yet propagated; `inflight` covers the propagated, acknowledged and confirmed stages, until the transaction is finalized or dropped.
+- A transition's `state` is the stage reached: `pending`, `propagated`, `acknowledged`, `confirmed`, `finalized`, `dropped`, `rolled_back` (a rollback undid its confirmation, and it goes back to pending; only the in-memory mempool counts it, and with `persistent = true` the transaction is counted as `pending` again) or `unknown`. Each new confirmation of a transaction already confirmed is not counted again. Events the node missed under load are counted as `unknown`.
+- The confirmation time has the bucket boundaries 5, 10, 20, 30, 60, 120, 300, 600, 1800 and 3600 seconds. A transaction finalized in the block that confirms it is timed at finalization. The time is kept in memory only, so a transaction received before a restart is not timed, and one confirmed again after a rollback is not timed twice. When the node misses events under load, it checks the transactions it is timing against the mempool, so a confirmation it missed is timed when it notices, a little late.
+- A submission's `outcome` is `accepted`, `invalid` (phase-1 validation), `script_failed` (phase-2 validation), `duplicate` or `error`. Every submit API records it: gRPC, TRP and MiniBF.
+- A stale transaction is one the node stops offering upstream after three offers no peer acknowledged. It counts once, and is reported by the submit stage of a following sync.
+
+## Cache
+
+Under the `dolos-core` meter; [Cache](../operations/cache#metrics) explains how to read them.
+
+| series | meter | type, unit | labels | meaning |
+| ------ | ----- | ---------- | ------ | ------- |
+| `dolos.cache.hits`<br />`dolos_cache_hits_total` | `dolos-core` | counter, `{hit}` | `namespace`, `tier` | Lookups answered by a tier |
+| `dolos.cache.misses`<br />`dolos_cache_misses_total` | `dolos-core` | counter, `{miss}` | `namespace`, `tier` | Lookups a tier could not answer |
+| `dolos.cache.evictions`<br />`dolos_cache_evictions_total` | `dolos-core` | counter, `{eviction}` | `namespace`, `tier` | Entries evicted from the memory tier |
+| `dolos.cache.fills`<br />`dolos_cache_fills_total` | `dolos-core` | counter, `{fill}` | `namespace` | Answers computed after a miss |
+| `dolos.cache.fill.duration`<br />`dolos_cache_fill_duration_seconds` | `dolos-core` | histogram, `s` | `namespace` | How long a fill took |
+| `dolos.cache.entries`<br />`dolos_cache_entries` | `dolos-core` | gauge, `{entry}` | `namespace`, `tier` | Entries held |
+| `dolos.cache.bytes`<br />`dolos_cache_bytes` | `dolos-core` | gauge, `By` | `namespace`, `tier` | Bytes held |
+
+- `namespace` is a registered cache namespace: `totals`, `assets`, `pool-registrations`, `pool-blocks`, `network`, `offchain` and `offchain-failures`.
+- `tier` is `memory` or `disk`. Evictions are the memory tier's; the disk tier's own are not counted.
+- A fill is the computation of an answer after a miss on every tier, a failed one included; its duration is how long the computation took.
+
+## Storage
+
+| series | meter | type, unit | labels | meaning |
+| ------ | ----- | ---------- | ------ | ------- |
+| `dolos.storage.disk.usage`<br />`dolos_storage_disk_usage_bytes` | `dolos-fjall`, `dolos` | gauge, `By` | `store`, and `keyspace` for a Fjall store | Bytes the store's files take on disk |
+| `dolos.storage.l0_runs_max`<br />`dolos_storage_l0_runs_max` | `dolos-fjall` | gauge, `{run}` | `store`, `keyspace` | Most L0 runs in one keyspace of the store |
+| `dolos.storage.compactions.active`<br />`dolos_storage_compactions_active` | `dolos-fjall` | gauge, `{compaction}` | `store` | Compactions the store runs now |
+| `dolos.storage.compactions.completed`<br />`dolos_storage_compactions_completed_total` | `dolos-fjall` | counter, `{compaction}` | `store` | Compactions the store finished since it opened |
+| `dolos.storage.compaction.time`<br />`dolos_storage_compaction_time_seconds_total` | `dolos-fjall` | counter, `s` | `store` | Time the store's compactions took since it opened |
+| `dolos.storage.flushes.outstanding`<br />`dolos_storage_flushes_outstanding` | `dolos-fjall` | gauge, `{flush}` | `store` | Memtable flushes the store has queued |
+| `dolos.storage.write_buffer.size`<br />`dolos_storage_write_buffer_size_bytes` | `dolos-fjall` | gauge, `By` | `store` | Bytes the store's memtables hold |
+| `dolos.storage.wal.start.slot`<br />`dolos_storage_wal_start_slot` | `dolos` | gauge, `{slot}` | none | Oldest slot the WAL holds |
+| `dolos.storage.wal.tip.slot`<br />`dolos_storage_wal_tip_slot` | `dolos` | gauge, `{slot}` | none | Newest slot the WAL holds |
+| `dolos.storage.archive.start.slot`<br />`dolos_storage_archive_start_slot` | `dolos` | gauge, `{slot}` | none | Slot of the oldest block the archive holds |
+| `dolos.storage.archive.tip.slot`<br />`dolos_storage_archive_tip_slot` | `dolos` | gauge, `{slot}` | none | Slot of the newest block the archive holds |
+| `dolos.storage.commit.duration`<br />`dolos_storage_commit_duration_seconds` | `dolos-core` | histogram, `s` | `store` | How long one commit of a work unit to a store took |
+| `dolos.storage.housekeeping.duration`<br />`dolos_storage_housekeeping_duration_seconds` | `dolos-core` | histogram, `s` | `outcome` | How long one bounded round of pruning took, by outcome |
+
+- The Fjall stores report under the `dolos-fjall` meter: `store` is `state` (keyspaces `state-cursor`, `state-utxos`, `state-entities`, `state-tags`) or `archive` (`archive-blocks`, `archive-logs`, `archive-tags`, `index-exact`, `index-entity`, `archive-meta`). Their disk usage is one series per keyspace. A store opened read-only reports none of these series.
+- The `dolos` meter adds the disk usage of the stores that are not Fjall keyspaces, with no `keyspace`: `store` is `blocks` (the block segment files) or `wal` (the WAL file, when it is on disk). Summed by `store`, `dolos.storage.disk.usage` gives `state`, `archive`, `blocks` and `wal`.
+- `dolos.storage.l0_runs_max` is the largest number of L0 runs in any keyspace of the store, and `keyspace` names that keyspace. Fjall halts a keyspace's writes at 30 runs until compaction catches up, so a value climbing toward 30 means compaction falls behind the writes. See [Performance](../operations/performance#fjall-compaction-backlog).
+- The compaction counters and flush and write-buffer gauges are the store's as a whole. Take the `rate()` of the compaction time for the share of time spent compacting; above 1, several compactions run at once.
+- The range gauges read the WAL and the archive. An empty store reports no range. The WAL holds the mutable window behind the tip; the archive's start moves forward as `rolling` history prunes it (see the [`[history]`](../configuration/schema#history) section).
+- A commit is timed for each store a sync work unit writes, `wal`, `state` and `archive`, and for each shard of a sharded unit such as an epoch boundary, failed commits included. A bulk import, such as an ImmutableDB bootstrap, does not write the WAL and records no `wal` commits.
+- A housekeeping round prunes the archive and the WAL to their windows. Its `outcome` is `done` when nothing is left to prune, `pending` when the round left work for the next one, or `error`. The apply stage runs rounds as units of work of their own, which `dolos.sync.stage.housekeeping_runs` counts.
+- Gauges are read when the meter collects them, never on a write.
+
+## Process
+
+Under the `dolos` meter, reported whenever metric export is on.
+
+| series | meter | type, unit | labels | meaning |
+| ------ | ----- | ---------- | ------ | ------- |
+| `dolos.build.info`<br />`dolos_build_info` | `dolos` | gauge, none | `version`, `git_sha` | Always 1; its labels name the running build |
+| `process.uptime`<br />`process_uptime_seconds` | `dolos` | gauge, `s` | none | Time since the process started exporting metrics |
+| `process.cpu.time`<br />`process_cpu_time_seconds_total` | `dolos` | counter, `s` | `cpu.mode` | CPU time the process used, Linux only |
+| `process.memory.usage`<br />`process_memory_usage_bytes` | `dolos` | up-down counter, `By` | none | Resident memory, Linux only |
+| `process.memory.virtual`<br />`process_memory_virtual_bytes` | `dolos` | up-down counter, `By` | none | Virtual memory, Linux only |
+| `process.unix.file_descriptor.count`<br />`process_unix_file_descriptor_count` | `dolos` | up-down counter, `{file_descriptor}` | none | Open file descriptors, Linux only |
+| `process.thread.count`<br />`process_thread_count` | `dolos` | up-down counter, `{thread}` | none | Threads of the process, Linux only |
+
+- `version` is the Dolos version and `git_sha` the commit it was built from, or `unknown` for a build without one, such as one from a source tarball. Join it to another series to label it with the build: `… * on (service_instance_id) group_left (version, git_sha) topk by (service_instance_id) (1, dolos_build_info)`. It works with any left side keyed by node, such as the `sum by (service_instance_id)` of the examples below. Put a left side that holds `or` or a comparison, as the idle and cancelled-work examples do, in parentheses, since `*` binds tighter than both. With the resource attributes as series labels, an upgrade, or a rebuild from another commit, starts a new `dolos_build_info` series for the node, and the old one keeps its last value until the collector expires it (`metric_expiration`, 5 minutes by default). For that window the node has two builds and the join may show either; `count by (service_instance_id) (dolos_build_info) > 1` flags it. After a rebuild that keeps the version, no join can tell the lingering series from the live one. Where the left side keeps `service_version`, unaggregated or with `service_version` in its `by`, `… * on (service_instance_id, service_version) group_left (version, git_sha) dolos_build_info` joins each process to its own build across a version change, but it fails on the duplicate after a rebuild that keeps the version, since only `git_sha` differs. With the attributes on `target_info` (see [that section](#with-resource-attributes-on-target_info)), join on `job, instance`: `… * on (job, instance) group_left (version, git_sha) topk by (job, instance) (1, dolos_build_info)`, with the same caveat, flagged by `count by (job, instance) (dolos_build_info) > 1`. Several nodes on one host need distinct `service.instance.id` values, set through `OTEL_RESOURCE_ATTRIBUTES`.
+- `process.uptime` counts from when metric export is set up, at startup. The first value is exported one export interval later, so after a restart it drops back to about one interval rather than to zero; `resets((min by (service_instance_id) (process_uptime_seconds))[15m:1m]) > 0` finds a restart. The `min by` matters after an upgrade: the new process writes a new series, the old one holds its last value until it expires, and neither ever decreases, so `resets` on the raw series misses the restart.
+- The names, units and types follow the OpenTelemetry process semantic conventions. Only build info and uptime are reported on every platform; the others read `/proc/self` and are reported on Linux only.
+- `cpu.mode` is `user` or `system`. Take the `rate()` of the CPU time for the cores in use.
+- `process.memory.usage` is the resident set (`VmRSS`), `process.memory.virtual` the virtual size (`VmSize`) and `process.thread.count` the `Threads` of `/proc/self/status`. The descriptor count is the number of entries in `/proc/self/fd`.
+- A read of `/proc` that fails leaves that series out of the export, and logs one warning the first time.
+
+## Not measured
+
+- **Confirmation time across a restart.** The mempool keeps its timings in memory, so a transaction received before a restart has no confirmation time, though its transitions are still counted.
+- **Process resources outside Linux.** Of the [process](#process) series, only `dolos.build.info` and `process.uptime` are reported on every platform; CPU, memory, file descriptors and threads are reported on Linux only.
+- **Rollbacks absorbed upstream of the apply stage.** The pull stage keeps the headers it has gathered but not yet sent on as a chain fragment. A rollback the peer sends that lands inside that fragment only trims it, and is not counted in `dolos.sync.stage.rollbacks` or `dolos.sync.rollback.depth`: those count rollbacks of blocks already sent to the apply stage.
+
+## Example queries
+
+The queries below use the Prometheus names, with the resource attributes as labels. Add a selector such as `{dolos_network="mainnet"}` to look at one network, and `by (service_instance_id)` to look at one node.
+
+### Idle
+
+No request in flight and few arriving:
+
+```text
+sum by (service_instance_id) (
+  {__name__=~"http_server_active_requests|dolos_rpc_server_active_requests"})
+  or on (service_instance_id) (0 * group by (service_instance_id) (dolos_build_info))
+
+sum by (service_instance_id) (
+  rate({__name__=~"http_server_request_duration_seconds_count|rpc_server_call_duration_seconds_count"}[5m]))
+  or on (service_instance_id) (0 * group by (service_instance_id) (dolos_build_info))
+```
+
+A surface's request series appear with its first request after the node starts, so a node that has served nothing yet has none of them. The `or on (service_instance_id)` part gives such a node a zero, taking the node list from `dolos_build_info`, which every node exports. Add `surface` to the second `by` to split the rate by surface; a surface that has served nothing then has no row. A network selector on the request series has to be repeated on `dolos_build_info`, as in `group by (service_instance_id) (dolos_build_info{dolos_network="mainnet"})`, or the nodes of the other networks come back as zeros. The first is zero and the second low on an idle node; `dolos_query_limiter_in_use` is zero too. A gRPC server stream counts in the first until it sends its first message, so a client that holds a `WatchMempool` stream keeps it above zero until the mempool's first event, which on an idle node may not come.
+
+### Saturated
+
+Requests waiting for the limiter and for heavy-scan slots, and heavy scans turned away:
+
+```text
+histogram_quantile(0.99,
+  sum by (service_instance_id, le) (rate(dolos_query_limiter_wait_duration_seconds_bucket[5m])))
+
+histogram_quantile(0.99,
+  sum by (service_instance_id, le) (
+    rate(dolos_query_heavy_admission_duration_seconds_bucket{outcome="admitted"}[5m])))
+
+sum by (service_instance_id) (
+  rate(dolos_query_heavy_admission_duration_seconds_count{outcome="rejected"}[5m]))
+```
+
+A saturated node has high wait percentiles, `dolos_query_limiter_in_use` at `dolos_query_limiter_capacity` (or `dolos_query_heavy_admitted` at `dolos_query_heavy_capacity`), and a rising rate of rejections, each of them a `503` to a client.
+
+### Cancelled work
+
+Requests whose client went away, and the blocking work they left running:
+
+```text
+sum by (service_instance_id, surface) (
+  rate({__name__=~"dolos_http_server_request_dropped_total|dolos_rpc_server_request_dropped_total"}[5m]))
+
+max by (service_instance_id) (dolos_query_blocking_outlived) > 0
+```
+
+A server stream its client leaves after the stream's first message is not a drop: it ends as `dolos_rpc_server_streams_ended_total{rpc_response_status_code="CANCELLED"}`. Drops alone are clients giving up. Drops with `dolos_query_blocking_outlived` above zero are work the node still does for nobody: it holds permits, and heavy slots, that live requests wait for. A closure that outlives its caller for less than an export interval may not show; `max_over_time(dolos_query_blocking_outlived[15m])` keeps what the exports saw. The `504` samples of `http_server_request_duration_seconds_count` are the requests the deadline cut.
+
+### Behind the tip
+
+A node that had caught up and fell behind:
+
+```text
+(max by (service_instance_id) (dolos_sync_tip_lag_seconds) > 300)
+  and on (service_instance_id) (max by (service_instance_id) (dolos_sync_caught_up) == 1)
+```
+
+Before the node first catches up its lag is expected, so the `caught_up` condition leaves a node syncing from scratch out. The flag is 0 again after every start, so this alert is also silent for a node that restarted behind the tip: down for a while, crash-looping, or unable to reach its peer. Pair it with a lag that is high and not shrinking, whatever the flag says:
+
+```text
+(max by (service_instance_id) (dolos_sync_tip_lag_seconds) > 300)
+  and on (service_instance_id) (deriv(max by (service_instance_id) (dolos_sync_tip_lag_seconds)[30m:1m]) >= 0)
+```
+
+A node syncing from scratch has its lag fall quickly, so it stays out of this one; a node stuck or falling behind with an archive does not. The lag is measured against the archive's newest block, so a node with `history.mode = "none"` reports none and both queries stay silent for it. For such a node, watch the blocks the apply stage rolls forward stop, with the delivery age and the sessions of [Upstream stalled](#upstream-stalled):
+
+```text
+sum by (service_instance_id) (rate(dolos_sync_stage_blocks_total{stage="apply"}[15m])) == 0
+```
+
+At the tip the lag moves between zero and the gap since the last block (on mainnet, blocks are about 20 seconds apart on average, with gaps of a few minutes), so set the threshold well above that.
+
+### Upstream stalled
+
+The peer stopped delivering, and how its sessions end:
+
+```text
+max by (service_instance_id) (dolos_sync_upstream_last_delivery_age_seconds) > 300
+
+sum by (service_instance_id, outcome) (increase(dolos_sync_upstream_sessions_total[15m]))
+```
+
+A delivery age that keeps growing past the network's longest normal gap between blocks means no session is delivering. That is a slow or silent peer, or an apply stage stuck in a long unit: pull delivers a batch only once apply's queue took it, so a stalled apply fills the queue and stops deliveries. During catch-up such a stall shows in [Who is slow](#who-is-slow) only after the unit ends. In the sessions query, `failed` sessions and no `connected` ones mean the peer is unreachable, which is the only signal for a node that never reached it, since the age is not reported before a session first delivers; `lost` sessions mean it keeps dropping them. A lag that grows while the delivery age stays low means the node receives blocks but applies them slowly: see the next query.
+
+### Who is slow
+
+The share of time each sync stage spends working, and the slowest work units:
+
+```text
+sum by (service_instance_id, stage) (rate(dolos_sync_stage_busy_time_seconds_total[5m]))
+
+histogram_quantile(0.99,
+  sum by (service_instance_id, work_unit, le) (rate(dolos_sync_work_unit_duration_seconds_bucket[5m])))
+```
+
+An `apply` near 1 is busy all the time and holds the pipeline back; near 0 it waits for blocks, or it is stuck in a unit that has not ended yet, since busy time is added when a unit ends. A busy `apply` with long `roll` units is a slow ledger or store. `pull` reads near 1 whether the peer, the apply stage or nothing at all is slow, because its units include their waits, so do not read it here: a slow peer shows as a growing delivery age with a growing lag (see [Upstream stalled](#upstream-stalled)). `ewrap` and `estart` units are long by nature: they run once per epoch boundary.
+
+### Compaction falling behind
+
+L0 runs piling up in a Fjall store, and what compaction is doing about it:
+
+```text
+max by (service_instance_id, store, keyspace) (dolos_storage_l0_runs_max)
+
+max by (service_instance_id, store) (dolos_storage_compactions_active)
+
+sum by (service_instance_id, store) (rate(dolos_storage_compaction_time_seconds_total[5m]))
+```
+
+L0 runs climbing toward 30 while compactions are active and the compaction time rate stays high mean compaction runs but cannot keep up with the writes; Fjall halts the keyspace's writes at 30, and the sync stalls with it. Runs climbing with no compaction active is worth a look at the logs. See [Performance](../operations/performance#fjall-compaction-backlog).
+
+### Disk growth
+
+What each store takes on disk, and how fast it grows per day:
+
+```text
+sum by (service_instance_id, store) (dolos_storage_disk_usage_bytes)
+
+deriv(sum by (service_instance_id, store) (dolos_storage_disk_usage_bytes)[6h:5m]) * 86400
+```
+
+The stores are `state`, `archive` (the Fjall indexes and metadata), `blocks` (the block segments) and `wal`. A node with `rolling` history levels off once pruning keeps pace with the chain; one with `full` history grows with it. Compaction makes the Fjall stores' usage move in steps, so read growth over hours, not minutes.
+
+### Transactions not confirming
+
+What waits in the mempool, what gets dropped, and how long confirmations take:
+
+```text
+max by (service_instance_id, state) (dolos_mempool_txs)
+
+sum by (service_instance_id) (rate(dolos_mempool_transitions_total{state="dropped"}[15m]))
+
+histogram_quantile(0.9,
+  sum by (service_instance_id, le) (rate(dolos_mempool_confirmation_duration_seconds_bucket[1h])))
+```
+
+A `pending` count that grows means transactions are not leaving for the peer; an `inflight` count that grows with a rising `dropped` rate means they leave and do not reach a block. `dolos_submit_upstream_stale_total` counts those the node gave up offering. Rejections at submission are not drops: they are the `invalid`, `script_failed` and `duplicate` outcomes of `dolos_submit_duration_seconds_count`.
+
+### With resource attributes on `target_info`
+
+When the collector keeps the resource attributes on `target_info` only, every series carries `job` (from `service.name`) and `instance` (from `service.instance.id`), and the other attributes, `dolos.network` and `service.version` among them, are labels of `target_info` alone. This needs `honor_labels: true` on the Prometheus scrape job, as in the [Telemetry](../operations/tracing#a-minimal-collector) example: without it the exported labels become `exported_job` and `exported_instance`, every node behind one collector shares the scrape target's `job` and `instance`, and the sums and joins below merge nodes or fail on duplicate `target_info` series. It does not apply to OTLP sent straight into Prometheus. Group by `job, instance` in place of `service_instance_id`, and join an attribute in where a query needs it:
+
+```text
+sum by (job, instance) (rate(http_server_request_duration_seconds_count[5m]))
+  * on (job, instance) group_left (dolos_network) target_info
+```
+
+A selector on the network then filters the joined result, `… target_info{dolos_network="mainnet"}`, rather than the series.
+
+<Aside>
+The collector's Prometheus exporter puts resource attributes on every series with `resource_to_telemetry_conversion: { enabled: true }`; [Telemetry](../operations/tracing#a-minimal-collector) has an example.
+</Aside>

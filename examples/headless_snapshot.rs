@@ -5,12 +5,17 @@
 //!
 //! ```text
 //! cargo run --no-default-features --example headless_snapshot -- \
-//!   ./dolos.toml ./stele [208,236,290]
+//!   ./dolos.toml ./root
 //! ```
 //!
-//! The optional third argument is the publisher's retained state-dump epochs;
-//! omitted, the stele retains the tip alone. The destination must not already
-//! contain a stele. Progress rendering and destination cleanup remain host
+//! The destination is a network root: the Dolos snapshot goes into its
+//! `dolos/` layout and the closed epochs' blocks into `blocks/`, which the
+//! Dolos snapshot names in `position.blocks`. An empty destination starts a
+//! lineage. One whose latest Dolos snapshot is at the sequence just before
+//! this one is appended to: the new inscription names that snapshot as its
+//! `previous` and lists its own diff and the tip, not the predecessor's
+//! layers. A latest Dolos snapshot at any other sequence is refused before a
+//! layer is written. Progress rendering and destination cleanup remain host
 //! responsibilities.
 //!
 //! The stores must stand on the first block of an epoch, with the archive
@@ -23,7 +28,6 @@ use std::{error::Error, path::Path, sync::Arc};
 use dolos::engine::ReplayWorkspace;
 use dolos_cardano::networks::ResolvedNetwork;
 use dolos_snapshot::{
-    export::First,
     facade::{Selection, SnapshotSource as _},
     progress::Observer,
 };
@@ -34,16 +38,6 @@ fn main() -> Result<(), AnyError> {
     let mut args = std::env::args_os().skip(1);
     let config_path = args.next().ok_or("missing path to dolos.toml")?;
     let destination = args.next().ok_or("missing output directory")?;
-    let state_epochs: Vec<u64> = match args.next() {
-        Some(list) => list
-            .to_str()
-            .ok_or("state epochs are not valid UTF-8")?
-            .split(',')
-            .map(str::parse)
-            .collect::<Result<_, _>>()?,
-        None => Vec::new(),
-    };
-
     let config = dolos::core::config::load(Some(Path::new(&config_path)))?;
     let genesis = Arc::new(ResolvedNetwork::resolve(&config.chain)?.genesis()?);
 
@@ -53,23 +47,21 @@ fn main() -> Result<(), AnyError> {
 
     let snapshot_result = (|| -> Result<(), AnyError> {
         let snapshot = workspace.snapshot();
-        let retained = dolos_snapshot::planning::retained_epochs(&state_epochs)?;
-        let plan = snapshot.selected_plan(
-            u64::from(genesis.network_magic()),
-            retained,
-            Selection::default(),
-        )?;
+        let plan =
+            snapshot.selected_plan(u64::from(genesis.network_magic()), Selection::default())?;
 
         let inscription =
             snapshot.publish_directory(Path::new(&destination), &plan, &Observer::silent())?;
 
         // Reproduction uses the same plan and encoders and writes nothing.
         snapshot.verify_reproduction(&inscription, &plan)?;
-        let document = snapshot.digest_document(&plan, &First)?;
 
+        // The identity is the published inscription's: after an append it
+        // names its predecessor, and the layer count is this sequence's diff
+        // plus the tip.
         eprintln!("sequence: {}", plan.sequence);
-        eprintln!("layers:   {}", document.layers);
-        eprintln!("identity: {}", document.identity);
+        eprintln!("layers:   {}", inscription.layers().count());
+        eprintln!("identity: {}", inscription.digest()?);
         Ok(())
     })();
 

@@ -7,6 +7,7 @@ use tracing::info;
 
 use crate::feedback::Feedback;
 use dolos::storage::{Existing, ExistingDataPolicy, Removal};
+use dolos_cardano::networks::KnownNetwork;
 use dolos_core::config::RootConfig;
 use dolos_core::{seed_wal_from_state, WalSeed};
 
@@ -30,12 +31,12 @@ pub enum Command {
 }
 
 impl Command {
-    /// `--continue`, which only the replays take.
+    /// `--continue`, which every source takes.
     fn resumes(&self) -> bool {
         match self {
             #[cfg(feature = "mithril")]
             Command::Mithril(args) => args.replay.resume,
-            Command::Stelae(_) => false,
+            Command::Stelae(args) => args.resume,
             Command::Immutabledb(args) => args.replay.resume,
         }
     }
@@ -49,16 +50,16 @@ impl Command {
     /// script will never send. Checking here is what makes "a machine with no
     /// terminal" the same clean refusal on every platform, which is what
     /// `inspect_existing_data` below is written to assume.
-    pub fn inquire() -> miette::Result<Self> {
+    pub fn inquire(network: Option<&KnownNetwork>) -> miette::Result<Self> {
         if !std::io::stdin().is_terminal() {
             bail!("no bootstrap method given and no terminal to ask on; pass a subcommand instead (see `dolos bootstrap --help`)");
         }
 
-        Self::prompt()
+        Self::prompt(network)
     }
 
     #[cfg(feature = "utils")]
-    fn prompt() -> miette::Result<Self> {
+    fn prompt(network: Option<&KnownNetwork>) -> miette::Result<Self> {
         let mut methods = vec![Method::Stelae];
         #[cfg(feature = "mithril")]
         methods.push(Method::Mithril);
@@ -69,7 +70,7 @@ impl Command {
             .into_diagnostic()?;
 
         match method {
-            Method::Stelae => Ok(Command::Stelae(stelae::Args::inquire()?)),
+            Method::Stelae => Ok(Command::Stelae(stelae::Args::inquire(network)?)),
             #[cfg(feature = "mithril")]
             Method::Mithril => Ok(Command::Mithril(from_environment()?)),
             Method::Immutabledb => Ok(Command::Immutabledb(immutabledb::Args::inquire()?)),
@@ -77,7 +78,7 @@ impl Command {
     }
 
     #[cfg(not(feature = "utils"))]
-    fn prompt() -> miette::Result<Self> {
+    fn prompt(_network: Option<&KnownNetwork>) -> miette::Result<Self> {
         bail!("no bootstrap method given and this build has no prompt; pass a subcommand instead (see `dolos bootstrap --help`)");
     }
 }
@@ -96,7 +97,7 @@ enum Method {
 impl std::fmt::Display for Method {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Method::Stelae => "Stelae snapshot (a few mins, from a stele you can verify)",
+            Method::Stelae => "Stelae snapshot (a few mins, and you can verify it)",
             #[cfg(feature = "mithril")]
             Method::Mithril => "Mithril snapshot (a few hours, trust Mithril SPOs)",
             Method::Immutabledb => {
@@ -123,14 +124,16 @@ fn from_environment<T: clap::Args>() -> miette::Result<T> {
 
 #[derive(Debug, Parser, Default)]
 pub struct Args {
-    /// Replace any data already in storage
+    /// Replace any data already in storage, and with it what an interrupted
+    /// bootstrap left for `--continue`
     #[arg(long, global = true)]
     force: bool,
 
     /// Exit 0 without bootstrapping when storage already holds a node, as an
     /// interrupted replay that has committed leaves one for `--continue` to
-    /// resume; data without one, as a bootstrap interrupted before it commits
-    /// a cursor leaves, and a store this release refuses are errors instead
+    /// resume; data without one, as an interrupted Stelae snapshot restore or
+    /// a bootstrap interrupted before it commits a cursor leaves, and a store
+    /// this release refuses are errors instead
     #[arg(long, global = true)]
     skip_if_data: bool,
 
@@ -185,18 +188,20 @@ impl Args {
 enum Resolved<'a> {
     #[cfg(feature = "mithril")]
     Mithril(&'a mithril::Args, dolos_mithril::MithrilSource, PathBuf),
-    Stelae(&'a stelae::Args, stelae::Inputs),
+    Stelae(&'a stelae::Args, Box<stelae::Inputs>),
     Immutabledb(&'a immutabledb::Args, PathBuf),
 }
 
 /// `clears` says that `--force` is to clear storage once the command is
 /// resolved, so that a source the clear would take is refused here.
+/// `feedback` is where a check that reads a registry reports while it runs.
 fn resolve<'a>(
     config: &RootConfig,
     command: &'a Command,
     clears: bool,
+    feedback: &Feedback,
 ) -> miette::Result<Resolved<'a>> {
-    let network = dolos_cardano::networks::KnownNetwork::by_name(&config.chain.network);
+    let network = KnownNetwork::by_name(&config.chain.network);
 
     let resolved = match command {
         #[cfg(feature = "mithril")]
@@ -204,9 +209,10 @@ fn resolve<'a>(
             let (source, download_dir) = mithril::resolve(config, args, network, clears)?;
             Resolved::Mithril(args, source, download_dir)
         }
-        Command::Stelae(args) => {
-            Resolved::Stelae(args, stelae::resolve(config, args, network, clears)?)
-        }
+        Command::Stelae(args) => Resolved::Stelae(
+            args,
+            Box::new(stelae::resolve(config, args, network, clears, feedback)?),
+        ),
         Command::Immutabledb(args) => {
             Resolved::Immutabledb(args, immutabledb::resolve(config, args, clears)?)
         }
@@ -226,7 +232,7 @@ fn dispatch(
             mithril::run(config, args, &source, &download_dir, feedback)
         }
         Resolved::Stelae(args, inputs) => {
-            stelae::run(config, args, inputs, feedback)?;
+            stelae::run(config, args, *inputs, feedback)?;
 
             // A restore writes the state and the archive, never the WAL, so
             // the WAL is seeded at the restored cursor for `find_intersect`.
@@ -452,11 +458,48 @@ fn seed_wal(config: &RootConfig) -> miette::Result<()> {
     Ok(())
 }
 
-fn setup_tracing(config: &RootConfig, verbose: bool) -> miette::Result<()> {
+fn setup_tracing(
+    config: &RootConfig,
+    verbose: bool,
+) -> miette::Result<crate::common::TracingGuard> {
     if verbose {
-        crate::common::setup_tracing(&config.logging, config.telemetry.as_ref())?;
+        crate::common::setup_tracing(config)
     } else {
         crate::common::setup_tracing_error_only()?;
+        Ok(crate::common::TracingGuard::default())
+    }
+}
+
+/// Refuse a replay into storage that an interrupted snapshot restore left
+/// its records in, unless `--force` replaces it: only `bootstrap stelae`
+/// finishes those stores, and a replay's `--continue` would build on them.
+fn refuse_a_replay_over_a_restore(
+    config: &RootConfig,
+    command: &Command,
+    policy: ExistingDataPolicy,
+) -> miette::Result<()> {
+    if policy.force || matches!(command, Command::Stelae(_)) {
+        return Ok(());
+    }
+
+    crate::common::refuse_interrupted_restore(config)
+}
+
+/// Remove the records an interrupted snapshot restore left beside stores
+/// holding no data, where `--force` finds nothing to clear: kept, they would
+/// refuse the replayed node as that restore. The progress file goes first,
+/// so none is ever left without its source record.
+fn remove_restore_records(config: &RootConfig) -> miette::Result<()> {
+    let records = dolos_snapshot::restore::records_in(&config.storage.path)
+        .into_diagnostic()
+        .context("looking for the records of an interrupted snapshot restore")?;
+
+    for record in records.iter().rev() {
+        info!(record = %record.display(), "removing an interrupted restore's record due to --force");
+
+        std::fs::remove_file(record)
+            .into_diagnostic()
+            .with_context(|| format!("removing {}", record.display()))?;
     }
 
     Ok(())
@@ -465,7 +508,11 @@ fn setup_tracing(config: &RootConfig, verbose: bool) -> miette::Result<()> {
 pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     let policy = args.policy().unwrap_or_else(|error| error.exit());
 
-    setup_tracing(config, args.verbose)?;
+    if let Some(command) = &args.command {
+        refuse_a_replay_over_a_restore(config, command, policy)?;
+    }
+
+    let _tracing = setup_tracing(config, args.verbose)?;
 
     // The decision is the storage lifecycle's rather than any source's: one
     // policy over every managed store, whichever source fills them.
@@ -478,12 +525,16 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
 
     let command = match args.command.clone() {
         Some(x) => x,
-        None => Command::inquire()?,
+        None => {
+            let command = Command::inquire(KnownNetwork::by_name(&config.chain.network))?;
+            refuse_a_replay_over_a_restore(config, &command, policy)?;
+            command
+        }
     };
 
     let clears = matches!(existing, Existing::Clear);
 
-    let resolved = resolve(config, &command, clears)?;
+    let resolved = resolve(config, &command, clears, feedback)?;
 
     // The first destructive step, and deliberately the last one before the run:
     // everything that could still refuse — the flags, the prompts, the source
@@ -492,6 +543,8 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         info!("existing data detected, clearing storage due to --force");
 
         dolos::storage::clear_storage(&config.storage.path).into_diagnostic()?;
+    } else if policy.force && !matches!(command, Command::Stelae(_)) {
+        remove_restore_records(config)?;
     }
 
     dispatch(config, resolved, feedback)
@@ -506,23 +559,21 @@ mod tests {
     }
 
     #[test]
-    fn continue_belongs_to_the_replays() {
-        let replays = [
+    fn continue_belongs_to_each_source() {
+        let sources = [
             #[cfg(feature = "mithril")]
             &["mithril", "--continue"][..],
             &["immutabledb", "--source", "db", "--continue"][..],
+            &["stelae", "--continue"][..],
         ];
 
-        for flags in replays {
+        for flags in sources {
             let policy = parsed(flags).unwrap().policy().unwrap();
             assert!(policy.r#continue, "{flags:?}");
         }
 
-        for flags in [
-            &["--continue", "stelae"][..],
-            &["stelae", "--continue"][..],
-            &["--continue"][..],
-        ] {
+        // A source's flag, not the group's.
+        for flags in [&["--continue", "stelae"][..], &["--continue"][..]] {
             assert_eq!(parsed(flags).unwrap_err().exit_code(), 2, "{flags:?}");
         }
     }
@@ -540,6 +591,9 @@ mod tests {
                 "--continue",
                 "--skip-if-data",
             ][..],
+            &["--force", "stelae", "--continue"][..],
+            &["stelae", "--continue", "--force"][..],
+            &["stelae", "--skip-if-data", "--continue"][..],
         ] {
             let error = parsed(flags).unwrap().policy().unwrap_err();
             assert_eq!(error.exit_code(), 2, "{flags:?}");
@@ -548,6 +602,7 @@ mod tests {
         for flags in [
             &["--force", "stelae"][..],
             &["stelae", "--skip-if-data"][..],
+            &["stelae", "--continue"][..],
             &["immutabledb", "--source", "db"][..],
         ] {
             assert!(parsed(flags).unwrap().policy().is_ok(), "{flags:?}");

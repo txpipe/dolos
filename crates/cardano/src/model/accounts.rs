@@ -1284,13 +1284,86 @@ impl dolos_core::EntityDelta for AccountTransition {
 }
 
 #[cfg(test)]
-mod prop_tests {
+pub(super) mod prop_tests {
     use super::testing::any_account_state;
     use super::*;
     use crate::model::testing::{
         self as root, assert_delta_roundtrip, assert_delta_serde_roundtrip,
     };
+    use crate::model::testing::{replay_case, ReplayCase};
     use proptest::prelude::*;
+
+    /// One case per delta this module owns, with the fixups of the round
+    /// trips below, for `model::replay_tests`.
+    pub(crate) fn replay_cases() -> Vec<ReplayCase> {
+        vec![
+            replay_case((
+                prop::option::of(any_account_state()),
+                any_controlled_amount_inc(),
+            )),
+            replay_case((
+                any_account_state().prop_map(Some),
+                any_controlled_amount_dec(),
+            )),
+            replay_case((
+                prop::option::of(any_account_state()),
+                any_stake_registration(),
+            )),
+            replay_case((any_account_state(), any_stake_delegation()).prop_map(
+                |(entity, mut delta)| {
+                    delta.epoch = entity.pool.epoch().expect("generated at epoch position");
+                    (Some(entity), delta)
+                },
+            )),
+            replay_case((any_account_state(), any_vote_delegation()).prop_map(
+                |(entity, mut delta)| {
+                    delta.epoch = entity.drep.epoch().expect("generated at epoch position");
+                    (Some(entity), delta)
+                },
+            )),
+            replay_case((any_account_state(), any_stake_deregistration()).prop_map(
+                |(entity, mut delta)| {
+                    delta.epoch = entity.pool.epoch().expect("generated at epoch position");
+                    (Some(entity), delta)
+                },
+            )),
+            replay_case((any_account_state().prop_map(Some), any_withdrawal_inc())),
+            replay_case(
+                (any_account_with_active_pool(), any_pool_delegator_retire()).prop_map(
+                    |(entity, mut delta)| {
+                        delta.epoch = entity.pool.epoch().expect("generated at epoch position");
+                        (Some(entity), delta)
+                    },
+                ),
+            ),
+            replay_case((any_account_state(), any_drep_delegator_drop()).prop_map(
+                |(entity, mut delta)| {
+                    delta.epoch = entity.drep.epoch().expect("generated at epoch position");
+                    (Some(entity), delta)
+                },
+            )),
+            replay_case((
+                any_account_state().prop_map(Some),
+                any_treasury_withdrawal(),
+            )),
+            replay_case((
+                any_account_state().prop_map(Some),
+                any_pool_deposit_refund(),
+            )),
+            replay_case((
+                any_account_state().prop_map(Some),
+                any_proposal_deposit_refund(),
+            )),
+            replay_case((any_account_state().prop_map(Some), any_assign_rewards())),
+            replay_case((any_account_state(), any_account_transition()).prop_map(
+                |(entity, mut delta)| {
+                    delta.next_epoch =
+                        entity.stake.epoch().expect("generated at epoch position") + 1;
+                    (Some(entity), delta)
+                },
+            )),
+        ]
+    }
 
     /// Build an `AccountState` whose `pool.live` is guaranteed to be
     /// `PoolDelegation::Pool(..)`. Required by `PoolDelegatorRetire`, which

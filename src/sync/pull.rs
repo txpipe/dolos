@@ -11,6 +11,7 @@ use pallas::network::miniprotocols::chainsync::{HeaderContent, NextResponse, Tip
 use pallas::network::miniprotocols::Point;
 use tracing::{debug, info, warn};
 
+use super::metrics::UpstreamSessions;
 use super::retry::{Attempts, Failure};
 use super::{SyncLimit, SyncProgress};
 use crate::adapters::WalAdapter;
@@ -23,6 +24,29 @@ fn to_traverse(header: &HeaderContent) -> Result<MultiEraHeader<'_>, WorkerError
     };
 
     out.or_panic()
+}
+
+/// The points offered to the peer for an intersection.
+struct Candidates {
+    points: Vec<Point>,
+    /// The WAL's point when it holds no other, as a reset or a bootstrap
+    /// leaves it: there is no earlier point to roll back to.
+    lone: Option<ChainPoint>,
+}
+
+/// Why the peer, at `tip`, holds none of the points offered. When the WAL
+/// holds one point alone and the peer is past its slot, a fork dropped that
+/// block: no retry finds an intersection, and the store can't sync on.
+fn no_intersection(lone: Option<&ChainPoint>, tip: &ChainPoint) -> Failure {
+    match lone {
+        Some(point) if tip.slot() > point.slot() => Failure::stranded(format!(
+            "finding the intersection: the WAL holds only {point}, with no earlier point to \
+             roll back to, and the peer, past it at {tip}, does not hold it"
+        )),
+        _ => Failure::message(format!(
+            "finding the intersection: the peer, at {tip}, holds none of the WAL's recent points"
+        )),
+    }
 }
 
 // ============================================================================
@@ -207,11 +231,13 @@ impl Worker {
 
     fn track_tip(&mut self, tip: &Tip, stage: &Stage) {
         self.tip = ChainPoint::from(tip.0.clone());
-        stage.chain_tip.set(tip.0.slot_or_default() as i64);
+        stage.upstream_tip_slot.set(tip.0.slot_or_default() as i64);
     }
 
     /// Connect to the peer and find the intersection: one attempt.
-    async fn open(stage: &Stage, candidates: Vec<Point>) -> Result<Self, Failure> {
+    async fn open(stage: &Stage, candidates: Candidates) -> Result<Self, Failure> {
+        let Candidates { points, lone } = candidates;
+
         debug!("connecting to peer");
 
         let mut peer_session = PeerClient::connect(&stage.peer_address, stage.network_magic)
@@ -226,7 +252,7 @@ impl Worker {
 
         debug!("finding intersect");
 
-        let found = peer_session.chainsync().find_intersect(candidates).await;
+        let found = peer_session.chainsync().find_intersect(points).await;
 
         let (point, tip) = match found {
             Ok(found) => found,
@@ -241,9 +267,7 @@ impl Worker {
         let Some(intersection) = point else {
             peer_session.abort().await;
 
-            return Err(Failure::message(format!(
-                "finding the intersection: the peer, at {tip}, holds none of the WAL's recent points"
-            )));
+            return Err(no_intersection(lone.as_ref(), &tip));
         };
 
         info!(?intersection, "found intersection");
@@ -267,8 +291,14 @@ impl gasket::framework::Worker<Stage> for Worker {
             let candidates = stage.intersect_candidates()?;
 
             match Self::open(stage, candidates).await {
-                Ok(worker) => return Ok(worker),
-                Err(failure) => stage.attempts.failed(failure).await?,
+                Ok(worker) => {
+                    stage.sessions.connected();
+                    return Ok(worker);
+                }
+                Err(failure) => {
+                    stage.sessions.failed();
+                    stage.attempts.failed(failure).await?
+                }
             }
         }
     }
@@ -298,6 +328,8 @@ impl gasket::framework::Worker<Stage> for Worker {
         let Err(WorkerError::Restart) = result else {
             return result;
         };
+
+        stage.sessions.lost();
 
         let failure = self
             .lost
@@ -332,11 +364,15 @@ pub struct Stage {
 
     pub downstream: DownstreamPort,
 
-    #[metric]
-    block_count: gasket::metrics::Counter,
+    sessions: UpstreamSessions,
 
+    /// Blocks sent downstream.
     #[metric]
-    chain_tip: gasket::metrics::Gauge,
+    blocks: gasket::metrics::Counter,
+
+    /// The slot of the tip the peer reported last.
+    #[metric]
+    upstream_tip_slot: gasket::metrics::Gauge,
 }
 
 impl Stage {
@@ -362,28 +398,43 @@ impl Stage {
             block_fetch_batch_size: config.pull_batch_size,
             wal,
             downstream: Default::default(),
-            block_count: Default::default(),
-            chain_tip: Default::default(),
+            sessions: Default::default(),
+            blocks: Default::default(),
+            upstream_tip_slot: Default::default(),
         }
     }
 
+    /// Counts the sessions on `meter` instead of the `dolos` meter.
+    #[cfg(test)]
+    pub(crate) fn count_sessions_on(&mut self, meter: &opentelemetry::metrics::Meter) {
+        self.sessions = UpstreamSessions::on(meter);
+    }
+
     /// The points the WAL offers for an intersection, Origin when it holds
-    /// none.
-    fn intersect_candidates(&self) -> Result<Vec<Point>, WorkerError> {
-        let mut candidates = self
-            .wal
-            .intersect_candidates(5)
-            .or_panic()?
+    /// none, and its point when it holds one alone.
+    fn intersect_candidates(&self) -> Result<Candidates, WorkerError> {
+        let offered = self.wal.intersect_candidates(5).or_panic()?;
+
+        // One point offered that is also the WAL's start is all it holds.
+        let lone = match offered.as_slice() {
+            [point @ ChainPoint::Specific(..)] => {
+                let start = self.wal.find_start().or_panic()?.map(|(start, _)| start);
+                start.filter(|start| start == point)
+            }
+            _ => None,
+        };
+
+        let mut points = offered
             .into_iter()
             .map(TryFrom::try_from)
             .filter_map(|x| x.ok())
             .collect_vec();
 
-        if candidates.is_empty() {
-            candidates.push(Point::Origin);
+        if points.is_empty() {
+            points.push(Point::Origin);
         }
 
-        Ok(candidates)
+        Ok(Candidates { points, lone })
     }
 
     async fn flush_blocks(&mut self, blocks: Vec<BlockBody>) -> Result<(), WorkerError> {
@@ -392,6 +443,8 @@ impl Stage {
                 .send(PullEvent::RollForward(Arc::new(cbor)).into())
                 .await
                 .or_panic()?;
+
+            self.blocks.inc(1);
         }
 
         Ok(())

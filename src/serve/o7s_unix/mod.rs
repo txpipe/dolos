@@ -1,14 +1,15 @@
 use dolos_core::config::OuroborosConfig;
-use pallas::network::facades::NodeServer;
-use tokio::net::UnixListener;
+use pallas::network::facades::{NodeServer, DEFAULT_HANDSHAKE_TIMEOUT};
+use tokio::{net::UnixListener, task::JoinHandle};
 use tokio_util::task::TaskTracker;
 use tracing::{debug, info, instrument, warn};
 
+use super::accept::AcceptFailure;
 use crate::prelude::*;
 
 mod chainsync;
 mod statequery;
-mod utils;
+pub(crate) mod utils;
 
 #[derive(Clone)]
 pub struct DriverConfig {
@@ -19,6 +20,12 @@ pub struct DriverConfig {
 // TODO: fix tests
 //#[cfg(test)]
 //mod tests;
+
+#[cfg(test)]
+mod session_tests;
+
+#[cfg(test)]
+mod accept_tests;
 
 async fn handle_session<D: Domain, C: CancelToken>(
     domain: D,
@@ -44,15 +51,18 @@ async fn handle_session<D: Domain, C: CancelToken>(
         cancel.clone(),
     ));
 
-    let result = tokio::try_join!(chainsync_task, statequery_task);
+    // A failed protocol ends the connection, so its client gets an EOF rather than
+    // waiting on a reply while the other protocol stays idle.
+    let result = tokio::try_join!(flatten(chainsync_task), flatten(statequery_task));
     plexer.abort().await;
 
-    let (chainsync_res, statequery_res) = result.map_err(|e| ServeError::Internal(e.into()))?;
-
-    chainsync_res?;
-    statequery_res?;
+    result?;
 
     Ok(())
+}
+
+async fn flatten(task: JoinHandle<Result<(), ServeError>>) -> Result<(), ServeError> {
+    task.await.map_err(|e| ServeError::Internal(e.into()))?
 }
 
 async fn accept_client_connections<D: Domain, C: CancelToken>(
@@ -67,7 +77,12 @@ async fn accept_client_connections<D: Domain, C: CancelToken>(
     info!(addr = %config.service.listen_path.to_string_lossy(), "Ouroboros socket is listening for clients");
 
     loop {
-        let connection = NodeServer::accept(&listener, config.network_magic).await;
+        let connection = NodeServer::accept_with_timeout(
+            &listener,
+            config.network_magic,
+            DEFAULT_HANDSHAKE_TIMEOUT,
+        )
+        .await;
 
         match connection {
             Ok(connection) => {
@@ -81,7 +96,10 @@ async fn accept_client_connections<D: Domain, C: CancelToken>(
                 info!(connections = tasks.len(), "active connections changed");
             }
             Err(error) => {
-                warn!(%error, "error on incoming connection");
+                let failure = AcceptFailure::of(&error);
+                let cause = std::error::Error::source(&error).map(ToString::to_string);
+                warn!(%error, ?cause, ?failure, "error on incoming connection");
+                failure.settle().await;
             }
         }
     }

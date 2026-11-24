@@ -4,8 +4,7 @@ use dolos_core::config::{
 };
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use miette::{Context as _, IntoDiagnostic};
-use opentelemetry::trace::TracerProvider as _;
-use opentelemetry_otlp::WithExportConfig as _;
+use opentelemetry::{metrics::MeterProvider as _, trace::TracerProvider as _};
 use std::sync::Arc;
 use std::{
     path::{Path, PathBuf},
@@ -21,6 +20,7 @@ use dolos::core::Genesis;
 use dolos::engine::{DomainBuildError, DomainBuilder};
 use dolos::prelude::*;
 use dolos::storage;
+use dolos::sync::metrics::MetricsFlush;
 
 pub type Stores = storage::Stores<dolos_cardano::CardanoDelta>;
 
@@ -119,6 +119,54 @@ pub fn open_genesis(config: &RootConfig) -> miette::Result<Genesis> {
         .context("loading genesis")
 }
 
+/// What finishes or replaces stores that a snapshot restore left incomplete.
+const RESTORE_HELP: &str = "finish the restore with `dolos bootstrap stelae --continue`, or start \
+                            over with `dolos bootstrap stelae --force`";
+
+/// What recovers an archive whose state has no cursor when no snapshot restore
+/// left its records, as a `data rebuild` or `data reset` stopped before the
+/// state was written leaves it. With the records there, the stores are a
+/// restore's partial progress, and [`RESTORE_HELP`] applies instead: a state
+/// rebuild over them would spend the resume.
+const ARCHIVE_WITHOUT_STATE_HELP: &str =
+    "an interrupted `dolos data rebuild` or `dolos data reset` leaves the stores like this; \
+     rebuild the state from the archive with `dolos data rebuild`, or replace the dataset with \
+     `dolos bootstrap --force`";
+
+/// Refuse storage that an interrupted snapshot restore left its records in:
+/// its stores are incomplete, and only `bootstrap stelae` finishes or replaces
+/// them. Checked before any store is opened, so nothing on disk changes.
+pub fn refuse_interrupted_restore(config: &RootConfig) -> miette::Result<()> {
+    match interrupted_restore(&config.storage.path)? {
+        Some(refusal) => Err(refusal),
+        None => Ok(()),
+    }
+}
+
+/// The refusal for `storage` when an interrupted snapshot restore left its
+/// records there, naming them; `None` when it holds neither.
+fn interrupted_restore(storage: &Path) -> miette::Result<Option<miette::Report>> {
+    let records = dolos_snapshot::restore::records_in(storage)
+        .into_diagnostic()
+        .context("looking for the records of an interrupted snapshot restore")?;
+
+    if records.is_empty() {
+        return Ok(None);
+    }
+
+    let records: Vec<_> = records
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+
+    Ok(Some(miette::miette!(
+        help = RESTORE_HELP,
+        "a snapshot restore into {} was interrupted, so its stores are incomplete ({} left)",
+        storage.display(),
+        records.join(", "),
+    )))
+}
+
 pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
     setup_domain_with_stop_epoch(config, None)
 }
@@ -134,7 +182,7 @@ pub fn setup_domain_with_stop_epoch(
     DomainBuilder::new(config, genesis)
         .stop_epoch(stop_epoch)
         .build()
-        .map_err(render_domain_build_error)
+        .map_err(|error| render_domain_build_error(&config.storage.path, error))
 }
 
 /// A domain over `stores` as they stand, for a command that repairs or rolls
@@ -144,32 +192,29 @@ pub fn assemble_domain(config: &RootConfig, stores: &Stores) -> miette::Result<D
 
     DomainBuilder::new(config, genesis)
         .assemble(stores)
-        .map_err(render_domain_build_error)
+        .map_err(|error| render_domain_build_error(&config.storage.path, error))
 }
 
 /// Keep actionable executable diagnostics at the UI boundary while the
-/// library returns typed construction errors.
-fn render_domain_build_error(error: DomainBuildError) -> miette::Report {
+/// library returns typed construction errors. `storage_path` is where the
+/// stores live, read for the records a snapshot restore leaves.
+fn render_domain_build_error(storage_path: &Path, error: DomainBuildError) -> miette::Report {
     match error {
         DomainBuildError::Storage(error @ Error::InUse { .. }) => {
             miette::Report::new(storage::OpenError::from(error))
         }
-        DomainBuildError::Storage(Error::WalError(WalError::IncompatibleVersion {
-            found,
-            expected,
-        })) => miette::miette!(
-            help = format!(
-                "WAL was created by a newer dolos version (v{found}) than this binary supports (v{expected}); upgrade dolos or run `dolos bootstrap --force` to wipe storage and re-bootstrap",
-            ),
-            "incompatible WAL version: found v{found}, expected v{expected}",
-        ),
         DomainBuildError::Bootstrap(dolos_core::DomainError::InconsistentState {
             ref wal,
             ref state,
         }) => {
             let msg = match (wal, state) {
-                (Some(w), Some(s)) => format!(
+                (Some(w), Some(s)) if s.slot() > w.slot() => format!(
                     "state (slot {}) is ahead of WAL (slot {})",
+                    s.slot(),
+                    w.slot()
+                ),
+                (Some(w), Some(s)) => format!(
+                    "state (slot {}) is behind WAL (slot {}) after catch-up",
                     s.slot(),
                     w.slot()
                 ),
@@ -185,8 +230,95 @@ fn render_domain_build_error(error: DomainBuildError) -> miette::Report {
             };
             miette::miette!(help = help, "{msg}")
         }
+        // Each command refuses the records before it builds the domain; a
+        // caller that does not still names the restore, not a state rebuild
+        // that would spend its partial stores.
+        DomainBuildError::Bootstrap(
+            error @ dolos_core::DomainError::ArchiveWithoutState { .. },
+        ) => match interrupted_restore(storage_path) {
+            Ok(Some(refusal)) => refusal.wrap_err(error.to_string()),
+            Ok(None) => miette::miette!(help = ARCHIVE_WITHOUT_STATE_HELP, "{error}"),
+            Err(lookup) => lookup.wrap_err(error.to_string()),
+        },
+        DomainBuildError::Bootstrap(error @ dolos_core::DomainError::WalGap { .. }) => {
+            miette::miette!(
+                help = "To see the missing blocks, run `dolos sync recover --dry-run`. To reset the WAL to the state cursor, run `dolos sync recover --discard-wal`. This command erases the rollback history of the WAL.",
+                "{error}, so Dolos does not replay it"
+            )
+        }
         other => miette::miette!("{other}"),
     }
+}
+
+/// Keeps the OTLP tracer and meter providers for the life of a command and
+/// flushes them on drop.
+///
+/// `setup_tracing` also registers the providers globally, and those copies are
+/// never dropped, so without the guard the last spans and metrics are lost
+/// when the process exits. Hold it until the command returns, inside the
+/// command's tokio runtime, while the exporters can still deliver.
+#[must_use = "dropping the guard shuts tracing down immediately"]
+#[derive(Default)]
+pub struct TracingGuard {
+    provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
+    meters: Option<opentelemetry_sdk::metrics::SdkMeterProvider>,
+    _process: Option<crate::telemetry::process::ProcessMetrics>,
+}
+
+impl TracingGuard {
+    /// A handle that exports the pending metrics on demand, within a bound.
+    ///
+    /// The guard's flush on drop comes after a command dropped the sources of
+    /// its observable instruments: flush first, while they still report.
+    pub fn metrics_flush(&self) -> MetricsFlush {
+        self.meters
+            .clone()
+            .map(MetricsFlush::new)
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for TracingGuard {
+    fn drop(&mut self) {
+        if let Some(meters) = self.meters.take() {
+            if let Err(err) = meters.shutdown() {
+                warn!(%err, "failed to flush metrics on exit");
+            }
+        }
+
+        if let Some(provider) = self.provider.take() {
+            if let Err(err) = provider.shutdown() {
+                warn!(%err, "failed to flush telemetry on exit");
+            }
+        }
+    }
+}
+
+/// Builds the batch tracer provider over `exporter`, registers it globally and
+/// returns the guard that flushes it, with the tracer for the tracing layer.
+fn telemetry_pipeline<E>(
+    exporter: E,
+    resource: opentelemetry_sdk::Resource,
+) -> (TracingGuard, opentelemetry_sdk::trace::SdkTracer)
+where
+    E: opentelemetry_sdk::trace::SpanExporter + 'static,
+{
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .with_resource(resource)
+        .build();
+
+    opentelemetry::global::set_tracer_provider(provider.clone());
+
+    let tracer = provider.tracer("dolos");
+
+    let guard = TracingGuard {
+        provider: Some(provider),
+        meters: None,
+        _process: None,
+    };
+
+    (guard, tracer)
 }
 
 pub fn setup_tracing_error_only() -> miette::Result<()> {
@@ -216,11 +348,18 @@ pub fn setup_tracing_warnings() -> miette::Result<()> {
     Ok(())
 }
 
-/// Dolos's own targets at `level`, then the `filter` directives over them.
+/// Dolos's own targets at `level`, every other target at `error`, then the
+/// `filter` directives over them.
+///
+/// The `error` floor keeps a library's own account of a failure, such as the
+/// storage engine naming the OS error behind a failed sync. `tower_http` is
+/// off: it reports every HTTP 5xx at `error`, including deliberate 503s.
 fn log_filter(config: &LoggingConfig) -> Result<Targets, ConfigError> {
     let mut filter = Targets::new()
+        .with_default(tracing::Level::ERROR)
         .with_target("dolos", config.level)
-        .with_target("gasket", config.level);
+        .with_target("gasket", config.level)
+        .with_target("tower_http", tracing_subscriber::filter::LevelFilter::OFF);
 
     if let Some(directives) = &config.filter {
         let extra: Targets = directives.parse().map_err(|error| {
@@ -242,36 +381,74 @@ fn log_filter(config: &LoggingConfig) -> Result<Targets, ConfigError> {
     Ok(filter)
 }
 
-/// Logs go to stderr, which leaves stdout to a command's result.
-pub fn setup_tracing(
-    config: &LoggingConfig,
-    telemetry: Option<&TelemetryConfig>,
-) -> miette::Result<()> {
-    let filter = log_filter(config).into_diagnostic()?;
+/// Builds the tracer and, unless `metrics = false`, the meter provider of
+/// `[telemetry]`, both registered globally, and the guard that flushes them.
+fn telemetry_providers(
+    config: &RootConfig,
+) -> miette::Result<Option<(TracingGuard, opentelemetry_sdk::trace::SdkTracer)>> {
+    let (Some(telemetry), Some(exporters)) = (
+        &config.telemetry,
+        crate::telemetry::exporters(config.telemetry.as_ref())?,
+    ) else {
+        return Ok(None);
+    };
 
-    let otel_layer = if let Some(telemetry) = telemetry {
-        let exporter = opentelemetry_otlp::SpanExporter::builder()
-            .with_tonic()
-            .with_endpoint(&telemetry.otlp_endpoint)
-            .build()
-            .into_diagnostic()
-            .context("building OTLP span exporter")?;
+    telemetry_providers_over(config, telemetry, exporters.spans, exporters.metrics).map(Some)
+}
 
-        let tracer = opentelemetry_sdk::trace::SdkTracerProvider::builder()
-            .with_batch_exporter(exporter)
-            .with_resource(
-                opentelemetry_sdk::Resource::builder()
-                    .with_service_name(telemetry.service_name.clone())
-                    .build(),
-            )
-            .build();
+/// [`telemetry_providers`] over the given exporters.
+pub(crate) fn telemetry_providers_over<S, M>(
+    config: &RootConfig,
+    telemetry: &TelemetryConfig,
+    spans: S,
+    metrics: Option<M>,
+) -> miette::Result<(TracingGuard, opentelemetry_sdk::trace::SdkTracer)>
+where
+    S: opentelemetry_sdk::trace::SpanExporter + 'static,
+    M: opentelemetry_sdk::metrics::exporter::PushMetricExporter,
+{
+    let resource = crate::telemetry::resource(telemetry, network_label(config)?);
+    let (mut guard, tracer) = telemetry_pipeline(spans, resource.clone());
 
-        opentelemetry::global::set_tracer_provider(tracer.clone());
+    guard.meters = metrics.map(|exporter| {
+        crate::telemetry::install_meter_provider(exporter, telemetry.metrics_interval(), resource)
+    });
+    guard._process = guard.meters.as_ref().map(|meters| {
+        crate::telemetry::process::ProcessMetrics::register(
+            &meters.meter(crate::telemetry::process::METER),
+        )
+    });
 
-        let layer = tracing_opentelemetry::layer().with_tracer(tracer.tracer("dolos"));
-        Some(layer)
+    Ok((guard, tracer))
+}
+
+/// The `dolos.network` resource attribute: a known network's name, else the
+/// magic.
+fn network_label(config: &RootConfig) -> miette::Result<String> {
+    let network = resolve_network(config)?;
+
+    Ok(match network.known() {
+        Some(known) => known.name.to_string(),
+        None => network.magic().to_string(),
+    })
+}
+
+/// Logs go to stderr, which leaves stdout to a command's result. With
+/// `[telemetry]`, spans and metrics are exported over OTLP.
+///
+/// Instruments bind to the meter provider that is global when they are
+/// created, so every command calls this before it opens the domain; an
+/// instrument created earlier records nothing.
+pub fn setup_tracing(config: &RootConfig) -> miette::Result<TracingGuard> {
+    let filter = log_filter(&config.logging).into_diagnostic()?;
+
+    let (otel_layer, guard) = if let Some((guard, tracer)) = telemetry_providers(config)? {
+        (
+            Some(tracing_opentelemetry::layer().with_tracer(tracer)),
+            guard,
+        )
     } else {
-        None
+        (None, TracingGuard::default())
     };
 
     #[cfg(not(feature = "debug"))]
@@ -298,7 +475,7 @@ pub fn setup_tracing(
     // forwarded to the tracing subscriber.
     tracing_log::LogTracer::init().ok();
 
-    Ok(())
+    Ok(guard)
 }
 
 #[inline]
@@ -336,11 +513,40 @@ pub fn hook_exit_token() -> CancellationToken {
     cancel
 }
 
-/// Run the pipeline until it ends or `exit` is cancelled, then tear it down.
-/// Returns the stages that ended on their own when one did, which is a
-/// failure: `exit` is then cancelled, so the rest of the process winds down.
+/// The mempool's size gauge and its lifecycle subscriber, which stops when
+/// this value is dropped.
+pub struct MempoolMetrics {
+    _gauge: dolos_core::telemetry::mempool::MempoolGauge,
+    subscriber: JoinHandle<()>,
+}
+
+impl Drop for MempoolMetrics {
+    fn drop(&mut self) {
+        self.subscriber.abort();
+    }
+}
+
+/// Starts the mempool metrics over `domain`'s mempool. Call it before
+/// serving, so the subscriber sees every submission.
+pub fn mempool_metrics(domain: &DomainAdapter) -> MempoolMetrics {
+    use dolos_core::telemetry::mempool::{Lifecycle, MempoolGauge};
+
+    let mempool = domain.mempool().clone();
+    let events = mempool.subscribe();
+
+    MempoolMetrics {
+        _gauge: MempoolGauge::register(mempool.clone()),
+        subscriber: tokio::spawn(async move { Lifecycle::new().follow(&mempool, events).await }),
+    }
+}
+
+/// Run the pipeline until it ends or `exit` is cancelled, then flush the
+/// metrics while its series still report, and tear it down. Returns the
+/// stages that ended on their own when one did, which is a failure: `exit` is
+/// then cancelled, so the rest of the process winds down.
 pub async fn run_pipeline(
-    pipeline: gasket::daemon::Daemon,
+    pipeline: dolos::sync::metrics::ExportedDaemon,
+    flush: MetricsFlush,
     exit: CancellationToken,
 ) -> Option<Vec<String>> {
     let ended = loop {
@@ -365,6 +571,13 @@ pub async fn run_pipeline(
         }
     };
 
+    // The exporter may need the runtime's workers, so the flush waits off
+    // them, and at most its bound, so a stalled collector delays the teardown
+    // by no more than that.
+    if let Err(err) = tokio::task::spawn_blocking(move || flush.flush()).await {
+        warn!(%err, "failed to flush metrics");
+    }
+
     debug!("shutting down pipeline");
     pipeline.teardown();
 
@@ -373,12 +586,12 @@ pub async fn run_pipeline(
 
 /// The names of the pipeline's stages that have ended.
 pub fn ended_stages(pipeline: &gasket::daemon::Daemon) -> Vec<String> {
-    use gasket::runtime::{StagePhase, TetherState};
+    use gasket::runtime::TetherState;
 
     pipeline
         .tethers()
         .filter(|tether| {
-            !matches!(tether.check_state(), TetherState::Alive(phase) if phase != StagePhase::Ended)
+            !matches!(tether.check_state(), TetherState::Alive(phase) if phase.end_cause().is_none())
         })
         .map(|tether| tether.name().to_string())
         .collect()
@@ -386,6 +599,8 @@ pub fn ended_stages(pipeline: &gasket::daemon::Daemon) -> Vec<String> {
 
 /// The error for a sync whose pipeline ended on its own, said after `what`:
 /// why a stage gave up on the upstream peer, or else which stages stopped.
+/// Its help says what to do: check the peer, replace a store that can't sync
+/// on, or retry longer.
 pub fn sync_failure(
     what: &str,
     failure: Option<&dolos::sync::UpstreamFailure>,
@@ -396,6 +611,12 @@ pub fn sync_failure(
             help = "a peer refuses the handshake of a node on another network, or of one \
                     with no protocol version in common: check that `upstream.peer_address` \
                     serves the configured chain",
+            "{what}: {failure}"
+        ),
+        Some(failure) if failure.stranded => miette::miette!(
+            help = "a fork most likely dropped that block, and this store can't sync on \
+                    without it: replace its data with `dolos bootstrap --force`, after \
+                    checking that `upstream.peer_address` serves the configured chain",
             "{what}: {failure}"
         ),
         Some(failure) => miette::miette!(
@@ -466,6 +687,216 @@ mod tests {
 
     use super::*;
 
+    struct FailingStage;
+
+    impl gasket::framework::Stage for FailingStage {
+        type Unit = ();
+        type Worker = FailingWorker;
+
+        fn name(&self) -> &str {
+            "failing"
+        }
+    }
+
+    struct FailingWorker;
+
+    #[async_trait::async_trait(?Send)]
+    impl gasket::framework::Worker<FailingStage> for FailingWorker {
+        async fn bootstrap(_: &FailingStage) -> Result<Self, gasket::framework::WorkerError> {
+            Ok(Self)
+        }
+
+        async fn schedule(
+            &mut self,
+            _: &mut FailingStage,
+        ) -> Result<gasket::framework::WorkSchedule<()>, gasket::framework::WorkerError> {
+            Err(gasket::framework::WorkerError::Panic)
+        }
+
+        async fn execute(
+            &mut self,
+            _: &(),
+            _: &mut FailingStage,
+        ) -> Result<(), gasket::framework::WorkerError> {
+            Ok(())
+        }
+    }
+
+    struct IdleStage;
+
+    impl gasket::framework::Stage for IdleStage {
+        type Unit = ();
+        type Worker = IdleWorker;
+
+        fn name(&self) -> &str {
+            "idle"
+        }
+    }
+
+    struct IdleWorker;
+
+    #[async_trait::async_trait(?Send)]
+    impl gasket::framework::Worker<IdleStage> for IdleWorker {
+        async fn bootstrap(_: &IdleStage) -> Result<Self, gasket::framework::WorkerError> {
+            Ok(Self)
+        }
+
+        async fn schedule(
+            &mut self,
+            _: &mut IdleStage,
+        ) -> Result<gasket::framework::WorkSchedule<()>, gasket::framework::WorkerError> {
+            Ok(gasket::framework::WorkSchedule::Idle)
+        }
+
+        async fn execute(
+            &mut self,
+            _: &(),
+            _: &mut IdleStage,
+        ) -> Result<(), gasket::framework::WorkerError> {
+            Ok(())
+        }
+    }
+
+    /// The stage series stop reporting at the teardown, before the guard's
+    /// flush on exit, so the pipeline exports them first.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn running_the_pipeline_exports_its_stage_series_before_the_teardown() {
+        use opentelemetry::metrics::MeterProvider as _;
+
+        let exporter = opentelemetry_sdk::metrics::InMemoryMetricExporter::default();
+        let meters = crate::telemetry::meter_provider(
+            exporter.clone(),
+            Duration::from_secs(3600),
+            opentelemetry_sdk::Resource::builder_empty().build(),
+        );
+        let guard = TracingGuard {
+            provider: None,
+            meters: Some(meters.clone()),
+            _process: None,
+        };
+
+        let tether = gasket::runtime::spawn_stage(IdleStage, gasket::runtime::Policy::default());
+        let pipeline = dolos::sync::metrics::ExportedDaemon::on(
+            &meters.meter("test"),
+            gasket::daemon::Daemon::new(vec![tether]),
+        );
+
+        let exit = CancellationToken::new();
+        exit.cancel();
+        assert_eq!(
+            run_pipeline(pipeline, guard.metrics_flush(), exit).await,
+            None
+        );
+
+        let exported: Vec<String> = exporter
+            .get_finished_metrics()
+            .unwrap()
+            .iter()
+            .flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+            .map(|metric| metric.name().to_string())
+            .collect();
+        assert!(
+            exported.contains(&"dolos.sync.stage.ticks".to_string()),
+            "{exported:?}"
+        );
+
+        drop(guard);
+        drop(meters);
+    }
+
+    /// An exporter whose exports never finish, like one whose collector
+    /// drops every connection attempt.
+    struct StalledExporter;
+
+    impl opentelemetry_sdk::metrics::exporter::PushMetricExporter for StalledExporter {
+        async fn export(
+            &self,
+            _: &opentelemetry_sdk::metrics::data::ResourceMetrics,
+        ) -> opentelemetry_sdk::error::OTelSdkResult {
+            std::future::pending().await
+        }
+
+        fn force_flush(&self) -> opentelemetry_sdk::error::OTelSdkResult {
+            Ok(())
+        }
+
+        fn shutdown_with_timeout(&self, _: Duration) -> opentelemetry_sdk::error::OTelSdkResult {
+            Ok(())
+        }
+
+        fn temporality(&self) -> opentelemetry_sdk::metrics::Temporality {
+            opentelemetry_sdk::metrics::Temporality::Cumulative
+        }
+    }
+
+    /// A collector that never answers delays the teardown by the flush's
+    /// bound, not for as long as the exporter waits on it.
+    #[test]
+    fn a_stalled_collector_delays_the_teardown_by_the_flush_bound_at_most() {
+        use opentelemetry::metrics::MeterProvider as _;
+
+        let meters = crate::telemetry::meter_provider(
+            StalledExporter,
+            Duration::from_secs(3600),
+            opentelemetry_sdk::Resource::builder_empty().build(),
+        );
+
+        let tether = gasket::runtime::spawn_stage(IdleStage, gasket::runtime::Policy::default());
+        let pipeline = dolos::sync::metrics::ExportedDaemon::on(
+            &meters.meter("test"),
+            gasket::daemon::Daemon::new(vec![tether]),
+        );
+        let flush = MetricsFlush::new(meters).within(Duration::from_millis(200));
+
+        // On a runtime of its own, which a flush that never returns would
+        // keep from shutting down: this thread is left behind instead.
+        let (done, finished) = std::sync::mpsc::channel();
+        let started = std::time::Instant::now();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let exit = CancellationToken::new();
+            exit.cancel();
+            done.send(runtime.block_on(run_pipeline(pipeline, flush, exit)))
+                .unwrap();
+        });
+
+        let ended = finished
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the pipeline was never torn down");
+        assert_eq!(ended, None);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_stage_that_ends_with_an_error_counts_as_ended() {
+        let tether = gasket::runtime::spawn_stage(FailingStage, gasket::runtime::Policy::default());
+        let pipeline = gasket::daemon::Daemon::new(vec![tether]);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !pipeline.has_ended() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the stage never ended"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        assert_eq!(ended_stages(&pipeline), vec!["failing".to_string()]);
+        let state = pipeline.tethers().next().unwrap().check_state();
+        assert_eq!(
+            state.end_cause(),
+            Some(gasket::runtime::EndCause::Errored),
+            "{state:?}"
+        );
+
+        pipeline.teardown();
+    }
+
     #[test]
     fn the_log_filter_adds_targets_over_the_level() {
         let config = LoggingConfig {
@@ -479,7 +910,35 @@ mod tests {
         assert!(filter.would_enable("gasket", &tracing::Level::WARN));
         assert!(!filter.would_enable("gasket", &tracing::Level::INFO));
         assert!(filter.would_enable("fjall", &tracing::Level::INFO));
-        assert!(!filter.would_enable("tonic", &tracing::Level::ERROR));
+        assert!(filter.would_enable("fjall::db", &tracing::Level::ERROR));
+        assert!(filter.would_enable("tonic", &tracing::Level::ERROR));
+        assert!(!filter.would_enable("tonic", &tracing::Level::WARN));
+        assert!(!filter.would_enable("tower_http::trace::on_failure", &tracing::Level::ERROR));
+
+        let config = LoggingConfig {
+            filter: Some("tower_http=error".into()),
+            ..Default::default()
+        };
+        assert!(log_filter(&config)
+            .unwrap()
+            .would_enable("tower_http::trace::on_failure", &tracing::Level::ERROR));
+
+        let config = LoggingConfig {
+            filter: Some("warn".into()),
+            ..Default::default()
+        };
+        let filter = log_filter(&config).unwrap();
+        assert!(filter.would_enable("tonic", &tracing::Level::WARN));
+        assert!(filter.would_enable("dolos", &tracing::Level::INFO));
+        assert!(!filter.would_enable("tower_http::trace::on_failure", &tracing::Level::ERROR));
+
+        let config = LoggingConfig {
+            filter: Some("off".into()),
+            ..Default::default()
+        };
+        assert!(!log_filter(&config)
+            .unwrap()
+            .would_enable("tonic", &tracing::Level::ERROR));
 
         let config = LoggingConfig {
             filter: Some("dolos=loud".into()),
@@ -489,12 +948,45 @@ mod tests {
     }
 
     #[test]
+    fn an_archive_without_a_state_names_the_restore_its_records_show() {
+        let storage = tempfile::tempdir().unwrap();
+        let rendered = |storage: &Path| {
+            let error = DomainBuildError::Bootstrap(dolos_core::DomainError::ArchiveWithoutState {
+                archive: 42,
+            });
+            let report = render_domain_build_error(storage, error);
+            let help = report
+                .help()
+                .map(|help| help.to_string())
+                .unwrap_or_default();
+            (report.to_string(), help)
+        };
+
+        let (message, help) = rendered(storage.path());
+        assert!(message.contains("but the state has no cursor"), "{message}");
+        assert!(help.contains("dolos data rebuild"), "{help}");
+        assert!(!help.contains("--continue"), "{help}");
+
+        std::fs::write(
+            storage.path().join(dolos_snapshot::restore::PROGRESS_FILE),
+            "{}",
+        )
+        .unwrap();
+
+        let (message, help) = rendered(storage.path());
+        assert!(message.contains("but the state has no cursor"), "{message}");
+        assert!(help.contains("dolos bootstrap stelae --continue"), "{help}");
+        assert!(!help.contains("dolos data rebuild"), "{help}");
+    }
+
+    #[test]
     fn a_sync_failure_points_at_what_to_check() {
         use dolos::sync::UpstreamFailure;
 
-        let failure = |refused| UpstreamFailure {
+        let failure = |refused, stranded| UpstreamFailure {
             message: "the pull stage gave up on the upstream peer".into(),
             refused,
+            stranded,
         };
 
         let help = |failure: Option<&UpstreamFailure>| {
@@ -503,7 +995,7 @@ mod tests {
             (report.to_string(), help.unwrap_or_default())
         };
 
-        let (message, refused) = help(Some(&failure(true)));
+        let (message, refused) = help(Some(&failure(true, false)));
         assert_eq!(
             message,
             "the sync stopped: the pull stage gave up on the upstream peer"
@@ -511,8 +1003,16 @@ mod tests {
         assert!(refused.contains("another network"), "{refused}");
         assert!(!refused.contains("[sync.retry]"), "{refused}");
 
-        let (_, retried) = help(Some(&failure(false)));
+        let (_, retried) = help(Some(&failure(false, false)));
         assert!(retried.starts_with("`[sync.retry]`"), "{retried}");
+
+        let (message, stranded) = help(Some(&failure(false, true)));
+        assert_eq!(
+            message,
+            "the sync stopped: the pull stage gave up on the upstream peer"
+        );
+        assert!(stranded.contains("`dolos bootstrap --force`"), "{stranded}");
+        assert!(!stranded.contains("[sync.retry]"), "{stranded}");
 
         let (message, stopped) = help(None);
         assert_eq!(message, "the sync stopped: the pull stage stopped");
@@ -594,5 +1094,102 @@ mod tests {
         .expect("cancelled drivers should finish promptly");
 
         assert!(result.is_ok(), "a signalled shutdown is not a failure");
+    }
+
+    /// Counts the spans that actually reach the exporter.
+    #[derive(Debug, Clone, Default)]
+    struct CountingExporter(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl opentelemetry_sdk::trace::SpanExporter for CountingExporter {
+        async fn export(
+            &self,
+            batch: Vec<opentelemetry_sdk::trace::SpanData>,
+        ) -> opentelemetry_sdk::error::OTelSdkResult {
+            self.0
+                .fetch_add(batch.len(), std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// The provider `telemetry_pipeline` builds has to end up in the guard it
+    /// returns, or dropping the guard flushes nothing.
+    #[test]
+    fn the_telemetry_pipeline_guard_flushes_its_provider() {
+        use opentelemetry::trace::{Span as _, Tracer as _};
+
+        let exporter = CountingExporter::default();
+        let resource = opentelemetry_sdk::Resource::builder_empty().build();
+        let (guard, tracer) = telemetry_pipeline(exporter.clone(), resource);
+
+        tracer.start("work").end();
+
+        let exported = || exporter.0.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(exported(), 0, "the span should still be buffered");
+
+        // The tracer and the globally registered copy keep the provider alive,
+        // so only the guard can trigger this flush.
+        drop(guard);
+
+        assert_eq!(exported(), 1, "dropping the guard should flush the span");
+    }
+
+    /// The batch exporter holds finished spans until its next scheduled
+    /// export, so a command that returns before then loses them. Dropping the
+    /// guard has to deliver them.
+    #[test]
+    fn dropping_the_tracing_guard_delivers_buffered_spans() {
+        use opentelemetry::trace::{Span as _, Tracer as _};
+
+        let exporter = CountingExporter::default();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_batch_exporter(exporter.clone())
+            .build();
+        let guard = TracingGuard {
+            provider: Some(provider.clone()),
+            meters: None,
+            _process: None,
+        };
+
+        // `provider` stands in for the copy `setup_tracing` registers globally,
+        // which is never dropped. Were the guard's copy the last one, dropping
+        // it would flush on its own and this test could not fail.
+        provider.tracer("test").start("work").end();
+
+        let exported = || exporter.0.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(exported(), 0, "the span should still be buffered");
+
+        drop(guard);
+
+        assert_eq!(exported(), 1, "dropping the guard should flush the span");
+        drop(provider);
+    }
+
+    /// The periodic reader holds metrics until its next interval, so dropping
+    /// the guard has to export them, as it does buffered spans.
+    #[test]
+    fn dropping_the_tracing_guard_exports_pending_metrics() {
+        use opentelemetry::metrics::MeterProvider as _;
+
+        let exporter = opentelemetry_sdk::metrics::InMemoryMetricExporter::default();
+        let meters = crate::telemetry::meter_provider(
+            exporter.clone(),
+            std::time::Duration::from_secs(3600),
+            opentelemetry_sdk::Resource::builder_empty().build(),
+        );
+        let guard = TracingGuard {
+            provider: None,
+            meters: Some(meters.clone()),
+            _process: None,
+        };
+
+        // `meters` stands in for the globally registered copy, as above.
+        meters.meter("test").u64_counter("work").build().add(1, &[]);
+        let exported = || exporter.get_finished_metrics().unwrap().len();
+        assert_eq!(exported(), 0, "the sample should wait for the interval");
+
+        drop(guard);
+
+        assert_eq!(exported(), 1, "dropping the guard should export the sample");
+        drop(meters);
     }
 }

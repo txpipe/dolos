@@ -4,15 +4,20 @@
 
 mod node;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::Arc;
 
 use dolos::engine::DomainBuilder;
-use dolos_cardano::CardanoDelta;
+use dolos_cardano::{
+    indexes::{archive_dimensions, utxo_tags},
+    CardanoDelta, CardanoEntity, CardanoLogic,
+};
 use dolos_core::{
-    ChainPoint, Domain as _, Genesis, LogValue, RawBlock, SyncExt as _, WalStore as _,
+    ArchiveStore, ArchiveWriter as _, ChainLogic as _, ChainPoint, Domain, EntityKey, EntityMap,
+    ExactRecord, Genesis, KeyRange, LogValue, RawBlock, StateStore, StateWriter as _, SyncExt as _,
+    TagEntry, TagOrder, TagRecord, TagStart, UtxoEntry, WalStore as _,
 };
 use node::{feed_until_crash, fixture, point, start, store_positions, CrashAfter, Node};
 
@@ -85,6 +90,37 @@ fn empty_wal(node: &Node) {
 
     let wal = dolos::storage::open_wal_store::<CardanoDelta>(&node.config).unwrap();
     wal.shutdown().unwrap();
+}
+
+/// Move the state cursor to `to` and nothing else.
+fn set_state_cursor(node: &Node, to: ChainPoint) {
+    use dolos_core::{StateStore as _, StateWriter as _};
+
+    let state = dolos::storage::open_state_store(&node.config).unwrap();
+
+    let writer = state.start_writer().unwrap();
+    writer.set_cursor(to).unwrap();
+    writer.commit().unwrap();
+
+    state.shutdown().unwrap();
+}
+
+/// Every UTxO in the state, as text.
+fn utxo_set(node: &Node) -> Vec<String> {
+    use dolos_core::StateStore as _;
+
+    let state = dolos::storage::open_state_store(&node.config).unwrap();
+
+    let mut utxos: Vec<_> = state
+        .iter_utxos()
+        .unwrap()
+        .map(|utxo| format!("{:?}", utxo.unwrap()))
+        .collect();
+    utxos.sort();
+
+    state.shutdown().unwrap();
+
+    utxos
 }
 
 /// Empty the state store, as deleting a corrupt one leaves it once a node
@@ -308,6 +344,436 @@ fn a_missing_dataset_is_refused_and_left_missing() {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum RollbackInterruption {
+    State,
+    Indexes,
+    Archive,
+}
+
+fn interrupt_rollback<D>(domain: &D, to: &ChainPoint, after: RollbackInterruption)
+where
+    D: Domain<Entity = CardanoEntity, EntityDelta = CardanoDelta, Chain = CardanoLogic>,
+{
+    let writer = domain.state().start_writer().unwrap();
+    let archive = domain.archive().start_writer().unwrap();
+    let mut entities = EntityMap::default();
+
+    for (at, log) in domain
+        .wal()
+        .iter_logs(Some(to.clone()), None)
+        .unwrap()
+        .rev()
+    {
+        if at == *to {
+            writer.set_cursor(at).unwrap();
+            break;
+        }
+
+        dolos_core::state::undo_delta_chunk::<D>(&mut entities, domain.state(), &log.delta)
+            .unwrap();
+        let undo = CardanoLogic::compute_undo(&log.block, &log.inputs, at).unwrap();
+        writer.apply_utxoset(&undo.utxo_delta).unwrap();
+        writer.undo_utxo_tags(&undo.utxo_index_delta).unwrap();
+        archive.undo_index(&undo.archive_index_deltas).unwrap();
+    }
+
+    CardanoLogic::settle_undo(domain.state(), &mut entities).unwrap();
+    dolos_core::state::save_entities::<D>(&writer, &entities).unwrap();
+    writer.commit().unwrap();
+
+    if matches!(after, RollbackInterruption::State) {
+        return;
+    }
+
+    archive.commit().unwrap();
+
+    if matches!(after, RollbackInterruption::Archive) {
+        domain.archive().truncate_front(to).unwrap();
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ReplayContents {
+    cursor: Option<ChainPoint>,
+    entities: BTreeMap<&'static str, Vec<(EntityKey, Vec<u8>)>>,
+    utxos: Vec<UtxoEntry>,
+    utxo_tags: BTreeMap<(&'static str, Vec<u8>), Vec<TagEntry>>,
+    blocks: Vec<(u64, Vec<u8>)>,
+    tags: Vec<TagRecord>,
+    exact: Vec<ExactRecord>,
+}
+
+impl ReplayContents {
+    fn read<D>(domain: &D) -> Self
+    where
+        D: Domain<Entity = CardanoEntity, EntityDelta = CardanoDelta, Chain = CardanoLogic>,
+    {
+        let entities = dolos_cardano::model::build_schema()
+            .keys()
+            .map(|ns| {
+                let rows = domain
+                    .state()
+                    .iter_entities(ns, KeyRange::all())
+                    .unwrap()
+                    .collect::<Result<_, _>>()
+                    .unwrap();
+                (*ns, rows)
+            })
+            .collect();
+        let mut utxos: Vec<_> = domain
+            .state()
+            .iter_utxos()
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        utxos.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut probes = BTreeSet::new();
+        for (_, value) in &utxos {
+            let output = (&value.output).try_into().unwrap();
+            probes.extend(
+                utxo_tags(&output)
+                    .into_iter()
+                    .map(|tag| (tag.dimension, tag.key)),
+            );
+        }
+        for (at, log) in domain.wal().iter_logs(None, None).unwrap() {
+            if log.block.is_empty() {
+                continue;
+            }
+            let catchup = CardanoLogic::compute_catchup(&log.block, &log.inputs, at).unwrap();
+            for (_, _, tags) in catchup
+                .utxo_index_delta
+                .produced
+                .into_iter()
+                .chain(catchup.utxo_index_delta.consumed)
+            {
+                probes.extend(tags.into_iter().map(|tag| (tag.dimension, tag.key)));
+            }
+        }
+        let utxo_tags = probes
+            .into_iter()
+            .map(|(dimension, key)| {
+                let entries = domain
+                    .state()
+                    .utxos_by_tag_page(
+                        dimension,
+                        &key,
+                        TagOrder::Asc,
+                        TagStart::Skip(0),
+                        usize::MAX,
+                    )
+                    .unwrap();
+                let refs = domain.state().utxos_by_tag(dimension, &key).unwrap();
+                assert_eq!(
+                    refs,
+                    entries.iter().map(|entry| entry.txo.clone()).collect()
+                );
+                ((dimension, key), entries)
+            })
+            .filter(|(_, entries)| !entries.is_empty())
+            .collect();
+
+        Self {
+            cursor: domain.state().read_cursor().unwrap(),
+            entities,
+            utxos,
+            utxo_tags,
+            blocks: domain
+                .archive()
+                .get_range(None, None)
+                .unwrap()
+                .map(|(slot, body)| (slot, body.to_vec()))
+                .collect(),
+            tags: domain
+                .archive()
+                .iter_archive_tags(&archive_dimensions::ALL, 0..u64::MAX)
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap(),
+            exact: domain
+                .archive()
+                .iter_exact_records(0..u64::MAX)
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap(),
+        }
+    }
+
+    fn read_node(node: &Node, genesis: &Arc<Genesis>) -> Self {
+        let stores = dolos::storage::open_data_stores::<CardanoDelta>(&node.config).unwrap();
+        let domain = DomainBuilder::new(&node.config, genesis.clone())
+            .assemble(&stores)
+            .unwrap();
+        let contents = Self::read(&domain);
+        domain.shutdown().unwrap();
+        contents
+    }
+}
+
+fn wal_bytes(node: &Node) -> Vec<(ChainPoint, Vec<u8>)> {
+    use dolos_redb3::{
+        redb::{ReadOnlyDatabase, ReadableDatabase as _, ReadableTable as _, TableDefinition},
+        wal::{DbChainPoint, DbLogValue},
+    };
+
+    let db = ReadOnlyDatabase::open(node.config.wal_path().unwrap()).unwrap();
+    let tx = db.begin_read().unwrap();
+    let table = tx
+        .open_table(TableDefinition::<DbChainPoint, DbLogValue>::new("wal"))
+        .unwrap();
+    table
+        .iter()
+        .unwrap()
+        .map(|row| {
+            let (key, value) = row.unwrap();
+            (key.value().into(), value.value())
+        })
+        .collect()
+}
+
+fn segment_bytes(node: &Node) -> BTreeMap<PathBuf, Vec<u8>> {
+    let segments: BTreeMap<_, _> = files(&node.config.storage.archive_path().unwrap())
+        .into_iter()
+        .filter(|(path, _)| {
+            path.extension()
+                .is_some_and(|extension| extension == "segment")
+        })
+        .collect();
+    assert!(!segments.is_empty());
+    segments
+}
+
+#[test]
+fn interrupted_rollback_reconciles_existing_and_missing_archive_blocks() {
+    for after in [
+        RollbackInterruption::State,
+        RollbackInterruption::Indexes,
+        RollbackInterruption::Archive,
+    ] {
+        let (node, genesis, blocks) = fixture("");
+        let to = point(&blocks[1]);
+        let expected_rollback;
+        {
+            let domain = start(&node, &genesis);
+            domain.roll_forward_batch(blocks[..2].to_vec()).unwrap();
+            expected_rollback = ReplayContents::read(&domain);
+            domain.roll_forward_batch(blocks[2..].to_vec()).unwrap();
+            domain.shutdown().unwrap();
+        }
+        let expected = ReplayContents::read_node(&node, &genesis);
+        assert!(!expected.utxos.is_empty());
+        assert!(!expected.tags.is_empty());
+        assert!(dolos_core::ExactKind::ALL
+            .iter()
+            .all(|kind| expected.exact.iter().any(|record| record.kind == *kind)));
+        let wal = wal_bytes(&node);
+        let segments = segment_bytes(&node);
+
+        {
+            let stores = dolos::storage::open_data_stores::<CardanoDelta>(&node.config).unwrap();
+            assert!(matches!(
+                stores.state,
+                dolos::storage::StateStoreBackend::Fjall(_)
+            ));
+            assert!(matches!(
+                stores.archive,
+                dolos::storage::ArchiveStoreBackend::Fjall(_)
+            ));
+            let domain = DomainBuilder::new(&node.config, genesis.clone())
+                .assemble(&stores)
+                .unwrap();
+            interrupt_rollback(&domain, &to, after);
+            domain.shutdown().unwrap();
+        }
+
+        let interrupted = ReplayContents::read_node(&node, &genesis);
+        assert_eq!(interrupted.cursor, Some(to.clone()));
+        assert_eq!(interrupted.entities, expected_rollback.entities);
+        assert_eq!(interrupted.utxos, expected_rollback.utxos);
+        assert_eq!(interrupted.utxo_tags, expected_rollback.utxo_tags);
+        if matches!(after, RollbackInterruption::State) {
+            assert_eq!(interrupted.tags, expected.tags);
+            assert_eq!(interrupted.exact, expected.exact);
+        } else {
+            assert_eq!(interrupted.tags, expected_rollback.tags);
+            assert_eq!(interrupted.exact, expected_rollback.exact);
+            assert_ne!(interrupted.tags, expected.tags);
+            assert_ne!(interrupted.exact, expected.exact);
+        }
+        assert_eq!(wal_bytes(&node), wal, "{after:?}");
+        let before_recovery_segments = segment_bytes(&node);
+        if !matches!(after, RollbackInterruption::Archive) {
+            assert_eq!(before_recovery_segments, segments, "{after:?}");
+        }
+        let output = node.run(&["sync", "recover"]);
+        assert_eq!(
+            code(&output),
+            Some(0),
+            "{after:?}: {}",
+            stderr_words(&output)
+        );
+        assert_eq!(
+            ReplayContents::read_node(&node, &genesis),
+            expected,
+            "{after:?}"
+        );
+        assert_eq!(wal_bytes(&node), wal, "{after:?}");
+        if !matches!(after, RollbackInterruption::Archive) {
+            assert_eq!(segment_bytes(&node), before_recovery_segments, "{after:?}");
+        }
+        assert_eq!(segment_bytes(&node), segments, "{after:?}");
+
+        let output = node.run(&["sync", "recover"]);
+        assert_eq!(code(&output), Some(0), "{}", stderr_words(&output));
+        assert_eq!(ReplayContents::read_node(&node, &genesis), expected);
+        assert_eq!(wal_bytes(&node), wal);
+        assert_eq!(segment_bytes(&node), segments);
+
+        let slot = to.slot().to_string();
+        let hash = hash_of(&to);
+        let output = node.run(&[
+            "sync", "rollback", "--slot", &slot, "--hash", &hash, "--yes",
+        ]);
+        assert_eq!(code(&output), Some(0), "{}", stderr_words(&output));
+        assert_eq!(
+            ReplayContents::read_node(&node, &genesis),
+            expected_rollback
+        );
+    }
+}
+
+#[test]
+fn archive_reconciliation_commits_before_state_and_survives_retries() {
+    use dolos_testing::{
+        faults::{FaultyToyDomain, TestFault},
+        synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
+        toy_domain::ToyDomain,
+    };
+
+    for commits in 0..4 {
+        let (blocks, _, config) = build_synthetic_blocks(SyntheticBlockConfig {
+            block_count: 4,
+            slot: 100,
+            ..Default::default()
+        });
+        let domain = ToyDomain::new_with_genesis_and_config(
+            Arc::new(dolos_cardano::include::preview::load()),
+            config,
+            None,
+            None,
+        );
+        domain.roll_forward_batch(blocks.clone()).unwrap();
+        let expected = ReplayContents::read(&domain);
+        let to = point(&blocks[1]);
+        interrupt_rollback(&domain, &to, RollbackInterruption::Indexes);
+        let before = ReplayContents::read(&domain);
+        let faulty = FaultyToyDomain::new(domain.clone(), TestFault::CrashAfterCommits(commits));
+        assert!(dolos_core::bootstrap::catch_up_stores(&faulty).is_err());
+        let interrupted = ReplayContents::read(&domain);
+        let state_tip = if commits < 2 {
+            to.clone()
+        } else {
+            point(&blocks[2])
+        };
+        assert_eq!(interrupted.cursor, Some(state_tip), "{commits}");
+        if commits < 2 {
+            assert_eq!(interrupted.entities, before.entities, "{commits}");
+            assert_eq!(interrupted.utxos, before.utxos, "{commits}");
+            assert_eq!(interrupted.utxo_tags, before.utxo_tags, "{commits}");
+        }
+        for (index, block) in blocks.iter().enumerate().skip(2) {
+            let at = point(block).slot();
+            let applied = commits > 2 * (index as u32 - 2);
+            let expected_tags: Vec<_> = expected.tags.iter().filter(|tag| tag.slot == at).collect();
+            let expected_exact: Vec<_> = expected
+                .exact
+                .iter()
+                .filter(|entry| entry.slot == at)
+                .collect();
+            let tags: Vec<_> = interrupted
+                .tags
+                .iter()
+                .filter(|tag| tag.slot == at)
+                .collect();
+            let exact: Vec<_> = interrupted
+                .exact
+                .iter()
+                .filter(|entry| entry.slot == at)
+                .collect();
+            if applied {
+                assert_eq!(tags, expected_tags, "{commits}");
+                assert_eq!(exact, expected_exact, "{commits}");
+            } else {
+                assert!(tags.is_empty(), "{commits}");
+                assert!(exact.is_empty(), "{commits}");
+            }
+        }
+        dolos_core::bootstrap::catch_up_stores(&domain).unwrap();
+        assert_eq!(ReplayContents::read(&domain), expected, "{commits}");
+        domain.rollback(&to).unwrap();
+        let rolled_back = ReplayContents::read(&domain);
+        assert_eq!(rolled_back.entities, before.entities);
+        assert_eq!(rolled_back.utxos, before.utxos);
+        assert_eq!(rolled_back.utxo_tags, before.utxo_tags);
+        assert_eq!(rolled_back.tags, before.tags);
+        assert_eq!(rolled_back.exact, before.exact);
+    }
+}
+
+#[test]
+fn a_conflicting_archived_suffix_is_refused_before_any_state_replay() {
+    let (node, genesis, blocks) = synced_on("");
+    let to = point(&blocks[1]);
+    {
+        let stores = dolos::storage::open_data_stores::<CardanoDelta>(&node.config).unwrap();
+        let domain = DomainBuilder::new(&node.config, genesis.clone())
+            .assemble(&stores)
+            .unwrap();
+        interrupt_rollback(&domain, &to, RollbackInterruption::Indexes);
+        let slot = point(&blocks[3]).slot();
+        let (conflict, body) = dolos_testing::blocks::make_conway_block(slot);
+        let writer = domain.archive().start_writer().unwrap();
+        writer.undo(&point(&blocks[3])).unwrap();
+        writer.apply(&conflict, &body).unwrap();
+        writer.commit().unwrap();
+        domain.shutdown().unwrap();
+    }
+    let before = ReplayContents::read_node(&node, &genesis);
+    let wal = wal_bytes(&node);
+    let segments = segment_bytes(&node);
+    let output = node.run(&["sync", "recover"]);
+    assert!(!output.status.success(), "{}", stdout(&output));
+    assert_eq!(ReplayContents::read_node(&node, &genesis), before);
+    assert_eq!(wal_bytes(&node), wal);
+    assert_eq!(segment_bytes(&node), segments);
+}
+
+#[test]
+fn an_uncovered_state_replay_is_refused_before_any_commit() {
+    let (node, genesis, blocks) = synced_on("");
+    let to = point(&blocks[1]);
+    {
+        let stores = dolos::storage::open_data_stores::<CardanoDelta>(&node.config).unwrap();
+        let domain = DomainBuilder::new(&node.config, genesis.clone())
+            .assemble(&stores)
+            .unwrap();
+        interrupt_rollback(&domain, &to, RollbackInterruption::Indexes);
+        domain
+            .wal()
+            .append_entries(vec![(point(&blocks[3]), LogValue::origin())])
+            .unwrap();
+        let before = ReplayContents::read(&domain);
+        assert!(matches!(
+            dolos_core::bootstrap::catch_up_stores(&domain),
+            Err(dolos_core::DomainError::WalGap { .. })
+        ));
+        assert_eq!(ReplayContents::read(&domain), before);
+        domain.shutdown().unwrap();
+    }
+}
+
 #[test]
 fn a_lag_the_wal_covers_is_replayed() {
     for crash in [CrashAfter::Wal, CrashAfter::State] {
@@ -341,6 +807,162 @@ fn a_lag_the_wal_covers_is_replayed() {
         let status = node.run(&["sync", "status"]);
         assert_eq!(code(&status), Some(0), "{crash:?}: {}", stdout(&status));
     }
+}
+
+/// ESTART leaves the state cursor holding only the slot of the epoch's first
+/// block, which a crash after that block's WAL commit keeps it at: the state
+/// has every block before the slot and not the one at it. `sync status` says
+/// so, and `sync recover` replays the block.
+#[test]
+fn a_state_at_a_slot_without_its_block_replays_it() {
+    let (node, genesis, blocks) = fixture("");
+    let tip = point(&blocks[3]);
+
+    let domain = start(&node, &genesis);
+    domain.roll_forward_batch(blocks[..3].to_vec()).unwrap();
+    feed_until_crash(&domain, &blocks[3..], CrashAfter::Wal);
+    domain.shutdown().unwrap();
+    drop(domain);
+
+    set_state_cursor(&node, ChainPoint::Slot(tip.slot()));
+
+    let status = node.run(&["sync", "status", "--format", "json"]);
+    assert_eq!(code(&status), Some(3), "{}", stdout(&status));
+    let disagreements = json(&status)["disagreements"].to_string();
+    assert!(
+        disagreements.contains("the state, at slot")
+            && disagreements.contains("its block not applied"),
+        "{disagreements}"
+    );
+
+    let dry_run = node.run(&["sync", "recover", "--dry-run", "--format", "json"]);
+    assert_eq!(code(&dry_run), Some(0), "{}", stderr_words(&dry_run));
+    let planned = json(&dry_run);
+    assert_eq!(planned["action"], "replay");
+    assert_eq!(planned["steps"][0]["store"], "state", "{planned}");
+    assert_eq!(planned["steps"][0]["entries"], 1, "{planned}");
+
+    let output = node.run(&["sync", "recover"]);
+    assert_eq!(code(&output), Some(0), "{}", stderr_words(&output));
+
+    assert_eq!(
+        store_positions(&node),
+        (Some(tip.clone()), Some(tip.clone()), Some(tip.slot()))
+    );
+    assert_eq!(utxo_set(&node), utxo_set(&synced().0));
+
+    let status = node.run(&["sync", "status"]);
+    assert_eq!(code(&status), Some(0), "{}", stdout(&status));
+}
+
+/// The disagreements `sync status` reports, with its exit code.
+fn disagreements(node: &Node) -> (Option<i32>, Vec<String>) {
+    let status = node.run(&["sync", "status", "--format", "json"]);
+    let found = json(&status)["disagreements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|found| found.as_str().unwrap().to_string())
+        .collect();
+
+    (code(&status), found)
+}
+
+/// A Byron boundary block opening epoch 1 after the block at `tip`, and the
+/// main block numbered `number` chained onto it at the same slot.
+fn boundary_pair(tip: &ChainPoint, number: u64) -> [(ChainPoint, RawBlock); 2] {
+    use dolos_testing::blocks::{make_byron_ebb, make_conway_block_with_prev};
+
+    let ebb = make_byron_ebb(1, tip.hash().unwrap());
+    let main = make_conway_block_with_prev(ebb.0.slot(), ebb.0.hash(), number);
+
+    [ebb, main]
+}
+
+/// A Byron boundary block and the main block sharing its slot, past the
+/// synced blocks, both in the WAL and the archive. A state at the boundary
+/// block, as a crash between the main block's WAL and state commits leaves
+/// it, is behind the WAL; so is an archive holding only the boundary block.
+/// Either of the pair can sort last in the WAL.
+#[test]
+fn a_store_at_a_boundary_block_is_behind_the_block_sharing_its_slot() {
+    let tip = point(synced().1.last().unwrap());
+    let main_sorts_last = |number: &u64| {
+        let [(ebb, _), (main, _)] = boundary_pair(&tip, *number);
+        ebb.into_bytes() < main.into_bytes()
+    };
+
+    let main_last = (0..).find(main_sorts_last).unwrap();
+    let ebb_last = (0..).find(|number| !main_sorts_last(number)).unwrap();
+
+    for number in [main_last, ebb_last] {
+        a_store_at_a_boundary_block_is_behind(number);
+    }
+}
+
+fn a_store_at_a_boundary_block_is_behind(number: u64) {
+    let (node, blocks) = synced();
+    let tip = point(blocks.last().unwrap());
+    let [(ebb, ebb_block), (main, main_block)] = boundary_pair(&tip, number);
+    assert!(tip.slot() < ebb.slot());
+
+    let entry = |block: &RawBlock| LogValue::<CardanoDelta> {
+        block: block.to_vec(),
+        delta: vec![],
+        inputs: Default::default(),
+    };
+
+    let stores = dolos::storage::open_data_stores::<CardanoDelta>(&node.config).unwrap();
+    stores
+        .wal
+        .append_entries(vec![
+            (ebb.clone(), entry(&ebb_block)),
+            (main.clone(), entry(&main_block)),
+        ])
+        .unwrap();
+
+    let writer = stores.archive.start_writer().unwrap();
+    writer.apply(&ebb, &ebb_block).unwrap();
+    writer.apply(&main, &main_block).unwrap();
+    writer.commit().unwrap();
+
+    let writer = stores.state.start_writer().unwrap();
+    writer.set_cursor(ebb.clone()).unwrap();
+    writer.commit().unwrap();
+
+    stores.state.shutdown().unwrap();
+    stores.archive.shutdown().unwrap();
+    stores.wal.shutdown().unwrap();
+    drop(stores);
+
+    let slot = ebb.slot();
+    let behind = |store: &str| {
+        format!(
+            "the {store}, at slot {slot}, is behind the WAL tip at slot {slot} (its first 2 blocks applied)"
+        )
+    };
+
+    let case = format!("main block numbered {number}");
+
+    let (code, found) = disagreements(&node);
+    assert_eq!(code, Some(3), "{case}: {found:?}");
+    assert_eq!(found, vec![behind("state")], "{case}");
+
+    set_state_cursor(&node, main.clone());
+    assert_eq!(disagreements(&node), (Some(0), vec![]), "{case}");
+
+    let stores = dolos::storage::open_data_stores::<CardanoDelta>(&node.config).unwrap();
+    let writer = stores.archive.start_writer().unwrap();
+    writer.undo(&main).unwrap();
+    writer.commit().unwrap();
+    stores.state.shutdown().unwrap();
+    stores.archive.shutdown().unwrap();
+    stores.wal.shutdown().unwrap();
+    drop(stores);
+
+    let (code, found) = disagreements(&node);
+    assert_eq!(code, Some(3), "{case}: {found:?}");
+    assert_eq!(found, vec![behind("archive")], "{case}");
 }
 
 /// The state and the archive two blocks back, and a WAL reset to the tip, so
@@ -604,6 +1226,50 @@ fn a_state_without_a_cursor_is_refused() {
     }
 }
 
+/// An archive with blocks under an empty state and an empty WAL, as an
+/// interrupted state rebuild or store reset leaves them, stops a start before
+/// it reaches for a peer, naming the rebuild that recovers the state from the
+/// archive, which then does.
+#[test]
+#[cfg_attr(
+    feature = "debug",
+    ignore = "the debug feature's console subscriber panics a sync built without tokio_unstable"
+)]
+fn a_start_refuses_an_archive_without_a_state() {
+    let (node, blocks) = synced();
+    let tip = point(&blocks[3]);
+    empty_state(&node);
+    empty_wal(&node);
+
+    let stranded = (None, None, Some(tip.slot()));
+    assert_eq!(store_positions(&node), stranded);
+
+    for args in [&["sync", "catchup"][..], &["daemon"], &["serve"]] {
+        let output = node.run(args);
+        let message = stderr_words(&output);
+
+        assert_eq!(code(&output), Some(1), "{args:?}: {message}");
+        assert!(!message.contains("panicked"), "{args:?}: {message}");
+        for said in [
+            format!("the archive holds blocks up to slot {}", tip.slot()),
+            "the state has no cursor".to_string(),
+            "rebuild the state from the archive with `dolos data rebuild`".to_string(),
+            "`dolos bootstrap --force`".to_string(),
+        ] {
+            assert!(message.contains(&said), "{args:?}: {said:?} in {message}");
+        }
+        assert!(!message.contains("--continue"), "{args:?}: {message}");
+        assert_eq!(store_positions(&node), stranded, "{args:?}");
+    }
+
+    let output = node.run(&["data", "rebuild", "--yes"]);
+    assert_eq!(code(&output), Some(0), "{}", stderr_words(&output));
+    assert_eq!(
+        store_positions(&node),
+        (Some(tip.clone()), Some(tip.clone()), Some(tip.slot()))
+    );
+}
+
 /// The state at the tip, the archive two blocks back, and a WAL reset to the
 /// tip: resetting the WAL to the state cannot fill the archive.
 #[test]
@@ -630,6 +1296,277 @@ fn an_archive_behind_the_state_is_refused_even_with_the_flag() {
             "{args:?}"
         );
     }
+}
+
+/// Stamp the WAL `version`, its entries as they are, as a release reading
+/// another version leaves it.
+fn stamp_wal(node: &Node, version: u32) {
+    use dolos_redb3::redb::{Database, TableDefinition};
+
+    let db = Database::create(node.config.wal_path().unwrap()).unwrap();
+    let wx = db.begin_write().unwrap();
+    wx.open_table(TableDefinition::<&str, u32>::new("wal_metadata"))
+        .unwrap()
+        .insert("version", version)
+        .unwrap();
+    wx.commit().unwrap();
+}
+
+/// Replace the WAL entry at `at` with bytes no release decodes.
+fn break_wal_entry(node: &Node, at: &ChainPoint) {
+    use dolos_redb3::{
+        redb::{Database, TableDefinition},
+        wal::DbChainPoint,
+    };
+
+    let db = Database::create(node.config.wal_path().unwrap()).unwrap();
+    let wx = db.begin_write().unwrap();
+    wx.open_table(TableDefinition::<DbChainPoint, Vec<u8>>::new("wal"))
+        .unwrap()
+        .insert(DbChainPoint::from(at.clone()), vec![0xde, 0xad])
+        .unwrap();
+    wx.commit().unwrap();
+}
+
+/// A WAL this release can't read is kept while a store still needs a block
+/// it holds: after a crash between the state's commit and the archive's, of
+/// another version or failing to decode where the archive's replay reads
+/// it, and under a state cursor holding only a slot. `sync recover` stops,
+/// saying why and what to do, and leaves the WAL byte for byte; its dry run
+/// reads it as empty, warning that a writable open keeps it.
+#[test]
+fn a_wal_a_store_still_needs_is_kept_by_recover() {
+    let reads = dolos_redb3::wal::CURRENT_WAL_VERSION;
+    let mut cases = vec![];
+
+    for version in [reads - 1, reads + 1] {
+        let (node, _) = lagging(CrashAfter::State);
+        stamp_wal(&node, version);
+        cases.push((format!("version {version}"), node, "is behind the state"));
+    }
+
+    let (node, blocks) = lagging(CrashAfter::State);
+    break_wal_entry(&node, &point(&blocks[2]));
+    cases.push(("undecodable".into(), node, "is behind the state"));
+
+    let (node, genesis, blocks) = fixture("");
+    let domain = start(&node, &genesis);
+    domain.roll_forward_batch(blocks[..3].to_vec()).unwrap();
+    feed_until_crash(&domain, &blocks[3..], CrashAfter::Wal);
+    domain.shutdown().unwrap();
+    drop(domain);
+    set_state_cursor(&node, ChainPoint::Slot(point(&blocks[3]).slot()));
+    stamp_wal(&node, reads + 1);
+    cases.push(("hashless".into(), node, "has no block hash"));
+
+    for (case, node, why) in cases {
+        let wal = node.config.wal_path().unwrap();
+        let before = std::fs::read(&wal).unwrap();
+
+        let dry_run = node.run(&["sync", "recover", "--dry-run"]);
+        let warned = stderr_words(&dry_run);
+        assert!(
+            warned.contains("a writable open keeps it"),
+            "{case}: {warned}"
+        );
+        assert!(std::fs::read(&wal).unwrap() == before, "{case}: dry run");
+
+        let output = node.run(&["sync", "recover"]);
+        let message = stderr_words(&output);
+        assert_eq!(code(&output), Some(1), "{case}: {message}");
+
+        for said in [
+            "is kept as it is",
+            why,
+            "start that release once",
+            "dolos data rebuild",
+        ] {
+            assert!(message.contains(said), "{case}: {said:?} in {message}");
+        }
+
+        assert!(
+            std::fs::read(&wal).unwrap() == before,
+            "{case}: the WAL changed"
+        );
+    }
+}
+
+/// After a crash before the state's commit, the state and the archive agree
+/// and a start syncs the WAL's blocks again: a WAL of another version is
+/// wiped, and `sync recover` seeds it at the state cursor.
+#[test]
+fn a_wal_no_store_needs_is_reset_by_recover() {
+    let (node, blocks) = lagging(CrashAfter::Wal);
+    let at = point(&blocks[1]);
+    stamp_wal(&node, dolos_redb3::wal::CURRENT_WAL_VERSION + 1);
+
+    let output = node.run(&["sync", "recover", "--format", "json"]);
+    assert_eq!(code(&output), Some(0), "{}", stderr_words(&output));
+    assert_eq!(json(&output)["action"], "seed_wal");
+
+    assert_eq!(
+        store_positions(&node),
+        (Some(at.clone()), Some(at.clone()), Some(at.slot()))
+    );
+}
+
+/// A Byron boundary block and the main block sharing its slot, past the
+/// synced blocks, in the WAL, and the state at the main block, as a crash
+/// before the main block's archive commit leaves them. An archive holding
+/// only the boundary block lacks the main one at its own tip slot, so
+/// `sync recover` keeps a WAL of another version byte for byte; with both
+/// archived, it resets it and seeds it at the state cursor.
+#[test]
+fn a_wal_holding_the_block_an_archive_lacks_at_its_tip_slot_is_kept() {
+    for archived_main in [false, true] {
+        let (node, blocks) = synced();
+        let tip = point(blocks.last().unwrap());
+        let [(ebb, ebb_block), (main, main_block)] = boundary_pair(&tip, blocks.len() as u64);
+        assert_eq!(ebb.slot(), main.slot());
+
+        let entry = |block: &RawBlock| LogValue::<CardanoDelta> {
+            block: block.to_vec(),
+            delta: vec![],
+            inputs: Default::default(),
+        };
+
+        let stores = dolos::storage::open_data_stores::<CardanoDelta>(&node.config).unwrap();
+        stores
+            .wal
+            .append_entries(vec![
+                (ebb.clone(), entry(&ebb_block)),
+                (main.clone(), entry(&main_block)),
+            ])
+            .unwrap();
+
+        let writer = stores.archive.start_writer().unwrap();
+        writer.apply(&ebb, &ebb_block).unwrap();
+        if archived_main {
+            writer.apply(&main, &main_block).unwrap();
+        }
+        writer.commit().unwrap();
+
+        let writer = stores.state.start_writer().unwrap();
+        writer.set_cursor(main.clone()).unwrap();
+        writer.commit().unwrap();
+
+        stores.state.shutdown().unwrap();
+        stores.archive.shutdown().unwrap();
+        stores.wal.shutdown().unwrap();
+        drop(stores);
+
+        stamp_wal(&node, dolos_redb3::wal::CURRENT_WAL_VERSION + 1);
+        let wal = node.config.wal_path().unwrap();
+        let before = std::fs::read(&wal).unwrap();
+
+        let output = node.run(&["sync", "recover", "--format", "json"]);
+        let message = stderr_words(&output);
+
+        if archived_main {
+            assert_eq!(code(&output), Some(0), "{message}");
+            assert_eq!(json(&output)["action"], "seed_wal");
+            assert_eq!(store_positions(&node).0, Some(main));
+            continue;
+        }
+
+        assert_eq!(code(&output), Some(1), "{message}");
+
+        let lacks = format!(
+            "the archive, at slot {}, lacks the block the state applied there",
+            main.slot()
+        );
+
+        for said in ["is kept as it is", &lacks, "start that release once"] {
+            assert!(message.contains(said), "{said:?} in {message}");
+        }
+
+        assert!(std::fs::read(&wal).unwrap() == before, "the WAL changed");
+    }
+}
+
+/// A start, as `sync catchup` makes one, stops on a WAL a store still needs
+/// before it reaches for a peer, and leaves it byte for byte.
+#[test]
+#[cfg_attr(
+    feature = "debug",
+    ignore = "the debug feature's console subscriber panics a sync built without tokio_unstable"
+)]
+fn a_start_stops_on_a_wal_a_store_still_needs() {
+    let (node, _) = lagging(CrashAfter::State);
+    stamp_wal(&node, dolos_redb3::wal::CURRENT_WAL_VERSION + 1);
+
+    let wal = node.config.wal_path().unwrap();
+    let before = std::fs::read(&wal).unwrap();
+
+    let output = node.run(&["sync", "catchup"]);
+    let message = stderr_words(&output);
+    assert_eq!(code(&output), Some(1), "{message}");
+
+    for said in [
+        "is kept as it is",
+        "is behind the state",
+        "start that release once",
+    ] {
+        assert!(message.contains(said), "{said:?} in {message}");
+    }
+
+    assert!(std::fs::read(&wal).unwrap() == before, "the WAL changed");
+}
+
+/// A WAL of another version that no store needs is reset, and the start
+/// seeds it at the state cursor: one point, with none before it to roll back
+/// to. A peer past that point that doesn't hold it, as after a fork dropped
+/// the node's last block, ends `sync catchup` at its first answer, naming a
+/// forced bootstrap as the fix.
+#[test]
+#[cfg_attr(
+    feature = "debug",
+    ignore = "the debug feature's console subscriber panics a sync built without tokio_unstable"
+)]
+fn a_reset_wal_whose_point_a_fork_dropped_stops_the_sync_naming_a_forced_bootstrap() {
+    use dolos_testing::peer::{PeerFixture, PeerOptions};
+
+    let (node, blocks) = synced();
+    let tip = point(&blocks[3]);
+    stamp_wal(&node, dolos_redb3::wal::CURRENT_WAL_VERSION + 1);
+
+    // The fixture's chain has another block at every slot, and one past the
+    // node's tip.
+    let peer = PeerFixture::start(
+        "127.0.0.1:0",
+        2,
+        PeerOptions {
+            initial_blocks: tip.slot() + 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let config_path = node.config_path();
+    let mut document: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    document["upstream"] =
+        toml::from_str(&format!("peer_address = \"{}\"", peer.address())).unwrap();
+    document.as_table_mut().unwrap().insert(
+        "sync".into(),
+        toml::from_str("retry = { max_retries = 3, backoff_unit_seconds = 0 }").unwrap(),
+    );
+    std::fs::write(&config_path, toml::to_string(&document).unwrap()).unwrap();
+
+    let output = node.run(&["sync", "catchup"]);
+    let message = stderr_words(&output);
+    assert_eq!(code(&output), Some(1), "{message}");
+
+    for said in [
+        format!("the WAL holds only {tip}, with no earlier point to roll back to"),
+        format!("the peer, past it at {}, does not hold it", peer.tip()),
+        "`dolos bootstrap --force`".to_string(),
+    ] {
+        assert!(message.contains(&said), "{said:?} in {message}");
+    }
+
+    assert_eq!(peer.intersects(), 1, "no retry: {message}");
+    assert_eq!(store_positions(&node).0, Some(tip));
 }
 
 #[test]

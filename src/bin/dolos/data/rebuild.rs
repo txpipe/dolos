@@ -33,9 +33,10 @@
 //! replay completes.
 //! A crash mid-replay therefore leaves WAL(origin) behind a partial state
 //! cursor, which the next startup refuses loudly (`InconsistentState`); one
-//! during the wipe leaves the state moved aside, so the node starts from
-//! genesis, or, where a store is removed in place, a state every open
-//! refuses as being removed. Re-running this command recovers either.
+//! during the wipe leaves the state moved aside, an archive with no state
+//! cursor that the next startup refuses, naming this command, or, where a
+//! store is removed in place, a state every open refuses as being removed.
+//! Re-running this command recovers either.
 //!
 //! An archive whose seals wrote no script or asset entries — one written
 //! before the entity index existed, or by an earlier build that kept the
@@ -463,7 +464,7 @@ fn build_domain(
         .context("creating the in-memory WAL")?;
 
     let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
-    let query_limiter = QueryLimiter::new(config.serve.max_concurrent_queries);
+    let query_limiter = config.serve.query_limiter();
     let cache = open_store(
         "cache",
         dolos::storage::open_cache_store(config, query_limiter.clone()),
@@ -476,8 +477,10 @@ fn build_domain(
         mempool_config: config.mempool.clone(),
         genesis,
         chain: Arc::new(std::sync::RwLock::new(chain)),
+        storage_gauges: dolos::adapters::storage_gauges(&wal, None, &archive),
         wal,
         state,
+        tip_gauges: dolos::adapters::tip_gauges(&archive),
         archive,
         mempool: MempoolBackend::Ephemeral(dolos_core::builtin::EphemeralMempool::new()),
         cache,
@@ -593,6 +596,8 @@ fn replay(
 }
 
 pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
+    crate::common::refuse_interrupted_restore(config)?;
+
     crate::common::setup_tracing_error_only()?;
 
     let mode = match (&args.target, args.ephemeral) {

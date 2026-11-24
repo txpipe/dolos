@@ -175,7 +175,7 @@ impl dolos_core::EntityDelta for DatumRefDecrement {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use dolos_core::EntityDelta;
 
@@ -297,7 +297,22 @@ mod tests {
     use crate::model::testing::{
         self as root, assert_delta_roundtrip, assert_delta_serde_roundtrip,
     };
+    use crate::model::testing::{replay_case, ReplayCase};
     use proptest::prelude::*;
+
+    /// One case per delta this module owns, for `model::replay_tests`.
+    pub(crate) fn replay_cases() -> Vec<ReplayCase> {
+        vec![
+            replay_case((
+                prop::option::of(any_datum_state()),
+                any_datum_ref_increment(),
+            )),
+            replay_case((
+                prop::option::of(any_datum_state()),
+                any_datum_ref_decrement(),
+            )),
+        ]
+    }
 
     prop_compose! {
         fn any_datum_ref_increment()(

@@ -1,6 +1,8 @@
 use axum::{
-    extract::Request,
-    http::StatusCode,
+    extract::{Request, State},
+    http::{header, StatusCode},
+    middleware::Next,
+    response::{IntoResponse as _, Response},
     routing::{get, post},
     Router, ServiceExt,
 };
@@ -20,25 +22,31 @@ use std::{
     ops::{Deref, Range},
 };
 use tower::Layer;
-use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer, trace};
+use tower_http::{
+    cors::CorsLayer, normalize_path::NormalizePathLayer, timeout::TimeoutLayer, trace,
+};
 use tracing::Level;
 
 use dolos_core::{
-    config::MinibfConfig, ArchiveStore as _, AsyncQueryFacade, BlockSlot, CancelToken, Domain,
-    EraCbor, LogEntity, RangeOf, ServeError, StateEntity, StateError, StateStore as _, SubmitExt,
-    TxOrder,
+    config::MinibfConfig, telemetry::requests::RequestMetrics, ArchiveStore as _, AsyncQueryFacade,
+    BlockSlot, CancelToken, Domain, EraCbor, LogEntity, QueryLimiter, RangeOf, ServeError,
+    StateEntity, StateError, StateStore as _, SubmitExt, TxOrder,
 };
 
 mod error;
 pub(crate) mod hacks;
+#[cfg(test)]
+mod heavy_scan_tests;
 pub(crate) mod inputs;
 pub(crate) mod mapping;
+mod metrics;
 pub(crate) mod offchain;
 mod pagination;
 mod routes;
 pub(crate) mod scan;
 #[cfg(test)]
 mod test_support;
+pub(crate) mod utxos;
 
 /// Registers the `/network` namespace, as the router does, for tools that
 /// work on the cache without serving.
@@ -282,6 +290,33 @@ impl<D: Domain> Facade<D> {
     }
 }
 
+/// Runs a heavy-scan route under a slot of the domain's heavy-scan limit,
+/// shared with every other API, or answers 503 once the queue for one runs
+/// out.
+async fn admit_heavy_scan(
+    State(limiter): State<QueryLimiter>,
+    request: Request,
+    next: Next,
+) -> Response {
+    match limiter.admit_heavy().await {
+        Some(admission) => admission.scope(next.run(request)).await,
+        None => error::Error::HeavyScanLimit.into_response(),
+    }
+}
+
+/// Gives the deadline's bodiless 504 the Blockfrost error body, which clients
+/// parse.
+async fn timeout_body(response: Response) -> Response {
+    let bodiless = response.status() == StatusCode::GATEWAY_TIMEOUT
+        && !response.headers().contains_key(header::CONTENT_TYPE);
+
+    if bodiless {
+        error::Error::RequestTimeout.into_response()
+    } else {
+        response
+    }
+}
+
 pub struct Driver;
 
 pub fn build_router<D>(cfg: MinibfConfig, domain: D) -> Router
@@ -302,6 +337,21 @@ where
 }
 
 pub(crate) fn build_router_with_facade<D>(facade: Facade<D>) -> Router
+where
+    D: Domain + SubmitExt + Clone + Send + Sync + 'static,
+    Option<AccountState>: From<D::Entity>,
+    Option<PoolState>: From<D::Entity>,
+    Option<EpochState>: From<D::Entity>,
+    Option<DRepState>: From<D::Entity>,
+    Option<ProposalState>: From<D::Entity>,
+    Option<GovState>: From<D::Entity>,
+    Option<MetadataLabelState>: From<D::Entity>,
+{
+    build_router_with_metrics(facade, metrics::request_metrics())
+}
+
+/// The router, recording its requests on `requests`.
+pub(crate) fn build_router_with_metrics<D>(facade: Facade<D>, requests: RequestMetrics) -> Router
 where
     D: Domain + SubmitExt + Clone + Send + Sync + 'static,
     Option<AccountState>: From<D::Entity>,
@@ -336,10 +386,14 @@ where
 
     let permissive_cors = facade.config.permissive_cors();
     let route_prefix = facade.config.route_prefix().cloned();
+    let request_timeout = facade.config.request_timeout();
+    let heavy = axum::middleware::from_fn_with_state(
+        facade.inner.query_limiter().clone(),
+        admit_heavy_scan,
+    );
     let routes = Router::new()
         .route("/", get(routes::root::<D>))
         .route("/health", get(routes::health::naked))
-        .route("/metrics", get(routes::metrics::naked::<D>))
         .route("/health/clock", get(routes::health::clock))
         .route("/genesis", get(routes::genesis::naked::<D>))
         .route("/network", get(routes::network::naked::<D>))
@@ -362,7 +416,7 @@ where
         )
         .route(
             "/accounts/{stake_address}/addresses/assets",
-            get(routes::accounts::by_stake_addresses_assets::<D>),
+            get(routes::accounts::by_stake_addresses_assets::<D>).layer(heavy.clone()),
         )
         .route(
             "/accounts/{stake_address}/addresses/total",
@@ -370,7 +424,7 @@ where
         )
         .route(
             "/accounts/{stake_address}/utxos",
-            get(routes::accounts::by_stake_utxos::<D>),
+            get(routes::accounts::by_stake_utxos::<D>).layer(heavy.clone()),
         )
         .route(
             "/accounts/{stake_address}/history",
@@ -394,19 +448,19 @@ where
         )
         .route(
             "/addresses/{address}",
-            get(routes::addresses::by_address::<D>),
+            get(routes::addresses::by_address::<D>).layer(heavy.clone()),
         )
         .route(
             "/addresses/{address}/extended",
-            get(routes::addresses::extended::<D>),
+            get(routes::addresses::extended::<D>).layer(heavy.clone()),
         )
         .route(
             "/addresses/{address}/utxos",
-            get(routes::addresses::utxos::<D>),
+            get(routes::addresses::utxos::<D>).layer(heavy.clone()),
         )
         .route(
             "/addresses/{address}/utxos/{asset}",
-            get(routes::addresses::utxos_with_asset::<D>),
+            get(routes::addresses::utxos_with_asset::<D>).layer(heavy.clone()),
         )
         .route(
             "/addresses/{address}/transactions",
@@ -487,7 +541,7 @@ where
         )
         .route(
             "/epochs/{epoch}/stakes/{pool_id}",
-            get(routes::epochs::by_number_stakes_pool::<D>),
+            get(routes::epochs::by_number_stakes_pool::<D>).layer(heavy.clone()),
         )
         .route(
             "/epochs/latest/parameters",
@@ -505,7 +559,7 @@ where
         )
         .route(
             "/scripts/{script_hash}/utxos",
-            get(routes::scripts::by_hash_utxos::<D>),
+            get(routes::scripts::by_hash_utxos::<D>).layer(heavy.clone()),
         )
         .route(
             "/scripts/{script_hash}/redeemers",
@@ -568,11 +622,15 @@ where
         .route("/assets/{subject}", get(routes::assets::by_subject::<D>))
         .route(
             "/assets/{subject}/addresses",
-            get(routes::assets::by_subject_addresses::<D>),
+            get(routes::assets::by_subject_addresses::<D>).layer(heavy.clone()),
         )
         .route(
             "/assets/{subject}/history",
             get(routes::assets::by_subject_history::<D>),
+        )
+        .route(
+            "/assets/{subject}/utxos",
+            get(routes::assets::by_subject_utxos::<D>),
         )
         .route(
             "/assets/{subject}/transactions",
@@ -594,7 +652,7 @@ where
         .route("/pools/{id}/blocks", get(routes::pools::by_id_blocks::<D>))
         .route(
             "/pools/{id}/delegators",
-            get(routes::pools::by_id_delegators::<D>),
+            get(routes::pools::by_id_delegators::<D>).layer(heavy.clone()),
         )
         .route(
             "/pools/{id}/history",
@@ -610,11 +668,17 @@ where
             get(routes::pools::by_id_updates::<D>),
         )
         .route("/pools/{id}/votes", get(routes::pools::by_id_votes::<D>))
-        .route("/pools/extended", get(routes::pools::all_extended::<D>))
+        .route(
+            "/pools/extended",
+            get(routes::pools::all_extended::<D>).layer(heavy.clone()),
+        )
         .route("/pools/retiring", get(routes::pools::all_retiring::<D>))
         .route("/pools/retired", get(routes::pools::all_retired::<D>))
         .route("/pools", get(routes::pools::all::<D>))
-        .route("/pools/{id}", get(routes::pools::by_id::<D>))
+        .route(
+            "/pools/{id}",
+            get(routes::pools::by_id::<D>).layer(heavy.clone()),
+        )
         .route("/governance/dreps", get(routes::governance::all_dreps::<D>))
         .route(
             "/governance/committee",
@@ -638,7 +702,7 @@ where
         )
         .route(
             "/governance/dreps/{drep_id}/delegators",
-            get(routes::governance::drep_delegators::<D>),
+            get(routes::governance::drep_delegators::<D>).layer(heavy.clone()),
         )
         .route(
             "/governance/dreps/{drep_id}/votes",
@@ -701,9 +765,16 @@ where
         None => routes,
     };
 
+    // Outside the heavy-scan admission, so the deadline counts the wait for
+    // a slot.
     let app = routes
         .fallback(routes::invalid_path)
         .with_state(facade)
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::GATEWAY_TIMEOUT,
+            request_timeout,
+        ))
+        .layer(axum::middleware::map_response(timeout_body))
         .layer(
             trace::TraceLayer::new_for_http()
                 .make_span_with(|request: &Request<_>| {
@@ -734,7 +805,13 @@ where
             CorsLayer::permissive()
         } else {
             CorsLayer::new()
-        });
+        })
+        // Outside the deadline, so a cut request is a 504 and a drop is the
+        // client's; outside CORS, so preflights are counted too.
+        .layer(axum::middleware::from_fn_with_state(
+            requests,
+            metrics::record,
+        ));
     // Added via `Router::layer`, NormalizePathLayer runs *after* route matching
     // and never trims before routing (`/blocks/latest/` would miss its route).
     // Wrap the router with it and nest that behind an outer `Router` via
@@ -795,7 +872,7 @@ mod route_prefix_tests {
             json!({
                 "status_code": 400,
                 "error": "Bad Request",
-                "message": "Invalid path.",
+                "message": "Invalid path. Please check https://docs.txpipe.io/dolos/apis/minibf",
             }),
             "{path}"
         );
@@ -811,7 +888,6 @@ mod route_prefix_tests {
             "/api/v0/network",
             "/api/v0/network/",
             "/api/v0/health",
-            "/api/v0/metrics",
         ] {
             let (status, _) = app.get_bytes(path).await;
             assert_eq!(status, StatusCode::OK, "{path}");
@@ -839,6 +915,7 @@ mod route_prefix_tests {
 
         for path in [
             "/api/v0/nonexistent",
+            "/api/v0/metrics",
             "/api/v0/blocks/latest/nope",
             "/api/v0/txs",
         ] {
@@ -854,18 +931,23 @@ mod tests {
 
     use crate::test_support::TestApp;
 
-    /// These paths match no route. The first five paths are from issue #1323:
-    /// unknown endpoints and paths with too few segments. The sixth path
+    /// These paths match no route. `/metrics` was a route until the chain tip
+    /// moved to the exported metrics. The next five paths are from issue
+    /// #1323: unknown endpoints and paths with too few segments. The last path
     /// contains an empty segment in the middle. `NormalizePathLayer` removes
     /// only the slashes at the start and at the end of a path. As a result,
     /// the router receives `/blocks//latest` unchanged.
     const UNMATCHED_PATHS: &[&str] = &[
+        "/metrics",
         "/nonexistent",
         "/foo/bar/baz",
         "/txs",
         "/blocks/latest/nope",
         "/blocks/epoch/2/slot",
         "/blocks//latest",
+        "/blocks//txs/cbor",
+        "/blocks/",
+        "/blocks//",
     ];
 
     #[tokio::test]
@@ -888,9 +970,40 @@ mod tests {
                 json!({
                     "status_code": 400,
                     "error": "Bad Request",
-                    "message": "Invalid path.",
+                    "message": "Invalid path. Please check https://docs.txpipe.io/dolos/apis/minibf",
                 }),
                 "unexpected body for {path}"
+            );
+        }
+    }
+
+    /// An empty block segment is a malformed hash on the routes Blockfrost
+    /// answers that way. `/blocks//txs/cbor` is an invalid path there, see
+    /// `UNMATCHED_PATHS`. Checked against live Blockfrost on 2026-11-18.
+    #[tokio::test]
+    async fn an_empty_block_hash_is_malformed() {
+        let app = TestApp::new();
+
+        for path in [
+            "/blocks//txs",
+            "/blocks//txs?count=1",
+            "/blocks//addresses",
+            "/blocks//next",
+            "/blocks//previous",
+        ] {
+            let (status, bytes) = app.get_bytes(path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+
+            let body: Value = serde_json::from_slice(&bytes)
+                .unwrap_or_else(|_| panic!("no json body for {path}"));
+            assert_eq!(
+                body,
+                json!({
+                    "status_code": 400,
+                    "error": "Bad Request",
+                    "message": "Missing or malformed block hash.",
+                }),
+                "{path}"
             );
         }
     }

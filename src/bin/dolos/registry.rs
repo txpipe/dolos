@@ -1,4 +1,4 @@
-//! The credentials a command reads a stele registry with.
+//! The credentials a command reads a snapshot registry with.
 //!
 //! Inputs of the invocation, never of `dolos.toml`: the user from
 //! `--registry-user` or `DOLOS_STELAE_USER`, and the secret from

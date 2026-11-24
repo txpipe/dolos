@@ -4,7 +4,7 @@ use pallas::network::miniprotocols::{
     chainsync::{ClientRequest, N2NServer, Tip},
     Point,
 };
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::prelude::*;
 
@@ -124,13 +124,43 @@ impl<D: Domain> Session<D> {
 
         let crawler = self.assume_crawler();
 
-        let next = crawler.next_block();
+        match crawler.next_block() {
+            Ok(Some((point, block))) => self.send_forward(point, block).await,
+            Ok(None) => self.send_await_and_next().await,
+            Err(err) => {
+                // The cursor can no longer load the next batch (it has no overlap with
+                // the stores, or a load failed). Re-seek from the point we stalled on
+                // instead of unwinding the session's task.
+                warn!(%err, "crawler lost its overlap, re-seeking from the last point");
 
-        if let Some((point, block)) = next {
-            self.send_forward(point, block).await?;
-        } else {
-            self.send_await_and_next().await?;
+                self.reseek()?;
+
+                // The fresh cursor may hold buffered pages, but the peer only asked for one
+                // reply: any RollForward leaves us idle with the client holding agency, so
+                // answer with a single block (or an await if there is none) and let the next
+                // RequestNext drain the rest.
+                match self.assume_crawler().next_block() {
+                    Ok(Some((point, block))) => self.send_forward(point, block).await,
+                    Ok(None) => self.send_await_and_next().await,
+                    Err(retry_err) => {
+                        warn!(%retry_err, "re-seek did not restore overlap, ending session");
+                        Err(Error::server(retry_err))
+                    }
+                }
+            }
         }
+    }
+
+    fn reseek(&mut self) -> Result<(), Error> {
+        let point = self.assume_crawler().last_point().clone();
+
+        // A point gone from both stores ends the session: moving the cursor
+        // anywhere else would leave a gap in the client's chain.
+        let (crawler, _) = ChainCrawler::<D>::start(&self.domain, &[point])
+            .map_err(Error::server)?
+            .ok_or_else(|| Error::custom("crawler could not re-seek"))?;
+
+        self.crawler = Some(crawler);
 
         Ok(())
     }
@@ -149,7 +179,7 @@ impl<D: Domain> Session<D> {
 
         let points = points.into_iter().map(From::from).collect_vec();
 
-        let intersect = ChainCrawler::<D>::start(&self.domain, &points).unwrap();
+        let intersect = ChainCrawler::<D>::start(&self.domain, &points).map_err(Error::server)?;
 
         if let Some((crawler, point)) = intersect {
             debug!(%point, "found intersect point");

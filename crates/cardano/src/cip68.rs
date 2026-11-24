@@ -157,7 +157,7 @@ pub fn property_scheme_for_key(standard: Cip68TokenStandard, key: &str) -> Optio
         },
         Cip68TokenStandard::Nft => match key {
             "name" => Some(bytestring_scheme()),
-            "image" => Some(bytestring_scheme()),
+            "image" => Some(string_or_array_scheme()),
             "mediaType" => Some(bytestring_scheme()),
             "description" => Some(bytestring_scheme()),
             "files" => Some(array_scheme(FILES_ITEM_SCHEMA)),
@@ -165,7 +165,7 @@ pub fn property_scheme_for_key(standard: Cip68TokenStandard, key: &str) -> Optio
         },
         Cip68TokenStandard::Rft => match key {
             "name" => Some(bytestring_scheme()),
-            "image" => Some(bytestring_scheme()),
+            "image" => Some(string_or_array_scheme()),
             "mediaType" => Some(bytestring_scheme()),
             "description" => Some(bytestring_scheme()),
             "decimals" => Some(number_scheme()),
@@ -316,9 +316,7 @@ fn map_schema_lookup(schema: &'static [ItemProperty], key: &str) -> Option<Prope
         .map(|property| property.scheme)
 }
 
-/// Converts a single bounded-bytes value to a string. CIP-68 defines a
-/// bytestring property, such as `mediaType`, as a single value. This
-/// converter does not accept an array.
+/// Converts a single bounded-bytes value to a string.
 fn convert_bytestring_value(value: &PlutusData) -> Option<JsonValue> {
     match value {
         PlutusData::BoundedBytes(bytes) => {
@@ -329,9 +327,7 @@ fn convert_bytestring_value(value: &PlutusData) -> Option<JsonValue> {
 }
 
 /// Converts a bounded-bytes value, or an array of bounded-bytes parts, to a
-/// single string. CIP-68 defines the `src` property as a uri. Version 3
-/// splits a uri of more than 64 bytes into an array of parts. This converter
-/// joins the parts into one string.
+/// single string.
 fn convert_split_bytestring_value(value: &PlutusData) -> Option<JsonValue> {
     match value {
         PlutusData::BoundedBytes(_) => convert_bytestring_value(value),
@@ -385,11 +381,9 @@ fn convert_map_value(value: &PlutusData, schema: &'static [ItemProperty]) -> Opt
 
 fn convert_datum_value(value: &PlutusData, schema: PropertyScheme) -> Option<JsonValue> {
     match schema.kind {
-        PropertyKind::Bytestring => convert_bytestring_value(value),
-        // a bytestring, or a split bytestring. a version 3 `src` uses the
-        // split form for a payload of more than 64 bytes. the converter joins
-        // the parts into one string.
-        PropertyKind::StringOrArray => convert_split_bytestring_value(value),
+        PropertyKind::Bytestring | PropertyKind::StringOrArray => {
+            convert_split_bytestring_value(value)
+        }
         PropertyKind::Number => convert_number_value(value),
         PropertyKind::Array => {
             let PlutusData::Array(items) = value else {
@@ -444,6 +438,7 @@ pub fn parse_cip67_label_from_asset_name(asset_name: &[u8]) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pallas::ledger::primitives::MaybeIndefArray;
     use serde_json::json;
 
     fn label_hex(number: u32) -> String {
@@ -628,52 +623,236 @@ mod tests {
         ));
     }
 
-    /// Builds a files item as a Plutus map, and returns the parsed metadata of
-    /// an NFT datum that holds it. The datum also has `name` and `image`, so
-    /// only the files item decides the result.
-    fn parse_nft_with_files_item(
-        item: Vec<(PlutusData, PlutusData)>,
-    ) -> HashMap<String, JsonValue> {
-        let map = vec![
-            (bytes("name"), bytes("token")),
-            (bytes("image"), bytes("ipfs://x")),
-            (bytes("files"), array(vec![plutus_map(item)])),
+    #[test]
+    fn parses_all_declared_bytestring_properties() {
+        let parts = vec![bytes("part-one"), bytes("-two")];
+        let mixed = array(vec![
+            bytes("part-one"),
+            PlutusData::BigInt(BigInt::Int(7.into())),
+        ]);
+        let unknown = array(parts.clone());
+        let values = [
+            (bytes("part-one-two"), json!("part-one-two")),
+            (array(parts.clone()), json!("part-one-two")),
+            (
+                PlutusData::Array(MaybeIndefArray::Indef(parts)),
+                json!("part-one-two"),
+            ),
+            (
+                mixed.clone(),
+                json!(encode_to_hex(&mixed).expect("encodes")),
+            ),
         ];
-        parse_cip68_metadata_map(&map, Cip68TokenStandard::Nft).expect("parses")
+
+        for (standard, keys) in [
+            (
+                Cip68TokenStandard::Nft,
+                &["name", "image", "mediaType", "description"][..],
+            ),
+            (
+                Cip68TokenStandard::Rft,
+                &["name", "image", "mediaType", "description"][..],
+            ),
+            (
+                Cip68TokenStandard::Ft,
+                &["name", "description", "ticker", "url", "logo"][..],
+            ),
+        ] {
+            for (value, expected) in &values {
+                let mut map: Vec<_> = keys.iter().map(|key| (bytes(key), value.clone())).collect();
+                map.push((bytes("custom"), unknown.clone()));
+                if matches!(standard, Cip68TokenStandard::Ft | Cip68TokenStandard::Rft) {
+                    map.push((bytes("decimals"), PlutusData::BigInt(BigInt::Int(6.into()))));
+                }
+                let parsed = parse_cip68_metadata_map(&map, standard).expect("parses");
+
+                for key in keys {
+                    assert_eq!(parsed.get(*key), Some(expected), "{standard:?}: {key}");
+                }
+                assert_eq!(
+                    parsed.get("custom"),
+                    Some(&json!(encode_to_hex(&unknown).expect("encodes")))
+                );
+                if matches!(standard, Cip68TokenStandard::Ft | Cip68TokenStandard::Rft) {
+                    assert_eq!(parsed.get("decimals"), Some(&json!(6)));
+                }
+                assert!(cip68_metadata_is_valid(&parsed, standard));
+            }
+        }
     }
 
     #[test]
-    fn parses_a_split_src_but_not_a_split_media_type() {
-        // `src` is a uri. a version 3 datum splits a long uri into parts. the
-        // parser joins the parts, and the datum meets the scheme.
-        let split_src = parse_nft_with_files_item(vec![
-            (bytes("mediaType"), bytes("image/png")),
-            (
-                bytes("src"),
-                array(vec![bytes("ipfs://part-one"), bytes("-two")]),
-            ),
-        ]);
-        assert_eq!(
-            split_src.get("files"),
-            Some(&json!([{ "mediaType": "image/png", "src": "ipfs://part-one-two" }]))
-        );
-        assert!(cip68_metadata_is_valid(&split_src, Cip68TokenStandard::Nft));
+    fn parses_all_files_item_bytestring_properties() {
+        let parts = vec![bytes("part-one"), bytes("-two")];
+        let unknown = array(parts.clone());
 
-        // `mediaType` is a bounded-bytes value, not a uri. the parser does
-        // not accept an array for it, so it keeps the whole files value in its
-        // hex form. the hex string is not an array, so the datum does not meet
-        // the scheme, and the caller uses the CIP-25 metadata instead.
-        let split_media_type = parse_nft_with_files_item(vec![
+        for standard in [Cip68TokenStandard::Nft, Cip68TokenStandard::Rft] {
+            for value in [
+                bytes("part-one-two"),
+                array(parts.clone()),
+                PlutusData::Array(MaybeIndefArray::Indef(parts.clone())),
+            ] {
+                let map = vec![
+                    (bytes("name"), bytes("token")),
+                    (bytes("image"), bytes("ipfs://x")),
+                    (
+                        bytes("files"),
+                        array(vec![plutus_map(vec![
+                            (bytes("name"), value.clone()),
+                            (bytes("mediaType"), value.clone()),
+                            (bytes("src"), value),
+                            (bytes("custom"), unknown.clone()),
+                        ])]),
+                    ),
+                ];
+                let parsed = parse_cip68_metadata_map(&map, standard).expect("parses");
+
+                assert_eq!(
+                    parsed.get("files"),
+                    Some(&json!([{
+                        "name": "part-one-two",
+                        "mediaType": "part-one-two",
+                        "src": "part-one-two",
+                        "custom": encode_to_hex(&unknown).expect("encodes"),
+                    }])),
+                    "{standard:?}"
+                );
+                assert!(cip68_metadata_is_valid(&parsed, standard));
+            }
+        }
+    }
+
+    #[test]
+    fn keeps_files_with_non_bytestring_parts_as_hex() {
+        let mixed = vec![bytes("part-one"), PlutusData::BigInt(BigInt::Int(7.into()))];
+
+        for standard in [Cip68TokenStandard::Nft, Cip68TokenStandard::Rft] {
+            for key in ["name", "mediaType", "src"] {
+                for items in [
+                    MaybeIndefArray::Def(mixed.clone()),
+                    MaybeIndefArray::Indef(mixed.clone()),
+                ] {
+                    let item = ["name", "mediaType", "src"].map(|field| {
+                        let value = if field == key {
+                            PlutusData::Array(items.clone())
+                        } else {
+                            bytes("value")
+                        };
+                        (bytes(field), value)
+                    });
+                    let files = array(vec![plutus_map(item.into())]);
+                    let expected = encode_to_hex(&files).expect("encodes");
+                    let map = vec![
+                        (bytes("name"), bytes("token")),
+                        (bytes("image"), bytes("ipfs://x")),
+                        (bytes("files"), files),
+                    ];
+                    let parsed = parse_cip68_metadata_map(&map, standard).expect("parses");
+
+                    assert_eq!(
+                        parsed.get("files"),
+                        Some(&json!(expected)),
+                        "{standard:?}: {key}"
+                    );
+                    assert!(!cip68_metadata_is_valid(&parsed, standard));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn joins_bytestring_parts_before_decoding_utf8() {
+        for (parts, expected) in [
+            (vec![], ""),
+            (vec![bytes(""), bytes("")], ""),
             (
-                bytes("mediaType"),
-                array(vec![bytes("image/"), bytes("png")]),
+                vec![
+                    PlutusData::BoundedBytes(vec![0xe2].into()),
+                    PlutusData::BoundedBytes(vec![0x82, 0xac].into()),
+                ],
+                "€",
             ),
-            (bytes("src"), bytes("ipfs://y")),
-        ]);
-        assert!(!cip68_metadata_is_valid(
-            &split_media_type,
-            Cip68TokenStandard::Nft
-        ));
+            (
+                vec![
+                    PlutusData::BoundedBytes(vec![0xff].into()),
+                    PlutusData::BoundedBytes(vec![0xfe].into()),
+                ],
+                "fffe",
+            ),
+        ] {
+            for items in [
+                MaybeIndefArray::Def(parts.clone()),
+                MaybeIndefArray::Indef(parts),
+            ] {
+                for scheme in [bytestring_scheme(), string_or_array_scheme()] {
+                    assert_eq!(
+                        convert_datum_value(&PlutusData::Array(items.clone()), scheme),
+                        Some(json!(expected)),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn parses_a_split_image() {
+        let uri = "ipfs://bafybeiabsm2mg7munmodk37ne7hwokh4gxlvh2752tfwcqk2y5kyt7pp3y";
+        let parts = vec![bytes(&uri[..64]), bytes(&uri[64..])];
+
+        for standard in [Cip68TokenStandard::Nft, Cip68TokenStandard::Rft] {
+            for items in [
+                MaybeIndefArray::Def(parts.clone()),
+                MaybeIndefArray::Indef(parts.clone()),
+            ] {
+                let map = vec![
+                    (bytes("name"), bytes("token")),
+                    (bytes("image"), PlutusData::Array(items)),
+                ];
+                let parsed = parse_cip68_metadata_map(&map, standard).expect("parses");
+
+                assert_eq!(parsed.get("image"), Some(&json!(uri)), "{standard:?}");
+                assert!(cip68_metadata_is_valid(&parsed, standard));
+            }
+        }
+    }
+
+    #[test]
+    fn parses_a_single_image() {
+        let uri = "ipfs://x";
+        let map = vec![
+            (bytes("name"), bytes("token")),
+            (bytes("image"), bytes(uri)),
+        ];
+
+        for standard in [Cip68TokenStandard::Nft, Cip68TokenStandard::Rft] {
+            let parsed = parse_cip68_metadata_map(&map, standard).expect("parses");
+
+            assert_eq!(parsed.get("image"), Some(&json!(uri)), "{standard:?}");
+            assert!(cip68_metadata_is_valid(&parsed, standard));
+        }
+    }
+
+    #[test]
+    fn keeps_a_split_image_with_non_bytestring_parts_as_hex() {
+        let parts = vec![
+            bytes("ipfs://part-one"),
+            PlutusData::BigInt(BigInt::Int(7.into())),
+        ];
+
+        for standard in [Cip68TokenStandard::Nft, Cip68TokenStandard::Rft] {
+            for items in [
+                MaybeIndefArray::Def(parts.clone()),
+                MaybeIndefArray::Indef(parts.clone()),
+            ] {
+                let image = PlutusData::Array(items);
+                let expected = encode_to_hex(&image).expect("encodes");
+                let map = vec![(bytes("name"), bytes("token")), (bytes("image"), image)];
+                let parsed = parse_cip68_metadata_map(&map, standard).expect("parses");
+
+                assert_eq!(parsed.get("image"), Some(&json!(expected)), "{standard:?}");
+                assert!(cip68_metadata_is_valid(&parsed, standard));
+            }
+        }
     }
 
     #[test]

@@ -411,4 +411,8 @@ impl StateStore for MemoryStateStore {
 
         Ok(MemoryUtxoIter(entries.into_iter()))
     }
+
+    fn persist(&self) -> Result<(), StateError> {
+        Ok(())
+    }
 }

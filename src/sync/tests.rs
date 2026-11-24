@@ -10,7 +10,7 @@ use dolos_testing::blocks::make_conway_block_with_prev;
 use dolos_testing::peer::{PeerFixture, PeerOptions};
 use gasket::messaging::OutputPort;
 use gasket::metrics::Reading;
-use gasket::runtime::{StagePhase, Tether, TetherState};
+use gasket::runtime::{Tether, TetherState};
 use itertools::Itertools as _;
 
 use super::*;
@@ -19,10 +19,19 @@ use crate::engine::DomainBuilder;
 const PREVIEW_MAGIC: u64 = 2;
 
 fn domain_over(root: &Path, retry: RetryConfig) -> (RootConfig, DomainAdapter) {
+    domain_with_mempool(root, retry, false)
+}
+
+fn domain_with_mempool(
+    root: &Path,
+    retry: RetryConfig,
+    persistent_mempool: bool,
+) -> (RootConfig, DomainAdapter) {
     let mut config = RootConfig::new(ChainConfig::known("preview"));
     config.storage.path = root.to_path_buf();
     config.storage.state = StateStoreConfig::ephemeral();
     config.storage.archive = ArchiveStoreConfig::ephemeral();
+    config.mempool.persistent = persistent_mempool;
     config.sync.retry = retry;
 
     let genesis = dolos_cardano::networks::PREVIEW.genesis();
@@ -82,7 +91,7 @@ impl Stages {
             .filter_map(|tether| tether.read_metrics().ok())
             .flatten()
             .find_map(|(name, reading)| match (name, reading) {
-                ("housekeeping_count", Reading::Count(count)) => Some(count),
+                ("housekeeping_runs", Reading::Count(count)) => Some(count),
                 _ => None,
             })
             .unwrap_or(0)
@@ -100,7 +109,7 @@ impl Stages {
 }
 
 fn is_ended(tether: &Tether) -> bool {
-    !matches!(tether.check_state(), TetherState::Alive(phase) if phase != StagePhase::Ended)
+    !matches!(tether.check_state(), TetherState::Alive(phase) if phase.end_cause().is_none())
 }
 
 fn start(
@@ -115,6 +124,7 @@ fn start(
         peer.address().to_string(),
         limit,
         domain.clone(),
+        Default::default(),
     )
     .unwrap();
 
@@ -701,6 +711,163 @@ fn a_peer_that_holds_none_of_the_wal_is_given_up_once_retries_run_out() {
             .contains("holds none of the WAL's recent points"),
         "{failure}"
     );
+    assert!(!failure.stranded, "{failure}");
+}
+
+/// The block at `slot` on a chain other than the peer fixture's.
+fn off_the_peer(slot: u64) -> ChainPoint {
+    make_conway_block_with_prev(slot, None, 0).0
+}
+
+/// Leave the WAL holding `points` alone, oldest first, as a reset or a
+/// bootstrap leaves it holding one.
+fn wal_holding(domain: &DomainAdapter, points: &[ChainPoint]) {
+    let (first, rest) = points.split_first().expect("a point");
+    domain.wal().reset_to(first).unwrap();
+
+    let entries = rest
+        .iter()
+        .map(|point| (point.clone(), dolos_core::LogValue::origin()))
+        .collect();
+    domain.wal().append_entries(entries).unwrap();
+}
+
+/// A WAL holding one point alone, which the peer, past it, does not hold, as
+/// after a fork dropped the block a reset WAL was seeded at: no retry can
+/// help, so the pull stage gives up at the first answer, retries left.
+#[test]
+fn a_lone_wal_point_a_peer_past_it_lacks_is_given_up_at_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, domain) = domain_over(temp.path(), no_backoff(3));
+
+    let dropped = off_the_peer(30);
+    wal_holding(&domain, std::slice::from_ref(&dropped));
+
+    let peer = peer(PeerOptions {
+        initial_blocks: 31,
+        ..Default::default()
+    });
+
+    let (progress, stages) = catch_up(&config, &peer, &domain);
+
+    assert!(stages.ended("pull"));
+    stages.teardown();
+
+    assert!(!progress.succeeded(SyncLimit::CatchUp));
+    assert_eq!(peer.intersects(), 1, "no retry");
+    assert_eq!(wal_tip(&domain), Some(dropped.clone()));
+
+    let failure = progress
+        .upstream_failure()
+        .expect("the upstream was given up");
+    assert!(failure.stranded, "{failure}");
+    assert!(!failure.refused, "{failure}");
+
+    for said in [
+        format!("the WAL holds only {dropped}, with no earlier point"),
+        format!("the peer, past it at {}, does not hold it", peer.tip()),
+    ] {
+        assert!(failure.message.contains(&said), "{said:?} in {failure}");
+    }
+}
+
+/// A peer behind the WAL's one point, or at its slot, may yet hold it, and a
+/// WAL holding more points than it offers may hold one the peer does: each is
+/// an ordinary failed intersection, retried.
+#[test]
+fn a_wal_point_the_peer_may_yet_hold_is_retried() {
+    let cases = [
+        ("a peer behind the one point", vec![off_the_peer(30)], 29),
+        ("a peer at the one point's slot", vec![off_the_peer(30)], 30),
+        (
+            "a WAL holding two points, one offered",
+            vec![off_the_peer(20), off_the_peer(30)],
+            31,
+        ),
+        // Its oldest point is offered last, and isn't all it holds.
+        (
+            "a WAL holding three points, two offered",
+            vec![off_the_peer(10), off_the_peer(20), off_the_peer(30)],
+            31,
+        ),
+    ];
+
+    for (case, points, blocks) in cases {
+        let temp = tempfile::tempdir().unwrap();
+        let (config, domain) = domain_over(temp.path(), no_backoff(1));
+        wal_holding(&domain, &points);
+
+        let peer = peer(PeerOptions {
+            initial_blocks: blocks,
+            ..Default::default()
+        });
+
+        let (progress, stages) = catch_up(&config, &peer, &domain);
+
+        assert!(stages.ended("pull"), "{case}");
+        stages.teardown();
+
+        assert_eq!(peer.intersects(), 2, "{case}: one attempt and one retry");
+
+        let failure = progress.upstream_failure().expect(case);
+        assert!(!failure.stranded, "{case}: {failure}");
+        assert!(
+            failure
+                .message
+                .contains("holds none of the WAL's recent points"),
+            "{case}: {failure}"
+        );
+    }
+}
+
+/// A WAL holding one point alone that the peer holds, as a reset or a
+/// bootstrap leaves it, is the usual start: the sync intersects there and
+/// goes on, giving up nothing.
+#[test]
+fn a_lone_wal_point_the_peer_holds_syncs_on_from_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, domain) = domain_over(temp.path(), no_backoff(3));
+
+    let behind = peer(PeerOptions {
+        initial_blocks: 30,
+        ..Default::default()
+    });
+
+    let (progress, stages) = catch_up(&config, &behind, &domain);
+    stages.teardown();
+    assert!(progress.succeeded(SyncLimit::CatchUp));
+
+    // Empty the WAL and seed it at the state cursor, as a start does after a
+    // reset.
+    let seed = behind.tip();
+    assert_eq!(state_cursor(&domain), Some(seed.clone()));
+
+    let held = domain
+        .wal()
+        .iter_logs(None, None)
+        .unwrap()
+        .map(|(point, _)| point)
+        .collect_vec();
+    domain.wal().remove_points(&held).unwrap();
+    wal_holding(&domain, std::slice::from_ref(&seed));
+
+    // The fixture's chain is the same at every length, so this peer holds
+    // the seed.
+    let ahead = peer(PeerOptions {
+        initial_blocks: 40,
+        ..Default::default()
+    });
+
+    let (progress, stages) = catch_up(&config, &ahead, &domain);
+    stages.teardown();
+
+    if let Some(failure) = progress.upstream_failure() {
+        panic!("the sync gave up: {failure}");
+    }
+
+    assert!(progress.succeeded(SyncLimit::CatchUp));
+    assert_eq!(ahead.intersects(), 1);
+    assert_eq!(state_cursor(&domain), Some(ahead.tip()));
 }
 
 #[test]
@@ -738,6 +905,7 @@ fn a_connection_dropped_in_the_handshake_is_no_refusal() {
         accepting_and_closing().to_string(),
         SyncLimit::CatchUp,
         domain.clone(),
+        Default::default(),
     )
     .unwrap();
 
@@ -863,6 +1031,445 @@ fn a_tx_submission_session_the_peer_asked_in_starts_the_count_again() {
         failure.message.contains("after 2 failed attempts in a row"),
         "{failure}"
     );
+}
+
+#[test]
+fn a_new_submit_session_offers_again_what_the_last_one_left_unacknowledged() {
+    offers_again_on_a_new_session(false);
+}
+
+#[test]
+fn a_new_submit_session_offers_again_on_a_persistent_mempool() {
+    offers_again_on_a_new_session(true);
+}
+
+fn offers_again_on_a_new_session(persistent_mempool: bool) {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, domain) = domain_with_mempool(temp.path(), no_backoff(10), persistent_mempool);
+
+    let tx = dolos_testing::mempool::make_test_mempool_tx(dolos_testing::tx_sequence_to_hash(1));
+    let hash = tx.hash;
+    domain.mempool().receive(tx).unwrap();
+
+    // Sessions 1 and 2 ask once and close before acknowledging the reply.
+    let peer = peer(PeerOptions {
+        request_tx_ids_at: vec![1, 2],
+        ..Default::default()
+    });
+
+    let (_, stages) = submit_alone(&config, peer.address().to_string(), &domain);
+
+    wait_until("session 3 starts", Duration::from_secs(30), || {
+        peer.tx_submissions() >= 3
+    });
+    wait_until("session 3 re-queues", Duration::from_secs(5), || {
+        domain.mempool().check_status(&hash).stage == MempoolTxStage::Pending
+    });
+    stages.teardown();
+
+    let offered = peer.tx_ids_offered();
+    assert_eq!(offered, [(1, hash.to_vec()), (2, hash.to_vec())]);
+}
+
+/// A stale block on the mempool: nothing in it is seen on chain.
+fn stale_block(domain: &DomainAdapter, slot: u64) {
+    domain
+        .mempool()
+        .confirm(&point(slot), &[], &[], 10, 2)
+        .unwrap();
+}
+
+fn put_propagated(domain: &DomainAdapter, n: u64) -> TxHash {
+    let tx = dolos_testing::mempool::make_test_mempool_tx(dolos_testing::tx_sequence_to_hash(n));
+    let hash = tx.hash;
+    domain.mempool().receive(tx).unwrap();
+    domain.mempool().mark_inflight(&[hash]).unwrap();
+    hash
+}
+
+#[test]
+fn a_tx_in_flight_returns_to_pending_even_if_no_connection_succeeds() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, domain) = domain_over(temp.path(), no_backoff(1));
+    let hash = put_propagated(&domain, 1);
+
+    let (_, stages) = submit_alone(&config, closed_port().to_string(), &domain);
+
+    wait_until("the stage gives up", Duration::from_secs(30), || {
+        stages.ended("submit")
+    });
+    stages.teardown();
+
+    assert_eq!(
+        domain.mempool().check_status(&hash).stage,
+        MempoolTxStage::Pending
+    );
+}
+
+#[test]
+fn blocks_during_an_outage_do_not_drop_a_tx_left_in_flight() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, domain) = domain_over(temp.path(), no_backoff(1));
+    let hash = put_propagated(&domain, 1);
+
+    let (_, stages) = submit_alone(&config, closed_port().to_string(), &domain);
+
+    wait_until("the stage gives up", Duration::from_secs(30), || {
+        stages.ended("submit")
+    });
+    stages.teardown();
+
+    for slot in 1..=4 {
+        stale_block(&domain, slot);
+    }
+
+    assert_eq!(domain.mempool().dump_finalized(0, 10).items.len(), 0);
+    assert_eq!(domain.mempool().peek_pending()[0].hash, hash);
+}
+
+/// Each element is a session: the ids offered in it, in order.
+fn offers_by_session(peer: &PeerFixture) -> Vec<Vec<Vec<u8>>> {
+    peer.tx_ids_offered()
+        .into_iter()
+        .chunk_by(|(session, _)| *session)
+        .into_iter()
+        .map(|(_, ids)| ids.map(|(_, id)| id).collect())
+        .collect()
+}
+
+fn a_tx_whose_offers_end_sessions_leaves_the_queue(persistent_mempool: bool) {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, domain) = domain_with_mempool(temp.path(), no_backoff(100), persistent_mempool);
+    let mempool = domain.mempool();
+
+    let make =
+        |n| dolos_testing::mempool::make_test_mempool_tx(dolos_testing::tx_sequence_to_hash(n));
+    let (poison, other) = (make(1), make(2));
+    let (poison_hash, other_hash) = (poison.hash, other.hash);
+    mempool.receive(poison).unwrap();
+    mempool.receive(other).unwrap();
+
+    let peer = peer(PeerOptions {
+        close_at_offer_of: Some(poison_hash.to_vec()),
+        tx_ids_per_request: 5,
+        ..Default::default()
+    });
+
+    let (_, stages) = submit_alone(&config, peer.address().to_string(), &domain);
+
+    let (first, later) = (poison_hash.to_vec(), other_hash.to_vec());
+
+    // Session 4 starts only after a re-queue that passed over the poison.
+    wait_until("session 4 starts", Duration::from_secs(30), || {
+        peer.tx_submissions() >= 4
+    });
+    wait_until(
+        "the other tx is acknowledged",
+        Duration::from_secs(5),
+        || mempool.check_status(&other_hash).stage == MempoolTxStage::Acknowledged,
+    );
+
+    // Each offer of the poison ends its session. Once suspect, a tx goes alone,
+    // so the other one is acknowledged instead of ending with it.
+    let expected = [
+        vec![first.clone(), later.clone()],
+        vec![first.clone()],
+        vec![later.clone(), first.clone()],
+    ];
+    assert_eq!(offers_by_session(&peer), expected);
+    assert_eq!(
+        mempool.check_status(&poison_hash).stage,
+        MempoolTxStage::Propagated
+    );
+
+    // The normal drop takes it, and it isn't offered again.
+    for slot in 1..=2 {
+        mempool
+            .confirm(&point(slot), &[other_hash], &[], 10, 2)
+            .unwrap();
+    }
+    stages.teardown();
+
+    assert_eq!(offers_by_session(&peer), expected);
+    let finalized = mempool.dump_finalized(0, 10).items;
+    assert_eq!(finalized.len(), 1);
+    assert_eq!(finalized[0].hash, poison_hash);
+    assert_eq!(finalized[0].stage, MempoolTxStage::Dropped);
+}
+
+#[test]
+fn a_tx_whose_offers_end_sessions_leaves_the_queue_and_holds_nothing_back() {
+    a_tx_whose_offers_end_sessions_leaves_the_queue(false);
+}
+
+#[test]
+fn a_tx_whose_offers_end_sessions_leaves_a_persistent_mempool() {
+    a_tx_whose_offers_end_sessions_leaves_the_queue(true);
+}
+
+/// As a real node behaves: `poison` is fetched and only then ends the session,
+/// after the node has already asked for more. `poison` is queued first and has
+/// the lower hash, so it comes first on either backend.
+fn a_tx_whose_body_ends_sessions_spares_the_one_behind_it(persistent_mempool: bool) {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, domain) = domain_with_mempool(temp.path(), no_backoff(100), persistent_mempool);
+    let mempool = domain.mempool();
+
+    let make =
+        |n| dolos_testing::mempool::make_test_mempool_tx(dolos_testing::tx_sequence_to_hash(n));
+    let (poison, other) = {
+        let (a, b) = (make(1), make(2));
+        if a.hash < b.hash {
+            (a, b)
+        } else {
+            (b, a)
+        }
+    };
+    let (poison_hash, other_hash) = (poison.hash, other.hash);
+    mempool.receive(poison).unwrap();
+    mempool.receive(other).unwrap();
+
+    let peer = peer(PeerOptions {
+        close_at_body_of: Some(poison_hash.to_vec()),
+        tx_ids_per_request: 5,
+        ..Default::default()
+    });
+
+    let (_, stages) = submit_alone(&config, peer.address().to_string(), &domain);
+
+    wait_until("session 4 starts", Duration::from_secs(30), || {
+        peer.tx_submissions() >= 4
+    });
+    wait_until(
+        "the other tx is acknowledged",
+        Duration::from_secs(5),
+        || mempool.check_status(&other_hash).stage == MempoolTxStage::Acknowledged,
+    );
+
+    let (first, later) = (poison_hash.to_vec(), other_hash.to_vec());
+    let expected = [
+        vec![first.clone(), later.clone()],
+        vec![first.clone()],
+        vec![later.clone(), first.clone()],
+    ];
+    assert_eq!(offers_by_session(&peer), expected);
+    assert_eq!(
+        mempool.check_status(&poison_hash).stage,
+        MempoolTxStage::Propagated
+    );
+
+    for slot in 1..=2 {
+        mempool
+            .confirm(&point(slot), &[other_hash], &[], 10, 2)
+            .unwrap();
+    }
+    stages.teardown();
+
+    assert_eq!(offers_by_session(&peer), expected);
+    let finalized = mempool.dump_finalized(0, 10).items;
+    assert_eq!(finalized.len(), 1);
+    assert_eq!(finalized[0].hash, poison_hash);
+    assert_eq!(finalized[0].stage, MempoolTxStage::Dropped);
+}
+
+#[test]
+fn a_tx_whose_body_ends_sessions_spares_the_one_behind_it_on_the_ephemeral_mempool() {
+    a_tx_whose_body_ends_sessions_spares_the_one_behind_it(false);
+}
+
+#[test]
+fn a_tx_whose_body_ends_sessions_spares_the_one_behind_it_on_a_persistent_mempool() {
+    a_tx_whose_body_ends_sessions_spares_the_one_behind_it(true);
+}
+
+/// `honest` has two offers behind it when fresh `poison` comes first: the node
+/// asks for more before it judges the poison, and a third offer then would
+/// cost `honest` its last one for a session already ending.
+fn a_counted_tx_behind_a_poison_is_judged(persistent_mempool: bool) {
+    use dolos_testing::mempool::make_test_mempool_tx_spending as spending;
+
+    let temp = tempfile::tempdir().unwrap();
+    let (config, domain) = domain_with_mempool(temp.path(), no_backoff(100), persistent_mempool);
+    let mempool = domain.mempool();
+
+    let poison = spending(&[dolos_testing::tx_sequence_to_hash(1)], 1);
+    let honest = spending(&[dolos_testing::tx_sequence_to_hash(2)], 2);
+    let (poison_hash, honest_hash) = (poison.hash, honest.hash);
+    let honest_body = honest.payload.1.clone();
+
+    // As after a session that ended: the re-queue puts `honest` behind `poison`.
+    mempool.receive(poison).unwrap();
+    mempool.receive(honest).unwrap();
+    mempool.mark_inflight(&[honest_hash]).unwrap();
+
+    let peer = peer(PeerOptions {
+        close_at_body_of: Some(poison_hash.to_vec()),
+        tx_ids_per_request: 3,
+        ..Default::default()
+    });
+
+    let submit = submit::Stage::new(
+        peer.address().to_string(),
+        PREVIEW_MAGIC,
+        mempool.clone(),
+        &config.sync.retry,
+        Arc::default(),
+    );
+    submit.count_offers(&[honest_hash, honest_hash]);
+    let tether = gasket::runtime::spawn_stage(submit, define_gasket_policy(&config.sync.retry));
+    let stages = Stages(vec![tether]);
+
+    wait_until("session 4 starts", Duration::from_secs(30), || {
+        peer.tx_submissions() >= 4
+    });
+    wait_until(
+        "the honest tx is acknowledged",
+        Duration::from_secs(5),
+        || mempool.check_status(&honest_hash).stage == MempoolTxStage::Acknowledged,
+    );
+
+    let (poison_id, honest_id) = (poison_hash.to_vec(), honest_hash.to_vec());
+    let expected = vec![
+        (1, vec![poison_id.clone()]),
+        (1, vec![]),
+        (2, vec![honest_id.clone()]),
+        (2, vec![]),
+        (2, vec![poison_id.clone()]),
+        (2, vec![]),
+        (3, vec![poison_id.clone()]),
+        (3, vec![]),
+    ];
+    assert_eq!(peer.tx_id_replies(), expected);
+    assert!(peer
+        .tx_bodies_served()
+        .contains(&(vec![honest_id], vec![honest_body])));
+    assert_eq!(
+        mempool.check_status(&poison_hash).stage,
+        MempoolTxStage::Propagated
+    );
+
+    for slot in 1..=2 {
+        mempool
+            .confirm(&point(slot), &[honest_hash], &[], 10, 2)
+            .unwrap();
+    }
+    stages.teardown();
+
+    assert_eq!(peer.tx_id_replies(), expected);
+    let finalized = mempool.dump_finalized(0, 10).items;
+    assert_eq!(finalized.len(), 1);
+    assert_eq!(finalized[0].hash, poison_hash);
+    assert_eq!(finalized[0].stage, MempoolTxStage::Dropped);
+}
+
+#[test]
+fn a_counted_tx_behind_a_poison_is_judged_on_the_ephemeral_mempool() {
+    a_counted_tx_behind_a_poison_is_judged(false);
+}
+
+#[test]
+fn a_counted_tx_behind_a_poison_is_judged_on_a_persistent_mempool() {
+    a_counted_tx_behind_a_poison_is_judged(true);
+}
+
+/// A healthy session keeps its batches: a first offer holds nothing back. Each
+/// reply stays within what was asked, and each id asked for gets its body.
+#[test]
+fn a_node_that_judges_each_offer_gets_every_tx_in_one_session() {
+    use dolos_testing::mempool::make_test_mempool_tx_spending as spending;
+
+    let temp = tempfile::tempdir().unwrap();
+    let (config, domain) = domain_over(temp.path(), no_backoff(10));
+    let mempool = domain.mempool();
+
+    let txs = [1, 2, 3, 4, 5].map(|n| spending(&[dolos_testing::tx_sequence_to_hash(n)], n));
+    let ids = txs.clone().map(|tx| tx.hash.to_vec());
+    let bodies = txs.clone().map(|tx| tx.payload.1);
+    let hashes = txs.clone().map(|tx| tx.hash);
+    for tx in txs {
+        mempool.receive(tx).unwrap();
+    }
+
+    let peer = peer(PeerOptions {
+        close_at_body_of: Some(dolos_testing::tx_sequence_to_hash(9).to_vec()),
+        tx_ids_per_request: 2,
+        ..Default::default()
+    });
+
+    let (_, stages) = submit_alone(&config, peer.address().to_string(), &domain);
+
+    wait_until("all are acknowledged", Duration::from_secs(30), || {
+        hashes
+            .iter()
+            .all(|hash| mempool.check_status(hash).stage == MempoolTxStage::Acknowledged)
+    });
+    stages.teardown();
+
+    assert_eq!(offers_by_session(&peer), [ids.to_vec()]);
+    assert_eq!(peer.tx_submissions(), 1);
+    assert_eq!(
+        peer.tx_id_replies(),
+        [
+            (1, ids[..2].to_vec()),
+            (1, ids[2..4].to_vec()),
+            (1, ids[4..].to_vec()),
+            (1, vec![]),
+        ]
+    );
+    assert_eq!(
+        peer.tx_bodies_served(),
+        [
+            (ids[..2].to_vec(), bodies[..2].to_vec()),
+            (ids[2..4].to_vec(), bodies[2..4].to_vec()),
+            (ids[4..].to_vec(), bodies[4..].to_vec()),
+        ]
+    );
+}
+
+#[test]
+fn a_child_is_offered_after_its_parent_whichever_was_queued_first() {
+    a_child_is_offered_after_its_parent(false);
+}
+
+#[test]
+fn a_blocking_first_request_offers_a_child_after_its_parent() {
+    a_child_is_offered_after_its_parent(true);
+}
+
+fn a_child_is_offered_after_its_parent(blocking_tx_ids_request: bool) {
+    use dolos_testing::mempool::make_test_mempool_tx_spending as spending;
+
+    let temp = tempfile::tempdir().unwrap();
+    let (config, domain) = domain_over(temp.path(), no_backoff(10));
+    let mempool = domain.mempool();
+
+    let unrelated = spending(&[dolos_testing::tx_sequence_to_hash(1)], 1);
+    let parent = spending(&[dolos_testing::tx_sequence_to_hash(2)], 2);
+    let child = spending(&[parent.hash, dolos_testing::tx_sequence_to_hash(3)], 3);
+    let grandchild = spending(&[child.hash, parent.hash], 4);
+
+    let ids = [&unrelated, &parent, &child, &grandchild].map(|tx| tx.hash.to_vec());
+
+    // As after a re-queue: what was in flight went behind what wasn't.
+    for tx in [grandchild, unrelated, child, parent] {
+        mempool.receive(tx).unwrap();
+    }
+
+    let peer = peer(PeerOptions {
+        request_tx_ids_at: vec![1],
+        blocking_tx_ids_request,
+        tx_ids_per_request: 10,
+        ..Default::default()
+    });
+
+    let (_, stages) = submit_alone(&config, peer.address().to_string(), &domain);
+
+    wait_until("the offer arrives", Duration::from_secs(30), || {
+        !peer.tx_ids_offered().is_empty()
+    });
+    stages.teardown();
+
+    assert_eq!(offers_by_session(&peer), [ids.to_vec()]);
 }
 
 #[test]
@@ -1173,4 +1780,42 @@ fn retries_back_off_as_configured() {
     assert_eq!(retry::backoff(&retry, 4), Duration::from_secs(32));
     assert_eq!(retry::backoff(&retry, 5), Duration::from_secs(60));
     assert_eq!(retry::backoff(&retry, 1000), Duration::from_secs(60));
+}
+
+#[test]
+fn the_tip_lag_is_the_clock_minus_the_tip_slot_time() {
+    use pallas::interop::utxorpc::LedgerContext as _;
+    use std::time::UNIX_EPOCH;
+
+    let temp = tempfile::tempdir().unwrap();
+    let (_, domain) = domain_over(temp.path(), no_backoff(0));
+
+    let recorder = dolos_testing::metrics::MetricsRecorder::default();
+    let now = UNIX_EPOCH + Duration::from_secs(2_000_000_000);
+    let progress = Arc::new(SyncProgress::default());
+    let gauges =
+        metrics::SyncGauges::over_on(&recorder.meter("test"), &progress, &domain, move || now);
+
+    // An empty store has no tip, so no lag.
+    let points = recorder.collect();
+    assert_eq!(points.value("dolos.sync.tip.lag", &[]), None);
+    assert_eq!(points.value("dolos.sync.caught_up", &[]), Some(0.0));
+
+    let mut parent = None;
+    for slot in 1..=3 {
+        let (point, block) = make_conway_block_with_prev(slot, parent, slot);
+        parent = point.hash();
+        domain.roll_forward(block).unwrap();
+    }
+
+    let tip_time = domain.get_slot_timestamp(3).unwrap();
+    assert_eq!(
+        recorder.collect().value("dolos.sync.tip.lag", &[]),
+        Some(2_000_000_000.0 - tip_time as f64)
+    );
+
+    // The gauges report nothing once dropped.
+    drop(gauges);
+    let points = recorder.collect();
+    assert_eq!(points.value("dolos.sync.caught_up", &[]), None);
 }

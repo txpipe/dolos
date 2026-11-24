@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use dolos::adapters::DomainAdapter;
 use dolos::prelude::*;
-use dolos::sync::{SyncLimit, SyncProgress};
+use dolos::sync::{metrics::ExportedDaemon, SyncLimit, SyncProgress};
 use dolos_core::config::{RootConfig, UpstreamConfig};
 use gasket::daemon::Daemon;
 use miette::{Context, IntoDiagnostic};
@@ -54,6 +54,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[tokio::main]
 pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
+    crate::common::refuse_interrupted_restore(config)?;
+
     let limit = args.sync_limit();
     let emulator = matches!(config.upstream, Some(UpstreamConfig::Emulator(_)));
 
@@ -65,18 +67,24 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         .into());
     }
 
-    crate::common::setup_tracing(&config.logging, config.telemetry.as_ref())?;
+    let telemetry = crate::common::setup_tracing(config)?;
 
     let domain = crate::common::setup_domain_with_stop_epoch(config, args.stop_epoch)?;
 
-    let sync = dolos::sync::pipeline(config, limit, domain.clone())
+    let sync = dolos::sync::pipeline(config, limit, domain.clone(), telemetry.metrics_flush())
         .into_diagnostic()
         .context("bootstrapping sync pipeline")?;
 
     let progress = sync.progress;
-    let daemon = Daemon::new(sync.tethers);
+    let _gauges = sync.gauges;
+    let daemon = ExportedDaemon::new(Daemon::new(sync.tethers));
 
     let end = wait(&daemon, &progress);
+
+    // The guard's flush on exit comes after the gauges and the bridge are
+    // gone, so export their final values first. The flush is bounded, so a
+    // stalled collector delays the teardown by its bound at most.
+    telemetry.metrics_flush().flush();
     daemon.teardown();
 
     eprintln!("committed: {}", committed(&domain));

@@ -672,10 +672,15 @@ fn script_in_tx(tx: &MultiEraTx, script_hash: Hash<28>) -> Option<ScriptData> {
     let collateral_return = tx.collateral_return();
 
     for output in outputs.iter().chain(collateral_return.as_ref()) {
-        if let Some(script) = output
+        #[allow(
+            deprecated,
+            reason = "Pallas 1.5 deprecates script_ref; moving to multi_era_script_ref is a separate change"
+        )]
+        let script = output
             .script_ref()
-            .and_then(|x| reference_script(x, script_hash))
-        {
+            .and_then(|x| reference_script(x, script_hash));
+
+        if let Some(script) = script {
             return Some(script);
         }
     }
@@ -684,7 +689,12 @@ fn script_in_tx(tx: &MultiEraTx, script_hash: Hash<28>) -> Option<ScriptData> {
         return None;
     }
 
-    for script in tx.native_scripts() {
+    #[allow(
+        deprecated,
+        reason = "Pallas 1.5 deprecates native_scripts; moving to multi_era_native_scripts is a separate change"
+    )]
+    let native_scripts = tx.native_scripts();
+    for script in native_scripts {
         if script.original_hash() == script_hash {
             return Some(ScriptData {
                 language: ScriptLanguage::Native,

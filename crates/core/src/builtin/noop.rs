@@ -197,6 +197,34 @@ impl ArchiveStore for NoOpArchiveStore {
         Ok(EmptyBlockIter)
     }
 
+    fn blocks_after<'a>(
+        &self,
+        _point: &ChainPoint,
+    ) -> Result<Option<Self::BlockIter<'a>>, ArchiveError> {
+        Ok(None)
+    }
+
+    fn blocks_before<'a>(
+        &self,
+        _point: &ChainPoint,
+    ) -> Result<Option<Self::BlockIter<'a>>, ArchiveError> {
+        Ok(None)
+    }
+
+    fn block_after(
+        &self,
+        _point: &ChainPoint,
+    ) -> Result<Option<Option<(BlockSlot, BlockBody)>>, ArchiveError> {
+        Ok(None)
+    }
+
+    fn block_before(
+        &self,
+        _point: &ChainPoint,
+    ) -> Result<Option<Option<(BlockSlot, BlockBody)>>, ArchiveError> {
+        Ok(None)
+    }
+
     fn find_intersect(
         &self,
         _intersect: &[ChainPoint],
@@ -219,6 +247,10 @@ impl ArchiveStore for NoOpArchiveStore {
     }
 
     fn truncate_front(&self, _after: &ChainPoint) -> Result<(), ArchiveError> {
+        Ok(())
+    }
+
+    fn persist(&self) -> Result<(), ArchiveError> {
         Ok(())
     }
 

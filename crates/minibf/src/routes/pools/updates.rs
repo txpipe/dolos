@@ -8,9 +8,9 @@ use axum::{
 };
 use blockfrost_openapi::models::pool_updates_inner::{Action, PoolUpdatesInner};
 use dolos_cardano::{
-    indexes::{AsyncCardanoQueryExt, SlotOrder},
+    indexes::{pool_certs_in, AsyncCardanoQueryExt, PoolCert, SlotOrder},
     model::PoolState,
-    pallas_extras, PoolHash,
+    PoolHash,
 };
 use dolos_core::Domain;
 use futures::StreamExt;
@@ -63,35 +63,25 @@ where
     Ok(Json(out))
 }
 
+/// The updates of `target_pool` in `block`, in chain order. Certificates of
+/// phase-2-invalid transactions never took effect, so they are left out.
 fn scan_pool_updates_in_block(
     block: &MultiEraBlock,
     target_pool: &PoolHash,
 ) -> Vec<(String, i32, Action)> {
-    let mut updates = Vec::new();
+    let txs = block.txs();
 
-    for tx in block.txs() {
-        let tx_hash = tx.hash().to_string();
-
-        for (cert_index, cert) in tx.certs().iter().enumerate() {
-            let action = if pallas_extras::cert_as_pool_registration(cert)
-                .is_some_and(|cert| &cert.operator == target_pool)
-            {
-                Some(Action::Registered)
-            } else if pallas_extras::cert_as_pool_retirement(cert)
-                .is_some_and(|cert| &cert.operator == target_pool)
-            {
-                Some(Action::Deregistered)
-            } else {
-                None
+    pool_certs_in(block, target_pool)
+        .into_iter()
+        .map(|((_, tx_index, cert_index), cert)| {
+            let action = match cert {
+                PoolCert::Registration => Action::Registered,
+                PoolCert::Retirement(_) => Action::Deregistered,
             };
 
-            if let Some(action) = action {
-                updates.push((tx_hash.clone(), cert_index as i32, action));
-            }
-        }
-    }
-
-    updates
+            (txs[tx_index].hash().to_string(), cert_index as i32, action)
+        })
+        .collect()
 }
 
 async fn load_pool_updates<D>(
@@ -196,6 +186,51 @@ mod tests {
 
         desc.reverse();
         assert_eq!(asc, desc);
+    }
+
+    /// A certificate of a phase-2-invalid transaction never took effect:
+    /// only the valid registration is listed.
+    #[tokio::test]
+    async fn pools_updates_skip_invalid_transactions() {
+        use dolos_testing::synthetic::SyntheticBlockConfig;
+
+        use crate::{mapping::bech32_pool, routes::pools::testing::register};
+
+        const POOL: [u8; 28] = [0x74; 28];
+
+        // block 0 tx 0 registers the pool; block 1 tx 1, phase-2-invalid,
+        // registers it again
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 3,
+            txs_per_block: 2,
+            extra_certs_by_block: vec![
+                vec![vec![register(POOL)], vec![]],
+                vec![vec![], vec![register(POOL)]],
+                vec![vec![], vec![]],
+            ],
+            invalid_txs_by_block: vec![vec![], vec![1], vec![]],
+            ..Default::default()
+        });
+
+        let pool_id = bech32_pool(POOL).unwrap();
+        let (status, bytes) = app.get_bytes(&format!("/pools/{pool_id}/updates")).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let updates: Vec<PoolUpdatesInner> = serde_json::from_slice(&bytes).unwrap();
+        let valid = &app.vectors().blocks[0].tx_hashes[0];
+        assert_eq!(
+            updates,
+            vec![PoolUpdatesInner {
+                tx_hash: valid.clone(),
+                cert_index: 5,
+                action: Action::Registered,
+            }]
+        );
     }
 
     #[tokio::test]

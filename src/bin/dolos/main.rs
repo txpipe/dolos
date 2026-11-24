@@ -1,3 +1,7 @@
+// Keeps a `TracingGuard` from being discarded with `let _ =`, which shuts
+// telemetry down at startup; `#[must_use]` alone does not catch that.
+#![warn(clippy::let_underscore_must_use)]
+
 use clap::{Parser, Subcommand};
 use miette::Result;
 
@@ -20,6 +24,7 @@ mod registry;
 mod serve;
 mod service;
 mod sync;
+mod telemetry;
 
 #[cfg(feature = "utils")]
 mod init;
@@ -78,10 +83,21 @@ impl Command {
     }
 }
 
+/// What `dolos --version` and `-V` print after the name: the release and the
+/// compatibility contract it implements.
+static VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "{} (compatibility {})",
+        env!("CARGO_PKG_VERSION"),
+        dolos_core::config::Compatibility::current()
+    )
+});
+
 #[derive(Debug, Parser)]
-#[clap(name = "Dolos")]
+#[clap(name = "dolos")]
 #[clap(bin_name = "dolos")]
-#[clap(author, version, about, long_about = None)]
+#[clap(author, about, long_about = None)]
+#[clap(version = VERSION.as_str())]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -104,6 +120,7 @@ fn main() -> std::process::ExitCode {
 fn run() -> Result<()> {
     // reqwest 0.13 (via mithril-client) uses `rustls-no-provider`: it reads the
     // process-default provider and panics if none is installed.
+    #[allow(clippy::let_underscore_must_use)]
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let args = Cli::parse();

@@ -9,14 +9,14 @@
 //!
 //! Writing these constructors is also the entity-encoding audit ADR-004's
 //! Limitations section asks for: every field of every model type reachable
-//! from a stele is named here, so a type that cannot be built deterministically
-//! cannot be pinned and shows up as a failing determinism assertion instead of
-//! as a golden.
+//! from a snapshot is named here, so a type that cannot be built
+//! deterministically cannot be pinned and shows up as a failing determinism
+//! assertion instead of as a golden.
 //!
 //! Values are built through the model's **public** API only. `EpochValue`'s
 //! slots in particular are filled by driving `schedule`/`transition` the way
-//! the ledger does, not by a test-only raw constructor — the encoding a stele
-//! carries is the encoding the ledger writes.
+//! the ledger does, not by a test-only raw constructor — the encoding a
+//! snapshot carries is the encoding the ledger writes.
 
 use std::collections::BTreeMap;
 

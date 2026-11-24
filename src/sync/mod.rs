@@ -4,8 +4,8 @@ use dolos_core::config::{
 };
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
 use crate::adapters::DomainAdapter;
@@ -13,6 +13,7 @@ use crate::prelude::*;
 
 pub mod apply;
 pub mod emulator;
+pub mod metrics;
 pub mod pull;
 mod retry;
 pub mod submit;
@@ -45,6 +46,8 @@ pub struct SyncProgress {
     upstream_failure: OnceLock<UpstreamFailure>,
     /// How many times the pull stage's sessions delivered something.
     deliveries: AtomicU64,
+    /// When they last did.
+    last_delivery: Mutex<Option<Instant>>,
 }
 
 /// Why a stage gave up on the upstream peer.
@@ -55,6 +58,10 @@ pub struct UpstreamFailure {
     /// Whether the peer refused the last attempt's handshake: it serves
     /// another network, or shares no protocol version with dolos.
     pub refused: bool,
+    /// Whether the WAL holds one point alone, as a reset or a bootstrap
+    /// leaves it, which the peer, past it, does not hold: a fork dropped that
+    /// block, and the store can't sync on.
+    pub stranded: bool,
 }
 
 impl fmt::Display for UpstreamFailure {
@@ -71,6 +78,7 @@ impl Default for SyncProgress {
             stop_epoch_reached: AtomicBool::new(false),
             upstream_failure: OnceLock::new(),
             deliveries: AtomicU64::new(0),
+            last_delivery: Mutex::new(None),
         }
     }
 }
@@ -136,6 +144,12 @@ impl SyncProgress {
     /// the sync.
     fn note_delivery(&self) {
         self.deliveries.fetch_add(1, Ordering::SeqCst);
+        *self.last_delivery.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+    }
+
+    /// When a pull session last delivered something; none before the first.
+    pub fn last_delivery(&self) -> Option<Instant> {
+        *self.last_delivery.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn deliveries(&self) -> u64 {
@@ -173,10 +187,12 @@ fn committed(
     }
 }
 
-/// A sync's stages, and the progress they share.
+/// A sync's stages, the progress they share, and the gauges over it, which
+/// report while they are kept.
 pub struct Pipeline {
     pub tethers: Vec<gasket::runtime::Tether>,
     pub progress: Arc<SyncProgress>,
+    pub gauges: metrics::SyncGauges,
 }
 
 fn define_gasket_policy(config: &RetryConfig) -> gasket::runtime::Policy {
@@ -210,22 +226,26 @@ pub fn peer_address(config: &RootConfig, network: &ResolvedNetwork) -> Result<St
         .ok_or_else(|| Error::ConfigError("`upstream.peer_address` is not set".into()))
 }
 
+/// The sync `config` sets up, which flushes `export` before it ends on its
+/// own.
 pub fn pipeline(
     config: &RootConfig,
     limit: SyncLimit,
     domain: DomainAdapter,
+    export: metrics::MetricsFlush,
 ) -> Result<Pipeline, Error> {
     let network = ResolvedNetwork::resolve(&config.chain)
         .map_err(|error| Error::ConfigError(error.to_string()))?;
 
     match &config.upstream {
-        Some(UpstreamConfig::Emulator(cfg)) => devnet(cfg, domain, &config.sync.retry),
+        Some(UpstreamConfig::Emulator(cfg)) => devnet(cfg, domain, &config.sync.retry, export),
         _ => sync(
             &config.sync,
             network.magic(),
             peer_address(config, &network)?,
             limit,
             domain,
+            export,
         ),
     }
 }
@@ -236,6 +256,7 @@ pub fn sync(
     peer_address: String,
     limit: SyncLimit,
     domain: DomainAdapter,
+    export: metrics::MetricsFlush,
 ) -> Result<Pipeline, Error> {
     let progress = Arc::new(SyncProgress::default());
 
@@ -253,7 +274,8 @@ pub fn sync(
         limit,
         progress.clone(),
         HOUSEKEEPING_INTERVAL,
-    );
+    )
+    .with_final_export(export);
 
     let (to_apply, from_pull) = gasket::messaging::tokio::mpsc_channel(50);
     pull.downstream.connect(to_apply);
@@ -283,7 +305,13 @@ pub fn sync(
         tethers.push(gasket::runtime::spawn_stage(submit, policy.clone()));
     }
 
-    Ok(Pipeline { tethers, progress })
+    let gauges = metrics::SyncGauges::over(&progress, &domain);
+
+    Ok(Pipeline {
+        tethers,
+        progress,
+        gauges,
+    })
 }
 
 /// The emulator produces the chain itself, so there is no upstream tip to
@@ -292,6 +320,7 @@ pub fn devnet(
     emulator_cfg: &EmulatorConfig,
     domain: DomainAdapter,
     retries: &RetryConfig,
+    export: metrics::MetricsFlush,
 ) -> Result<Pipeline, Error> {
     let progress = Arc::new(SyncProgress::default());
 
@@ -306,7 +335,8 @@ pub fn devnet(
         SyncLimit::Follow,
         progress.clone(),
         HOUSEKEEPING_INTERVAL,
-    );
+    )
+    .with_final_export(export);
 
     let (to_apply, from_pull) = gasket::messaging::tokio::mpsc_channel(50);
     emulator.downstream.connect(to_apply);
@@ -319,9 +349,11 @@ pub fn devnet(
 
     let emulator = gasket::runtime::spawn_stage(emulator, policy.clone());
     let apply = gasket::runtime::spawn_stage(apply, policy.clone());
+    let gauges = metrics::SyncGauges::over(&progress, &domain);
 
     Ok(Pipeline {
         tethers: vec![emulator, apply],
         progress,
+        gauges,
     })
 }

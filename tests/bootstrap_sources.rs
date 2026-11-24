@@ -1,6 +1,6 @@
 //! `dolos bootstrap` over its three sources, end to end against real on-disk
 //! stores: a local ImmutableDB, the same database through the Mithril path with
-//! its download and verification skipped, and a directory stele. One
+//! its download and verification skipped, and a directory snapshot. One
 //! existing-data policy holds for all of them.
 
 mod node;
@@ -309,20 +309,20 @@ fn mithril_replays_through_the_immutabledb_path() {
 }
 
 #[test]
-fn a_stele_restores_through_bootstrap_stelae() {
+fn a_snapshot_restores_through_bootstrap_stelae() {
     let synced = Node::new();
     synced.sync();
     synced.stand_at_boundary();
 
-    let stele = synced.root.path().join("stele");
-    synced.write_stele(&stele);
+    let snapshot = synced.root.path().join("snapshot");
+    synced.write_snapshot(&snapshot);
 
     let restored = Node::new();
     let stdout = assert_ok(&restored.run(&[
         "bootstrap",
         "stelae",
         "--source",
-        &format!("file://{}", stele.display()),
+        &format!("file://{}", snapshot.display()),
     ]));
     assert!(stdout.contains("restored:"), "{stdout}");
 
@@ -343,9 +343,9 @@ fn every_source_refuses_existing_data_unless_told() {
     let synced = Node::new();
     synced.sync();
     synced.stand_at_boundary();
-    let stele = synced.root.path().join("stele");
-    synced.write_stele(&stele);
-    let stele = format!("file://{}", stele.display());
+    let snapshot = synced.root.path().join("snapshot");
+    synced.write_snapshot(&snapshot);
+    let snapshot = format!("file://{}", snapshot.display());
     let synced = contents(&synced);
 
     let source = fixture.source();
@@ -353,7 +353,7 @@ fn every_source_refuses_existing_data_unless_told() {
     let mut sources: Vec<(&str, Vec<&str>, Option<ChainPoint>)> = vec![
         (
             "stelae",
-            vec!["stelae", "--source", &stele],
+            vec!["stelae", "--source", &snapshot],
             synced.cursor.clone(),
         ),
         (
@@ -447,7 +447,7 @@ fn skip_if_data_refuses_data_without_a_node() {
         ("immutabledb", vec!["immutabledb", "--source", &source]),
         (
             "stelae",
-            vec!["stelae", "--source", "file:///no/stele/is/read"],
+            vec!["stelae", "--source", "file:///no/snapshot/is/read"],
         ),
     ];
 
@@ -1115,6 +1115,71 @@ fn force_replays_a_source_named_through_the_root() {
     assert!(beside.join("immutable").is_dir(), "the source was cleared");
 }
 
+/// A snapshot restore interrupted before its first layer leaves its records
+/// over stores that hold no data. A `--force`d replay removes them with
+/// nothing else to clear, so the node it replays is not refused as that
+/// restore.
+#[test]
+fn a_forced_replay_removes_an_interrupted_restores_records() {
+    let fixture = Fixture::new();
+    let source = fixture.source();
+
+    #[cfg_attr(not(feature = "mithril"), allow(unused_mut))]
+    let mut replays: Vec<Vec<&str>> = vec![vec![
+        "bootstrap",
+        "--force",
+        "immutabledb",
+        "--source",
+        &source,
+    ]];
+
+    #[cfg(feature = "mithril")]
+    replays.push(vec![
+        "bootstrap",
+        "--force",
+        "mithril",
+        "--skip-download",
+        "--skip-validation",
+        "--retain-snapshot",
+        "--download-dir",
+        &source,
+        "--aggregator",
+        "https://aggregator.invalid",
+        "--genesis-vkey",
+        "5b31",
+    ]);
+
+    let records = [
+        dolos_snapshot::restore::SOURCE_FILE,
+        dolos_snapshot::restore::PROGRESS_FILE,
+    ];
+
+    for replay in &replays {
+        let node = fixture.node();
+        drop(
+            dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&node.config).unwrap(),
+        );
+        for name in records {
+            std::fs::write(node.config.storage.path.join(name), "{}").unwrap();
+        }
+
+        assert_ok(&node.run(replay));
+
+        for name in records {
+            let path = node.config.storage.path.join(name);
+            assert!(!path.exists(), "{replay:?}: {} left", path.display());
+        }
+        assert_healthy_at(&node, &fixture.tip());
+
+        let recover = node.run(&["sync", "recover", "--dry-run"]);
+        assert!(
+            !said(&recover).contains("was interrupted"),
+            "{replay:?}: {}",
+            stderr(&recover)
+        );
+    }
+}
+
 /// A node synced on past its database: the first three blocks by the
 /// replay, the rest through the live path, which writes the WAL entries a
 /// rollback undoes.
@@ -1187,14 +1252,15 @@ fn continue_past_the_source_tip_keeps_the_wal_window() {
     assert!(!fixture.db().exists(), "the snapshot outlived the resume");
 }
 
-/// A stele directory is resolved before `--force` clears anything: one
-/// holding no stele, one inside the storage root or a relative link to it,
-/// one whose blobs link there, and one whose inscription or blob index links
-/// there, are refused with the node, and the stele, as they were. One beside
-/// the root, named through it, is restored, and what it holds beside the
-/// stele's own files, as a volume's `.Trashes`, is never read.
+/// A network root is resolved before `--force` clears anything: one holding
+/// no snapshot, one inside the storage root or a relative link to it, one whose
+/// snapshot's blobs link there, and one whose snapshot's inscription or blob
+/// index links there, are refused with the node, and the snapshot, as they
+/// were. One beside the storage root, named through it, is restored, and what
+/// it holds beside the layouts' own files, as a volume's `.Trashes`, is never
+/// read.
 #[test]
-fn force_refuses_a_stele_it_would_lose_the_node_over() {
+fn force_refuses_a_snapshot_it_would_lose_the_node_over() {
     let synced = Node::new();
     synced.sync();
     synced.stand_at_boundary();
@@ -1204,16 +1270,20 @@ fn force_refuses_a_stele_it_would_lose_the_node_over() {
     fixture.populate(&node, 3);
     let before = contents(&node);
 
-    let stele = node.config.storage.path.join("stele");
-    synced.write_stele(&stele);
-    let stele_before = files(&stele);
+    let snapshot = node.config.storage.path.join("snapshot");
+    synced.write_snapshot(&snapshot);
+    let snapshot_before = files(&snapshot);
+    let dolos = snapshot.join("dolos");
 
     #[allow(unused_mut)]
     let mut sources = vec![
-        (node.root.path().join("no-such-stele"), "holds no stele"),
         (
-            stele.clone(),
-            "which `--force` clears before the restore: move the stele out of the storage root",
+            node.root.path().join("no-such-snapshot"),
+            "holds no `dolos` directory",
+        ),
+        (
+            snapshot.clone(),
+            "which `--force` clears before the restore: move the source out of the storage root",
         ),
     ];
 
@@ -1221,45 +1291,48 @@ fn force_refuses_a_stele_it_would_lose_the_node_over() {
     {
         use std::os::unix::fs::symlink;
 
-        // As `ln -s ../data/stele srv/stele` leaves it: the target is read
+        // As `ln -s ../data/snapshot srv/snapshot` leaves it: the target is read
         // from the link's directory.
         let srv = node.root.path().join("srv");
         std::fs::create_dir_all(&srv).unwrap();
-        let relative = Path::new("..").join(stele.strip_prefix(node.root.path()).unwrap());
-        symlink(relative, srv.join("stele")).unwrap();
-        sources.push((srv.join("stele"), "which `--force` clears"));
+        let relative = Path::new("..").join(snapshot.strip_prefix(node.root.path()).unwrap());
+        symlink(relative, srv.join("snapshot")).unwrap();
+        sources.push((srv.join("snapshot"), "which `--force` clears"));
 
-        // A stele of its own whose blob directories are the root's stele's,
-        // linked from its `blobs` directory, and from a directory elsewhere
-        // that its `blobs` links to.
+        // A root of its own whose snapshot's blob directories are the storage
+        // root's snapshot's, linked from its `blobs` directory, and from a
+        // directory elsewhere that its `blobs` links to.
         let viewing = |view: &Path, blobs: &Path| {
-            std::fs::create_dir_all(view).unwrap();
-            for entry in std::fs::read_dir(&stele).unwrap() {
+            let layout = view.join("dolos");
+            std::fs::create_dir_all(&layout).unwrap();
+            for entry in std::fs::read_dir(&dolos).unwrap() {
                 let path = entry.unwrap().path();
                 if path.is_file() {
-                    std::fs::copy(&path, view.join(path.file_name().unwrap())).unwrap();
+                    std::fs::copy(&path, layout.join(path.file_name().unwrap())).unwrap();
                 }
             }
 
             std::fs::create_dir_all(blobs).unwrap();
-            for entry in std::fs::read_dir(stele.join("blobs")).unwrap() {
+            for entry in std::fs::read_dir(dolos.join("blobs")).unwrap() {
                 let path = entry.unwrap().path();
                 symlink(&path, blobs.join(path.file_name().unwrap())).unwrap();
             }
+
+            copy_tree(&snapshot.join("blocks"), &view.join("blocks"));
         };
 
-        let view = node.root.path().join("stele-view");
-        viewing(&view, &view.join("blobs"));
+        let view = node.root.path().join("snapshot-view");
+        viewing(&view, &view.join("dolos").join("blobs"));
         sources.push((view, "leads into the storage root"));
 
-        let nested = node.root.path().join("stele-nested");
+        let nested = node.root.path().join("snapshot-nested");
         let elsewhere = node.root.path().join("elsewhere").join("blobs");
         viewing(&nested, &elsewhere);
-        symlink(&elsewhere, nested.join("blobs")).unwrap();
+        symlink(&elsewhere, nested.join("dolos").join("blobs")).unwrap();
         sources.push((nested, "leads into the storage root"));
 
-        // A stele of its own, blobs and all, but for one file of the root's
-        // stele, linked in its place.
+        // A root of its own, blobs and all, but for one file of the storage
+        // root's snapshot, linked in its place.
         fn copy_tree(from: &Path, to: &Path) {
             std::fs::create_dir_all(to).unwrap();
             for entry in std::fs::read_dir(from).unwrap() {
@@ -1274,13 +1347,14 @@ fn force_refuses_a_stele_it_would_lose_the_node_over() {
         }
 
         for (view, linked) in [
-            ("stele-inscription", dolos_snapshot::dir::INSCRIPTION_FILE),
-            ("stele-blob-index", dolos_snapshot::dir::BLOB_INDEX_FILE),
+            ("snapshot-layout", dolos_snapshot::dir::LAYOUT_FILE),
+            ("snapshot-index", dolos_snapshot::dir::INDEX_FILE),
         ] {
             let view = node.root.path().join(view);
-            copy_tree(&stele, &view);
-            std::fs::remove_file(view.join(linked)).unwrap();
-            symlink(stele.join(linked), view.join(linked)).unwrap();
+            copy_tree(&snapshot, &view);
+            let copied = view.join("dolos").join(linked);
+            std::fs::remove_file(&copied).unwrap();
+            symlink(dolos.join(linked), &copied).unwrap();
             sources.push((view, "leads into the storage root"));
         }
     }
@@ -1307,11 +1381,11 @@ fn force_refuses_a_stele_it_would_lose_the_node_over() {
         );
     }
 
-    assert_eq!(files(&stele), stele_before, "the stele changed");
+    assert_eq!(files(&snapshot), snapshot_before, "the snapshot changed");
 
-    let beside = node.root.path().join("stele-beside");
-    synced.write_stele(&beside);
-    let through = node.config.storage.path.join("..").join("stele-beside");
+    let beside = node.root.path().join("snapshot-beside");
+    synced.write_snapshot(&beside);
+    let through = node.config.storage.path.join("..").join("snapshot-beside");
 
     #[cfg(unix)]
     let trashes = {
@@ -1319,7 +1393,7 @@ fn force_refuses_a_stele_it_would_lose_the_node_over() {
 
         let trashes = beside.join(".Trashes");
         std::fs::create_dir_all(&trashes).unwrap();
-        std::os::unix::fs::symlink(&stele, trashes.join("stele")).unwrap();
+        std::os::unix::fs::symlink(&snapshot, trashes.join("snapshot")).unwrap();
         std::fs::set_permissions(&trashes, std::fs::Permissions::from_mode(0o1311)).unwrap();
         trashes
     };
@@ -1343,22 +1417,22 @@ fn force_refuses_a_stele_it_would_lose_the_node_over() {
     assert_eq!(contents(&node).cursor, contents(&synced).cursor);
 }
 
-/// Without a clear, a stele may lie in the storage root beside the stores,
+/// Without a clear, a snapshot may lie in the storage root beside the stores,
 /// whether or not `--force` is given over an empty node.
 #[test]
-fn a_stele_beside_the_stores_restores_without_a_clear() {
+fn a_snapshot_beside_the_stores_restores_without_a_clear() {
     let synced = Node::new();
     synced.sync();
     synced.stand_at_boundary();
 
     for flags in [&[][..], &["--force"][..]] {
         let node = Node::new();
-        let stele = node.config.storage.path.join("stele");
-        synced.write_stele(&stele);
+        let snapshot = node.config.storage.path.join("snapshot");
+        synced.write_snapshot(&snapshot);
 
         let mut args = vec!["bootstrap"];
         args.extend_from_slice(flags);
-        let source = format!("file://{}", stele.display());
+        let source = format!("file://{}", snapshot.display());
         args.extend_from_slice(&["stelae", "--source", &source]);
 
         assert_ok(&node.run(&args));
@@ -1368,8 +1442,8 @@ fn a_stele_beside_the_stores_restores_without_a_clear() {
             "{flags:?}"
         );
         assert!(
-            stele.join("blobs").is_dir(),
-            "{flags:?}: the stele was taken"
+            snapshot.join("dolos").join("blobs").is_dir(),
+            "{flags:?}: the snapshot was taken"
         );
     }
 }
@@ -1426,16 +1500,18 @@ fn an_empty_download_directory_is_a_usage_error() {
     );
 }
 
-/// `--continue` belongs to the replays, and says something about data in
-/// storage that `--force` and `--skip-if-data` contradict.
+/// `--continue` belongs to each source and not to the group, and says
+/// something about data in storage that `--force` and `--skip-if-data`
+/// contradict.
 #[test]
-fn continue_is_a_usage_error_outside_the_replays() {
+fn continue_is_a_usage_error_outside_a_source_or_beside_another_answer() {
     let fixture = Fixture::new();
     let node = fixture.node();
     let source = fixture.source();
 
     for args in [
-        &["bootstrap", "stelae", "--continue"][..],
+        &["bootstrap", "--continue", "stelae"][..],
+        &["bootstrap", "--force", "stelae", "--continue"][..],
         &[
             "bootstrap",
             "--continue",

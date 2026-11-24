@@ -100,6 +100,15 @@ pub struct TxStatus {
     pub confirmed_at: Option<ChainPoint>,
 }
 
+/// How many transactions a [`MempoolStore`] holds, by umbrella stage.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MempoolCount {
+    /// In the pending queue.
+    pub pending: usize,
+    /// In any inflight sub-stage: Propagated, Acknowledged or Confirmed.
+    pub inflight: usize,
+}
+
 pub struct MempoolPage {
     pub items: Vec<MempoolTx>,
     pub next_cursor: Option<u64>,
@@ -143,7 +152,12 @@ pub enum MempoolError {
 ///                                          Pending   (rollback via `confirm(unseen)`)
 /// ```
 ///
-/// - **Pending** — received but not yet submitted to a peer.
+/// A new peer session also returns `Propagated` transactions to `Pending`
+/// ([`requeue_propagated`](Self::requeue_propagated)), and a `Pending` one seen
+/// on chain goes straight to `Confirmed` ([`confirm`](Self::confirm)).
+///
+/// - **Pending** — queued to be offered to a peer; it may have been offered
+///   before.
 /// - **Propagated** — sent to a peer, awaiting acknowledgement.
 /// - **Acknowledged** — the peer accepted the transaction.
 /// - **Confirmed** — observed on-chain; confirmation counter tracks depth.
@@ -177,6 +191,10 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
     /// Does not remove them.
     fn peek_pending(&self) -> Vec<MempoolTx>;
 
+    /// The number of pending and of inflight transactions, counted without
+    /// reading or cloning them.
+    fn count(&self) -> MempoolCount;
+
     /// Moves matching transactions from pending to the inflight table
     /// (initial sub-stage: `Propagated`).
     ///
@@ -189,6 +207,14 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
     /// Only transitions transactions currently in `Propagated`; other stages
     /// are silently skipped.
     fn mark_acknowledged(&self, hashes: &[TxHash]) -> Result<(), MempoolError>;
+
+    /// Moves every `Propagated` transaction back to the pending queue with its
+    /// counters reset, so that a new peer session offers it again.
+    ///
+    /// No peer acknowledged these, and the session they were offered on is
+    /// gone. Those in `except` stay `Propagated`, on their way to the normal
+    /// drop. `Acknowledged` and `Confirmed` transactions are left untouched.
+    fn requeue_propagated(&self, except: &[TxHash]) -> Result<(), MempoolError>;
 
     /// Returns the transaction if it is currently in any inflight sub-stage
     /// (Propagated, Acknowledged, or Confirmed), `None` otherwise.
@@ -203,9 +229,11 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
     /// Called after each chain-sync event.
     ///
     /// For `seen_txs`: transitions to `Confirmed` and increments the
-    /// confirmation counter. For `unseen_txs` (rollback): moves the
-    /// transaction back to the pending queue so it can be re-submitted.
-    /// Hashes not currently tracked are silently ignored.
+    /// confirmation counter, including a transaction still pending, since one
+    /// re-queued can land on chain before it is offered again. For `unseen_txs`
+    /// (rollback): moves the transaction back to the pending queue so it
+    /// can be re-submitted. Hashes not currently tracked are silently
+    /// ignored.
     ///
     /// `point` is the block's chain point. On first confirmation, it is
     /// stored as `confirmed_at`. On rollback (unseen), it is cleared.
@@ -464,11 +492,19 @@ mod tests {
             vec![]
         }
 
+        fn count(&self) -> MempoolCount {
+            MempoolCount::default()
+        }
+
         fn mark_inflight(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
             Ok(())
         }
 
         fn mark_acknowledged(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
+            Ok(())
+        }
+
+        fn requeue_propagated(&self, _except: &[TxHash]) -> Result<(), MempoolError> {
             Ok(())
         }
 

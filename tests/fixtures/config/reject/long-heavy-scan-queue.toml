@@ -1,0 +1,8 @@
+compatibility = "v2-beta.1"
+
+[chain]
+protocol = "cardano"
+network = "preview"
+
+[serve]
+heavy_scan_queue_seconds = 61

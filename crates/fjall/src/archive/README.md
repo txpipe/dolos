@@ -55,11 +55,15 @@ Value: (empty)
 
 ```
 Key:   "identity"
-Value: UTF-8 contract identifier, e.g. "v2-alpha.2"
+Value: UTF-8 contract identifier, e.g. "v2-beta.1"
+
+Key:   "format"
+Value: big-endian u32, the internal format the store was written in
 ```
 
-The compatibility identity the store recorded when it was created, which the
-node's store opener checks before anything else (see the data layer docs).
+The compatibility identity and internal format the store recorded when it was
+created, written in one batch, which the node's store opener checks before
+anything else (see the data layer docs).
 
 ### Exact lookups (`index-exact`)
 
@@ -104,7 +108,7 @@ Internal prefix constants:
 
 ## Stelae
 
-The `indexes` stele layer is the sorted output of
+The `indexes` snapshot layer is the sorted output of
 `ArchiveStore::iter_archive_tags` followed by `iter_exact_records`, and the
 input of `ArchiveWriter::append_prehashed`. The `entity-{kind}` layers are
 `ArchiveStore::iter_entity_records` per kind, restored through

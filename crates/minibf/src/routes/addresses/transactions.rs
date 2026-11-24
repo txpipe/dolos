@@ -108,6 +108,47 @@ mod tests {
             serde_json::from_slice(&bytes).expect("failed to parse address transactions");
     }
 
+    /// A height past the tip: `from` there is an empty page, `to` there reads
+    /// to the tip; `from` and `to` at the tip still hold the tip's block.
+    #[tokio::test]
+    async fn addresses_transactions_bounds_past_tip() {
+        let app = TestApp::new();
+        let address = app.vectors().address.as_str();
+        let tip = app.tip_height().await;
+        let get = |query: String| {
+            let app = &app;
+            async move {
+                let path = format!("/addresses/{address}/transactions?{query}");
+                let (status, bytes) = app.get_bytes(&path).await;
+                assert_eq!(status, StatusCode::OK, "{query}");
+                serde_json::from_slice::<Vec<AddressTransactionsContentInner>>(&bytes)
+                    .expect("failed to parse address transactions")
+            }
+        };
+
+        for order in ["asc", "desc"] {
+            assert!(get(format!("from=99999999&order={order}")).await.is_empty());
+            assert!(get(format!("from={}&order={order}", tip + 1))
+                .await
+                .is_empty());
+            assert_eq!(
+                get(format!("to=99999999&count=2&order={order}")).await,
+                get(format!("count=2&order={order}")).await
+            );
+        }
+
+        let at_tip = get(format!("from={tip}&to={tip}")).await;
+        assert!(!at_tip.is_empty(), "the address has txs in the tip block");
+        assert!(at_tip.iter().all(|x| x.block_height as u64 == tip));
+        assert_eq!(get(format!("from={tip}")).await, at_tip);
+
+        // synthetic heights start at 1, as Byron main blocks do: `from=0` is
+        // all history
+        let from_zero = get("from=0&count=2".to_string()).await;
+        assert!(!from_zero.is_empty());
+        assert_eq!(from_zero, get("count=2".to_string()).await);
+    }
+
     #[tokio::test]
     async fn addresses_transactions_slot_constrained() {
         let app = TestApp::new();

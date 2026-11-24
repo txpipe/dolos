@@ -31,6 +31,10 @@ use crate::{
     PParamsSet, StageFirstScript,
 };
 
+#[allow(
+    deprecated,
+    reason = "Pallas 1.5 deprecates script_ref; moving to multi_era_script_ref is a separate change"
+)]
 fn reference_script(output: &MultiEraOutput) -> Option<Hash<28>> {
     output
         .script_ref()
@@ -64,7 +68,12 @@ pub fn tx_script_hashes(tx: &MultiEraTx<'_>) -> Vec<Hash<28>> {
     }
 
     let mut witnesses = BTreeSet::new();
-    witnesses.extend(tx.native_scripts().iter().map(|x| x.original_hash()));
+    #[allow(
+        deprecated,
+        reason = "Pallas 1.5 deprecates native_scripts; moving to multi_era_native_scripts is a separate change"
+    )]
+    let native_scripts = tx.native_scripts();
+    witnesses.extend(native_scripts.iter().map(|x| x.original_hash()));
     witnesses.extend(tx.plutus_v1_scripts().iter().map(|x| x.compute_hash()));
     witnesses.extend(tx.plutus_v2_scripts().iter().map(|x| x.compute_hash()));
     witnesses.extend(tx.plutus_v3_scripts().iter().map(|x| x.compute_hash()));

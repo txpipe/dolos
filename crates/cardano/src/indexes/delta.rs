@@ -217,7 +217,12 @@ impl CardanoIndexDeltaBuilder {
             return;
         }
 
-        for script in tx.native_scripts() {
+        #[allow(
+            deprecated,
+            reason = "Pallas 1.5 deprecates native_scripts; moving to multi_era_native_scripts is a separate change"
+        )]
+        let native_scripts = tx.native_scripts();
+        for script in native_scripts {
             self.add_script_hash(script.original_hash().to_vec());
         }
         for script in tx.plutus_v1_scripts() {
@@ -240,8 +245,13 @@ impl CardanoIndexDeltaBuilder {
         // a phase-2-invalid tx produces its collateral return, which is tagged
         // with the other outputs it produces
         let collateral_return = tx.collateral_return();
+        #[allow(
+            deprecated,
+            reason = "Pallas 1.5 deprecates script_ref; moving to multi_era_script_ref is a separate change"
+        )]
+        let collateral_script_ref = collateral_return.as_ref().and_then(|x| x.script_ref());
 
-        if let Some(script_ref) = collateral_return.as_ref().and_then(|x| x.script_ref()) {
+        if let Some(script_ref) = collateral_script_ref {
             self.add_script_hash(pallas_extras::script_ref_hash(&script_ref).to_vec());
         }
     }
@@ -458,7 +468,12 @@ impl CardanoIndexDeltaBuilder {
                     self.add_datum(&datum);
                 }
 
-                if let Some(script_ref) = output.script_ref() {
+                #[allow(
+                    deprecated,
+                    reason = "Pallas 1.5 deprecates script_ref; moving to multi_era_script_ref is a separate change"
+                )]
+                let script_ref = output.script_ref();
+                if let Some(script_ref) = script_ref {
                     self.add_script_hash(pallas_extras::script_ref_hash(&script_ref).to_vec());
                 }
             }
@@ -624,7 +639,12 @@ pub fn utxo_tags(output: &MultiEraOutput) -> Vec<Tag> {
     }
 
     // Reference script tag
-    if let Some(script_ref) = output.script_ref() {
+    #[allow(
+        deprecated,
+        reason = "Pallas 1.5 deprecates script_ref; moving to multi_era_script_ref is a separate change"
+    )]
+    let script_ref = output.script_ref();
+    if let Some(script_ref) = script_ref {
         tags.push(Tag::new(
             utxo::SCRIPT_REF,
             pallas_extras::script_ref_hash(&script_ref).to_vec(),
@@ -640,7 +660,7 @@ pub fn utxo_tags(output: &MultiEraOutput) -> Vec<Tag> {
 /// set (produced, recovered) gains its tags, every ref it takes out (consumed,
 /// undone) loses them, so applying both through one writer keeps the tags a
 /// projection of the set. Used by genesis, WAL replay, the epoch-boundary
-/// AVVM deletion and the stele restore.
+/// AVVM deletion and the snapshot restore.
 pub fn utxo_index_delta_from_utxo_delta(utxo_delta: &UtxoSetDelta) -> UtxoIndexDelta {
     let mut builder = CardanoIndexDeltaBuilder::new();
     builder.add_utxo_tags_from_delta(utxo_delta);
@@ -919,7 +939,12 @@ mod tests {
             builder.add_tx_scripts(&tx);
 
             for (_, output) in tx.produces() {
-                if let Some(script_ref) = output.script_ref() {
+                #[allow(
+                    deprecated,
+                    reason = "Pallas 1.5 deprecates script_ref; moving to multi_era_script_ref is a separate change"
+                )]
+                let script_ref = output.script_ref();
+                if let Some(script_ref) = script_ref {
                     builder.add_script_hash(pallas_extras::script_ref_hash(&script_ref).to_vec());
                 }
             }
