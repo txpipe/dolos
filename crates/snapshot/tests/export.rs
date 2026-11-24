@@ -2262,6 +2262,10 @@ impl<S: ArchiveStore> ArchiveStore for Counted<S> {
         self.inner.get_tip()
     }
 
+    fn get_oldest_slot(&self) -> Result<Option<BlockSlot>, ArchiveError> {
+        self.inner.get_oldest_slot()
+    }
+
     fn prune_history(
         &self,
         max_slots: u64,
@@ -8125,6 +8129,10 @@ mod boundary_preparation {
 
         fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError> {
             self.inner.get_tip()
+        }
+
+        fn get_oldest_slot(&self) -> Result<Option<BlockSlot>, ArchiveError> {
+            self.inner.get_oldest_slot()
         }
 
         fn prune_history(

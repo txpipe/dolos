@@ -1421,6 +1421,10 @@ impl CoreArchiveStore for ArchiveStore {
         Ok(Some((slot, body)))
     }
 
+    fn get_oldest_slot(&self) -> Result<Option<BlockSlot>, ArchiveError> {
+        self.oldest_block_slot()
+    }
+
     fn prune_history(
         &self,
         max_slots: u64,
@@ -1749,6 +1753,27 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap()
+    }
+
+    /// The oldest slot comes from the index alone, so a block whose body no
+    /// longer reads still bounds a walk, and reading that body fails.
+    #[test]
+    fn the_oldest_slot_counts_a_block_whose_body_does_not_read() {
+        let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
+        write(&store, &[(100, body(100, 0)), (200, body(200, 0))]);
+
+        let oldest = locations(&store, 100)[0];
+        let mut segment = segment_bytes(&store, oldest.segment_id);
+        let frame = oldest.offset as usize;
+        segment[frame..frame + 4].fill(0);
+        std::fs::write(store.flatfiles.segment_path(oldest.segment_id), segment).unwrap();
+
+        assert_eq!(store.get_oldest_slot().unwrap(), Some(100));
+        assert!(store.get_block_by_slot(&100).is_err());
+        assert_eq!(
+            store.get_block_by_slot(&200).unwrap(),
+            Some(body(200, 0).to_vec())
+        );
     }
 
     #[test]

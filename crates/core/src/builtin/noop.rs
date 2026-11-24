@@ -236,6 +236,10 @@ impl ArchiveStore for NoOpArchiveStore {
         Ok(None)
     }
 
+    fn get_oldest_slot(&self) -> Result<Option<BlockSlot>, ArchiveError> {
+        Ok(None)
+    }
+
     fn prune_history(
         &self,
         _max_slots: u64,

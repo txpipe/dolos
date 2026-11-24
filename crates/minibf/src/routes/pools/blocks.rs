@@ -124,12 +124,10 @@ where
 {
     domain
         .blocking(|domain| {
-            let mut blocks = domain
+            domain
                 .archive()
-                .get_range(None, None)
-                .map_err(log_and_500("failed to read the oldest block"))?;
-
-            Ok(blocks.next().map(|(slot, _)| slot))
+                .get_oldest_slot()
+                .map_err(log_and_500("failed to read the oldest block"))
         })
         .await
 }
@@ -408,12 +406,7 @@ mod tests {
             .expect("prune");
         assert!(done);
 
-        let oldest = archive
-            .get_range(None, None)
-            .expect("blocks")
-            .next()
-            .map(|(slot, _)| slot);
-        assert_eq!(oldest, Some(slots[2]));
+        assert_eq!(archive.get_oldest_slot().expect("oldest"), Some(slots[2]));
 
         slots[..2].to_vec()
     }
