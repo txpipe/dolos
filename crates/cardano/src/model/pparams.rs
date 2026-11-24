@@ -399,6 +399,7 @@ impl PParamsSet {
         self
     }
 
+    /// An empty unknown cost-model map never clears existing models.
     pub fn merge(&mut self, other: Self) {
         for param in other.values {
             if matches!(&param, PParamValue::CostModelsUnknown(models) if models.is_empty()) {
