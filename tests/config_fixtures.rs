@@ -529,6 +529,262 @@ fn assert_refused_with_stores_intact(dir: &Path, markers: &[PathBuf], message: &
     }
 }
 
+#[cfg(unix)]
+mod limits {
+    use super::*;
+    use nix::sys::resource::{getrlimit, rlim_t, setrlimit, Resource, RLIM_INFINITY};
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    use std::time::Instant;
+
+    fn drain(pipe: impl std::io::Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut pipe = pipe;
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes).unwrap();
+            bytes
+        })
+    }
+
+    fn run_with_limits(
+        cwd: &Path,
+        args: &[&str],
+        soft: rlim_t,
+        hard: rlim_t,
+    ) -> Option<std::process::Output> {
+        let (_, inherited_hard) = getrlimit(Resource::RLIMIT_NOFILE).unwrap();
+        if inherited_hard != RLIM_INFINITY && inherited_hard < hard {
+            eprintln!(
+                "The limit test did not run. The inherited hard limit {inherited_hard} is less \
+                 than {hard}."
+            );
+            return None;
+        }
+        let inherited =
+            std::env::vars_os().filter(|(key, _)| !key.to_string_lossy().starts_with("DOLOS_"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_dolos"));
+        command
+            .current_dir(cwd)
+            .args(args)
+            .env_clear()
+            .envs(inherited)
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        unsafe {
+            command.pre_exec(move || {
+                setrlimit(Resource::RLIMIT_NOFILE, soft, hard).map_err(std::io::Error::from)
+            });
+        }
+        let mut child = command.spawn().unwrap();
+        let stdout = drain(child.stdout.take().unwrap());
+        let stderr = drain(child.stderr.take().unwrap());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut timed_out = false;
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                timed_out = true;
+                child.kill().unwrap();
+                break child.wait().unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let output = std::process::Output {
+            status,
+            stdout: stdout.join().unwrap(),
+            stderr: stderr.join().unwrap(),
+        };
+        assert!(
+            !timed_out,
+            "{args:?} timed out: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Some(output)
+    }
+
+    fn run_with_low_hard_limit(cwd: &Path, args: &[&str]) -> Option<std::process::Output> {
+        run_with_limits(cwd, args, 1024, 2048)
+    }
+
+    #[cfg(not(feature = "debug"))]
+    fn daemon_with_blocked_state(soft: rlim_t, level: &str) -> Option<std::process::Output> {
+        let dir = tempfile::tempdir().unwrap();
+        let config = std::fs::read_to_string(fixture("minimal.toml")).unwrap()
+            + &format!("\n[storage.state]\npath = \"blocked\"\n\n[logging]\nlevel = \"{level}\"\n");
+        std::fs::write(dir.path().join("dolos.toml"), config).unwrap();
+        std::fs::create_dir(dir.path().join("data")).unwrap();
+        let blocked = dir.path().join("data/blocked");
+        std::fs::write(&blocked, "kept").unwrap();
+
+        let output = run_with_limits(dir.path(), &["daemon"], soft, 4096)?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{stderr}");
+        assert!(
+            stderr.contains("opening configured Dolos stores"),
+            "{stderr}"
+        );
+        assert!(output.stdout.is_empty(), "{:?}", output.stdout);
+        assert_eq!(std::fs::read(blocked).unwrap(), b"kept");
+        Some(output)
+    }
+
+    #[test]
+    #[cfg(not(feature = "debug"))]
+    fn daemon_logs_raised_and_unchanged_limits_once_at_info_before_storage_failure() {
+        for soft in [1024, 4096] {
+            let Some(output) = daemon_with_blocked_state(soft, "info") else {
+                return;
+            };
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let summary = format!("RLIMIT_NOFILE soft {soft} -> 4096, hard 4096");
+            assert_eq!(stderr.matches(&summary).count(), 1, "{stderr}");
+            assert_eq!(stderr.matches("RLIMIT_NOFILE").count(), 1, "{stderr}");
+            let line = stderr.lines().find(|line| line.contains(&summary)).unwrap();
+            assert!(
+                line.split_whitespace().any(|word| word == "INFO"),
+                "{stderr}"
+            );
+            assert!(
+                stderr.find(&summary).unwrap()
+                    < stderr.find("opening configured Dolos stores").unwrap(),
+                "{stderr}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(not(feature = "debug"))]
+    fn daemon_does_not_log_the_info_limit_summary_at_warn() {
+        let Some(output) = daemon_with_blocked_state(1024, "warn") else {
+            return;
+        };
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.contains("RLIMIT_NOFILE"), "{stderr}");
+    }
+
+    fn commands() -> Vec<&'static [&'static str]> {
+        STORE_COMMANDS
+            .into_iter()
+            .filter(|args| cfg!(feature = "utils") || args[0] != "data")
+            .chain([
+                &["daemon"][..],
+                &["serve"][..],
+                &["cache", "stats"][..],
+                &["cache", "clear", "--all"][..],
+            ])
+            .collect()
+    }
+
+    fn assert_limit_refusal(output: &std::process::Output, args: &[&str]) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{args:?}: {stderr}");
+        for expected in [
+            "RLIMIT_NOFILE",
+            "inherited soft=1024 hard=2048",
+            "required soft >= 4096",
+            "ulimit -Sn",
+            "LimitNOFILE=4096",
+            "supervisor",
+        ] {
+            assert!(stderr.contains(expected), "{args:?}: {stderr}");
+        }
+        assert!(output.stdout.is_empty(), "{args:?}: {:?}", output.stdout);
+    }
+
+    #[test]
+    fn a_low_hard_limit_stops_storage_commands_with_marker_bytes_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::copy(fixture("minimal.toml"), dir.path().join("dolos.toml")).unwrap();
+        let mut markers = plant_store_markers(dir.path());
+        let cache = dir.path().join("data/cache/marker");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(&cache, "kept").unwrap();
+        markers.push(cache);
+
+        for args in commands() {
+            let Some(output) = run_with_low_hard_limit(dir.path(), args) else {
+                return;
+            };
+            assert_limit_refusal(&output, args);
+            for marker in &markers {
+                assert_eq!(
+                    std::fs::read(marker).unwrap(),
+                    b"kept",
+                    "{args:?}: {}",
+                    marker.display()
+                );
+            }
+            assert_eq!(
+                entries(&dir.path().join("data")),
+                ["archive", "cache", "state", "wal"]
+            );
+            for store in ["archive", "cache", "state", "wal"] {
+                assert_eq!(entries(&dir.path().join("data").join(store)), ["marker"]);
+            }
+        }
+    }
+
+    #[test]
+    fn a_low_hard_limit_creates_no_missing_data_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::copy(fixture("minimal.toml"), dir.path().join("dolos.toml")).unwrap();
+
+        for args in commands() {
+            let Some(output) = run_with_low_hard_limit(dir.path(), args) else {
+                return;
+            };
+            assert_limit_refusal(&output, args);
+            assert_eq!(entries(dir.path()), ["dolos.toml"], "{args:?}");
+        }
+    }
+
+    #[test]
+    fn a_low_hard_limit_exempts_help_version_and_config_check() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::copy(fixture("minimal.toml"), dir.path().join("dolos.toml")).unwrap();
+
+        for args in [
+            &["--help"][..],
+            &["--version"][..],
+            &["sync", "status", "--help"][..],
+            &["config", "check"][..],
+        ] {
+            let Some(output) = run_with_low_hard_limit(dir.path(), args) else {
+                return;
+            };
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{args:?}: {stderr}");
+            assert!(!output.stdout.is_empty(), "{args:?}");
+            assert!(!stderr.contains("RLIMIT_NOFILE"), "{args:?}: {stderr}");
+            assert_eq!(entries(dir.path()), ["dolos.toml"], "{args:?}");
+        }
+    }
+
+    #[test]
+    fn a_low_hard_limit_does_not_hide_invalid_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = std::fs::read_to_string(fixture("minimal.toml")).unwrap()
+            + "\n[logging]\nfilter = \"dolos=loud\"\n";
+        std::fs::write(dir.path().join("dolos.toml"), config).unwrap();
+
+        for args in commands() {
+            let Some(output) = run_with_low_hard_limit(dir.path(), args) else {
+                return;
+            };
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(!output.status.success(), "{args:?}: {stderr}");
+            assert!(stderr.contains("logging.filter"), "{args:?}: {stderr}");
+            assert!(!stderr.contains("RLIMIT_NOFILE"), "{args:?}: {stderr}");
+            assert_eq!(entries(dir.path()), ["dolos.toml"], "{args:?}");
+        }
+    }
+}
+
 #[test]
 fn a_mismatched_custom_magic_stops_every_command_before_its_stores() {
     let (dir, _) = beside_genesis("reject/magic-mismatch.toml", 42);

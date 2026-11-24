@@ -8,10 +8,17 @@ use tracing::warn;
 pub struct Args {}
 
 #[tokio::main]
-pub async fn run(config: RootConfig, _args: &Args) -> miette::Result<()> {
+pub async fn run(
+    config: RootConfig,
+    _args: &Args,
+    limits: Option<crate::limits::Outcome>,
+) -> miette::Result<()> {
     crate::common::refuse_interrupted_restore(&config)?;
 
     let telemetry = crate::common::setup_tracing(&config)?;
+    if let Some(limits) = limits {
+        limits.log();
+    }
 
     let domain = crate::common::setup_domain(&config)?;
     let _limiter_gauges =

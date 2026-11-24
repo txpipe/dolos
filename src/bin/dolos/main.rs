@@ -18,6 +18,7 @@ mod common;
 mod config;
 mod daemon;
 mod feedback;
+mod limits;
 mod output;
 mod registry;
 mod serve;
@@ -63,6 +64,23 @@ enum Command {
     /// Fill the node's stores from a Stelae snapshot, Mithril or a local
     /// ImmutableDB
     Bootstrap(bootstrap::Args),
+}
+
+impl Command {
+    fn uses_storage(&self) -> bool {
+        match self {
+            Self::Daemon(_)
+            | Self::Sync(_)
+            | Self::Serve(_)
+            | Self::Cache(_)
+            | Self::Bootstrap(_) => true,
+            #[cfg(feature = "utils")]
+            Self::Data(_) => true,
+            Self::Config(_) | Self::Service(_) => false,
+            #[cfg(feature = "utils")]
+            Self::Init(_) => false,
+        }
+    }
 }
 
 /// What `dolos --version` and `-V` print after the name: the release and the
@@ -113,13 +131,21 @@ fn run() -> Result<()> {
 
     // Each command loads the configuration it runs on, so `config
     // write-genesis --network` runs without one.
-    let load = || crate::common::load_and_check_config(config_file);
+    let uses_storage = args.command.uses_storage();
+    let load = || -> Result<_> {
+        let config = crate::common::load_and_check_config(config_file)?;
+        let limits = uses_storage.then(crate::limits::prepare).transpose()?;
+        Ok((config, limits))
+    };
 
     match args.command {
-        Command::Daemon(args) => daemon::run(load()?, &args),
-        Command::Sync(args) => sync::run(&load()?, &args, &feedback),
-        Command::Serve(args) => serve::run(load()?, &args),
-        Command::Cache(args) => cache::run(&load()?, &args),
+        Command::Daemon(args) => {
+            let (config, limits) = load()?;
+            daemon::run(config, &args, limits)
+        }
+        Command::Sync(args) => sync::run(&load()?.0, &args, &feedback),
+        Command::Serve(args) => serve::run(load()?.0, &args),
+        Command::Cache(args) => cache::run(&load()?.0, &args),
         Command::Config(args) => config::run(config_file, &args),
         Command::Service(args) => service::run(explicit_config, &args),
 
@@ -127,11 +153,60 @@ fn run() -> Result<()> {
         // configuration, that is why we pass the whole result and let the command logic decide what
         // to do with it.
         #[cfg(feature = "utils")]
-        Command::Init(args) => init::run(load(), config_file, &args),
+        Command::Init(args) => init::run(load().map(|(config, _)| config), config_file, &args),
 
         #[cfg(feature = "utils")]
-        Command::Data(args) => data::run(&load()?, &args, &feedback),
+        Command::Data(args) => data::run(&load()?.0, &args, &feedback),
 
-        Command::Bootstrap(args) => bootstrap::run(&load()?, &args, &feedback),
+        Command::Bootstrap(args) => bootstrap::run(&load()?.0, &args, &feedback),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn storage_commands_require_resource_preflight() {
+        for args in [
+            &["daemon"][..],
+            &["serve"],
+            &["sync", "catchup"],
+            &["sync", "status"],
+            &["sync", "recover", "--dry-run"],
+            #[cfg(feature = "utils")]
+            &["sync", "dump"],
+            &["cache", "stats"],
+            &["bootstrap", "immutabledb", "--source", "db"],
+        ] {
+            let cli =
+                Cli::try_parse_from(std::iter::once("dolos").chain(args.iter().copied())).unwrap();
+            assert!(cli.command.uses_storage(), "{args:?}");
+        }
+
+        #[cfg(feature = "utils")]
+        assert!(Cli::try_parse_from(["dolos", "data", "stats"])
+            .unwrap()
+            .command
+            .uses_storage());
+    }
+
+    #[test]
+    fn configuration_and_service_commands_need_no_resource_preflight() {
+        for args in [
+            &["config", "check"][..],
+            &["service", "install"],
+            &["service", "uninstall", "example"],
+        ] {
+            let cli =
+                Cli::try_parse_from(std::iter::once("dolos").chain(args.iter().copied())).unwrap();
+            assert!(!cli.command.uses_storage(), "{args:?}");
+        }
+
+        #[cfg(feature = "utils")]
+        assert!(!Cli::try_parse_from(["dolos", "init"])
+            .unwrap()
+            .command
+            .uses_storage());
     }
 }
