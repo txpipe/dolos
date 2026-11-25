@@ -1304,4 +1304,37 @@ mod tests {
             }
         }
     }
+    /// The guard answers only for a subject that is valid but for its odd
+    /// count of digits. It leaves each other subject to the decoder.
+    #[test]
+    fn odd_subject_is_not_found_only_in_a_valid_shape() {
+        for subject in [
+            "f".repeat(57),
+            "F".repeat(119),
+            format!("{}aB1", "0".repeat(56)),
+        ] {
+            assert!(matches!(
+                odd_subject_not_found(&subject),
+                Err(Error::Code(StatusCode::NOT_FOUND))
+            ));
+            assert!(matches!(
+                decode_asset_subject(&subject),
+                Err(Error::InvalidAsset)
+            ));
+        }
+
+        for subject in ["f".repeat(56), "f".repeat(120)] {
+            assert!(odd_subject_not_found(&subject).is_ok());
+            assert!(decode_asset_subject(&subject).is_ok());
+        }
+
+        // too short, too long, and a character that is not a hex digit
+        for subject in ["f".repeat(55), "f".repeat(121), "z".repeat(57)] {
+            assert!(odd_subject_not_found(&subject).is_ok());
+            assert!(matches!(
+                decode_asset_subject(&subject),
+                Err(Error::InvalidAsset)
+            ));
+        }
+    }
 }

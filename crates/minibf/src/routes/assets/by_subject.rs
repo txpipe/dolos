@@ -330,6 +330,22 @@ mod tests {
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
     }
 
+    /// Blockfrost takes a subject with an odd count of hex digits for a valid
+    /// shape here. No asset has such a subject, so it is a 404, not a 400.
+    #[tokio::test]
+    async fn assets_by_subject_odd_subject_not_found() {
+        let app = TestApp::new();
+        let asset = app.vectors().asset_unit.as_str();
+
+        // the asset of the chain with one digit more and one digit less
+        let near = [format!("{asset}0"), asset[..asset.len() - 1].to_string()];
+
+        for subject in odd_assets().into_iter().chain(near) {
+            let path = format!("/assets/{subject}");
+            assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+        }
+    }
+
     #[tokio::test]
     async fn assets_by_subject_internal_error() {
         let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));

@@ -91,6 +91,21 @@ pub(super) mod testing {
         ]
     }
 
+    /// Subjects of a valid length whose hex has an odd count of digits.
+    /// Blockfrost takes them for a valid shape on `/assets/{asset}` and on
+    /// `/assets/{asset}/history`, where they are a 404. They are a 400 on each
+    /// other route.
+    pub fn odd_assets() -> Vec<String> {
+        vec![
+            // a policy id and half of a name byte
+            "f".repeat(57),
+            // one digit less than the longest subject
+            "f".repeat(119),
+            // the letter case of a digit changes nothing
+            format!("{}A", "ab".repeat(32)),
+        ]
+    }
+
     pub fn missing_asset() -> &'static str {
         "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
     }

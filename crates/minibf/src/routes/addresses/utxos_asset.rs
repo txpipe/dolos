@@ -157,4 +157,16 @@ mod tests {
         );
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
     }
+    /// An asset with an odd count of hex digits is malformed here, though
+    /// `/assets/{asset}` and its history take it for a valid shape.
+    #[tokio::test]
+    async fn addresses_utxos_asset_odd_subject_bad_request() {
+        let app = TestApp::new();
+        let address = app.vectors().address.clone();
+
+        for asset in crate::routes::assets::testing::odd_assets() {
+            let path = format!("/addresses/{address}/utxos/{asset}");
+            assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+        }
+    }
 }
