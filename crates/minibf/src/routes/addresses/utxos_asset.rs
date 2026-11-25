@@ -126,6 +126,30 @@ mod tests {
         }
     }
 
+    /// Blockfrost finds an asset only from its lowercase hex, here as on the
+    /// asset routes: an uppercase digit gives 404, and it hides neither an
+    /// invalid shape nor a refused query parameter.
+    #[tokio::test]
+    async fn addresses_utxos_asset_finds_nothing_from_uppercase_hex() {
+        use crate::routes::assets::testing::uppercase_spellings;
+
+        let app = TestApp::new();
+        let address = app.vectors().address.clone();
+        let unit = app.vectors().asset_unit.clone();
+        let path = |unit: &str| format!("/addresses/{address}/utxos/{unit}");
+
+        assert!(!utxo_page(&app, &path(&unit)).await.is_empty());
+
+        for spelling in uppercase_spellings(&unit) {
+            assert_status(&app, &path(&spelling), StatusCode::NOT_FOUND).await;
+        }
+
+        assert_status(&app, &path(&"Z".repeat(56)), StatusCode::BAD_REQUEST).await;
+
+        let upper = format!("{}?count=0", path(&unit.to_ascii_uppercase()));
+        assert_status(&app, &upper, StatusCode::BAD_REQUEST).await;
+    }
+
     /// An asset the chain saw but no live UTxO holds is an empty page; one the
     /// chain never saw is a 404 on a live address; a held asset on an address
     /// the chain never saw is a 404 too.

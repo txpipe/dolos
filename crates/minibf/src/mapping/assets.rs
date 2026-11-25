@@ -989,6 +989,47 @@ mod tests {
 
     /// The asset body has the bytes that `serde_json` encodes for the sorted
     /// asset.
+    /// Blockfrost takes an uppercase hex digit as part of a valid id, then
+    /// finds nothing from it: the id is neither decoded nor malformed.
+    #[test]
+    fn ids_with_an_uppercase_digit_are_valid_and_find_nothing() {
+        fn not_found<T>(res: Result<T, Error>) -> bool {
+            matches!(res, Err(Error::Code(StatusCode::NOT_FOUND)))
+        }
+
+        let policy = "ab".repeat(28);
+        let subject = format!("{policy}cd");
+
+        assert_eq!(
+            decode_asset_subject(&subject).unwrap(),
+            [vec![0xab; 28], vec![0xcd]].concat()
+        );
+        assert!(not_found(decode_asset_subject(&subject.to_uppercase())));
+        assert!(not_found(decode_asset_subject(&format!("{policy}cD"))));
+        assert!(not_found(decode_asset_subject(&format!(
+            "A{}",
+            &subject[1..]
+        ))));
+
+        assert_eq!(
+            decode_policy_id(&policy).unwrap().as_slice(),
+            [0xab; 28].as_slice()
+        );
+        assert!(not_found(decode_policy_id(&policy.to_uppercase())));
+        assert!(not_found(decode_policy_id(&format!("A{}", &policy[1..]))));
+
+        // an invalid shape stays malformed in either letter case
+        for id in ["AB".repeat(27), "ZZ".repeat(28), "AB".repeat(61)] {
+            assert!(matches!(
+                decode_asset_subject(&id),
+                Err(Error::InvalidAsset)
+            ));
+        }
+        for id in ["AB".repeat(27), "ZZ".repeat(28), "AB".repeat(29)] {
+            assert!(matches!(decode_policy_id(&id), Err(Error::InvalidPolicy)));
+        }
+    }
+
     #[test]
     fn asset_body_matches_serde() {
         let unit = format!("{POLICY}{}", hex::encode("james"));
