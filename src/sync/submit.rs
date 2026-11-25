@@ -12,11 +12,12 @@ use opentelemetry::{
 };
 use pallas::crypto::hash::Hash;
 use pallas::ledger::traverse::MultiEraTx;
-use pallas::network::facades::PeerClient;
+use pallas::network::facades::{self, PeerClient};
 use pallas::network::miniprotocols::txsubmission::{
     self, EraTxBody, EraTxId, Request, TxIdAndSize,
 };
 use std::time::Duration;
+use tokio::task::JoinError;
 use tracing::{debug, info, warn};
 
 use super::retry::{Attempts, Failure};
@@ -187,11 +188,22 @@ impl Worker {
         offer
     }
 
-    fn txsubmission(&mut self) -> &mut txsubmission::Client {
+    fn session(&mut self) -> &mut PeerClient {
         self.peer_session
             .as_mut()
             .expect("the session is open until teardown")
-            .txsubmission()
+    }
+
+    fn txsubmission(&mut self) -> &mut txsubmission::Client {
+        self.session().txsubmission()
+    }
+
+    /// Close a session whose keep-alive loop ended. Its handle is spent, so
+    /// teardown must not await it again.
+    async fn close_without_keepalive(&mut self) {
+        if let Some(session) = self.peer_session.take() {
+            session.plexer.abort().await;
+        }
     }
 
     async fn propagate_txs(
@@ -248,7 +260,17 @@ impl Worker {
             // we wait a few secs to avoid turning this stage into a hot loop.
             // TODO: we need to watch the mempool and abort the wait if there's a change in
             // the list of available txs.
-            tokio::time::sleep(Duration::from_secs(10)).await;
+            let keepalive = tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(10)) => None,
+                // Nothing else uses the connection while idle, so only this sees it end.
+                result = &mut self.session().keepalive => Some(result),
+            };
+
+            if let Some(result) = keepalive {
+                self.close_without_keepalive().await;
+                reconnecting(&keepalive_failure(result));
+                return Err(WorkerError::Restart);
+            }
 
             // we store the request again so that the next schedule knows we're still
             // waiting for new transactions.
@@ -382,7 +404,23 @@ impl gasket::framework::Worker<Stage> for Worker {
 
 /// A session that ended once the peer had asked: it reconnects at once.
 fn ended(what: &str, error: &txsubmission::Error) {
-    warn!(cause = %Failure::new(what, error), "the tx-submission session ended, reconnecting");
+    reconnecting(&Failure::new(what, error));
+}
+
+fn reconnecting(cause: &Failure) {
+    warn!(%cause, "the tx-submission session ended, reconnecting");
+}
+
+/// Why the keep-alive loop ended.
+fn keepalive_failure(result: Result<Result<(), facades::Error>, JoinError>) -> Failure {
+    const WHAT: &str = "keeping the connection alive";
+
+    match result {
+        Ok(Err(facades::Error::KeepAliveClientLoop(error))) => Failure::new(WHAT, &error),
+        Ok(Err(error)) => Failure::new(WHAT, &error),
+        Ok(Ok(())) => Failure::message(format!("{WHAT}: the loop stopped")),
+        Err(error) => Failure::new(WHAT, &error),
+    }
 }
 
 #[derive(Stage)]
@@ -833,6 +871,21 @@ mod tests {
         worker.acknowledge_propagated(&stage, 1).unwrap();
 
         assert!(stage.unacknowledged_offers.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_keepalive_that_lost_its_connection_says_so() {
+        use pallas::network::miniprotocols::keepalive;
+        use pallas::network::multiplexer;
+
+        let lost = keepalive::ClientError::Plexer(multiplexer::Error::AgentDequeue);
+        let failure = keepalive_failure(Ok(Err(facades::Error::KeepAliveClientLoop(lost))));
+
+        assert_eq!(
+            failure.to_string(),
+            "keeping the connection alive: error while sending or receiving data through the \
+             channel: the connection closed"
+        );
     }
 
     #[test]

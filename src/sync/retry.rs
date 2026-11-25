@@ -11,7 +11,7 @@ use std::time::Duration;
 use dolos_core::config::RetryConfig;
 use gasket::framework::WorkerError;
 use pallas::network::facades;
-use pallas::network::miniprotocols::{blockfetch, chainsync, handshake, txsubmission};
+use pallas::network::miniprotocols::{blockfetch, chainsync, handshake, keepalive, txsubmission};
 use pallas::network::multiplexer;
 use tracing::{error, warn};
 
@@ -110,6 +110,10 @@ fn plexer_error<'a>(error: &'a (dyn StdError + 'static)) -> Option<&'a multiplex
     }
 
     if let Some(handshake::Error::Plexer(inner)) = error.downcast_ref() {
+        return Some(inner);
+    }
+
+    if let Some(keepalive::ClientError::Plexer(inner)) = error.downcast_ref() {
         return Some(inner);
     }
 
