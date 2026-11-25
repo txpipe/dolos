@@ -174,3 +174,291 @@ pub async fn metadata<C: CacheStore>(cache: &C, url: &str, unit: &str) -> Option
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{extract::Path, routing::get, Router};
+    use dolos_core::{config::CacheConfig, QueryLimiter, TieredCache};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
+    use tokio::{sync::Semaphore, task::JoinHandle, time::Instant};
+
+    /// A unit with an entry and a unit without one.
+    const REGISTERED: &str = "7c7c7c7c";
+    const UNREGISTERED: &str = "0000";
+
+    /// The name that makes the registry fail on [`REGISTERED`].
+    const FAILING: &str = "fail";
+
+    fn memory_cache(namespace: CacheNamespace) -> impl CacheStore {
+        let cache = TieredCache::memory(&CacheConfig::default(), QueryLimiter::default());
+        cache.register(namespace).unwrap();
+        cache
+    }
+
+    fn entry(name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "subject": REGISTERED,
+            "name": { "value": name, "sequenceNumber": 0, "signatures": [] },
+            "description": { "value": "a registered token" },
+            "ticker": { "value": "REG" },
+            "decimals": { "value": 4 },
+        })
+    }
+
+    fn metadata_named(name: &str) -> AssetMetadata {
+        AssetMetadata {
+            name: name.to_string(),
+            description: "a registered token".to_string(),
+            ticker: Some("REG".to_string()),
+            url: None,
+            logo: None,
+            decimals: Some(4),
+        }
+    }
+
+    /// A registry that answers [`REGISTERED`] with the entry named `name`, or
+    /// 502 while that is [`FAILING`], [`UNREGISTERED`] with 204, `undescribed`
+    /// with an entry that has no description, and any other unit with 500. It
+    /// records the units it is asked for.
+    struct Registry {
+        url: String,
+        name: Arc<Mutex<String>>,
+        asked: Arc<Mutex<Vec<String>>>,
+        server: JoinHandle<()>,
+    }
+
+    impl Registry {
+        async fn start(name: &str) -> Self {
+            let name = Arc::new(Mutex::new(name.to_string()));
+            let asked: Arc<Mutex<Vec<String>>> = Default::default();
+
+            let router = Router::new().route(
+                "/metadata/{unit}",
+                get({
+                    let (name, asked) = (name.clone(), asked.clone());
+
+                    move |Path(unit): Path<String>| {
+                        let (name, asked) = (name.clone(), asked.clone());
+
+                        async move {
+                            asked.lock().unwrap().push(unit.clone());
+                            let name = name.lock().unwrap().clone();
+
+                            match unit.as_str() {
+                                REGISTERED if name == FAILING => {
+                                    (StatusCode::BAD_GATEWAY, String::new())
+                                }
+                                REGISTERED => (StatusCode::OK, entry(&name).to_string()),
+                                UNREGISTERED => (StatusCode::NO_CONTENT, String::new()),
+                                "undescribed" => (
+                                    StatusCode::OK,
+                                    serde_json::json!({ "name": { "value": "x" } }).to_string(),
+                                ),
+                                _ => (StatusCode::INTERNAL_SERVER_ERROR, String::new()),
+                            }
+                        }
+                    }
+                }),
+            );
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+            Self {
+                url,
+                name,
+                asked,
+                server,
+            }
+        }
+
+        fn answer(&self, name: &str) {
+            *self.name.lock().unwrap() = name.to_string();
+        }
+
+        fn asked(&self, unit: &str) -> usize {
+            self.asked
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|x| *x == unit)
+                .count()
+        }
+    }
+
+    impl Drop for Registry {
+        fn drop(&mut self) {
+            self.server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn an_entry_is_asked_for_once() {
+        let registry = Registry::start("first").await;
+        let cache = memory_cache(TOKEN_REGISTRY);
+
+        for _ in 0..3 {
+            let found = metadata(&cache, &registry.url, REGISTERED).await;
+            assert_eq!(found, Some(metadata_named("first")));
+        }
+
+        assert_eq!(registry.asked(REGISTERED), 1);
+    }
+
+    /// 204, and an entry Blockfrost could not serve, are answers: the unit
+    /// has no metadata, and the registry is not asked again.
+    #[tokio::test]
+    async fn not_registered_is_kept_too() {
+        let registry = Registry::start("first").await;
+        let cache = memory_cache(TOKEN_REGISTRY);
+
+        for unit in [UNREGISTERED, "undescribed"] {
+            for _ in 0..3 {
+                assert_eq!(metadata(&cache, &registry.url, unit).await, None);
+            }
+
+            assert_eq!(registry.asked(unit), 1, "{unit}");
+        }
+    }
+
+    /// A failed request is no answer: the unit has no metadata for now, and
+    /// the next lookup asks again.
+    #[tokio::test]
+    async fn a_failure_is_not_kept() {
+        let registry = Registry::start("first").await;
+        let cache = memory_cache(TOKEN_REGISTRY);
+
+        for _ in 0..3 {
+            assert_eq!(metadata(&cache, &registry.url, "elsewhere").await, None);
+        }
+
+        assert_eq!(registry.asked("elsewhere"), 3);
+
+        let unreachable = "http://127.0.0.1:1";
+        assert_eq!(metadata(&cache, unreachable, REGISTERED).await, None);
+        assert_eq!(cache.get(TOKEN_REGISTRY.name, REGISTERED.as_bytes()), None);
+    }
+
+    /// Past its time limit an answer is served while one request replaces
+    /// it, and a request that fails keeps it.
+    #[tokio::test]
+    async fn an_old_answer_is_served_until_a_new_one_arrives() {
+        let registry = Registry::start("first").await;
+        let stale = CacheNamespace::tip_scoped(TOKEN_REGISTRY.name, 1, Duration::ZERO)
+            .with_fill_limits(MAX_CONCURRENT_FETCHES, MAX_PENDING_FETCHES);
+        let cache = memory_cache(stale);
+
+        let first = Some(metadata_named("first"));
+        assert_eq!(metadata(&cache, &registry.url, REGISTERED).await, first);
+
+        // the registry fails: each lookup gets the old answer, and a third
+        // request means the refill of the second ended, failed, and kept it
+        registry.answer(FAILING);
+        let deadline = Instant::now() + Duration::from_secs(10);
+
+        while registry.asked(REGISTERED) < 3 {
+            assert_eq!(metadata(&cache, &registry.url, REGISTERED).await, first);
+            assert!(Instant::now() < deadline, "no refill started");
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+
+        assert_eq!(metadata(&cache, &registry.url, REGISTERED).await, first);
+
+        // the registry answers again: the lookup that starts the refill gets
+        // the old answer, a later one the new
+        registry.answer("second");
+        let second = Some(metadata_named("second"));
+
+        loop {
+            let found = metadata(&cache, &registry.url, REGISTERED).await;
+
+            if found == second {
+                break;
+            }
+
+            assert_eq!(found, first);
+            assert!(Instant::now() < deadline, "the new answer never arrived");
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    /// Lookups of many units ask the registry at most
+    /// [`MAX_CONCURRENT_FETCHES`] at a time, those past
+    /// [`MAX_PENDING_FETCHES`] included, and each gets its answer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_registry_is_asked_a_bounded_number_at_once() {
+        const UNITS: usize = MAX_PENDING_FETCHES + 36;
+
+        let gate = Arc::new(Semaphore::new(0));
+        let (running, most) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+
+        let router = Router::new().route(
+            "/metadata/{unit}",
+            get({
+                let (gate, running, most) = (gate.clone(), running.clone(), most.clone());
+
+                move || {
+                    let (gate, running, most) = (gate.clone(), running.clone(), most.clone());
+
+                    async move {
+                        let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                        most.fetch_max(now, Ordering::SeqCst);
+                        let _permit = gate.acquire().await.unwrap();
+                        running.fetch_sub(1, Ordering::SeqCst);
+
+                        StatusCode::NO_CONTENT
+                    }
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let cache = memory_cache(TOKEN_REGISTRY);
+
+        let lookups: Vec<_> = (0..UNITS)
+            .map(|i| {
+                let (cache, url) = (cache.clone(), url.clone());
+                tokio::spawn(async move { metadata(&cache, &url, &format!("{i:04x}")).await })
+            })
+            .collect();
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while running.load(Ordering::SeqCst) < MAX_CONCURRENT_FETCHES {
+            assert!(Instant::now() < deadline, "{running:?}");
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+
+        // room for any request past the bound to arrive
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(most.load(Ordering::SeqCst), MAX_CONCURRENT_FETCHES);
+
+        gate.add_permits(UNITS);
+
+        for lookup in lookups {
+            assert_eq!(lookup.await.unwrap(), None);
+        }
+
+        server.abort();
+        assert_eq!(most.load(Ordering::SeqCst), MAX_CONCURRENT_FETCHES);
+    }
+
+    /// Without the namespace, the registry is asked on every lookup.
+    #[tokio::test]
+    async fn without_the_namespace_every_lookup_asks() {
+        let registry = Registry::start("first").await;
+        let cache = TieredCache::memory(&CacheConfig::default(), QueryLimiter::default());
+
+        for _ in 0..2 {
+            let found = metadata(&cache, &registry.url, REGISTERED).await;
+            assert_eq!(found, Some(metadata_named("first")));
+        }
+
+        assert_eq!(registry.asked(REGISTERED), 2);
+    }
+}
