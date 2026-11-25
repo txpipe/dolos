@@ -6,11 +6,10 @@ use axum::{
 use blockfrost_openapi::models::asset_policy_inner::AssetPolicyInner;
 use dolos_cardano::{indexes::SlotOrder, periods::first_mints};
 use dolos_core::{Domain, DomainError};
-use pallas::crypto::hash::Hash;
 
 use crate::{
     error::Error,
-    mapping::assets::asset_quantities,
+    mapping::assets::{asset_quantities, decode_policy_id},
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
@@ -27,10 +26,7 @@ where
 {
     let pagination = Pagination::try_from(params)?;
 
-    let policy = hex::decode(&policy_hex).map_err(|_| Error::InvalidPolicy)?;
-    let policy: Hash<28> = <[u8; 28]>::try_from(policy.as_slice())
-        .map_err(|_| Error::InvalidPolicy)?
-        .into();
+    let policy = decode_policy_id(&policy_hex)?;
 
     let chain = domain.get_chain_summary()?;
     let Some(mary_epoch) = chain.first_mary_epoch() else {

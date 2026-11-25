@@ -760,12 +760,43 @@ pub(crate) fn walks_reference_token(unit: &str) -> bool {
 /// Decodes an asset subject: a 56 hex char policy id plus up to 64 hex chars
 /// of asset name. Blockfrost rejects any other shape with 400 before looking
 /// the asset up.
+///
+/// An uppercase hex digit is part of a valid shape. But Blockfrost finds an
+/// asset only from its lowercase hex. Thus, a subject with an uppercase digit
+/// gives the 404 of an asset the chain never saw.
 pub(crate) fn decode_asset_subject(subject: &str) -> Result<Vec<u8>, Error> {
     if !(56..=120).contains(&subject.len()) {
         return Err(Error::InvalidAsset);
     }
 
-    hex::decode(subject).map_err(|_| Error::InvalidAsset)
+    decode_lowercase_id(subject, Error::InvalidAsset)
+}
+
+/// Decodes a policy id: 56 hex chars. Blockfrost rejects any other shape with
+/// 400. A policy id with an uppercase digit gives 404, as an asset subject
+/// with one does.
+pub(crate) fn decode_policy_id(policy: &str) -> Result<Hash<28>, Error> {
+    if policy.len() != 56 {
+        return Err(Error::InvalidPolicy);
+    }
+
+    let policy = decode_lowercase_id(policy, Error::InvalidPolicy)?;
+    let policy = <[u8; 28]>::try_from(policy.as_slice()).map_err(|_| Error::InvalidPolicy)?;
+
+    Ok(policy.into())
+}
+
+/// Decodes the hex of an id of a valid length. Text that is not hex gives
+/// `malformed`. Hex with an uppercase digit is well formed, but Blockfrost
+/// compares the id as written with lowercase hex, so it gives 404.
+fn decode_lowercase_id(id: &str, malformed: Error) -> Result<Vec<u8>, Error> {
+    let bytes = hex::decode(id).map_err(|_| malformed)?;
+
+    if id.bytes().any(|c| c.is_ascii_uppercase()) {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    Ok(bytes)
 }
 
 fn log_500(error: impl std::fmt::Debug) -> StatusCode {
