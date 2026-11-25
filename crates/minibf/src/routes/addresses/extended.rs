@@ -94,9 +94,11 @@ where
         .try_collect()
         .await?;
 
+    let cache = domain.inner.cache();
+
     let amount = futures_util::stream::iter(onchain)
         .map(|(entry, extras)| async move {
-            let extras = extras.with_registry().await?;
+            let extras = extras.with_registry(cache).await;
 
             Ok::<_, Error>(AddressContentExtendedAmountInner {
                 unit: entry.unit,

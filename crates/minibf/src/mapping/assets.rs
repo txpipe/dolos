@@ -2,7 +2,7 @@
 //! the off-chain token-registry metadata and the per-unit facts an amount
 //! entry reports.
 
-use std::{collections::HashMap, ops::Deref, sync::OnceLock, time::Duration};
+use std::{collections::HashMap, ops::Deref};
 
 use axum::{http::StatusCode, Json};
 use blockfrost_openapi::models::{
@@ -19,7 +19,7 @@ use dolos_cardano::{
     periods::assets::{self, AssetSummary, WalkBudget},
     ChainSummary,
 };
-use dolos_core::{BlockSlot, Domain, EraCbor};
+use dolos_core::{BlockSlot, CacheStore, Domain, EraCbor};
 use futures_util::{StreamExt as _, TryStreamExt as _};
 
 use pallas::{
@@ -31,7 +31,6 @@ use pallas::{
         validate::phase2::to_plutus_data::ToPlutusData,
     },
 };
-use serde::Deserialize;
 
 use crate::{
     error::Error,
@@ -40,7 +39,7 @@ use crate::{
         direct_json::{drop_value, ValueBody},
         sorted_json,
     },
-    Facade,
+    token_registry, Facade,
 };
 
 struct OnchainMetadata {
@@ -224,42 +223,6 @@ impl Drop for OnchainMetadata {
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct TokenRegistryValue<T> {
-    pub value: T,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct TokenRegistryMetadata {
-    pub name: Option<TokenRegistryValue<String>>,
-    pub description: Option<TokenRegistryValue<String>>,
-    pub ticker: Option<TokenRegistryValue<String>>,
-    pub url: Option<TokenRegistryValue<String>>,
-    pub logo: Option<TokenRegistryValue<String>>,
-    pub decimals: Option<TokenRegistryValue<i32>>,
-}
-
-impl From<TokenRegistryMetadata> for OffchainMetadata {
-    fn from(token_registry_asset: TokenRegistryMetadata) -> Self {
-        Self {
-            name: token_registry_asset.name.as_ref().unwrap().value.clone(),
-            description: token_registry_asset
-                .description
-                .as_ref()
-                .unwrap()
-                .value
-                .clone(),
-            ticker: token_registry_asset
-                .ticker
-                .as_ref()
-                .map(|v| v.value.clone()),
-            url: token_registry_asset.url.as_ref().map(|v| v.value.clone()),
-            logo: token_registry_asset.logo.as_ref().map(|v| v.value.clone()),
-            decimals: token_registry_asset.decimals.as_ref().map(|v| v.value),
-        }
-    }
-}
-
 /// Returns the object in `value`. A value of another kind is freed with
 /// [`drop_value`].
 fn take_object(
@@ -413,68 +376,6 @@ where
     Ok(last_metadata)
 }
 
-/// The time limit for one token-registry request. The client applies this
-/// limit. Each request also applies it, so the limit holds even if the client
-/// falls back to the default and loses its own limit.
-const TOKEN_REGISTRY_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// The HTTP client that every token-registry request shares. `reqwest::Client`
-/// holds an internal connection pool, so one instance reuses DNS and TLS across
-/// the many concurrent lookups that `/addresses/{address}/extended` starts.
-///
-/// `get_or_init` builds the client one time. Two concurrent calls do not
-/// build two clients. The builder fails only when the TLS backend does not
-/// start. In that case, this function uses the default client. As a result,
-/// the caller gets a client and does not handle a `Result`. The default
-/// client has no time limit, so each request applies `TOKEN_REGISTRY_TIMEOUT`
-/// on its own.
-fn token_registry_client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(TOKEN_REGISTRY_TIMEOUT)
-            .user_agent("Dolos MiniBF")
-            .build()
-            .unwrap_or_default()
-    })
-}
-
-/// Asks the token registry at `url` for the metadata of `asset`.
-async fn token_registry_metadata(
-    url: &str,
-    asset: &str,
-) -> Result<Option<OffchainMetadata>, StatusCode> {
-    // TODO: apply memory cache
-    let url = format!("{url}/metadata/{asset}");
-
-    // The off-chain metadata adds to the response. It is not necessary.
-    // If the token registry does not answer, or sends data that does not
-    // parse, the code reports no metadata. The request does not fail.
-    let Ok(res) = token_registry_client()
-        .get(&url)
-        .timeout(TOKEN_REGISTRY_TIMEOUT)
-        .send()
-        .await
-    else {
-        return Ok(None);
-    };
-
-    if res.status() != StatusCode::OK {
-        return Ok(None);
-    }
-
-    let Ok(metadata) = res.json::<TokenRegistryMetadata>().await else {
-        return Ok(None);
-    };
-
-    if metadata.name.is_none() || metadata.description.is_none() {
-        return Ok(None);
-    }
-
-    Ok(Some(metadata.into()))
-}
-
 pub struct AssetModelBuilder {
     pub subject: Vec<u8>,
     pub unit: String,
@@ -564,11 +465,9 @@ impl AssetModelBuilder {
         Ok(None)
     }
 
-    async fn offchain_metadata(&self, asset: &str) -> Result<Option<OffchainMetadata>, StatusCode> {
-        match &self.registry_url {
-            Some(url) => token_registry_metadata(url, asset).await,
-            None => Ok(None),
-        }
+    async fn offchain_metadata<C: CacheStore>(&self, cache: &C) -> Option<OffchainMetadata> {
+        let url = self.registry_url.as_deref()?;
+        token_registry::metadata(cache, url, &self.unit).await
     }
 
     pub async fn into_model<D>(self, domain: &Facade<D>) -> Result<Asset, StatusCode>
@@ -579,7 +478,10 @@ impl AssetModelBuilder {
         let asset = self.subject[28..].to_vec();
 
         let onchain = self.onchain_metadata(domain).await?;
-        let metadata = self.offchain_metadata(&self.unit).await?.map(Box::new);
+        let metadata = self
+            .offchain_metadata(domain.inner.cache())
+            .await
+            .map(Box::new);
         let fingerprint = asset_fingerprint(&self.subject)?;
 
         // moves the on-chain metadata instead of copying it. until here, an
@@ -728,20 +630,20 @@ impl OnchainExtras {
     }
 
     /// The extras, with the registry's decimal places where it is asked.
-    pub async fn with_registry(self) -> Result<AssetAmountExtras, Error> {
+    pub async fn with_registry<C: CacheStore>(self, cache: &C) -> AssetAmountExtras {
         let Some((url, unit)) = self.registry else {
-            return Ok(self.extras);
+            return self.extras;
         };
 
-        let registry = token_registry_metadata(&url, &unit).await?;
+        let registry = token_registry::metadata(cache, &url, &unit).await;
 
-        Ok(AssetAmountExtras {
+        AssetAmountExtras {
             decimals: self
                 .extras
                 .decimals
                 .or_else(|| registry.and_then(|metadata| metadata.decimals)),
             ..self.extras
-        })
+        }
     }
 }
 

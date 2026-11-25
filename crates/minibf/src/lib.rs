@@ -46,6 +46,7 @@ mod routes;
 pub(crate) mod scan;
 #[cfg(test)]
 mod test_support;
+pub(crate) mod token_registry;
 pub(crate) mod utxos;
 
 /// Registers the `/network` namespace, as the router does, for tools that
@@ -55,6 +56,10 @@ pub use routes::network::register_cache as register_network_cache;
 /// Registers the off-chain metadata namespaces, as the router does, for tools
 /// that work on the cache without serving.
 pub use offchain::register as register_governance_caches;
+
+/// Registers the token registry namespace, as the router does, for tools that
+/// work on the cache without serving.
+pub use token_registry::register as register_token_registry_cache;
 
 pub(crate) fn log_and_500<E: std::fmt::Debug>(context: &str) -> impl Fn(E) -> StatusCode + '_ {
     move |err| {
@@ -368,6 +373,12 @@ where
     }
 
     offchain::register(facade.cache());
+
+    // tip-scoped, so it opens no disk tier and cannot fail in practice;
+    // without it the registry is asked on every request
+    if let Err(error) = token_registry::register(facade.cache()) {
+        tracing::warn!(%error, "token registry cache not registered");
+    }
 
     // disposable: without the namespace the totals routes fold uncached
     if let Err(error) = dolos_cardano::periods::stats::register_totals_cache(&facade.inner) {
