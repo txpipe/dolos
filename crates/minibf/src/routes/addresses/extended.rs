@@ -1138,6 +1138,41 @@ mod tests {
             }
         }
 
+        /// A registry URL that ends in a slash still reaches
+        /// `/metadata/{unit}`, and the registry is asked for the subject in
+        /// lowercase, as it spells it, whatever spelling the request uses.
+        /// Blockfrost answers 404 for an asset spelt in uppercase, so that
+        /// request is held to asking nothing more, whatever it answers.
+        #[tokio::test]
+        async fn the_registry_is_asked_for_the_subject_as_it_spells_it() {
+            let native: Token = ([0x7e; 28], b"CASE".to_vec());
+
+            let (url, asked, server) = registry_at_its_metadata_path(vec![(
+                unit_of(&native),
+                serde_json::json!({
+                    "name": { "value": "cased" },
+                    "description": { "value": "a registered token" },
+                }),
+            )])
+            .await;
+
+            let app = app_holding(format!("{url}/"), std::slice::from_ref(&native));
+
+            let (status, bytes) = app
+                .get_bytes(&format!("/assets/{}", unit_of(&native)))
+                .await;
+            assert_eq!(status, StatusCode::OK);
+
+            let asset: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(asset["metadata"]["name"], "cased", "{asset}");
+
+            let uppercase = unit_of(&native).to_uppercase();
+            app.get_bytes(&format!("/assets/{uppercase}")).await;
+
+            server.abort();
+            assert_eq!(*asked.lock().unwrap(), [unit_of(&native)]);
+        }
+
         /// Finding T1 of the fifth QA review of dolos#1524: a request asks the
         /// registry for at most [`EXTENDED_ASSET_CONCURRENCY`] units at once.
         /// The registry never answers, and the address holds twice as many

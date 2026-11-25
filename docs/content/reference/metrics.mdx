@@ -181,7 +181,7 @@ Under the `dolos-core` meter; [Cache](../operations/cache#metrics) explains how 
 | `dolos.cache.entries`<br />`dolos_cache_entries` | `dolos-core` | gauge, `{entry}` | `namespace`, `tier` | Entries held |
 | `dolos.cache.bytes`<br />`dolos_cache_bytes` | `dolos-core` | gauge, `By` | `namespace`, `tier` | Bytes held |
 
-- `namespace` is a registered cache namespace: `totals`, `assets`, `pool-registrations`, `pool-blocks`, `network`, `offchain`, `offchain-failures` and `token-registry`.
+- `namespace` is a registered cache namespace: `totals`, `assets`, `pool-registrations`, `pool-blocks`, `network`, `offchain`, `offchain-failures`, `token-registry` and `token-registry-failures`.
 - `tier` is `memory` or `disk`. Evictions are the memory tier's; the disk tier's own are not counted.
 - A fill is the computation of an answer after a miss on every tier, a failed one included; its duration is how long the computation took.
 

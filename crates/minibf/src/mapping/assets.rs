@@ -467,7 +467,10 @@ impl AssetModelBuilder {
 
     async fn offchain_metadata<C: CacheStore>(&self, cache: &C) -> Option<OffchainMetadata> {
         let url = self.registry_url.as_deref()?;
-        token_registry::metadata(cache, url, &self.unit).await
+
+        // the registry spells a subject in lowercase, whatever the request
+        // spelled its unit in
+        token_registry::metadata(cache, url, &hex::encode(&self.subject)).await
     }
 
     pub async fn into_model<D>(self, domain: &Facade<D>) -> Result<Asset, StatusCode>
@@ -792,7 +795,7 @@ where
         unit,
         summary,
         initial_tx,
-        registry_url: domain.config.token_registry_url.clone(),
+        registry_url: token_registry::base_url(domain.config.token_registry_url.as_deref()),
         chain,
         tip,
         budget: budget.clone(),
