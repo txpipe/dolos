@@ -5,7 +5,7 @@ use dolos_core::Domain;
 use crate::{
     error::Error,
     mapping::{
-        assets::{asset_json, load_asset_builder},
+        assets::{asset_json, load_asset_builder, odd_subject_not_found},
         direct_json::DirectJson,
     },
     Facade,
@@ -18,6 +18,8 @@ pub async fn by_subject<D>(
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
+    odd_subject_not_found(&unit)?;
+
     let budget = WalkBudget::new(domain.config.max_scan_items());
     let model = load_asset_builder(&domain, unit, &budget).await?;
 

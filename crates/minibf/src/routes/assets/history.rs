@@ -52,6 +52,8 @@ where
 
     let pagination = Pagination::try_from(params)?;
 
+    crate::mapping::assets::odd_subject_not_found(&subject)?;
+
     let (subject, initial_slot) = crate::mapping::assets::resolve_asset(&domain, &subject).await?;
 
     let chain = domain.get_chain_summary()?;
