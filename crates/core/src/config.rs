@@ -1272,6 +1272,39 @@ impl TelemetryConfig {
     }
 }
 
+/// The status file a running node keeps, and the lock beside it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct HealthConfig {
+    /// The status file, relative to `storage.path`; default `status.json`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    /// How often the node rewrites it.
+    pub write_interval_seconds: NonZeroU64,
+}
+
+impl HealthConfig {
+    pub const DEFAULT_WRITE_INTERVAL_SECONDS: u64 = 5;
+
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// How often the node rewrites the status file.
+    pub fn write_interval(&self) -> Duration {
+        Duration::from_secs(self.write_interval_seconds.get())
+    }
+}
+
+impl Default for HealthConfig {
+    fn default() -> Self {
+        Self {
+            path: None,
+            write_interval_seconds: NonZeroU64::new(Self::DEFAULT_WRITE_INTERVAL_SECONDS).unwrap(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RootConfig {
@@ -1305,6 +1338,9 @@ pub struct RootConfig {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry: Option<TelemetryConfig>,
+
+    #[serde(default, skip_serializing_if = "HealthConfig::is_default")]
+    pub health: HealthConfig,
 }
 
 impl RootConfig {
@@ -1323,6 +1359,7 @@ impl RootConfig {
             relay: None,
             logging: LoggingConfig::default(),
             telemetry: None,
+            health: HealthConfig::default(),
         }
     }
 
@@ -1345,6 +1382,20 @@ impl RootConfig {
         self.mempool
             .persistent
             .then(|| self.storage.resolve(self.mempool.path.as_ref(), "mempool"))
+    }
+
+    /// The status file a running `daemon` or `serve` keeps.
+    pub fn status_path(&self) -> PathBuf {
+        self.storage
+            .resolve(self.health.path.as_ref(), "status.json")
+    }
+
+    /// The lock a running node holds on the status file: beside it, its name
+    /// with `.lock` added.
+    pub fn status_lock_path(&self) -> PathBuf {
+        let mut name = self.status_path().into_os_string();
+        name.push(".lock");
+        PathBuf::from(name)
     }
 
     /// Whether the node keeps a block archive at all.
@@ -2276,6 +2327,49 @@ mod tests {
             Err(ConfigError::Invalid { message, .. }) => message,
             other => panic!("expected a validation error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_status_file_sits_under_the_storage_root_unless_overridden() {
+        let mut config = preview();
+        config.storage.path = PathBuf::from("/srv/dolos");
+
+        assert_eq!(config.status_path(), Path::new("/srv/dolos/status.json"));
+        assert_eq!(
+            config.status_lock_path(),
+            Path::new("/srv/dolos/status.json.lock")
+        );
+
+        config.health.path = Some("health/node.json".into());
+        assert_eq!(
+            config.status_path(),
+            Path::new("/srv/dolos/health/node.json")
+        );
+        assert_eq!(
+            config.status_lock_path(),
+            Path::new("/srv/dolos/health/node.json.lock")
+        );
+
+        let elsewhere = std::env::temp_dir().join("node.json");
+        config.health.path = Some(elsewhere.clone());
+        assert_eq!(config.status_path(), elsewhere);
+    }
+
+    #[test]
+    fn the_status_file_is_rewritten_every_five_seconds_unless_set() {
+        let health = HealthConfig::default();
+        assert_eq!(health.write_interval(), Duration::from_secs(5));
+        assert!(preview().health.is_default());
+
+        let set: HealthConfig =
+            serde_json::from_value(json!({ "write_interval_seconds": 30 })).unwrap();
+        assert_eq!(set.write_interval(), Duration::from_secs(30));
+
+        let zero = serde_json::from_value::<HealthConfig>(json!({ "write_interval_seconds": 0 }));
+        assert!(zero.is_err(), "{zero:?}");
+
+        let unknown = serde_json::from_value::<HealthConfig>(json!({ "interval": 5 }));
+        assert!(unknown.is_err(), "{unknown:?}");
     }
 
     #[test]

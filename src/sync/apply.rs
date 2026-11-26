@@ -90,8 +90,9 @@ impl Stage {
         debug!("handling roll forward");
 
         match self.domain.roll_forward(block) {
-            Ok(_) => {
+            Ok(slot) => {
                 self.blocks.inc(1);
+                self.progress.note_applied(slot);
                 Ok(())
             }
             Err(DomainError::StopEpochReached) => {
@@ -110,6 +111,7 @@ impl Stage {
         // nothing: only a rollback that undid blocks counts.
         if self.domain.rollback(point).or_panic()? > 0 {
             self.rollbacks.inc(1);
+            self.progress.note_applied(point.slot());
         }
 
         Ok(())

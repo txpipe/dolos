@@ -2,10 +2,11 @@ use dolos_cardano::networks::ResolvedNetwork;
 use dolos_core::config::{
     EmulatorConfig, PeerConfig, RetryConfig, RootConfig, SyncConfig, UpstreamConfig,
 };
+use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 
 use crate::adapters::DomainAdapter;
@@ -36,6 +37,43 @@ pub enum SyncLimit {
     CatchUp,
 }
 
+/// What a running sync is doing, as the node's status file reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SyncState {
+    /// No session with the upstream has opened yet.
+    Starting,
+    /// A session is open, and the stores have not yet committed the tip the
+    /// upstream reported when chain-sync first reached it.
+    CatchingUp,
+    /// The stores committed that tip. An emulator upstream, which has no tip
+    /// to catch up to, is followed from its first block.
+    Following,
+    /// The pull stage is retrying the upstream: a session ended, or an
+    /// attempt to open one failed.
+    UpstreamLost,
+}
+
+/// Where the pull stage stands with the upstream. [`SyncProgress`] keeps it
+/// as its `u8`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum Session {
+    Unopened,
+    Open,
+    Retrying,
+}
+
+impl Session {
+    fn from_code(code: u8) -> Self {
+        match code {
+            code if code == Self::Open as u8 => Self::Open,
+            code if code == Self::Retrying as u8 => Self::Retrying,
+            _ => Self::Unopened,
+        }
+    }
+}
+
 /// What a running sync has reached, shared by its stages and read by
 /// whoever runs it.
 #[derive(Debug)]
@@ -48,6 +86,41 @@ pub struct SyncProgress {
     deliveries: AtomicU64,
     /// When they last did.
     last_delivery: Mutex<Option<Instant>>,
+    /// Whether the upstream is the emulator, which produces the chain itself.
+    emulated: bool,
+    /// The pull stage's [`Session`].
+    session: AtomicU8,
+    /// The slot of the tip the upstream reported last, or [`NEVER`].
+    upstream_tip_slot: AtomicU64,
+    /// When the upstream last sent anything, in Unix milliseconds, or
+    /// [`NEVER`].
+    heard_at: AtomicU64,
+    /// When the pipeline last advanced, in Unix milliseconds, or [`NEVER`]:
+    /// a block applied, a rollback that undid blocks, or the upstream
+    /// answering at a tip the stores hold.
+    advanced_at: AtomicU64,
+    /// The slot the stores stand on, as the sync found them and the apply
+    /// stage since left them, or [`NEVER`] when that is unknown.
+    standing_slot: AtomicU64,
+}
+
+/// What an unset reading of [`SyncProgress`] holds.
+const NEVER: u64 = u64::MAX;
+
+fn now_unix_ms() -> u64 {
+    let since = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+
+    u64::try_from(since.as_millis()).unwrap_or(NEVER - 1)
+}
+
+fn reading(value: &AtomicU64) -> Option<u64> {
+    Some(value.load(Ordering::SeqCst)).filter(|value| *value != NEVER)
+}
+
+fn unix_ms(value: &AtomicU64) -> Option<SystemTime> {
+    reading(value).map(|ms| UNIX_EPOCH + Duration::from_millis(ms))
 }
 
 /// Why a stage gave up on the upstream peer.
@@ -79,11 +152,108 @@ impl Default for SyncProgress {
             upstream_failure: OnceLock::new(),
             deliveries: AtomicU64::new(0),
             last_delivery: Mutex::new(None),
+            emulated: false,
+            session: AtomicU8::new(Session::Unopened as u8),
+            upstream_tip_slot: AtomicU64::new(NEVER),
+            heard_at: AtomicU64::new(NEVER),
+            advanced_at: AtomicU64::new(NEVER),
+            standing_slot: AtomicU64::new(NEVER),
         }
     }
 }
 
 impl SyncProgress {
+    /// The progress of a sync over `domain`, whose stores stand where the
+    /// last run left them.
+    fn over(domain: &DomainAdapter) -> Result<Self, Error> {
+        let progress = Self::default();
+        let cursor = domain.state().read_cursor()?;
+        progress.note_standing(cursor.as_ref().map_or(0, ChainPoint::slot));
+
+        Ok(progress)
+    }
+
+    /// [`Self::over`], for a sync from the emulator.
+    fn emulated(domain: &DomainAdapter) -> Result<Self, Error> {
+        Ok(Self {
+            emulated: true,
+            ..Self::over(domain)?
+        })
+    }
+
+    /// What the sync is doing: the pull stage's session first, then whether
+    /// the stores committed the target.
+    pub fn state(&self) -> SyncState {
+        match Session::from_code(self.session.load(Ordering::SeqCst)) {
+            Session::Unopened => SyncState::Starting,
+            Session::Retrying => SyncState::UpstreamLost,
+            Session::Open if self.emulated || self.caught_up() => SyncState::Following,
+            Session::Open => SyncState::CatchingUp,
+        }
+    }
+
+    /// The slot of the tip the upstream reported last; none before the
+    /// first.
+    pub fn upstream_tip_slot(&self) -> Option<u64> {
+        reading(&self.upstream_tip_slot)
+    }
+
+    /// When the upstream last sent anything; none before the first message.
+    pub fn heard_at(&self) -> Option<SystemTime> {
+        unix_ms(&self.heard_at)
+    }
+
+    /// When the pipeline last advanced: a block applied, a rollback that
+    /// undid blocks, or the upstream answering at a tip the stores hold. None
+    /// before the first.
+    pub fn advanced_at(&self) -> Option<SystemTime> {
+        unix_ms(&self.advanced_at)
+    }
+
+    /// A session with the upstream opened.
+    fn note_session_open(&self) {
+        self.session.store(Session::Open as u8, Ordering::SeqCst);
+    }
+
+    /// The pull stage is retrying the upstream: a session ended, or an
+    /// attempt to open one failed.
+    fn note_session_retrying(&self) {
+        self.session
+            .store(Session::Retrying as u8, Ordering::SeqCst);
+    }
+
+    /// The upstream sent a message.
+    fn note_heard(&self) {
+        self.heard_at.store(now_unix_ms(), Ordering::SeqCst);
+    }
+
+    /// The upstream sent a message reporting its tip at `slot`.
+    fn note_upstream_tip(&self, slot: u64) {
+        self.upstream_tip_slot.store(slot, Ordering::SeqCst);
+        self.note_heard();
+    }
+
+    /// The pipeline advanced.
+    fn note_advance(&self) {
+        self.advanced_at.store(now_unix_ms(), Ordering::SeqCst);
+    }
+
+    /// The stores stand on `slot`.
+    fn note_standing(&self, slot: u64) {
+        self.standing_slot.store(slot, Ordering::SeqCst);
+    }
+
+    /// The apply stage moved the stores onto `slot`: the pipeline advanced.
+    fn note_applied(&self, slot: u64) {
+        self.note_standing(slot);
+        self.note_advance();
+    }
+
+    /// Whether the stores stand on `tip` or past its slot.
+    fn stands_on(&self, tip: &ChainPoint) -> bool {
+        reading(&self.standing_slot).is_some_and(|slot| slot >= tip.slot())
+    }
+
     /// The tip the peer reported when chain-sync first reached it; none until
     /// then.
     pub fn target(&self) -> Option<ChainPoint> {
@@ -145,6 +315,7 @@ impl SyncProgress {
     fn note_delivery(&self) {
         self.deliveries.fetch_add(1, Ordering::SeqCst);
         *self.last_delivery.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+        self.note_heard();
     }
 
     /// When a pull session last delivered something; none before the first.
@@ -258,7 +429,7 @@ pub fn sync(
     domain: DomainAdapter,
     export: metrics::MetricsFlush,
 ) -> Result<Pipeline, Error> {
-    let progress = Arc::new(SyncProgress::default());
+    let progress = Arc::new(SyncProgress::over(&domain)?);
 
     let mut pull = pull::Stage::new(
         config,
@@ -322,12 +493,13 @@ pub fn devnet(
     retries: &RetryConfig,
     export: metrics::MetricsFlush,
 ) -> Result<Pipeline, Error> {
-    let progress = Arc::new(SyncProgress::default());
+    let progress = Arc::new(SyncProgress::emulated(&domain)?);
 
     let mut emulator = emulator::Stage::new(
         domain.wal().clone(),
         domain.mempool().clone(),
         emulator_cfg.block_production_interval,
+        progress.clone(),
     );
 
     let mut apply = apply::Stage::new(

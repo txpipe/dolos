@@ -1,3 +1,4 @@
+use dolos::health::{Command, Pipeline};
 use dolos::sync::{metrics::ExportedDaemon, SyncLimit};
 use dolos_core::config::RootConfig;
 use futures_util::stream::FuturesUnordered;
@@ -14,6 +15,8 @@ pub async fn run(config: RootConfig, _args: &Args) -> miette::Result<()> {
     let telemetry = crate::common::setup_tracing(&config)?;
 
     let domain = crate::common::setup_domain(&config)?;
+    let status_lock = crate::common::lock_status(&config)?;
+
     let _limiter_gauges =
         dolos_core::telemetry::queries::LimiterGauges::register(&domain.query_limiter);
 
@@ -32,6 +35,13 @@ pub async fn run(config: RootConfig, _args: &Args) -> miette::Result<()> {
 
     let progress = sync.progress;
     let _sync_gauges = sync.gauges;
+
+    let _status = crate::common::keep_status(
+        &config,
+        status_lock,
+        Command::Daemon,
+        Some(Box::new(Pipeline::new(&progress, &domain))),
+    )?;
 
     let sync = tokio::spawn(crate::common::run_pipeline(
         ExportedDaemon::new(gasket::daemon::Daemon::new(sync.tethers)),

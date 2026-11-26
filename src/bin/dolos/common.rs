@@ -185,6 +185,36 @@ pub fn setup_domain_with_stop_epoch(
         .map_err(|error| render_domain_build_error(&config.storage.path, error))
 }
 
+/// Take the status lock of `config`'s node. Called once the stores are
+/// admitted and before any port binds, so a second node over the same status
+/// file stops here, saying so.
+pub fn lock_status(config: &RootConfig) -> miette::Result<dolos::health::StatusLock> {
+    use dolos::health::{StatusError, StatusLock};
+
+    StatusLock::acquire(&config.status_lock_path()).map_err(|error| match error {
+        StatusError::Held(path) => miette::miette!(
+            help = "another dolos node runs over this status file: stop it first, or give \
+                    this node its own `storage.path` or `health.path`",
+            "the status lock {} is held by another process",
+            path.display()
+        ),
+        error => miette::miette!("taking the status lock: {error}"),
+    })
+}
+
+/// Keep the status file under `lock`: written now, then on its timer, and
+/// removed when the returned value drops.
+pub fn keep_status(
+    config: &RootConfig,
+    lock: dolos::health::StatusLock,
+    command: dolos::health::Command,
+    sync: Option<Box<dyn dolos::health::SyncReport>>,
+) -> miette::Result<dolos::health::StatusFile> {
+    dolos::health::StatusFile::keep(config, lock, command, sync)
+        .into_diagnostic()
+        .context("keeping the status file")
+}
+
 /// A domain over `stores` as they stand, for a command that repairs or rolls
 /// them back itself; see [`DomainBuilder::assemble`].
 pub fn assemble_domain(config: &RootConfig, stores: &Stores) -> miette::Result<DomainAdapter> {
