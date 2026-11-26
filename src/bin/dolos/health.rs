@@ -13,7 +13,7 @@ use dolos::health::check::{self, Bounds, Endpoint, Failure, Mode};
 use dolos::health::Command;
 use dolos_core::config::RootConfig;
 
-use crate::output::{emit, Format, FormatArgs, Probe};
+use crate::output::{emit, Format, FormatArgs, Probe, Usage};
 
 #[derive(Debug, clap::Args)]
 #[command(group(clap::ArgGroup::new("mode").required(true).args(["live", "ready"])))]
@@ -65,12 +65,25 @@ impl Args {
         }
     }
 
-    /// The configuration's bounds, with the flags given over them.
-    fn bounds(&self, config: &RootConfig) -> Bounds {
+    /// The configuration's bounds, with the flags given over them. A write
+    /// age at or below the write interval is refused: it fails a healthy node.
+    fn bounds(&self, config: &RootConfig) -> Result<Bounds, Usage> {
         let seconds = |seconds: NonZeroU64| Duration::from_secs(seconds.get());
         let mut bounds = Bounds::from(&config.health);
 
         if let Some(age) = self.max_write_age_seconds {
+            let interval = config.health.write_interval_seconds;
+            if age <= interval {
+                return Err(Usage::new(
+                    format!(
+                        "--max-write-age-seconds {age} is not greater than \
+                         health.write_interval_seconds {interval}"
+                    ),
+                    Some(
+                        "the node writes once an interval, so a healthy node would fail it".into(),
+                    ),
+                ));
+            }
             bounds.max_write_age = seconds(age);
         }
         if let Some(stall) = self.max_stall_seconds {
@@ -83,14 +96,16 @@ impl Args {
             bounds.max_tip_age = Some(seconds(age));
         }
 
-        bounds
+        Ok(bounds)
     }
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
+    let bounds = args.bounds(config)?;
+
     let mut verdict = check::probe(
         args.mode(),
-        &args.bounds(config),
+        &bounds,
         &config.status_path(),
         &config.status_lock_path(),
         SystemTime::now(),

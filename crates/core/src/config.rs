@@ -1570,6 +1570,25 @@ impl RootConfig {
             }
         }
 
+        let health = &self.health;
+        if let Some(age) = health
+            .max_write_age_seconds
+            .filter(|age| *age <= health.write_interval_seconds)
+        {
+            return Err(ConfigError::invalid(
+                [
+                    "health.max_write_age_seconds",
+                    "health.write_interval_seconds",
+                ],
+                format!(
+                    "`health.max_write_age_seconds` must be greater than \
+                     `health.write_interval_seconds`, found {age} with an interval of {}: the \
+                     node writes once an interval, so a healthy node would fail the bound",
+                    health.write_interval_seconds
+                ),
+            ));
+        }
+
         let (state, archive) = (&self.storage.state, &self.storage.archive);
         let stray: Vec<(&str, &str)> = [
             (

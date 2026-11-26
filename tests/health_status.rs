@@ -532,6 +532,72 @@ fn health_prints_the_status_and_its_verdict_as_json() {
 
 #[test]
 #[serial]
+fn the_bounds_in_the_configuration_reach_the_command() {
+    let node = Node::with_tables(
+        "[health]\nmax_write_age_seconds = 30\nmax_stall_seconds = 600\nmax_lag_slots = \
+         50\nmax_tip_age_seconds = 60\n",
+    );
+    let _lock = health::StatusLock::acquire(&node.config.status_lock_path()).unwrap();
+
+    // Each status passes the default bound and fails the configured one.
+    let mut stale = status_with(sync_at(SyncState::Following, 900, 900, 1));
+    stale.written_unix_ms = unix_ms_ago(40);
+    write_status(&node, &stale);
+    fails(
+        &node,
+        &["--live"],
+        "not live: the status was written 40s ago, over max_write_age_seconds 30",
+    );
+
+    let wedged = status_with(sync_at(SyncState::CatchingUp, 100, 900, 700));
+    write_status(&node, &wedged);
+    fails(
+        &node,
+        &["--live"],
+        "not live: the pipeline has not advanced for 700s with the upstream ahead",
+    );
+    let (_, _, stderr) = health(&node, &["--live"]);
+    assert!(stderr.contains("over max_stall_seconds 600"), "{stderr}");
+
+    let mut lagging = sync_at(SyncState::Following, 900, 960, 1);
+    lagging.local_tip_unix_ms = Some(unix_ms_ago(1));
+    write_status(&node, &status_with(lagging));
+    fails(
+        &node,
+        &["--ready"],
+        "not ready: the local tip is 60 slots behind the upstream's, over max_lag_slots 50",
+    );
+
+    let mut old = sync_at(SyncState::Following, 900, 900, 1);
+    old.local_tip_unix_ms = Some(unix_ms_ago(120));
+    write_status(&node, &status_with(old));
+    fails(
+        &node,
+        &["--ready"],
+        "not ready: the local tip is 120s old, over max_tip_age_seconds 60",
+    );
+}
+
+#[test]
+#[serial]
+fn health_refuses_a_write_age_within_the_write_interval() {
+    let node = Node::with_tables("[health]\nwrite_interval_seconds = 10\n");
+
+    for age in ["5", "10"] {
+        let (code, _, stderr) = health(&node, &["--live", "--max-write-age-seconds", age]);
+        assert_eq!(code, Some(2), "{stderr}");
+        assert!(
+            reports(
+                &stderr,
+                "is not greater than health.write_interval_seconds 10"
+            ),
+            "{stderr}"
+        );
+    }
+}
+
+#[test]
+#[serial]
 fn health_asks_for_exactly_one_mode() {
     let node = Node::with_tables("");
 
@@ -563,14 +629,35 @@ fn health_runs_beside_a_daemon_that_holds_the_stores() {
     let status_path = node.config.status_path();
 
     let mut daemon = spawn(&node, "daemon");
-    wait_for_status(&mut daemon, &status_path, |status| {
+    let following = wait_for_status(&mut daemon, &status_path, |status| {
         status.sync.as_ref().is_some_and(|sync| {
             sync.state == SyncState::Following && sync.local_tip_slot == Some(tip)
         })
     });
 
+    // The daemon times its tip by the chain's eras: preview's slots are one
+    // second each from its system start.
+    let genesis = dolos_cardano::include::preview::load();
+    let start = chrono::DateTime::parse_from_rfc3339(genesis.shelley.system_start.as_ref().unwrap())
+        .unwrap()
+        .timestamp() as u64;
+    assert_eq!(
+        following.sync.unwrap().local_tip_unix_ms,
+        Some((start + tip) * 1000)
+    );
+
     passes(&node, &["--live"], "live: daemon pid");
     passes(&node, &["--ready"], "ready: daemon pid");
+    passes(
+        &node,
+        &["--ready", "--max-tip-age-seconds", "10000000000"],
+        "ready: daemon pid",
+    );
+    fails(
+        &node,
+        &["--ready", "--max-tip-age-seconds", "60"],
+        "not ready: the local tip is",
+    );
 
     // The probe left the daemon its lock and its stores.
     assert!(

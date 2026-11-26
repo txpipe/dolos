@@ -113,6 +113,19 @@ fn a_pipeline_standing_still_with_the_upstream_ahead_is_wedged() {
 }
 
 #[test]
+fn a_following_pipeline_standing_still_behind_its_upstream_is_wedged() {
+    let status = daemon(sync(SyncState::Following, 1_000, 5_000, 1801));
+
+    let wedged = Err(Failure::Wedged {
+        local_tip_slot: Some(1_000),
+        upstream_tip_slot: Some(5_000),
+        stalled_seconds: 1801,
+        max_stall_seconds: 1800,
+    });
+    assert_eq!(verdicts(&status, &bounds()), (wedged.clone(), wedged));
+}
+
+#[test]
 fn a_pipeline_that_never_advanced_is_timed_from_the_start() {
     let mut sync = sync(SyncState::CatchingUp, 1_000, 5_000, 0);
     sync.advanced_unix_ms = None;
@@ -230,6 +243,20 @@ fn a_node_that_does_not_sync_is_ready_while_it_writes() {
     status.sync = None;
 
     assert_eq!(verdicts(&status, &bounds()), (Ok(()), Ok(())));
+}
+
+#[test]
+fn a_stale_write_fails_a_node_that_does_not_sync() {
+    let mut status = following();
+    status.command = Command::Serve;
+    status.sync = None;
+    status.written_unix_ms = ago(16);
+
+    let stale = Err(Failure::StaleWrite {
+        age_seconds: 16,
+        max_write_age_seconds: 15,
+    });
+    assert_eq!(verdicts(&status, &bounds()), (stale.clone(), stale));
 }
 
 /// A status file and its lock in a fresh folder.

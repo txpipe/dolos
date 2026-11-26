@@ -59,9 +59,10 @@ pub enum Output {
     Nothing,
     /// The JSON, whole.
     Json,
-    /// The JSON, with these top-level fields compared by shape only: each
-    /// keeps its key and its JSON type, recursively, while its values
-    /// describe data outside the contract, for the reason given.
+    /// The JSON, with these fields compared by shape only: each keeps its key
+    /// and its JSON type, recursively, while its values describe data outside
+    /// the contract, for the reason given. A dot names a field inside an
+    /// object, as `failure.path`.
     JsonShaped(&'static [&'static str], &'static str),
     /// Nothing, for the reason given. The generator still checks that the
     /// command printed JSON.
@@ -148,7 +149,7 @@ pub const GOLDENS: &[Golden] = &[
         &["health", "--live", "--format", "json"],
         3,
         Output::JsonShaped(
-            &["failure"],
+            &["failure.path"],
             "no node runs over the fixture, so it fails on the lock, whose path is the copy's own",
         ),
     ),
@@ -653,7 +654,8 @@ pub fn run_first(binary: &Path, node: &Path, args: &[&str]) -> Result<(), String
 }
 
 /// `stdout`, one JSON value per line; refused when it holds no value, or a
-/// value lacks one of the top-level fields `required`.
+/// value lacks one of the fields `required`, dotted as [`Output::JsonShaped`]
+/// names them.
 fn json_lines(stdout: &str, required: &[&str]) -> Result<String, String> {
     let mut kept = String::new();
 
@@ -662,7 +664,7 @@ fn json_lines(stdout: &str, required: &[&str]) -> Result<String, String> {
             .map_err(|e| format!("printed a line that is not JSON: {e}"))?;
 
         for field in required {
-            if value.get(*field).is_none() {
+            if field_at(&value, field).is_none() {
                 return Err(format!("printed no `{field}` to compare by shape"));
             }
         }
@@ -697,8 +699,8 @@ fn fixture_md(provenance: &Provenance, slot: u64, hash: &str) -> String {
          ## Compared by shape or left out\n\n\
          Each row runs on its own copy of `data/`. A row with a `.before` file runs \
          that command first, on the same copy. A row with a `.shape` file compares \
-         the top-level fields it names by key and JSON type only, recursively; \
-         an array there may change its length.\n\n",
+         the fields it names, a dot reaching into an object, by key and JSON \
+         type only, recursively; an array there may change its length.\n\n",
         provenance.version, provenance.commit, provenance.contract,
     );
 
@@ -833,8 +835,9 @@ fn compare(
 
 /// Check stdout of a command against its golden: one JSON value per line,
 /// each compared with [`added_fields_only`] and no defaults, apart from the
-/// top-level fields `shaped`, which compare by shape only: each keeps its
-/// keys and JSON types, recursively, and an array may change its length.
+/// fields `shaped`, dotted as [`Output::JsonShaped`] names them, which compare
+/// by shape only: each keeps its keys and JSON types, recursively, and an
+/// array may change its length.
 pub fn matches_golden(golden: &str, current: &str, shaped: &[&str]) -> Result<(), Vec<String>> {
     let parse = |text: &str| -> Result<Vec<Value>, Vec<String>> {
         text.lines()
@@ -875,6 +878,29 @@ pub fn matches_golden(golden: &str, current: &str, shaped: &[&str]) -> Result<()
     }
 }
 
+/// The field of `value` that `field` names, a dot reaching into an object.
+fn field_at<'a>(value: &'a Value, field: &str) -> Option<&'a Value> {
+    field
+        .split('.')
+        .try_fold(value, |value, key| value.get(key))
+}
+
+/// Remove the field of `value` that `field` names, a dot reaching into an
+/// object, and return it.
+fn take_field(value: &mut Value, field: &str) -> Option<Value> {
+    let (parent, key) = match field.rsplit_once('.') {
+        Some((parent, key)) => (
+            parent
+                .split('.')
+                .try_fold(value, |value, key| value.get_mut(key))?,
+            key,
+        ),
+        None => (value, field),
+    };
+
+    parent.as_object_mut()?.remove(key)
+}
+
 /// One record of [`matches_golden`]: `shaped` fields by shape, the rest by
 /// value.
 fn record_matches(golden: &Value, current: &Value, shaped: &[&str]) -> Result<(), Vec<String>> {
@@ -883,7 +909,7 @@ fn record_matches(golden: &Value, current: &Value, shaped: &[&str]) -> Result<()
 
     for field in shaped {
         let at = format!("$.{field}");
-        let taken = |value: &mut Value| value.as_object_mut().and_then(|o| o.remove(*field));
+        let taken = |value: &mut Value| take_field(value, field);
 
         match (taken(&mut golden), taken(&mut current)) {
             (Some(golden), Some(current)) => shape(&at, &golden, &current, &mut problems),
@@ -1135,6 +1161,31 @@ mod tests {
         );
         assert_eq!(json_lines("\n", &[]), Err("printed no JSON".to_string()));
         assert!(json_lines("Error: no store\n", &[]).is_err());
+    }
+
+    #[test]
+    fn a_dotted_shaped_field_leaves_its_siblings_compared_by_value() {
+        let golden = "{\"failure\":{\"check\":\"no-lock\",\"path\":\"/a\"}}\n";
+        let shaped = &["failure.path"];
+
+        assert_eq!(json_lines(golden, shaped), Ok(golden.to_string()));
+        assert_eq!(
+            json_lines("{\"failure\":{\"check\":\"no-lock\"}}\n", shaped),
+            Err("printed no `failure.path` to compare by shape".to_string())
+        );
+
+        let check = |current: &str| matches_golden(golden, current, shaped);
+        assert_eq!(
+            check("{\"failure\":{\"check\":\"no-lock\",\"path\":\"/b\"}}\n"),
+            Ok(())
+        );
+        assert!(check("{\"failure\":{\"check\":\"no-file\",\"path\":\"/a\"}}\n").is_err());
+        assert_eq!(
+            check("{\"failure\":{\"check\":\"no-lock\",\"path\":1}}\n"),
+            Err(vec![
+                "line 0: $.failure.path was a string, now a number".to_string()
+            ])
+        );
     }
 
     #[test]

@@ -69,7 +69,7 @@ Exit codes mean the same for every command (see [exit codes](cli#exit-codes)): `
 | `dolos config write-genesis` | none | `0`, `1`, `2` |
 | `dolos daemon` | none | `0`, `1`, `2` |
 | `dolos serve` | none | `0`, `1`, `2` |
-| `dolos health` | `--format json`, a report | `0`, `1`, `2`, `3` |
+| `dolos health` | `--format json`, a report, except the `status` it embeds | `0`, `1`, `2`, `3` |
 | `dolos bootstrap` | none | `0`, `1`, `2` |
 | `dolos bootstrap mithril` | none | `0`, `1`, `2` |
 | `dolos bootstrap stelae` | none | `0`, `1`, `2` |
@@ -107,6 +107,7 @@ Outside the contract:
 - `cargo xtask` and every one of its subcommands, which are development tools that never ship in the `dolos` binary.
 - Builds with the `debug` feature, and builds from source that leave out default features.
 - Any command not in the table above.
+- The `status` object that `dolos health --format json` embeds. It is the node's status file, whose format is private to Dolos, so a 2.x release may reshape it.
 
 ## Transition matrix
 

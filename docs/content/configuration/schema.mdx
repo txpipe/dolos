@@ -632,6 +632,7 @@ The status file a running `dolos daemon` or `dolos serve` keeps, whatever APIs a
 - The node locks `path` with `.lock` added to its name once its stores are open, and holds the lock until it exits. A second node over the same file stops there, naming the lock.
 - It rewrites the file every `write_interval_seconds` and removes it on a clean shutdown. After a crash the file stays, and the released lock marks it as left by a node that is gone.
 - The file's format is private to Dolos.
+- `max_write_age_seconds` must be greater than `write_interval_seconds`, since the node writes once an interval.
 - `dolos health --live` fails when the last write is older than `max_write_age_seconds`, or when the sync has a session open, the upstream's tip is ahead of the local one and nothing advanced for `max_stall_seconds`.
 - `dolos health --ready` also fails unless the sync follows its upstream within `max_lag_slots` of its tip and, when `max_tip_age_seconds` is set, the local tip's slot is at most that old by the wall clock.
 
@@ -654,7 +655,8 @@ Besides each field's own type and range, loading refuses:
 - `sync.wal_path` with an ephemeral state;
 - `history.window` without `mode = "rolling"`, and `rolling` without a `window`;
 - `serve.max_concurrent_queries` or `serve.max_concurrent_heavy_scans` outside 1 to 64, and `serve.heavy_scan_queue_seconds` above 60;
-- `request_timeout_seconds` of `serve.minibf` or `serve.minikupo` outside 1 to 3600.
+- `request_timeout_seconds` of `serve.minibf` or `serve.minikupo` outside 1 to 3600;
+- `health.max_write_age_seconds` at or below `health.write_interval_seconds`.
 
 Each error names the keys involved, and is reported before any store opens.
 

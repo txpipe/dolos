@@ -382,6 +382,11 @@ fn each_rule_refuses_its_fixture() {
             "`serve.minikupo.request_timeout_seconds` must be between 1 and 3600, found 0",
         ),
         (
+            "write-age-within-the-interval",
+            "`health.max_write_age_seconds` must be greater than \
+             `health.write_interval_seconds`, found 10 with an interval of 30",
+        ),
+        (
             "ephemeral-store-with-a-path",
             "an ephemeral store takes no other field; remove `path`",
         ),
