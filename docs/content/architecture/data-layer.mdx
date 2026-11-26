@@ -114,7 +114,7 @@ The Cardano entity types in `crates/cardano/src/model/` follow one naming conven
 | `Set` | a member's first appearance in an epoch | an insert-if-absent staged per block | state only; its seal builds a `Chunk` |
 | `Chunk` | a page of an ordered list, built at seal | one write at seal | archive |
 
-A `Stats` type is one type under one namespace in both stores: its seal moves an epoch's rows to the archive at the epoch's start slot, and never reshapes them. On mainnet, the archive's `account-stats` takes 1.12 GB on disk for 33.9 M rows, and its `address-stats` 18.70 GB for 104.4 M rows; [The v2 data model](#the-v2-data-model) gives every structure's footprint.
+A `Stats` type is one type under one namespace in both stores: its seal moves an epoch's rows to the archive at the epoch's start slot, and never reshapes them. On mainnet, the archive's `account-stats` takes 1.12 GB on disk for 33.9 M rows, and its `address-stats` 18.70 GB for 104.4 M rows, measured in epoch 664; [The v2 data model](#the-v2-data-model) gives every structure's footprint. At the beta.1 candidate, sealed through epoch 667, `address-stats` takes 18.74 GB for 104.7 M rows, as [Archive logs](#archive-logs) records.
 
 A `Set` lives in state only, one row per member keyed `group ‖ epoch ‖ member` (`GroupKey`), so one prefix scan returns a group's unsealed epochs. Its seal builds a `Chunk`: one list per group and epoch, in pages of at most 256 entries keyed by the page number (`u32`, big-endian) after the group, each page carrying the list's count in field 0, written to the archive at the epoch's start slot before the epoch's `Set` rows are deleted. Page `i` holds entries `i × 256` onward, so a reader learns from page 0 how many pages follow. A seal may drop rows, as first mints drop re-mints. A `Set` and the `Stats` that counts its group may seal into one `Chunk`, and that `Stats` then lives in state only: `PaymentStats` does, its tx count riding in field 2 of page 0 of `PaymentAddressEpochs`, absent on later pages; a credential with a tx count and no addresses has page 0 alone, with a count of 0.
 
@@ -222,6 +222,8 @@ Every log in `archive-logs` is keyed `ns_hash(8) ‖ slot(8, BE) ‖ typed key`.
 | `pool-epochs` | `PoolEpochLog` | `PoolKey`, 28 B | pool and epoch | 1.3 M | 87.05 MB |
 | `pools` | `PoolState` | `PoolKey`, 28 B | retired pool that left state, its final row | 3.3 k | 1.10 MB |
 | `proposals` | `ProposalState` | `ProposalKey`, 36 B | resolved proposal, its final row without votes | 239 | 38.24 kB |
+
+**`address-stats` at the beta.1 candidate.** The sealed `address-stats` log was measured again on a mainnet store restored from the Stelae snapshot of epoch 669 (`cardano/mainnet/dolos`, manifest `sha256:6ef4a9d53a55206ddc1c771d2e78eb65a38ff01ce7a85a9ec4f5764fb5f5de0f`) and synced by dolos [`a9f1c4cc`](https://github.com/txpipe/dolos/commit/a9f1c4cc122d44a068f66b25262ab3a59c7b7787) to slot 203,874,991, on 2026-11-23. Its last key is at slot 202,780,800, the start of epoch 667, so it is sealed through epoch 667. It takes 18,742,852,968 bytes (18.74 GB) compacted for 104,667,212 rows, measured as the figures above are: its rows copied unchanged into a fully compacted default keyspace, against the candidate's fjall. That is 0.2 % more bytes and 0.3 % more rows than the table's epoch-664 figure.
 
 Six namespaces live in both stores: `epochs`, `address-stats` and `account-stats` are one type in each, and `dreps`, `pools` and `proposals` keep a final row in the archive once their object leaves state.
 
