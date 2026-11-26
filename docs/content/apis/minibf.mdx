@@ -125,12 +125,14 @@ No other route is refused by this limit. Every route, heavy or not, answers `504
 
 Dolos provides many, but not all of the Blockfrost endpoints. The following list represent the endpoints currently supported by Dolos. How far their responses match Blockfrost's is measured in [Blockfrost Conformance](./blockfrost-conformance).
 
+MiniBF's `/health` route always answers `{"is_healthy": true}` while the server runs: it does not reflect the sync, so it is not a readiness signal. To tell whether the node is live or ready to serve, probe it with `dolos health`; see [Health Checks](../operations/health).
+
 MiniBF no longer serves a `/metrics` route. Its `dolos_slot` and `dolos_block_number` series are now `dolos.sync.tip.slot` and `dolos.sync.tip.block_number`, exported over OTLP with every other series once [`telemetry`](../configuration/schema#telemetry) is configured; the [metric reference](../reference/metrics) lists them.
 
 | Endpoint                                                   | Description                                              |
 | ---------------------------------------------------------- | -------------------------------------------------------- |
 | `/`                                                        | Service info (`url` when `public_url` is set, `version`) |
-| `/health`                                                  | Health check                                             |
+| `/health`                                                  | Constant health answer; see [Health Checks](../operations/health) |
 | `/health/clock`                                            | Clock health                                             |
 | `/accounts/{stake_address}`                                | Get account information for a stake address              |
 | `/accounts/{stake_address}/addresses`                      | Get addresses for a stake address                        |
