@@ -1,9 +1,10 @@
 //! The catch-up criterion and the upstream retries, over the real pull and
 //! apply stages syncing from a local peer.
 
+use std::num::NonZeroU64;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dolos_core::config::{ArchiveStoreConfig, ChainConfig, RetryConfig, StateStoreConfig};
 use dolos_testing::blocks::make_conway_block_with_prev;
@@ -15,6 +16,7 @@ use itertools::Itertools as _;
 
 use super::*;
 use crate::engine::DomainBuilder;
+use crate::health::{self, SyncReport as _};
 
 const PREVIEW_MAGIC: u64 = 2;
 
@@ -1876,15 +1878,17 @@ fn the_state_moves_from_starting_through_catching_up_to_following() {
 #[test]
 fn a_session_that_ends_leaves_the_upstream_lost_until_the_next_opens() {
     let temp = tempfile::tempdir().unwrap();
-    let (config, domain) = domain_over(temp.path(), backing_off(5, 1, 1));
+    let (mut config, domain) = domain_over(temp.path(), backing_off(5, 1, 1));
 
-    // The first session ends after a few headers, before it delivers a
-    // block, and the first reconnection's intersection is dropped. Every
-    // intersection is held long enough to see the start.
+    // One block per request, so the first session delivers blocks before it
+    // ends after a few headers, and reconnects at once. Every intersection
+    // succeeds, held long enough to see the start and the reconnection: only
+    // the session's end can report the upstream lost.
+    config.sync.pull_batch_size = 1;
+
     let peer = peer(PeerOptions {
         initial_blocks: 20,
         close_first_session_after_headers: Some(5),
-        close_at_intersects: vec![2],
         intersect_delay: Some(Duration::from_millis(300)),
         ..Default::default()
     });
@@ -1893,8 +1897,13 @@ fn a_session_that_ends_leaves_the_upstream_lost_until_the_next_opens() {
 
     let seen = states_until(&progress, SyncState::UpstreamLost);
     assert_eq!(seen.first(), Some(&SyncState::Starting));
+    assert!(
+        progress.deliveries() > 0,
+        "the session that ended delivered blocks"
+    );
 
     let seen = states_until(&progress, SyncState::Following);
+    assert_eq!(peer.intersects(), 2, "one reconnection");
     assert!(
         !seen.contains(&SyncState::Starting),
         "a session that ended never starts again: {seen:?}"
@@ -1968,6 +1977,16 @@ fn an_answer_at_the_tip_is_no_progress_until_the_stores_hold_it() {
     assert!(progress.heard_at().is_some());
     assert_eq!(progress.advanced_at(), None);
 
+    // The status file reads the same: the upstream heard, the pipeline never
+    // advanced.
+    let status = health::Pipeline::new(&progress, &domain).report();
+    assert_eq!(status.state, SyncState::CatchingUp);
+    assert_eq!(status.local_tip_slot, None);
+    assert_eq!(status.upstream_tip_slot, Some(peer.tip().slot()));
+    assert_eq!(status.lag_slots, Some(peer.tip().slot()));
+    assert!(status.heard_unix_ms.is_some());
+    assert_eq!(status.advanced_unix_ms, None);
+
     stages.teardown();
 }
 
@@ -1999,5 +2018,113 @@ fn a_node_already_at_the_tip_advances_on_the_upstream_answer() {
         Some(peer.tip().slot())
     );
 
+    stages.teardown();
+}
+
+#[test]
+fn an_emulator_upstream_is_followed_from_its_first_block() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, domain) = domain_over(temp.path(), no_backoff(0));
+
+    // The emulator produces its first block as soon as it runs, so the state
+    // before it is read off a progress of the same kind.
+    assert_eq!(
+        SyncProgress::emulated(&domain).unwrap().state(),
+        SyncState::Starting
+    );
+
+    let pipeline = devnet(
+        &EmulatorConfig {
+            block_production_interval: 1,
+        },
+        domain.clone(),
+        &config.sync.retry,
+        Default::default(),
+    )
+    .unwrap();
+
+    let progress = pipeline.progress;
+    let stages = Stages(pipeline.tethers);
+
+    wait_until(
+        "the first block is applied",
+        Duration::from_secs(30),
+        || progress.advanced_at().is_some(),
+    );
+
+    assert_eq!(progress.state(), SyncState::Following);
+
+    let applied = state_cursor(&domain).expect("a block is applied").slot();
+    assert!(
+        progress
+            .upstream_tip_slot()
+            .is_some_and(|tip| tip >= applied),
+        "{:?} against {applied}",
+        progress.upstream_tip_slot()
+    );
+    assert!(progress.heard_at().is_some());
+
+    stages.teardown();
+}
+
+fn unix_millis(time: Option<SystemTime>) -> Option<u64> {
+    time.map(|time| time.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64)
+}
+
+#[test]
+fn a_following_sync_keeps_its_tips_and_its_advance_in_the_status_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut config, domain) = domain_over(temp.path(), no_backoff(0));
+    config.health.write_interval_seconds = NonZeroU64::new(1).unwrap();
+
+    let peer = peer(PeerOptions {
+        initial_blocks: 20,
+        ..Default::default()
+    });
+    let tip = peer.tip();
+
+    let (progress, stages) = start(&config, &peer, SyncLimit::Follow, &domain);
+
+    wait_until("the stores follow the tip", Duration::from_secs(60), || {
+        progress.state() == SyncState::Following && state_cursor(&domain).as_ref() == Some(&tip)
+    });
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let _entered = runtime.enter();
+
+    let lock = health::StatusLock::acquire(&config.status_lock_path()).unwrap();
+    let file = health::StatusFile::keep(
+        &config,
+        lock,
+        health::Command::Daemon,
+        Some(Box::new(health::Pipeline::new(&progress, &domain))),
+    )
+    .unwrap();
+
+    let first = health::read(file.path()).unwrap();
+    let sync = first.sync.clone().expect("a syncing node reports its sync");
+
+    assert_eq!(sync.state, SyncState::Following);
+    assert_eq!(sync.local_tip_slot, Some(tip.slot()));
+    assert_eq!(sync.upstream_tip_slot, Some(tip.slot()));
+    assert_eq!(sync.lag_slots, Some(0));
+    assert!(sync.heard_unix_ms.is_some());
+    assert!(sync.advanced_unix_ms.is_some());
+    assert_eq!(sync.advanced_unix_ms, unix_millis(progress.advanced_at()));
+
+    // Nothing new upstream: the writes move on while the advance holds.
+    let mut later = None;
+    wait_until("the file is rewritten", Duration::from_secs(10), || {
+        later = health::read(file.path())
+            .ok()
+            .filter(|later| later.written_unix_ms >= first.written_unix_ms + 1500);
+        later.is_some()
+    });
+
+    let later = later.unwrap().sync.unwrap();
+    assert_eq!(later.state, SyncState::Following);
+    assert_eq!(later.advanced_unix_ms, sync.advanced_unix_ms);
+
+    drop(file);
     stages.teardown();
 }

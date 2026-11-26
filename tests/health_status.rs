@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use dolos::health::{self, Command as Running, Status, FORMAT};
 use dolos::sync::SyncState;
+use dolos_testing::peer::{PeerFixture, PeerOptions};
 use node::{toml_string, Node};
 use serial_test::serial;
 
@@ -150,6 +151,64 @@ fn a_daemon_with_no_serve_section_keeps_the_status_file_under_its_lock() {
         status.written_unix_ms > first.written_unix_ms
     });
     assert_eq!(later.started_unix_ms, first.started_unix_ms);
+}
+
+/// A node with no stores yet, syncing from `peer`, whose status is
+/// rewritten every second.
+fn node_syncing_from(peer: &PeerFixture) -> Node {
+    let node = Node::with_tables("[health]\nwrite_interval_seconds = 1\n");
+
+    let config_path = node.config_path();
+    let mut document: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    document["upstream"] =
+        toml::from_str(&format!("peer_address = \"{}\"", peer.address())).unwrap();
+    std::fs::write(&config_path, toml::to_string(&document).unwrap()).unwrap();
+
+    node
+}
+
+#[test]
+#[serial]
+#[cfg_attr(
+    feature = "debug",
+    ignore = "the debug feature's console subscriber panics a daemon built without tokio_unstable"
+)]
+fn a_daemon_that_follows_its_upstream_reports_both_tips_and_holds_its_advance() {
+    let peer = PeerFixture::start(
+        "127.0.0.1:0",
+        2,
+        PeerOptions {
+            initial_blocks: 20,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let tip = peer.tip().slot();
+
+    let node = node_syncing_from(&peer);
+    let status_path = node.config.status_path();
+
+    let mut daemon = spawn(&node, "daemon");
+    let following = wait_for_status(&mut daemon, &status_path, |status| {
+        status.sync.as_ref().is_some_and(|sync| {
+            sync.state == SyncState::Following && sync.local_tip_slot == Some(tip)
+        })
+    });
+
+    let sync = following.sync.clone().unwrap();
+    assert_eq!(sync.upstream_tip_slot, Some(tip), "{following:?}");
+    assert_eq!(sync.lag_slots, Some(0), "{following:?}");
+    assert!(sync.heard_unix_ms.is_some(), "{following:?}");
+    assert!(sync.advanced_unix_ms.is_some(), "{following:?}");
+
+    // Nothing new upstream: the writes move on while the advance holds.
+    let later = wait_for_status(&mut daemon, &status_path, |status| {
+        status.written_unix_ms >= following.written_unix_ms + 1500
+    });
+    let later = later.sync.unwrap();
+    assert_eq!(later.state, SyncState::Following);
+    assert_eq!(later.advanced_unix_ms, sync.advanced_unix_ms);
 }
 
 #[test]
