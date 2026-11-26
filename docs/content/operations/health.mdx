@@ -111,8 +111,8 @@ systemd restarts a `dolos daemon` that exits, such as a unit [`dolos service ins
 
 ```sh
 #!/bin/sh
-# /usr/local/libexec/dolos-live-check UNIT CONFIG
-verdict=$(dolos --config "$2" health --live --format json)
+# /usr/local/libexec/dolos-live-check UNIT DOLOS CONFIG
+verdict=$("$2" --config "$3" health --live --format json)
 case $? in
   0) exit 0 ;;
   3) case "$verdict" in
@@ -133,7 +133,7 @@ After=dolos-cardano-preview.service
 [Service]
 Type=oneshot
 WorkingDirectory=/srv/dolos/preview
-ExecStart=/usr/local/libexec/dolos-live-check dolos-cardano-preview.service /srv/dolos/preview/dolos.toml
+ExecStart=/usr/local/libexec/dolos-live-check dolos-cardano-preview.service /opt/dolos/bin/dolos /srv/dolos/preview/dolos.toml
 ```
 
 ```ini
@@ -150,10 +150,12 @@ WantedBy=timers.target
 ```
 
 ```sh
+sudo chmod +x /usr/local/libexec/dolos-live-check
 sudo systemctl daemon-reload
 sudo systemctl enable --now dolos-cardano-preview-live.timer
 ```
 
+- Pass the script the absolute path of the binary the node's unit runs, the one its `ExecStart=` names (`systemctl cat dolos-cardano-preview.service` shows it). systemd's default `PATH` does not include where the installers and `cargo install` put `dolos`, and the check must run the same release as the node.
 - `Requisite=` makes the check do nothing while the node's unit is stopped, so it never starts a node you stopped.
 - Set `WorkingDirectory=` to the directory the node's unit runs in, the configuration file's directory for a unit `dolos service install` wrote.
 - For a user unit, put the files under `~/.config/systemd/user/`, and use `systemctl --user` in the script and the commands.
