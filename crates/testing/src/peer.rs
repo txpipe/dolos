@@ -46,6 +46,8 @@ pub struct PeerOptions {
     /// Close the session instead of answering these intersection requests,
     /// numbered from 1 across sessions.
     pub close_at_intersects: Vec<usize>,
+    /// Wait this long before answering each intersection request.
+    pub intersect_delay: Option<Duration>,
     /// Close the first session that intersects once it sent this many
     /// headers.
     pub close_first_session_after_headers: Option<usize>,
@@ -552,6 +554,10 @@ async fn serve_chainsync(
 
                 if options.close_at_intersects.contains(&number) {
                     return Ok(());
+                }
+
+                if let Some(delay) = options.intersect_delay {
+                    tokio::time::sleep(delay).await;
                 }
 
                 match chain.intersect(&points) {

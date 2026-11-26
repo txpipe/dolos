@@ -1,6 +1,7 @@
 pub mod adapters;
 pub mod cli;
 pub mod engine;
+pub mod health;
 pub mod prelude;
 pub mod relay;
 pub mod serve;

@@ -99,3 +99,7 @@ filter = "dolos=debug,fjall=warn"
 [telemetry]                   # on when present
 otlp_endpoint = "http://localhost:4317"
 service_name = "dolos-mainnet"
+
+[health]
+path = "status.json"          # relative to storage.path
+write_interval_seconds = 5

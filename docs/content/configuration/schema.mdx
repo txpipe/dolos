@@ -144,6 +144,10 @@ filter = "dolos=debug,fjall=warn"
 [telemetry]                   # on when present
 otlp_endpoint = "http://localhost:4317"
 service_name = "dolos-mainnet"
+
+[health]
+path = "status.json"          # relative to storage.path
+write_interval_seconds = 5
 ```
 
 The [`examples/`](https://github.com/txpipe/dolos/tree/main/examples) directory of the repository holds this file, the ordinary node for each known network, a custom network and an ephemeral node as complete configurations, and CI runs `dolos config check` over each of them.
@@ -155,7 +159,7 @@ A relative path resolves against one of three bases, named for every path field 
 | base | fields |
 | ---- | ------ |
 | the working directory | `storage.path`, `serve.ouroboros.listen_path` |
-| `storage.path` | `storage.state.path`, `storage.archive.path`, `storage.archive.blocks_path`, `storage.cache.path`, `sync.wal_path`, `mempool.path` |
+| `storage.path` | `storage.state.path`, `storage.archive.path`, `storage.archive.blocks_path`, `storage.cache.path`, `sync.wal_path`, `mempool.path`, `health.path` |
 | the configuration file's directory | `chain.cardano.genesis.*_path` |
 
 An absolute path is used as written, which is how a store, or the archive's block segments, goes on another volume.
@@ -608,6 +612,24 @@ OpenTelemetry trace and metric export over OTLP, on when the table is present. S
 [telemetry]
 otlp_endpoint = "https://otlp.example.com"
 otlp_protocol = "http-protobuf"
+```
+
+## `health`
+
+The status file a running `dolos daemon` or `dolos serve` keeps, whatever APIs are enabled, and the lock beside it.
+
+| field | type | default |
+| ----- | ---- | ------- |
+| `path` | path, relative to `storage.path` | `status.json` |
+| `write_interval_seconds` | integer (seconds), at least 1 | `5` |
+
+- The node locks `path` with `.lock` added to its name once its stores are open, and holds the lock until it exits. A second node over the same file stops there, naming the lock.
+- It rewrites the file every `write_interval_seconds` and removes it on a clean shutdown. After a crash the file stays, and the released lock marks it as left by a node that is gone.
+- The file's format is private to Dolos.
+
+```toml
+[health]
+write_interval_seconds = 10
 ```
 
 ## Rules across fields

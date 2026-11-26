@@ -1819,3 +1819,185 @@ fn the_tip_lag_is_the_clock_minus_the_tip_slot_time() {
     let points = recorder.collect();
     assert_eq!(points.value("dolos.sync.caught_up", &[]), None);
 }
+
+/// The distinct states `progress` passes through, sampled every millisecond
+/// until it reaches `last` or a minute passes.
+fn states_until(progress: &SyncProgress, last: SyncState) -> Vec<SyncState> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut seen = vec![progress.state()];
+
+    while seen.last() != Some(&last) {
+        assert!(Instant::now() < deadline, "timed out at {seen:?}");
+        std::thread::sleep(Duration::from_millis(1));
+
+        let state = progress.state();
+        if seen.last() != Some(&state) {
+            seen.push(state);
+        }
+    }
+
+    seen
+}
+
+#[test]
+fn the_state_moves_from_starting_through_catching_up_to_following() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut config, domain) = domain_over(temp.path(), no_backoff(0));
+
+    // One block per request, so the catch-up spans many round trips, and an
+    // intersection held long enough to see the start.
+    config.sync.pull_batch_size = 1;
+
+    let peer = peer(PeerOptions {
+        initial_blocks: 200,
+        intersect_delay: Some(Duration::from_millis(300)),
+        ..Default::default()
+    });
+
+    let (progress, stages) = start(&config, &peer, SyncLimit::Follow, &domain);
+
+    let seen = states_until(&progress, SyncState::Following);
+    assert_eq!(
+        seen,
+        [
+            SyncState::Starting,
+            SyncState::CatchingUp,
+            SyncState::Following
+        ]
+    );
+
+    assert_eq!(progress.upstream_tip_slot(), Some(peer.tip().slot()));
+    assert!(progress.heard_at().is_some());
+    assert!(progress.advanced_at().is_some());
+
+    stages.teardown();
+}
+
+#[test]
+fn a_session_that_ends_leaves_the_upstream_lost_until_the_next_opens() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, domain) = domain_over(temp.path(), backing_off(5, 1, 1));
+
+    // The first session ends after a few headers, before it delivers a
+    // block, and the first reconnection's intersection is dropped. Every
+    // intersection is held long enough to see the start.
+    let peer = peer(PeerOptions {
+        initial_blocks: 20,
+        close_first_session_after_headers: Some(5),
+        close_at_intersects: vec![2],
+        intersect_delay: Some(Duration::from_millis(300)),
+        ..Default::default()
+    });
+
+    let (progress, stages) = start(&config, &peer, SyncLimit::Follow, &domain);
+
+    let seen = states_until(&progress, SyncState::UpstreamLost);
+    assert_eq!(seen.first(), Some(&SyncState::Starting));
+
+    let seen = states_until(&progress, SyncState::Following);
+    assert!(
+        !seen.contains(&SyncState::Starting),
+        "a session that ended never starts again: {seen:?}"
+    );
+
+    stages.teardown();
+}
+
+#[test]
+fn an_unreachable_upstream_is_lost_from_the_first_attempt() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, domain) = domain_over(temp.path(), backing_off(5, 1, 1));
+
+    let pipeline = sync(
+        &config.sync,
+        PREVIEW_MAGIC,
+        closed_port().to_string(),
+        SyncLimit::Follow,
+        domain.clone(),
+        Default::default(),
+    )
+    .unwrap();
+
+    let progress = pipeline.progress;
+    let stages = Stages(pipeline.tethers);
+
+    wait_until("the upstream is lost", Duration::from_secs(10), || {
+        progress.state() == SyncState::UpstreamLost
+    });
+
+    assert_eq!(progress.upstream_tip_slot(), None);
+    assert_eq!(progress.heard_at(), None);
+    assert_eq!(progress.advanced_at(), None);
+
+    stages.teardown();
+}
+
+#[test]
+fn an_answer_at_the_tip_is_no_progress_until_the_stores_hold_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, domain) = domain_over(temp.path(), no_backoff(0));
+
+    let peer = peer(PeerOptions {
+        initial_blocks: 5,
+        ..Default::default()
+    });
+
+    let progress = Arc::new(SyncProgress::over(&domain).unwrap());
+
+    let mut pull = pull::Stage::new(
+        &config.sync,
+        peer.address().to_string(),
+        PREVIEW_MAGIC,
+        SyncLimit::Follow,
+        progress.clone(),
+        domain.wal().clone(),
+    );
+
+    // Nothing applies what the stage pulls, as if the apply stage hung.
+    let (to_apply, _unread) = gasket::messaging::tokio::mpsc_channel(50);
+    pull.downstream.connect(to_apply);
+
+    let policy = define_gasket_policy(&config.sync.retry);
+    let stages = Stages(vec![gasket::runtime::spawn_stage(pull, policy)]);
+
+    wait_until("the pull reaches the tip", Duration::from_secs(10), || {
+        progress.target().is_some()
+    });
+
+    assert_eq!(progress.upstream_tip_slot(), Some(peer.tip().slot()));
+    assert!(progress.heard_at().is_some());
+    assert_eq!(progress.advanced_at(), None);
+
+    stages.teardown();
+}
+
+#[test]
+fn a_node_already_at_the_tip_advances_on_the_upstream_answer() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, domain) = domain_over(temp.path(), no_backoff(0));
+
+    let peer = peer(PeerOptions {
+        initial_blocks: 5,
+        ..Default::default()
+    });
+
+    let (progress, stages) = start(&config, &peer, SyncLimit::Follow, &domain);
+    wait_until("the first run follows", Duration::from_secs(60), || {
+        progress.state() == SyncState::Following
+    });
+    stages.teardown();
+
+    // Nothing is left to apply: the upstream's answer at its tip is the
+    // progress.
+    let (progress, stages) = start(&config, &peer, SyncLimit::Follow, &domain);
+    wait_until("the second run advances", Duration::from_secs(60), || {
+        progress.advanced_at().is_some() && progress.state() == SyncState::Following
+    });
+
+    assert_eq!(
+        state_cursor(&domain).map(|cursor| cursor.slot()),
+        Some(peer.tip().slot())
+    );
+
+    stages.teardown();
+}

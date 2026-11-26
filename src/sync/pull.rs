@@ -96,7 +96,10 @@ impl Worker {
 
     /// Receive the next chainsync response, using the appropriate method
     /// depending on whether we have agency (catching up) or not (at the tip).
-    async fn recv_next_header(&mut self) -> Result<NextResponse<HeaderContent>, WorkerError> {
+    async fn recv_next_header(
+        &mut self,
+        stage: &Stage,
+    ) -> Result<NextResponse<HeaderContent>, WorkerError> {
         let client = self.peer_session.chainsync();
 
         let next = if client.has_agency() {
@@ -105,7 +108,10 @@ impl Worker {
             client.recv_while_must_reply().await
         };
 
-        next.map_err(|error| self.lose("chain-sync failed", &error))
+        let next = next.map_err(|error| self.lose("chain-sync failed", &error))?;
+        stage.progress.note_heard();
+
+        Ok(next)
     }
 
     /// Gather up to `max_headers` headers from the upstream peer.
@@ -124,7 +130,7 @@ impl Worker {
         let mut gathered = 0;
 
         while gathered < max_headers {
-            let next = self.recv_next_header().await?;
+            let next = self.recv_next_header(stage).await?;
 
             match next {
                 NextResponse::RollForward(header, tip) => {
@@ -221,6 +227,12 @@ impl Worker {
         if !self.peer_session.chainsync().has_agency() {
             self.deliver(stage);
 
+            // An answer at the tip is progress once the stores hold that tip;
+            // until then the blocks they apply are.
+            if stage.progress.stands_on(&self.tip) {
+                stage.progress.note_advance();
+            }
+
             if stage.progress.fix_target(self.tip.clone()) {
                 info!(tip = %self.tip, "reached the upstream tip, the catch-up target");
             }
@@ -232,6 +244,7 @@ impl Worker {
     fn track_tip(&mut self, tip: &Tip, stage: &Stage) {
         self.tip = ChainPoint::from(tip.0.clone());
         stage.upstream_tip_slot.set(tip.0.slot_or_default() as i64);
+        stage.progress.note_upstream_tip(tip.0.slot_or_default());
     }
 
     /// Connect to the peer and find the intersection: one attempt.
@@ -262,6 +275,7 @@ impl Worker {
             }
         };
 
+        stage.progress.note_upstream_tip(tip.0.slot_or_default());
         let tip = ChainPoint::from(tip.0);
 
         let Some(intersection) = point else {
@@ -293,10 +307,12 @@ impl gasket::framework::Worker<Stage> for Worker {
             match Self::open(stage, candidates).await {
                 Ok(worker) => {
                     stage.sessions.connected();
+                    stage.progress.note_session_open();
                     return Ok(worker);
                 }
                 Err(failure) => {
                     stage.sessions.failed();
+                    stage.progress.note_session_retrying();
                     stage.attempts.failed(failure).await?
                 }
             }
@@ -330,6 +346,7 @@ impl gasket::framework::Worker<Stage> for Worker {
         };
 
         stage.sessions.lost();
+        stage.progress.note_session_retrying();
 
         let failure = self
             .lost

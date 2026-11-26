@@ -8,6 +8,7 @@ use pallas::ledger::traverse::{ComputeHash, Era, MultiEraBlock, MultiEraTx};
 use pallas::network::miniprotocols::chainsync::Tip;
 use tracing::debug;
 
+use super::SyncProgress;
 use crate::adapters::storage::MempoolBackend;
 use crate::adapters::WalAdapter;
 use crate::prelude::*;
@@ -176,6 +177,7 @@ pub struct Stage {
     block_production_interval: u64,
     wal: WalAdapter,
     mempool: MempoolBackend,
+    progress: Arc<SyncProgress>,
 
     pub downstream: DownstreamPort,
 
@@ -189,7 +191,12 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(wal: WalAdapter, mempool: MempoolBackend, block_production_interval: u64) -> Self {
+    pub fn new(
+        wal: WalAdapter,
+        mempool: MempoolBackend,
+        block_production_interval: u64,
+        progress: Arc<SyncProgress>,
+    ) -> Self {
         Self {
             downstream: Default::default(),
             blocks: Default::default(),
@@ -197,6 +204,7 @@ impl Stage {
             block_production_interval,
             wal,
             mempool,
+            progress,
         }
     }
 
@@ -211,7 +219,11 @@ impl Stage {
         Ok(())
     }
 
+    /// The emulator produced a block at `tip`: it is the upstream, and its
+    /// session is open from its first block.
     fn track_tip(&self, tip: &Tip) {
         self.upstream_tip_slot.set(tip.0.slot_or_default() as i64);
+        self.progress.note_upstream_tip(tip.0.slot_or_default());
+        self.progress.note_session_open();
     }
 }

@@ -13,9 +13,9 @@ use dolos_cardano::networks::{KnownNetwork, ResolvedNetwork};
 use dolos_core::compat::SUPPORTED_CONTRACTS;
 use dolos_core::config::{
     load, load_checked, override_variables, ArchiveStoreConfig, CacheConfig, ChainConfig,
-    ConfigError, CustomUtxo, FjallPreset, GenesisConfig, HistoryConfig, HistoryMode, HistoryWindow,
-    LoggingConfig, MempoolConfig, Protocol, RetryConfig, RootConfig, StateStoreConfig, StoreType,
-    SyncConfig, TelemetryConfig, UpstreamConfig, MIGRATION_GUIDE_URL,
+    ConfigError, CustomUtxo, FjallPreset, GenesisConfig, HealthConfig, HistoryConfig, HistoryMode,
+    HistoryWindow, LoggingConfig, MempoolConfig, Protocol, RetryConfig, RootConfig,
+    StateStoreConfig, StoreType, SyncConfig, TelemetryConfig, UpstreamConfig, MIGRATION_GUIDE_URL,
 };
 use dolos_core::Genesis;
 use serial_test::serial;
@@ -195,7 +195,7 @@ fn the_full_reference_parses() {
     assert_eq!(trp.max_optimize_rounds(), 10);
     assert_eq!(trp.extra_fees_lovelace, Some(200_000));
 
-    assert_eq!(config.relay.unwrap().listen_address, "[::]:30031");
+    assert_eq!(config.relay.as_ref().unwrap().listen_address, "[::]:30031");
     assert_eq!(
         config.logging,
         LoggingConfig {
@@ -210,6 +210,18 @@ fn the_full_reference_parses() {
             service_name: "dolos-mainnet".into(),
             ..Default::default()
         })
+    );
+    assert_eq!(
+        config.health,
+        HealthConfig {
+            path: Some("status.json".into()),
+            ..HealthConfig::default()
+        }
+    );
+    assert_eq!(config.status_path(), PathBuf::from("data/status.json"));
+    assert_eq!(
+        config.status_lock_path(),
+        PathBuf::from("data/status.json.lock")
     );
 }
 

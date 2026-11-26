@@ -13,12 +13,17 @@ pub async fn run(config: RootConfig, _args: &Args) -> miette::Result<()> {
     let _tracing = crate::common::setup_tracing(&config)?;
 
     let domain = crate::common::setup_domain(&config)?;
+    let status_lock = crate::common::lock_status(&config)?;
+
     let _limiter_gauges =
         dolos_core::telemetry::queries::LimiterGauges::register(&domain.query_limiter);
 
     let _mempool_metrics = crate::common::mempool_metrics(&domain);
 
     let exit = crate::common::hook_exit_token();
+
+    let _status =
+        crate::common::keep_status(&config, status_lock, dolos::health::Command::Serve, None)?;
 
     let drivers = FuturesUnordered::new();
     let network_magic = crate::common::resolve_network(&config)?.magic();
