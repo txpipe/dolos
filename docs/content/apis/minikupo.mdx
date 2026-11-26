@@ -33,7 +33,7 @@ MiniKupo does not serve Kupo's `/health` route, in either its JSON or its Promet
 - the chain tip is `dolos.sync.tip.slot` (and `dolos.sync.tip.block_number`);
 - request health is the request series with `surface="minikupo"`: `http.server.request.duration` by route and status, `http.server.active_requests` and `dolos.http.server.request.dropped`.
 
-The [metric reference](../reference/metrics) lists them. A deployment whose clients need Kupo's `/health` puts a proxy in front of MiniKupo that answers it with the mappings those clients expect.
+The [metric reference](../reference/metrics) lists them. A deployment whose clients need Kupo's `/health` puts a proxy in front of MiniKupo that answers it with the mappings those clients expect. To tell whether the node is live or ready to serve, probe it with `dolos health`; see [Health Checks](../operations/health).
 
 ## Usage
 

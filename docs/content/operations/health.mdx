@@ -1,0 +1,191 @@
+---
+title: Health Checks
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+[`dolos health`](../reference/cli#dolos-health) tells a supervisor whether the node is **live** (running, and restarting it would not help) or **ready** (able to take traffic). It is the one command a liveness, readiness or startup check needs, whatever APIs the node serves. This page explains what it reads and how to wire it into Kubernetes, systemd and Docker.
+
+## What it reads
+
+A running `dolos daemon` or `dolos serve` keeps a **status file**, `status.json` under `storage.path` unless [`health.path`](../configuration/schema#health) says otherwise, and holds a **lock** beside it, the same name with `.lock` added:
+
+- the node takes the lock once its stores are open and holds it until it exits; the operating system drops the lock when the process dies, so a file a crashed node left behind is never read as current;
+- the node rewrites the file every `health.write_interval_seconds` (5 by default), with what its sync is doing, and removes it on a clean shutdown.
+
+`dolos health` reads the configuration, then the lock and the file. It opens no store, takes no lock and calls no network unless asked to with `--check-ports`, so it runs beside the node, as often as a probe needs. Run it with the **same configuration file and working directory** as the node, so that it finds the same file: relative paths such as `storage.path` resolve against the working directory.
+
+The file's format is private to Dolos and may change in any release. Don't read it yourself: ask `dolos health`, whose exit code and `--format json` verdict are in the [compatibility contract](../reference/compatibility).
+
+## Live and ready
+
+Exactly one of `--live` and `--ready` is required. The checks run in order, and the first that fails is the answer:
+
+1. a process holds the status lock;
+2. the status file exists, parses and is in a format this release reads;
+3. it was written within `max_write_age_seconds`: the process still schedules work;
+4. for `--live`, the sync is not **wedged**: it is wedged when it has a session open with the upstream, the upstream's tip is ahead of the local one, and nothing advanced (no block applied, no rollback, no answer at a tip the stores hold) for `max_stall_seconds`;
+5. for `--ready`, the node is live, its sync **follows** the upstream, the local tip is within `max_lag_slots` of the upstream's and, when `max_tip_age_seconds` is set, the local tip's slot is at most that old by the wall clock.
+
+`--check-ports` adds one more step after a pass: connect to each serving listener the configuration enables (gRPC, MiniBF, MiniKupo, TRP, the Ouroboros socket, and the relay under `daemon` only). A listener bound to a wildcard address is reached on loopback. Each connection waits at most 2 seconds.
+
+The command exits `0` when the check passes and `3` when it fails, with one line on stderr naming the failed check and the values behind it; the [troubleshooting](./troubleshooting#dolos-health-failures) page lists each line. It exits `1` on an error, such as a configuration that doesn't load, and `2` on a malformed command line.
+
+### Sync states
+
+The sync of a `daemon` is in one of these states:
+
+| state | meaning | live | ready |
+| ----- | ------- | ---- | ----- |
+| `starting` | no session with the upstream has opened yet | yes | no |
+| `catching-up` | a session is open, and the stores have not yet committed the tip the upstream reported when the session first reached it | unless wedged | no |
+| `following` | the stores committed that tip; an emulator upstream is followed from its first block | unless wedged | within the bounds |
+| `upstream-lost` | the sync is retrying the upstream: a session ended, or opening one failed | yes | no |
+
+A `serve` node does not sync, so it is ready whenever it is live.
+
+### Bounds
+
+Each bound is a [`health`](../configuration/schema#health) key, and each has a flag of the same name that overrides it for one run, such as `--max-lag-slots 60`.
+
+| key | default | used by |
+| --- | ------- | ------- |
+| `max_write_age_seconds` | three times `write_interval_seconds` (15) | both; it must be greater than `write_interval_seconds` |
+| `max_stall_seconds` | `1800` | both |
+| `max_lag_slots` | `300` | `--ready` |
+| `max_tip_age_seconds` | unset: no bound | `--ready` |
+
+With the default lag bound a ready node is within about five minutes of its upstream on a network of one-second slots. A node level with an upstream that has stopped producing blocks stays ready: its lag is zero. Set `max_tip_age_seconds` when clients should stop being sent to a node whose chain has gone quiet by the wall clock, whatever the upstream says.
+
+## Why liveness never tests freshness
+
+A liveness check that fails restarts the node, so it must fail only when a restart would cure the problem. `--live` therefore asks whether the process runs and its pipeline moves, never whether its data is fresh:
+
+- **an upstream outage** leaves the sync in `upstream-lost`, retrying as [`[sync.retry]`](../configuration/schema#syncretry) allows. A restart would not bring the upstream back. If retries run out, `dolos daemon` exits 1 by itself and the supervisor restarts it.
+- **a catch-up**, however far behind, is progress. A restart would only start it again from the last commit.
+
+Freshness belongs to readiness: a node that is behind, catching up or without its upstream is not ready, and stops taking traffic until it is level again, without being restarted. A wedged pipeline, one with an open session, the upstream ahead and nothing moving, is the case a restart cures, and the one `--live` fails.
+
+## Kubernetes
+
+The recipes below use `dolos health` alone. Pin the image or binary to an exact release that ships the command, in place of `<version>`.
+
+
+Use exec probes, one per question. The startup probe gives the node time to open its stores and take the lock before liveness counts; the liveness probe restarts a wedged or hung node; the readiness probe takes a node out of its Service's endpoints while it is behind or without its upstream.
+
+```yaml
+containers:
+  - name: dolos
+    image: ghcr.io/txpipe/dolos:<version>
+    args: ["daemon", "--config", "/etc/dolos/dolos.toml"]
+    workingDir: /data
+    startupProbe:
+      exec:
+        command: ["dolos", "--config", "/etc/dolos/dolos.toml", "health", "--live"]
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 360   # up to an hour to open the stores
+    livenessProbe:
+      exec:
+        command: ["dolos", "--config", "/etc/dolos/dolos.toml", "health", "--live"]
+      periodSeconds: 30
+      timeoutSeconds: 5
+      failureThreshold: 3
+    readinessProbe:
+      exec:
+        command: ["dolos", "--config", "/etc/dolos/dolos.toml", "health", "--ready", "--check-ports"]
+      periodSeconds: 10
+      timeoutSeconds: 15
+      failureThreshold: 3
+```
+
+- Give the probes the node's `--config` and `workingDir`, so that they read the node's status file.
+- Keep `timeoutSeconds` above 2 seconds per listener when the probe passes `--check-ports`.
+- A node that bootstraps or catches up from far behind stays live and not ready the whole time, which is what you want: it is not restarted, and it takes no traffic.
+
+## systemd
+
+systemd restarts a `dolos daemon` that exits, such as a unit [`dolos service install`](./service) wrote, but it cannot see a process that runs and does no work. A timer that runs `dolos health --live` covers that case. The script below restarts the node only when the check ran and found it not live; it leaves it alone while it has not taken the lock yet (it is opening its stores, or systemd is already restarting it) and when the check itself errs.
+
+```sh
+#!/bin/sh
+# /usr/local/libexec/dolos-live-check UNIT DOLOS CONFIG
+verdict=$("$2" --config "$3" health --live --format json)
+case $? in
+  0) exit 0 ;;
+  3) case "$verdict" in
+       *'"check":"no-lock"'*) exit 0 ;;
+     esac
+     exec systemctl restart "$1" ;;
+  *) exit 1 ;;
+esac
+```
+
+```ini
+# /etc/systemd/system/dolos-cardano-preview-live.service
+[Unit]
+Description=Restart dolos-cardano-preview when it is not live
+Requisite=dolos-cardano-preview.service
+After=dolos-cardano-preview.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/dolos/preview
+ExecStart=/usr/local/libexec/dolos-live-check dolos-cardano-preview.service /opt/dolos/bin/dolos /srv/dolos/preview/dolos.toml
+```
+
+```ini
+# /etc/systemd/system/dolos-cardano-preview-live.timer
+[Unit]
+Description=Check that dolos-cardano-preview is live
+
+[Timer]
+OnActiveSec=10min
+OnUnitActiveSec=1min
+
+[Install]
+WantedBy=timers.target
+```
+
+```sh
+sudo chmod +x /usr/local/libexec/dolos-live-check
+sudo systemctl daemon-reload
+sudo systemctl enable --now dolos-cardano-preview-live.timer
+```
+
+- Pass the script the absolute path of the binary the node's unit runs, the one its `ExecStart=` names (`systemctl cat dolos-cardano-preview.service` shows it). systemd's default `PATH` does not include where the installers and `cargo install` put `dolos`, and the check must run the same release as the node.
+- `Requisite=` makes the check do nothing while the node's unit is stopped, so it never starts a node you stopped.
+- Set `WorkingDirectory=` to the directory the node's unit runs in, the configuration file's directory for a unit `dolos service install` wrote.
+- For a user unit, put the files under `~/.config/systemd/user/`, and use `systemctl --user` in the script and the commands.
+- systemd's own `WatchdogSec=` needs the process to notify it, and Dolos does not, so leave it unset.
+
+## Docker
+
+A `HEALTHCHECK` sets the container's health status. Docker itself does not restart an unhealthy container; what reads the status, such as Compose's `depends_on` with `condition: service_healthy`, a load balancer or an orchestrator, decides what to do with it. Check `--ready` when the status gates traffic or dependent services, and `--live` when it drives restarts.
+
+```dockerfile
+FROM ghcr.io/txpipe/dolos:<version>
+WORKDIR /data
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10m --retries=3 \
+  CMD ["dolos", "--config", "/etc/dolos/dolos.toml", "health", "--ready"]
+CMD ["daemon", "--config", "/etc/dolos/dolos.toml"]
+```
+
+The same check on `docker run`, without a Dockerfile:
+
+```sh
+docker run -d \
+    -v $(pwd):/etc/dolos:ro \
+    -v dolos-data:/data -w /data \
+    --health-cmd 'dolos --config /etc/dolos/dolos.toml health --ready' \
+    --health-interval 30s --health-timeout 10s --health-start-period 10m --health-retries 3 \
+    ghcr.io/txpipe/dolos:<version> daemon --config /etc/dolos/dolos.toml
+```
+
+The check runs in the container's working directory, so it reads the same status file as the node. `docker inspect --format '{{json .State.Health}}' <container>` shows the last checks and their output.
+
+<Aside type="note">
+MiniBF's `/health` route always answers that the node is healthy, and MiniKupo serves no `/health` route. Neither is a readiness signal; probe with `dolos health` instead.
+</Aside>

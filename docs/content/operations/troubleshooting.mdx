@@ -4,7 +4,7 @@ sidebar:
   order: 6
 ---
 
-Dolos tags certain operational failures with a stable error code (e.g. `CARDANO-001`). When you see one in the logs, look it up here for what it means and how to act.
+Dolos tags certain operational failures with a stable error code (e.g. `CARDANO-001`). When you see one in the logs, look it up here for what it means and how to act. The lines a failed [`dolos health`](#dolos-health-failures) prints are listed at the end.
 
 Codes are grouped by subsystem: `CARDANO-*` covers ledger / epoch-boundary state. Severity is `error` (the node stops) unless noted as a warning.
 
@@ -65,3 +65,111 @@ CARDANO-005: boundary half-closed at startup; resuming the remaining phase
 **Meaning.** One half of a boundary committed before the stop and the other did not (e.g. epoch close finished but epoch open did not). The completed half is not replayed; dolos resumes the remaining phase.
 
 **What to do.** Nothing required; same caveat as `CARDANO-004` — watch the boundary for consistency.
+
+## `dolos health` failures
+
+A failed [health check](./health) exits `3` and prints one line on stderr naming the first check that failed, after `not live:` or `not ready:` for the mode it checked. The checks on the lock, the file and its write age fail either mode, as can `--check-ports`. With `--format json` the same check is the verdict's `failure.check`, given here after each heading. The values in angle brackets are the ones the node reported.
+
+### No process holds the lock (`no-lock`)
+
+```
+no process holds the status lock <path>.lock
+```
+
+No `dolos daemon` or `dolos serve` runs over this configuration, or it has not opened its stores yet. A startup probe sees this while the node opens its stores. Otherwise check that the node runs, and that `dolos health` uses the node's configuration file and working directory, so that it looks for the same file.
+
+### The lock can't be probed (`lock-unreadable`)
+
+```
+the status lock <path>.lock can't be probed: <error>
+```
+
+The lock exists but `dolos health` could not open or test it, most often because it runs as a user that cannot read the node's storage directory. Run it as the node's user.
+
+### No status file (`no-file`)
+
+```
+there is no status file <path>
+```
+
+A process holds the lock but the file is not there: the node took the lock and has not written its first status yet, or something removed the file. If it persists past one `write_interval_seconds`, restart the node.
+
+### The status file can't be read (`unreadable`)
+
+```
+the status file <path> can't be read: <error>
+```
+
+The file exists and can't be opened, usually a permission problem. Run `dolos health` as the node's user.
+
+### The status file does not parse (`unparsable`)
+
+```
+the status file <path> does not parse: <error>
+```
+
+The file is not a status document. Something other than the node wrote to it, or `health.path` points at another file. Check `health.path`; the node rewrites a good file within one interval.
+
+### Unknown format (`unknown-format`)
+
+```
+the status file <path> has format <n>, and this release reads <m>
+```
+
+The node and the `dolos health` binary are different releases. Run the check with the same binary as the node, such as from the same image.
+
+### Stale write (`stale-write`)
+
+```
+the status was written <n>s ago, over max_write_age_seconds <m>
+```
+
+The node holds the lock but has stopped rewriting its status: its process no longer schedules work, because it is hung, starved of CPU or paused. A restart is the cure, which is what a liveness probe does. If it happens under load, raise `max_write_age_seconds`, or give the node more CPU.
+
+### Wedged (`wedged`)
+
+```
+the pipeline has not advanced for <n>s with the upstream ahead (local tip slot <a>, upstream tip slot <b>), over max_stall_seconds <m>
+```
+
+The sync has a session open, the upstream's tip is ahead of the local one, and no block, rollback or answer at a tip the stores hold arrived for `max_stall_seconds`. A restart opens a fresh session. If it recurs, look at the upstream peer and at the node's logs for the stage that stopped; the metric reference's [upstream stalled](../reference/metrics#upstream-stalled) query shows it over time.
+
+### Not following (`not-following`)
+
+```
+the sync is <state>, not following
+```
+
+The node is live but not level with its upstream: `starting` before the first session opens, `catching-up` while it applies the blocks up to the tip the upstream reported, `upstream-lost` while it retries the upstream. Wait, and take no action unless it stays `upstream-lost`: then check the upstream peer's address and reachability, and [`[sync.retry]`](../configuration/schema#syncretry).
+
+### Lagging (`lagging`)
+
+```
+the local tip is <n> slots behind the upstream's, over max_lag_slots <m>
+```
+
+The node follows its upstream but has fallen behind it, such as after a burst of blocks or while starved of disk or CPU. It is ready again once it is within `max_lag_slots`. If it lags steadily, see [Performance](./performance).
+
+### Tip age unknown (`tip-age-unknown`)
+
+```
+the wall-clock time of the local tip (slot <n>) is unknown, and max_tip_age_seconds is set
+```
+
+`max_tip_age_seconds` is set, and the node can't tell the wall-clock time of its tip's slot, because its stores don't hold the era that slot falls in yet, or hold no block at all. It clears as the node syncs. Leave `max_tip_age_seconds` unset for a node whose chain has no such times, such as an emulator.
+
+### Old tip (`old-tip`)
+
+```
+the local tip is <n>s old, over max_tip_age_seconds <m>
+```
+
+The node follows its upstream within `max_lag_slots`, but its tip is older than `max_tip_age_seconds` by the wall clock: the upstream itself is stalled or cut off. Check the upstream, or point the node at another one.
+
+### Port closed (`port-closed`)
+
+```
+the <name> port <address> does not accept: <error>
+```
+
+With `--check-ports`, a listener the configuration enables refused a connection or did not accept it within 2 seconds, or its address does not resolve. Check the node's logs for the listener failing to bind, and that the address in the configuration is the one it listens on.
