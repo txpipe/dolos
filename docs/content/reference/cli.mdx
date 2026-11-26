@@ -23,6 +23,7 @@ dolos [--config PATH]
 │   └── write-genesis [--network NAME] [--dir PATH] [--force]
 ├── daemon
 ├── serve
+├── health --live | --ready [--check-ports]
 ├── bootstrap [--force | --skip-if-data]
 │   ├── mithril [--continue] [--stop-epoch N]
 │   ├── stelae [--continue]
@@ -68,7 +69,7 @@ A command's result goes to **stdout**: the report, the records of a dump, the en
 
 ### `--format`
 
-`--format text|json` (default `text`) is accepted by every command that prints a report or records: `config check`, `sync status`, `sync dump`, `sync recover`, `data stats`, `data inspect`, `data dump state|logs|blocks`, `data check`, `cache stats`, `cache verify`, `service install` and `service uninstall`.
+`--format text|json` (default `text`) is accepted by every command that prints a report or records: `config check`, `health`, `sync status`, `sync dump`, `sync recover`, `data stats`, `data inspect`, `data dump state|logs|blocks`, `data check`, `cache stats`, `cache verify`, `service install` and `service uninstall`.
 
 - A report is printed as **one JSON object on one line**.
 - A dump prints **one JSON object per record, one per line** (JSON Lines), so it can be streamed.
@@ -83,7 +84,7 @@ The text form is for people and outside the [compatibility contract](compatibili
 | `0` | the command did what it was asked |
 | `1` | it failed: an error, a refusal of the data it found, a store held by another process |
 | `2` | usage: the command line is malformed (an unknown command or flag, a missing argument, conflicting flags), or asks for something the command won't do as given, such as a destructive command without `--yes` |
-| `3` | the command ran and found the node or its data unhealthy: `sync status`, `data check` and `cache verify` |
+| `3` | the command ran and found the node or its data unhealthy: `health`, `sync status`, `data check` and `cache verify` |
 
 ### Confirmation
 
@@ -176,6 +177,24 @@ Serves the configured APIs over the stores as they are, without syncing.
 
 - **Opens:** runs the node's open.
 - **Exits:** `0` when stopped; `1` on an error.
+
+### `dolos health`
+
+Whether the `dolos daemon` or `dolos serve` running over this configuration is live, or ready to serve, read from the status file it keeps (see [`health`](../configuration/schema#health)). It is what a supervisor's exec probe runs. The checks run in order, and the first that fails is the answer: a process holds the status lock; the file exists, parses and is in a format this release reads; it was written within `max_write_age_seconds`; then the mode's own rule.
+
+| flag | meaning |
+| ---- | ------- |
+| `--live` | pass unless the sync has a session open, the upstream's tip is ahead of the local one, and nothing advanced for `max_stall_seconds`. A node catching up, however far behind, or retrying a lost upstream is live |
+| `--ready` | pass when live, the sync follows its upstream and the local tip is within `max_lag_slots` of the upstream's, and, with `max_tip_age_seconds` set, the local tip is at most that old by the wall clock. A node level with a stalled upstream stays ready. A `serve` node, which does not sync, is ready while live |
+| `--check-ports` | also connect to each serving listener the configuration enables, the relay under `daemon` only; a wildcard address is reached on loopback |
+| `--max-write-age-seconds N`, `--max-stall-seconds N`, `--max-lag-slots N`, `--max-tip-age-seconds N` | override the configuration's bound of the same name |
+| `--format text\|json` | how to print the result |
+
+Exactly one of `--live` and `--ready` is required.
+
+- **Opens nothing:** it reads the configuration, the status file and its lock, and takes no lock. It runs beside the node.
+- **Prints:** on a pass, one line on stdout; on a failure, one line on stderr naming the failed check and the values behind it. With `--format json`, stdout gets the verdict either way, carrying the mode, whether it passed, the failed check and the status the node wrote.
+- **Exits:** `0` when the check passes; `3` when it fails; `1` on an error, such as a configuration that doesn't load.
 
 ## Bootstrap
 

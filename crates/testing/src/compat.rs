@@ -144,6 +144,15 @@ pub const GOLDENS: &[Golden] = &[
     golden("dolos daemon", &["daemon", "--help"], 0, Output::Nothing),
     golden("dolos serve", &["serve", "--help"], 0, Output::Nothing),
     golden(
+        "dolos health",
+        &["health", "--live", "--format", "json"],
+        3,
+        Output::JsonShaped(
+            &["failure"],
+            "no node runs over the fixture, so it fails on the lock, whose path is the copy's own",
+        ),
+    ),
+    golden(
         "dolos bootstrap",
         &["bootstrap", "--force"],
         1,

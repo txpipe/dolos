@@ -1,0 +1,29 @@
+Check that the running node is live, or ready to serve, from its status file, without opening the
+stores
+
+Usage: dolos health [OPTIONS] <--live|--ready>
+
+Options:
+      --live
+          Pass while the node runs and its sync is not wedged; a node catching up or retrying a lost
+          upstream is live
+      --ready
+          Pass while the node is live, follows its upstream and is within the lag bound
+      --check-ports
+          Also connect to each serving port the configuration enables
+      --max-write-age-seconds <SECONDS>
+          How old the last status write may be; overrides `health.max_write_age_seconds`
+      --max-stall-seconds <SECONDS>
+          How long the sync may stand still with the upstream ahead; overrides
+          `health.max_stall_seconds`
+      --max-lag-slots <SLOTS>
+          How far behind the upstream's tip a ready node may be; overrides `health.max_lag_slots`
+      --max-tip-age-seconds <SECONDS>
+          How old the local tip may be for a ready node; overrides `health.max_tip_age_seconds`
+      --format <FORMAT>
+          How to print the result: text for people, JSON for scripts [default: text] [possible
+          values: text, json]
+  -c, --config <CONFIG>
+          
+  -h, --help
+          Print help

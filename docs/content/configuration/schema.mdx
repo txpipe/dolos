@@ -148,6 +148,8 @@ service_name = "dolos-mainnet"
 [health]
 path = "status.json"          # relative to storage.path
 write_interval_seconds = 5
+max_stall_seconds = 1800      # max_write_age_seconds and max_tip_age_seconds are optional
+max_lag_slots = 300
 ```
 
 The [`examples/`](https://github.com/txpipe/dolos/tree/main/examples) directory of the repository holds this file, the ordinary node for each known network, a custom network and an ephemeral node as complete configurations, and CI runs `dolos config check` over each of them.
@@ -616,20 +618,27 @@ otlp_protocol = "http-protobuf"
 
 ## `health`
 
-The status file a running `dolos daemon` or `dolos serve` keeps, whatever APIs are enabled, and the lock beside it.
+The status file a running `dolos daemon` or `dolos serve` keeps, whatever APIs are enabled, the lock beside it, and the bounds [`dolos health`](../reference/cli#dolos-health) judges it by.
 
 | field | type | default |
 | ----- | ---- | ------- |
 | `path` | path, relative to `storage.path` | `status.json` |
 | `write_interval_seconds` | integer (seconds), at least 1 | `5` |
+| `max_write_age_seconds` | integer (seconds), at least 1 | three times `write_interval_seconds` |
+| `max_stall_seconds` | integer (seconds), at least 1 | `1800` |
+| `max_lag_slots` | integer (slots) | `300` |
+| `max_tip_age_seconds` | integer (seconds), at least 1 | unset: no bound |
 
 - The node locks `path` with `.lock` added to its name once its stores are open, and holds the lock until it exits. A second node over the same file stops there, naming the lock.
 - It rewrites the file every `write_interval_seconds` and removes it on a clean shutdown. After a crash the file stays, and the released lock marks it as left by a node that is gone.
 - The file's format is private to Dolos.
+- `dolos health --live` fails when the last write is older than `max_write_age_seconds`, or when the sync has a session open, the upstream's tip is ahead of the local one and nothing advanced for `max_stall_seconds`.
+- `dolos health --ready` also fails unless the sync follows its upstream within `max_lag_slots` of its tip and, when `max_tip_age_seconds` is set, the local tip's slot is at most that old by the wall clock.
 
 ```toml
 [health]
 write_interval_seconds = 10
+max_lag_slots = 60
 ```
 
 ## Rules across fields
