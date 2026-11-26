@@ -21,6 +21,7 @@ const TREE: &[&[&str]] = &[
     &["config", "write-genesis"],
     &["daemon"],
     &["serve"],
+    &["health"],
     &["bootstrap"],
     &["bootstrap", "mithril"],
     &["bootstrap", "stelae"],

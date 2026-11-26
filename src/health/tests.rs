@@ -242,3 +242,48 @@ fn the_document_names_its_state_in_kebab_case() {
     let back: Status = serde_json::from_value(document).unwrap();
     assert_eq!(back, status);
 }
+
+#[test]
+fn the_local_tip_time_comes_from_the_era_its_slot_falls_in() {
+    use dolos_cardano::{EraBoundary, EraState};
+
+    let era = |slot, timestamp, slot_length, end: Option<(u64, u64)>| EraState {
+        start: EraBoundary {
+            epoch: 0,
+            slot,
+            timestamp,
+        },
+        end: end.map(|(slot, timestamp)| EraBoundary {
+            epoch: 0,
+            slot,
+            timestamp,
+        }),
+        epoch_length: 100,
+        slot_length,
+        protocol: 0,
+    };
+
+    assert_eq!(slot_unix_seconds(&ChainSummary::default(), 10), None);
+
+    let mut summary = ChainSummary::default();
+    summary.append_era(2, era(100, 1_000, 20, Some((200, 3_000))));
+    summary.append_era(5, era(200, 3_000, 1, None));
+
+    // Before the first era the stores hold, in a past era, then the edge.
+    assert_eq!(slot_unix_seconds(&summary, 99), None);
+    assert_eq!(slot_unix_seconds(&summary, 150), Some(2_000));
+    assert_eq!(slot_unix_seconds(&summary, 260), Some(3_060));
+
+    let status = SyncStatus {
+        local_tip_unix_ms: Some(3_060_000),
+        ..SyncStatus::new(SyncState::Following, Some(260), Some(260), None, None)
+    };
+    let document = serde_json::to_value(&status).unwrap();
+    assert_eq!(document["local_tip_unix_ms"], 3_060_000);
+
+    // A document without it, as the first writers of this format leave, reads.
+    let mut older = document;
+    older.as_object_mut().unwrap().remove("local_tip_unix_ms");
+    let older: SyncStatus = serde_json::from_value(older).unwrap();
+    assert_eq!(older.local_tip_unix_ms, None);
+}

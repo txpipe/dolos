@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use dolos_cardano::eras::{load_chain_summary_from_state, ChainSummary};
 use dolos_core::config::RootConfig;
 use dolos_core::{ChainPoint, Domain as _, StateStore as _};
 use serde::{Deserialize, Serialize};
@@ -59,6 +60,10 @@ pub struct SyncStatus {
     pub state: SyncState,
     /// The slot of the state's cursor; none while the stores hold no block.
     pub local_tip_slot: Option<u64>,
+    /// The wall-clock time of that slot, by the chain's eras; none where the
+    /// stores don't hold the era it falls in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_tip_unix_ms: Option<u64>,
     /// The slot of the tip the upstream reported last; none before the first.
     pub upstream_tip_slot: Option<u64>,
     /// The upstream tip's slot less the local one, counted from slot 0 while
@@ -83,6 +88,7 @@ impl SyncStatus {
         Self {
             state,
             local_tip_slot,
+            local_tip_unix_ms: None,
             upstream_tip_slot,
             lag_slots: upstream_tip_slot
                 .map(|upstream| upstream.saturating_sub(local_tip_slot.unwrap_or(0))),
@@ -126,17 +132,51 @@ impl Pipeline {
             }
         }
     }
+
+    fn slot_unix_ms(&self, slot: u64) -> Option<u64> {
+        match load_chain_summary_from_state(self.domain.state()) {
+            Ok(summary) => slot_unix_seconds(&summary, slot).map(|seconds| seconds * 1000),
+            Err(error) => {
+                warn!(%error, "failed to read the chain's eras for the status file");
+                None
+            }
+        }
+    }
+}
+
+/// The wall-clock time of `slot` in seconds, by the era of `summary` it falls
+/// in; none when no era holds it.
+fn slot_unix_seconds(summary: &ChainSummary, slot: u64) -> Option<u64> {
+    if summary.is_empty() {
+        return None;
+    }
+
+    let edge = summary.edge();
+    let era = if slot >= edge.start.slot {
+        Some(edge)
+    } else {
+        summary.iter_past().find(|era| {
+            slot >= era.start.slot && era.end.as_ref().is_some_and(|end| slot < end.slot)
+        })
+    };
+
+    era.map(|era| era.slot_time(slot))
 }
 
 impl SyncReport for Pipeline {
     fn report(&self) -> SyncStatus {
-        SyncStatus::new(
-            self.progress.state(),
-            self.local_tip_slot(),
-            self.progress.upstream_tip_slot(),
-            self.progress.advanced_at(),
-            self.progress.heard_at(),
-        )
+        let local_tip_slot = self.local_tip_slot();
+
+        SyncStatus {
+            local_tip_unix_ms: local_tip_slot.and_then(|slot| self.slot_unix_ms(slot)),
+            ..SyncStatus::new(
+                self.progress.state(),
+                local_tip_slot,
+                self.progress.upstream_tip_slot(),
+                self.progress.advanced_at(),
+                self.progress.heard_at(),
+            )
+        }
     }
 }
 
@@ -391,6 +431,8 @@ async fn rewrite(writer: Arc<Writer>, every: Duration) {
         }
     }
 }
+
+pub mod check;
 
 #[cfg(test)]
 mod tests;

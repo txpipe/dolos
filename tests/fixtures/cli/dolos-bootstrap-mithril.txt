@@ -34,10 +34,10 @@ Options:
           Download up to this immutable file number (inclusive)
       --continue
           Resume an interrupted replay from its committed position, over the data it left in storage
-  -c, --config <CONFIG>
-          
       --stop-epoch <N>
           Stop once the ledger reaches this epoch
+  -c, --config <CONFIG>
+          
       --chunk-size <CHUNK_SIZE>
           Number of blocks to process in each chunk, more is faster but uses more memory [default:
           500]

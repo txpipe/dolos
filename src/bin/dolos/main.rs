@@ -18,6 +18,7 @@ mod common;
 mod config;
 mod daemon;
 mod feedback;
+mod health;
 mod output;
 mod registry;
 mod serve;
@@ -63,6 +64,10 @@ enum Command {
     /// Fill the node's stores from a Stelae snapshot, Mithril or a local
     /// ImmutableDB
     Bootstrap(bootstrap::Args),
+
+    /// Check that the running node is live, or ready to serve, from its
+    /// status file, without opening the stores
+    Health(health::Args),
 }
 
 /// What `dolos --version` and `-V` print after the name: the release and the
@@ -92,8 +97,11 @@ fn main() -> std::process::ExitCode {
     match run() {
         Ok(()) => ExitCode::Ok.into(),
         Err(report) => {
-            // What returning the error from `main` prints.
-            eprintln!("Error: {report:?}");
+            match report.downcast_ref::<crate::output::Probe>() {
+                Some(probe) => eprintln!("{probe}"),
+                // What returning the error from `main` prints.
+                None => eprintln!("Error: {report:?}"),
+            }
             ExitCode::of(&report).into()
         }
     }
@@ -133,5 +141,6 @@ fn run() -> Result<()> {
         Command::Data(args) => data::run(&load()?, &args, &feedback),
 
         Command::Bootstrap(args) => bootstrap::run(&load()?, &args, &feedback),
+        Command::Health(args) => health::run(&load()?, &args),
     }
 }

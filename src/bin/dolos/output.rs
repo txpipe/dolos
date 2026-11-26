@@ -72,7 +72,9 @@ impl ExitCode {
     pub fn of(report: &miette::Report) -> Self {
         if report.downcast_ref::<Usage>().is_some() {
             Self::Usage
-        } else if report.downcast_ref::<Unhealthy>().is_some() {
+        } else if report.downcast_ref::<Unhealthy>().is_some()
+            || report.downcast_ref::<Probe>().is_some()
+        {
             Self::Unhealthy
         } else {
             Self::Error
@@ -115,6 +117,12 @@ impl miette::Diagnostic for Usage {
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 #[error("{0}")]
 pub struct Unhealthy(pub String);
+
+/// A probe's failed check, printed as the one line it is, for a supervisor's
+/// log; exits 3.
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+#[error("{0}")]
+pub struct Probe(pub String);
 
 /// `--yes`, for a command that destroys data.
 #[derive(Debug, Clone, Default, clap::Args)]
@@ -162,6 +170,10 @@ mod tests {
     fn exit_codes_follow_the_failure() {
         assert_eq!(
             ExitCode::of(&miette::Report::new(Unhealthy("behind".into()))),
+            ExitCode::Unhealthy
+        );
+        assert_eq!(
+            ExitCode::of(&miette::Report::new(Probe("not live".into()))),
             ExitCode::Unhealthy
         );
         assert_eq!(ExitCode::of(&miette::miette!("failed")), ExitCode::Error);

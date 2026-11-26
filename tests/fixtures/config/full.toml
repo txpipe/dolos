@@ -103,3 +103,5 @@ service_name = "dolos-mainnet"
 [health]
 path = "status.json"
 write_interval_seconds = 5
+max_stall_seconds = 1800
+max_lag_slots = 300

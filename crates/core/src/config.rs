@@ -1272,7 +1272,8 @@ impl TelemetryConfig {
     }
 }
 
-/// The status file a running node keeps, and the lock beside it.
+/// The status file a running node keeps, the lock beside it, and the bounds
+/// `dolos health` judges it by.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct HealthConfig {
@@ -1281,10 +1282,25 @@ pub struct HealthConfig {
     pub path: Option<PathBuf>,
     /// How often the node rewrites it.
     pub write_interval_seconds: NonZeroU64,
+    /// How old the last write may be for the node to be live; unset, three
+    /// write intervals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_write_age_seconds: Option<NonZeroU64>,
+    /// How long the pipeline may stand still, with the upstream's tip ahead,
+    /// before the node is wedged and not live.
+    pub max_stall_seconds: NonZeroU64,
+    /// How far behind the upstream's tip a ready node may be.
+    pub max_lag_slots: u64,
+    /// How old, by the wall clock, the local tip may be for the node to be
+    /// ready; unset, no bound.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tip_age_seconds: Option<NonZeroU64>,
 }
 
 impl HealthConfig {
     pub const DEFAULT_WRITE_INTERVAL_SECONDS: u64 = 5;
+    pub const DEFAULT_MAX_STALL_SECONDS: u64 = 1800;
+    pub const DEFAULT_MAX_LAG_SLOTS: u64 = 300;
 
     pub fn is_default(&self) -> bool {
         *self == Self::default()
@@ -1294,6 +1310,24 @@ impl HealthConfig {
     pub fn write_interval(&self) -> Duration {
         Duration::from_secs(self.write_interval_seconds.get())
     }
+
+    /// How old the last write may be for the node to be live.
+    pub fn max_write_age(&self) -> Duration {
+        self.max_write_age_seconds
+            .map(|seconds| Duration::from_secs(seconds.get()))
+            .unwrap_or_else(|| self.write_interval() * 3)
+    }
+
+    /// How long the pipeline may stand still with the upstream ahead.
+    pub fn max_stall(&self) -> Duration {
+        Duration::from_secs(self.max_stall_seconds.get())
+    }
+
+    /// How old the local tip may be for the node to be ready, if bounded.
+    pub fn max_tip_age(&self) -> Option<Duration> {
+        self.max_tip_age_seconds
+            .map(|seconds| Duration::from_secs(seconds.get()))
+    }
 }
 
 impl Default for HealthConfig {
@@ -1301,6 +1335,10 @@ impl Default for HealthConfig {
         Self {
             path: None,
             write_interval_seconds: NonZeroU64::new(Self::DEFAULT_WRITE_INTERVAL_SECONDS).unwrap(),
+            max_write_age_seconds: None,
+            max_stall_seconds: NonZeroU64::new(Self::DEFAULT_MAX_STALL_SECONDS).unwrap(),
+            max_lag_slots: Self::DEFAULT_MAX_LAG_SLOTS,
+            max_tip_age_seconds: None,
         }
     }
 }
@@ -1530,6 +1568,25 @@ impl RootConfig {
                     ),
                 ));
             }
+        }
+
+        let health = &self.health;
+        if let Some(age) = health
+            .max_write_age_seconds
+            .filter(|age| *age <= health.write_interval_seconds)
+        {
+            return Err(ConfigError::invalid(
+                [
+                    "health.max_write_age_seconds",
+                    "health.write_interval_seconds",
+                ],
+                format!(
+                    "`health.max_write_age_seconds` must be greater than \
+                     `health.write_interval_seconds`, found {age} with an interval of {}: the \
+                     node writes once an interval, so a healthy node would fail the bound",
+                    health.write_interval_seconds
+                ),
+            ));
         }
 
         let (state, archive) = (&self.storage.state, &self.storage.archive);
@@ -2370,6 +2427,34 @@ mod tests {
 
         let unknown = serde_json::from_value::<HealthConfig>(json!({ "interval": 5 }));
         assert!(unknown.is_err(), "{unknown:?}");
+    }
+
+    #[test]
+    fn the_health_bounds_need_no_configuration_and_follow_the_file() {
+        let health = HealthConfig::default();
+        assert_eq!(health.max_write_age(), Duration::from_secs(15));
+        assert_eq!(health.max_stall(), Duration::from_secs(1800));
+        assert_eq!(health.max_lag_slots, 300);
+        assert_eq!(health.max_tip_age(), None);
+
+        let slower: HealthConfig =
+            serde_json::from_value(json!({ "write_interval_seconds": 30 })).unwrap();
+        assert_eq!(slower.max_write_age(), Duration::from_secs(90));
+
+        let set: HealthConfig = serde_json::from_value(json!({
+            "max_write_age_seconds": 20,
+            "max_stall_seconds": 60,
+            "max_lag_slots": 0,
+            "max_tip_age_seconds": 120,
+        }))
+        .unwrap();
+        assert_eq!(set.max_write_age(), Duration::from_secs(20));
+        assert_eq!(set.max_stall(), Duration::from_secs(60));
+        assert_eq!(set.max_lag_slots, 0);
+        assert_eq!(set.max_tip_age(), Some(Duration::from_secs(120)));
+
+        let zero = serde_json::from_value::<HealthConfig>(json!({ "max_stall_seconds": 0 }));
+        assert!(zero.is_err(), "{zero:?}");
     }
 
     #[test]
