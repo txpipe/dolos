@@ -192,6 +192,24 @@ mod tests {
         }
     }
 
+    /// Blockfrost reads the media type alone, in any case: the body under
+    /// these content types is read as CBOR, and refused as a transaction.
+    #[tokio::test]
+    async fn the_media_type_is_read_alone_in_any_case() {
+        let app = TestApp::new();
+
+        for content_type in [
+            "application/cbor; charset=utf-8",
+            "Application/CBOR",
+            " application/cbor ",
+        ] {
+            let (status, _, body) = submit(&app, Some(content_type), b"x".to_vec()).await;
+
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{content_type}");
+            assert_eq!(body["error"], "Bad Request", "{content_type}");
+        }
+    }
+
     /// A transaction the node refuses gets Blockfrost's error body, with the
     /// node's reason as its message.
     #[tokio::test]
@@ -206,6 +224,25 @@ mod tests {
 
         let message = "chain error: decoding error: Unknown CBOR structure: deadbeef";
         assert_eq!(body["message"], message);
+    }
+
+    /// A transaction submitted again is refused with the node's reason: the
+    /// copy it submitted first spends its inputs.
+    #[tokio::test]
+    async fn a_transaction_submitted_twice_is_refused_with_a_reason() {
+        let app = TestApp::new();
+        let tx = app.vectors().tx_cbor.clone();
+
+        let (status, _, _) = submit(&app, Some("application/cbor"), tx.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, _, body) = submit(&app, Some("application/cbor"), tx).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body["message"],
+            "chain error: phase-1 script rejected the transaction: some transaction input is not \
+             present in the UTxO set"
+        );
     }
 
     #[tokio::test]
