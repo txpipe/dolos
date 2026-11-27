@@ -4,6 +4,7 @@ use dolos_cardano::model::gov::GovState;
 use dolos_core::Domain;
 use pallas::ledger::primitives::RationalNumber;
 
+use crate::error::Error;
 use crate::{
     mapping::{bech32_gov_action, governance::committee::committee_members, i32_or_500},
     Facade,
@@ -41,7 +42,7 @@ use crate::{
 /// state as a dissolution. A fresh sync recovers the true state. If governance
 /// is not active (`active_since` unset), no committee exists. The endpoint then
 /// returns 404 instead of an empty committee.
-pub async fn committee<D>(State(domain): State<Facade<D>>) -> Result<Json<Committee>, StatusCode>
+pub async fn committee<D>(State(domain): State<Facade<D>>) -> Result<Json<Committee>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
     Option<GovState>: From<D::Entity>,

@@ -15,11 +15,12 @@ use crate::{
 };
 
 use super::{drep_distribution, drep_key, point_read_drep_row, scan_drep_row, DRepReads};
+use crate::error::Error;
 
 pub async fn drep_by_id<D>(
     Path(drep): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<blockfrost_openapi::models::drep::Drep>, StatusCode>
+) -> Result<Json<blockfrost_openapi::models::drep::Drep>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
     Option<DRepState>: From<D::Entity>,
@@ -41,7 +42,7 @@ where
             .await?;
 
         if drep_state.is_none() {
-            return Err(StatusCode::NOT_FOUND);
+            return Err(StatusCode::NOT_FOUND.into());
         }
     }
 
@@ -62,7 +63,7 @@ where
         tip,
     };
 
-    model.into_response()
+    Ok(model.into_response()?)
 }
 
 #[cfg(test)]

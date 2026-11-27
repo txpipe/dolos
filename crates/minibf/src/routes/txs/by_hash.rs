@@ -16,11 +16,12 @@ use crate::{
 };
 
 use super::parse_tx_hash;
+use crate::error::Error;
 
 pub async fn by_hash<D>(
     Path(tx_hash): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<TxContent>, StatusCode>
+) -> Result<Json<TxContent>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
     Option<AccountState>: From<D::Entity>,
@@ -34,7 +35,7 @@ where
         Err(StatusCode::NOT_FOUND) => {
             return Ok(Json(genesis_tx::content_for_hash(&domain, &hash)?));
         }
-        Err(err) => return Err(err),
+        Err(err) => return Err(err.into()),
     };
 
     let chain = domain.get_chain_summary()?;
@@ -56,7 +57,7 @@ where
 
     builder.compute_deposit(&domain)?;
 
-    builder.into_response()
+    Ok(builder.into_response()?)
 }
 
 #[cfg(test)]

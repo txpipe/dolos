@@ -65,19 +65,19 @@ impl IntoResponse for Error {
         match self {
             Error::Pagination(pagination) => pagination.into_response(),
             Error::Code(status) => {
-                if matches!(status, StatusCode::NOT_FOUND) {
-                    (
-                        status,
-                        Json(ErrorBody::new(
-                            404,
-                            "Not Found",
-                            "The requested component has not been found.",
-                        )),
-                    )
-                        .into_response()
-                } else {
-                    status.into_response()
-                }
+                let reason = status.canonical_reason().unwrap_or("Error");
+
+                // the messages Blockfrost's API reference gives these statuses
+                let message = match status {
+                    StatusCode::BAD_REQUEST => "Backend did not understand your request.",
+                    StatusCode::NOT_FOUND => "The requested component has not been found.",
+                    StatusCode::INTERNAL_SERVER_ERROR => {
+                        "An unexpected response was received from the backend."
+                    }
+                    _ => reason,
+                };
+
+                (status, Json(ErrorBody::new(status.as_u16(), reason, message))).into_response()
             }
             Error::InvalidAddress => (
                 StatusCode::BAD_REQUEST,

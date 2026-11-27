@@ -15,6 +15,7 @@ use dolos_core::{
     CacheEntry, CacheError, CacheNamespace, CacheStore, Domain, FillError, StateStore,
 };
 
+use crate::error::Error;
 use crate::{
     mapping::{network::NetworkModelBuilder, IntoModel},
     Facade,
@@ -196,7 +197,7 @@ where
     }
 }
 
-pub async fn naked<D>(State(domain): State<Facade<D>>) -> Result<Response, StatusCode>
+pub async fn naked<D>(State(domain): State<Facade<D>>) -> Result<Response, Error>
 where
     Option<EpochState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
