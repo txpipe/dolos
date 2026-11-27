@@ -123,7 +123,7 @@ No other route is refused by this limit. Every route, heavy or not, answers `504
 
 ## Coverage
 
-Dolos provides many, but not all of the Blockfrost endpoints. The following list represent the endpoints currently supported by Dolos. How far their responses match Blockfrost's is measured in [Blockfrost Conformance](./blockfrost-conformance).
+Dolos provides many, but not all of the Blockfrost endpoints. The following list represent the endpoints currently supported by Dolos. How far their responses match Blockfrost's is measured in [Blockfrost Conformance](./blockfrost-conformance). Every error answers Blockfrost's error body, with its `status_code`, `error` and `message`; where no route gives a message of its own, it is the one Blockfrost's API reference gives the status, such as `The requested component has not been found.` for a `404`.
 
 MiniBF's `/health` route always answers `{"is_healthy": true}` while the server runs: it does not reflect the sync, so it is not a readiness signal. To tell whether the node is live or ready to serve, probe it with `dolos health`; see [Health Checks](../operations/health).
 
