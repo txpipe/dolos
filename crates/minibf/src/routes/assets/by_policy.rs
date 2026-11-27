@@ -6,11 +6,10 @@ use axum::{
 use blockfrost_openapi::models::asset_policy_inner::AssetPolicyInner;
 use dolos_cardano::{indexes::SlotOrder, periods::first_mints};
 use dolos_core::{Domain, DomainError};
-use pallas::crypto::hash::Hash;
 
 use crate::{
     error::Error,
-    mapping::assets::asset_quantities,
+    mapping::assets::{asset_quantities, decode_policy_id},
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
@@ -27,10 +26,7 @@ where
 {
     let pagination = Pagination::try_from(params)?;
 
-    let policy = hex::decode(&policy_hex).map_err(|_| Error::InvalidPolicy)?;
-    let policy: Hash<28> = <[u8; 28]>::try_from(policy.as_slice())
-        .map_err(|_| Error::InvalidPolicy)?
-        .into();
+    let policy = decode_policy_id(&policy_hex)?;
 
     let chain = domain.get_chain_summary()?;
     let Some(mary_epoch) = chain.first_mary_epoch() else {
@@ -247,6 +243,42 @@ mod tests {
         assert_status(&app, "/assets/policy/not-hex", StatusCode::BAD_REQUEST).await;
         // This policy contains fewer than 28 bytes.
         assert_status(&app, "/assets/policy/abcd", StatusCode::BAD_REQUEST).await;
+    }
+
+    /// Blockfrost finds a policy only from its lowercase hex. An uppercase
+    /// digit keeps the shape of the id valid, so the route gives 404, not 400.
+    /// It does not hide an invalid shape or a refused query parameter.
+    #[tokio::test]
+    async fn assets_by_policy_finds_nothing_from_uppercase_hex() {
+        // the default policy id has no hex letter
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            policy_id: [0xab; 28],
+            ..Default::default()
+        });
+        let policy = app.vectors().policy_id.clone();
+
+        assert_status(&app, &format!("/assets/policy/{policy}"), StatusCode::OK).await;
+
+        for spelling in uppercase_spellings(&policy) {
+            let path = format!("/assets/policy/{spelling}");
+            assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+        }
+
+        let short = "AB".repeat(27);
+        assert_status(
+            &app,
+            &format!("/assets/policy/{short}"),
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+
+        let upper = policy.to_ascii_uppercase();
+        assert_status(
+            &app,
+            &format!("/assets/policy/{upper}?count=0"),
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
     }
 
     #[tokio::test]

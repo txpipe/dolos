@@ -95,6 +95,19 @@ pub(super) mod testing {
         "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
     }
 
+    /// The hex of an id with each letter in uppercase, and with only its last
+    /// letter in uppercase.
+    pub fn uppercase_spellings(id: &str) -> [String; 2] {
+        let last = id
+            .rfind(|c: char| c.is_ascii_lowercase())
+            .expect("the id has a hex letter");
+
+        let mut mixed = id.to_string();
+        mixed[last..=last].make_ascii_uppercase();
+
+        [id.to_ascii_uppercase(), mixed]
+    }
+
     pub async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
         let (status, bytes) = app.get_bytes(path).await;
         assert_eq!(
@@ -103,5 +116,71 @@ pub(super) mod testing {
             "unexpected status {status} with body: {}",
             String::from_utf8_lossy(&bytes)
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::*;
+    use crate::test_support::TestApp;
+    use axum::http::StatusCode;
+
+    /// The routes under `/assets/{asset}`, as the text after the asset.
+    const SUBJECT_ROUTES: [&str; 6] = [
+        "",
+        "/history",
+        "/txs",
+        "/transactions",
+        "/addresses",
+        "/utxos",
+    ];
+
+    /// Blockfrost finds an asset only from its lowercase hex. An uppercase
+    /// digit keeps the shape of the id valid, so each route gives 404, not
+    /// 400.
+    #[tokio::test]
+    async fn assets_by_subject_routes_find_nothing_from_uppercase_hex() {
+        let app = TestApp::new();
+        let asset = app.vectors().asset_unit.as_str();
+
+        for route in SUBJECT_ROUTES {
+            assert_status(&app, &format!("/assets/{asset}{route}"), StatusCode::OK).await;
+
+            for spelling in uppercase_spellings(asset) {
+                let path = format!("/assets/{spelling}{route}");
+                assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+            }
+        }
+    }
+
+    /// An uppercase digit does not hide an error that Blockfrost reports
+    /// before it looks the asset up: an id of an invalid shape and a refused
+    /// query parameter stay 400.
+    #[tokio::test]
+    async fn assets_by_subject_routes_refuse_a_malformed_uppercase_id() {
+        let app = TestApp::new();
+        let asset = app.vectors().asset_unit.to_ascii_uppercase();
+
+        let malformed = [
+            // valid hex, shorter than a policy id
+            "F".repeat(54),
+            // valid hex, longer than a policy id plus the longest asset name
+            "F".repeat(122),
+            // valid length, non-hex characters
+            "Z".repeat(56),
+        ];
+
+        for route in SUBJECT_ROUTES {
+            for id in &malformed {
+                let path = format!("/assets/{id}{route}");
+                assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+            }
+
+            // `/assets/{asset}` itself takes no query parameters
+            if !route.is_empty() {
+                let path = format!("/assets/{asset}{route}?count=0");
+                assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+            }
+        }
     }
 }

@@ -760,12 +760,43 @@ pub(crate) fn walks_reference_token(unit: &str) -> bool {
 /// Decodes an asset subject: a 56 hex char policy id plus up to 64 hex chars
 /// of asset name. Blockfrost rejects any other shape with 400 before looking
 /// the asset up.
+///
+/// An uppercase hex digit is part of a valid shape. But Blockfrost finds an
+/// asset only from its lowercase hex. Thus, a subject with an uppercase digit
+/// gives the 404 of an asset the chain never saw.
 pub(crate) fn decode_asset_subject(subject: &str) -> Result<Vec<u8>, Error> {
     if !(56..=120).contains(&subject.len()) {
         return Err(Error::InvalidAsset);
     }
 
-    hex::decode(subject).map_err(|_| Error::InvalidAsset)
+    decode_lowercase_id(subject, Error::InvalidAsset)
+}
+
+/// Decodes a policy id: 56 hex chars. Blockfrost rejects any other shape with
+/// 400. A policy id with an uppercase digit gives 404, as an asset subject
+/// with one does.
+pub(crate) fn decode_policy_id(policy: &str) -> Result<Hash<28>, Error> {
+    if policy.len() != 56 {
+        return Err(Error::InvalidPolicy);
+    }
+
+    let policy = decode_lowercase_id(policy, Error::InvalidPolicy)?;
+    let policy = <[u8; 28]>::try_from(policy.as_slice()).map_err(|_| Error::InvalidPolicy)?;
+
+    Ok(policy.into())
+}
+
+/// Decodes the hex of an id of a valid length. Text that is not hex gives
+/// `malformed`. Hex with an uppercase digit is well formed, but Blockfrost
+/// compares the id as written with lowercase hex, so it gives 404.
+fn decode_lowercase_id(id: &str, malformed: Error) -> Result<Vec<u8>, Error> {
+    let bytes = hex::decode(id).map_err(|_| malformed)?;
+
+    if id.bytes().any(|c| c.is_ascii_uppercase()) {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    Ok(bytes)
 }
 
 fn log_500(error: impl std::fmt::Debug) -> StatusCode {
@@ -958,6 +989,47 @@ mod tests {
 
     /// The asset body has the bytes that `serde_json` encodes for the sorted
     /// asset.
+    /// Blockfrost takes an uppercase hex digit as part of a valid id, then
+    /// finds nothing from it: the id is neither decoded nor malformed.
+    #[test]
+    fn ids_with_an_uppercase_digit_are_valid_and_find_nothing() {
+        fn not_found<T>(res: Result<T, Error>) -> bool {
+            matches!(res, Err(Error::Code(StatusCode::NOT_FOUND)))
+        }
+
+        let policy = "ab".repeat(28);
+        let subject = format!("{policy}cd");
+
+        assert_eq!(
+            decode_asset_subject(&subject).unwrap(),
+            [vec![0xab; 28], vec![0xcd]].concat()
+        );
+        assert!(not_found(decode_asset_subject(&subject.to_uppercase())));
+        assert!(not_found(decode_asset_subject(&format!("{policy}cD"))));
+        assert!(not_found(decode_asset_subject(&format!(
+            "A{}",
+            &subject[1..]
+        ))));
+
+        assert_eq!(
+            decode_policy_id(&policy).unwrap().as_slice(),
+            [0xab; 28].as_slice()
+        );
+        assert!(not_found(decode_policy_id(&policy.to_uppercase())));
+        assert!(not_found(decode_policy_id(&format!("A{}", &policy[1..]))));
+
+        // an invalid shape stays malformed in either letter case
+        for id in ["AB".repeat(27), "ZZ".repeat(28), "AB".repeat(61)] {
+            assert!(matches!(
+                decode_asset_subject(&id),
+                Err(Error::InvalidAsset)
+            ));
+        }
+        for id in ["AB".repeat(27), "ZZ".repeat(28), "AB".repeat(29)] {
+            assert!(matches!(decode_policy_id(&id), Err(Error::InvalidPolicy)));
+        }
+    }
+
     #[test]
     fn asset_body_matches_serde() {
         let unit = format!("{POLICY}{}", hex::encode("james"));
