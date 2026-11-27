@@ -4,6 +4,7 @@ use axum::{
     Json,
 };
 use serde::Serialize;
+use std::borrow::Cow;
 
 use crate::pagination::PaginationError;
 
@@ -41,21 +42,30 @@ pub enum Error {
     HeavyScanLimit,
     /// The request ran past the node's request deadline.
     RequestTimeout,
+    /// `/tx/submit` refused the transaction, for the reason it holds.
+    /// Blockfrost's message carries the submit API's reason; this is the
+    /// node's.
+    TxRejected(String),
+    /// `/tx/submit` got a transaction this node's mempool holds already.
+    TxInMempool,
+    /// `/tx/submit` got a body not declared as CBOR, under the content type
+    /// the request named, if any.
+    UnsupportedMediaType(Option<String>),
 }
 
 #[derive(Serialize)]
 struct ErrorBody {
     status_code: u16,
     error: &'static str,
-    message: &'static str,
+    message: Cow<'static, str>,
 }
 
 impl ErrorBody {
-    fn new(status_code: u16, error: &'static str, message: &'static str) -> Self {
+    fn new(status_code: u16, error: &'static str, message: impl Into<Cow<'static, str>>) -> Self {
         Self {
             status_code,
             error,
-            message,
+            message: message.into(),
         }
     }
 }
@@ -278,6 +288,32 @@ impl IntoResponse for Error {
                 )),
             )
                 .into_response(),
+            Error::TxRejected(reason) => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::new(400, "Bad Request", reason)),
+            )
+                .into_response(),
+            Error::TxInMempool => (
+                StatusCode::CONFLICT,
+                Json(ErrorBody::new(
+                    409,
+                    "Conflict",
+                    "The transaction is already in this node's mempool.",
+                )),
+            )
+                .into_response(),
+            Error::UnsupportedMediaType(content_type) => {
+                let message = match content_type {
+                    Some(content_type) => format!("Unsupported Media Type: {content_type}"),
+                    None => "Unsupported Media Type".to_string(),
+                };
+
+                (
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    Json(ErrorBody::new(415, "Unsupported Media Type", message)),
+                )
+                    .into_response()
+            }
         }
     }
 }

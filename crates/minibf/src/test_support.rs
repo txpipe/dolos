@@ -778,6 +778,26 @@ impl TestApp {
         (status, bytes.to_vec())
     }
 
+    /// The status, headers and body of the answer to `request`.
+    pub async fn respond(&self, request: Request<Body>) -> (StatusCode, HeaderMap, Vec<u8>) {
+        let res = self
+            .router
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("request failed");
+
+        let status = res.status();
+        let headers = res.headers().clone();
+        let bytes = res
+            .into_body()
+            .collect()
+            .await
+            .expect("failed to read response body")
+            .to_bytes();
+        (status, headers, bytes.to_vec())
+    }
+
     /// The status of `request`, its body read to the end.
     pub async fn send(&self, request: Request<Body>) -> StatusCode {
         let res = self
