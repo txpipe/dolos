@@ -66,6 +66,8 @@ pub struct PeerOptions {
     pub request_tx_ids_at: Vec<usize>,
     /// Make that request a blocking one, as a node's first request is.
     pub blocking_tx_ids_request: bool,
+    /// Close that session instead if the node does not reply this soon.
+    pub close_unanswered_after: Option<Duration>,
     /// In every other tx-submission session, keep asking for transaction ids
     /// and acknowledging them, and close the session at an offer of this id.
     pub close_at_offer_of: Option<Vec<u8>>,
@@ -657,7 +659,17 @@ async fn serve_txsubmission(mut server: txsubmission::Server, shared: &Shared) {
             .await
             .is_ok()
         {
-            if let Ok(txsubmission::Reply::TxIds(ids)) = server.receive_next_reply().await {
+            let reply = server.receive_next_reply();
+
+            let reply = match options.close_unanswered_after {
+                Some(delay) => match tokio::time::timeout(delay, reply).await {
+                    Ok(reply) => reply,
+                    Err(_) => return,
+                },
+                None => reply.await,
+            };
+
+            if let Ok(txsubmission::Reply::TxIds(ids)) = reply {
                 shared.record_tx_id_reply(number, ids.into_iter().map(|id| id.0 .1).collect());
             }
         }

@@ -1531,6 +1531,33 @@ fn a_tx_submission_session_the_peer_closed_closes_its_connection() {
 }
 
 #[test]
+fn a_submit_stage_waiting_for_txs_reconnects_once_its_connection_ends() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, domain) = domain_over(temp.path(), no_backoff(0));
+
+    // Session 1 asks with nothing to offer, then closes the connection.
+    let peer = peer(PeerOptions {
+        request_tx_ids_at: vec![1],
+        blocking_tx_ids_request: true,
+        close_unanswered_after: Some(Duration::from_millis(100)),
+        ..Default::default()
+    });
+
+    let (progress, stages) = submit_alone(&config, peer.address().to_string(), &domain);
+
+    // The keep-alive loop pings every 20 seconds.
+    wait_until("the stage reconnects", Duration::from_secs(45), || {
+        peer.tx_submissions() >= 2 || stages.any_ended()
+    });
+
+    let ended = stages.any_ended();
+    stages.teardown();
+
+    assert!(!ended, "{:?}", progress.upstream_failure());
+    assert!(peer.tx_id_replies().is_empty());
+}
+
+#[test]
 fn a_follow_at_the_tip_whose_peer_drops_idle_sessions_keeps_reconnecting() {
     let temp = tempfile::tempdir().unwrap();
     let (config, domain) = domain_over(temp.path(), no_backoff(0));
