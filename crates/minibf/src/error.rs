@@ -292,3 +292,54 @@ impl From<StatusCode> for Error {
         Self::Code(value)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body_util::BodyExt;
+
+    async fn rendered(error: Error) -> (StatusCode, serde_json::Value) {
+        let response = error.into_response();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+
+        (status, serde_json::from_slice(&body).expect("a JSON body"))
+    }
+
+    /// A bare status answers Blockfrost's error body, with the message its
+    /// API reference gives the status, or the status's reason.
+    #[tokio::test]
+    async fn a_bare_status_answers_a_blockfrost_body() {
+        for (status, error, message) in [
+            (
+                400,
+                "Bad Request",
+                "Backend did not understand your request.",
+            ),
+            (
+                404,
+                "Not Found",
+                "The requested component has not been found.",
+            ),
+            (
+                500,
+                "Internal Server Error",
+                "An unexpected response was received from the backend.",
+            ),
+            (503, "Service Unavailable", "Service Unavailable"),
+        ] {
+            let code = StatusCode::from_u16(status).unwrap();
+            let (answered, body) = rendered(Error::Code(code)).await;
+
+            assert_eq!(answered, code);
+            assert_eq!(
+                body,
+                serde_json::json!({
+                    "status_code": status,
+                    "error": error,
+                    "message": message,
+                })
+            );
+        }
+    }
+}

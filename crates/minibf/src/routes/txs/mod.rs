@@ -80,3 +80,77 @@ mod testing {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use super::testing::MISSING_HASH;
+    use crate::test_support::{TestApp, TestFault};
+
+    /// Every route under `/txs/{hash}`.
+    const ROUTES: [&str; 13] = [
+        "",
+        "/utxos",
+        "/cbor",
+        "/stakes",
+        "/delegations",
+        "/withdrawals",
+        "/mirs",
+        "/pool_updates",
+        "/pool_retires",
+        "/metadata",
+        "/metadata/cbor",
+        "/redeemers",
+        "/required_signers",
+    ];
+
+    async fn error_body(app: &TestApp, path: &str, expected: StatusCode) -> serde_json::Value {
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(status, expected, "{path}");
+
+        serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+            panic!(
+                "{path}: no JSON body: {:?}",
+                String::from_utf8_lossy(&bytes)
+            )
+        })
+    }
+
+    /// A transaction the node does not hold is Blockfrost's 404, body
+    /// included, on every route.
+    #[tokio::test]
+    async fn a_missing_transaction_answers_a_blockfrost_404() {
+        let app = TestApp::new();
+
+        for route in ROUTES {
+            let path = format!("/txs/{MISSING_HASH}{route}");
+            let body = error_body(&app, &path, StatusCode::NOT_FOUND).await;
+
+            assert_eq!(
+                body,
+                serde_json::json!({
+                    "status_code": 404,
+                    "error": "Not Found",
+                    "message": "The requested component has not been found.",
+                }),
+                "{path}"
+            );
+        }
+    }
+
+    /// A store that fails is Blockfrost's 500, body included, on every route.
+    #[tokio::test]
+    async fn a_failing_store_answers_a_blockfrost_500() {
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
+        let hash = app.vectors().tx_hash.clone();
+
+        for route in ROUTES {
+            let path = format!("/txs/{hash}{route}");
+            let body = error_body(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+
+            assert_eq!(body["status_code"], 500, "{path}");
+            assert_eq!(body["error"], "Internal Server Error", "{path}");
+        }
+    }
+}
