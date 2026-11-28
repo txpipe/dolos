@@ -14,6 +14,7 @@ use crate::{
 };
 
 use super::drep_key;
+use crate::error::Error;
 
 /// `GET /governance/dreps/{drep_id}/metadata`: the newest anchor a
 /// registration or update of the DRep carried, and the off-chain metadata
@@ -34,12 +35,12 @@ use super::drep_key;
 pub async fn drep_metadata<D: Domain>(
     Path(drep): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<DrepMetadata>, StatusCode> {
+) -> Result<Json<DrepMetadata>, Error> {
     let parsed = parse_drep_id(&drep)?;
 
     // The special DReps have no registration, so they have no anchor.
     if parsed.is_special {
-        return Err(StatusCode::NOT_FOUND);
+        return Err(StatusCode::NOT_FOUND.into());
     }
 
     let observation = domain

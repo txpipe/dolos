@@ -16,7 +16,7 @@ pub mod utils;
 
 use std::env;
 
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{extract::State, Json};
 use dolos_core::Domain;
 use serde::{Deserialize, Serialize};
 
@@ -40,9 +40,7 @@ impl From<&MinibfConfig> for RootResponse {
     }
 }
 
-pub async fn root<D: Domain>(
-    State(domain): State<Facade<D>>,
-) -> Result<Json<RootResponse>, StatusCode> {
+pub async fn root<D: Domain>(State(domain): State<Facade<D>>) -> Result<Json<RootResponse>, Error> {
     Ok(Json(RootResponse::from(&domain.config)))
 }
 

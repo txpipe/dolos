@@ -1,7 +1,8 @@
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{extract::State, Json};
 use blockfrost_openapi::models::genesis_content::GenesisContent;
 use dolos_core::Domain;
 
+use crate::error::Error;
 use crate::{
     mapping::{genesis::GenesisModelBuilder, IntoModel as _},
     Facade,
@@ -9,18 +10,18 @@ use crate::{
 
 pub async fn naked<D: Domain>(
     State(domain): State<Facade<D>>,
-) -> Result<Json<GenesisContent>, StatusCode> {
+) -> Result<Json<GenesisContent>, Error> {
     let model = GenesisModelBuilder {
         genesis: &domain.genesis(),
     };
 
-    model.into_response()
+    Ok(model.into_response()?)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::test_support::{TestApp, TestFault};
+    use axum::http::StatusCode;
     use blockfrost_openapi::models::genesis_content::GenesisContent;
 
     async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {

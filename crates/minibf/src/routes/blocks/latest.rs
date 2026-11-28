@@ -1,12 +1,13 @@
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{extract::State, Json};
 use blockfrost_openapi::models::block_content::BlockContent;
 use dolos_core::Domain;
 
 use crate::Facade;
 
 use super::{build_block_model, tip_block};
+use crate::error::Error;
 
-pub async fn latest<D>(State(domain): State<Facade<D>>) -> Result<Json<BlockContent>, StatusCode>
+pub async fn latest<D>(State(domain): State<Facade<D>>) -> Result<Json<BlockContent>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
@@ -23,6 +24,7 @@ mod tests {
     use super::*;
     use crate::routes::blocks::testing::assert_status;
     use crate::test_support::{TestApp, TestFault};
+    use axum::http::StatusCode;
 
     #[tokio::test]
     async fn blocks_latest_happy_path() {

@@ -1,6 +1,5 @@
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
     Json,
 };
 use blockfrost_openapi::models::tx_content_pool_certs_inner::TxContentPoolCertsInner;
@@ -12,11 +11,12 @@ use crate::{
 };
 
 use super::parse_tx_hash;
+use crate::error::Error;
 
 pub async fn by_hash_pool_updates<D>(
     Path(tx_hash): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<TxContentPoolCertsInner>>, StatusCode>
+) -> Result<Json<Vec<TxContentPoolCertsInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
@@ -34,7 +34,7 @@ where
     tx.fetch_pool_metadata().await?;
     tx.set_pool_registrations(&domain)?;
 
-    tx.into_response()
+    Ok(tx.into_response()?)
 }
 
 #[cfg(test)]
@@ -42,6 +42,7 @@ mod tests {
     use super::*;
     use crate::routes::txs::testing::*;
     use crate::test_support::{TestApp, TestFault};
+    use axum::http::StatusCode;
 
     #[tokio::test]
     async fn txs_by_hash_pool_updates_happy_path() {

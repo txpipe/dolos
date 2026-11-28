@@ -15,11 +15,12 @@ use crate::{
 };
 
 use super::parse_tx_hash;
+use crate::error::Error;
 
 pub async fn by_hash_utxos<D>(
     Path(tx_hash): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<TxContentUtxo>, StatusCode>
+) -> Result<Json<TxContentUtxo>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
@@ -30,7 +31,7 @@ where
         Err(StatusCode::NOT_FOUND) => {
             return Ok(Json(genesis_tx::utxos_for_hash(&domain, &hash).await?));
         }
-        Err(err) => return Err(err),
+        Err(err) => return Err(err.into()),
     };
 
     let mut builder = TxModelBuilder::new(&raw, order)?;
@@ -58,7 +59,7 @@ where
         }
     }
 
-    builder.into_response()
+    Ok(builder.into_response()?)
 }
 
 #[cfg(test)]

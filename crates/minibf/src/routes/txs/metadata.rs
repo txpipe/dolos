@@ -1,7 +1,4 @@
-use axum::{
-    extract::{Path, State},
-    http::StatusCode,
-};
+use axum::extract::{Path, State};
 use dolos_core::Domain;
 
 use crate::{
@@ -14,11 +11,12 @@ use crate::{
 };
 
 use super::parse_tx_hash;
+use crate::error::Error;
 
 pub async fn by_hash_metadata<D>(
     Path(tx_hash): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<DirectJson, StatusCode>
+) -> Result<DirectJson, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
@@ -41,6 +39,7 @@ mod tests {
         mapping::direct_json::WriteJson,
         test_support::{TestApp, TestFault},
     };
+    use axum::http::StatusCode;
     use blockfrost_openapi::models::tx_content_metadata_inner::TxContentMetadataInner;
 
     #[tokio::test]

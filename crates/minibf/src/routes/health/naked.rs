@@ -1,4 +1,5 @@
-use axum::{http::StatusCode, Json};
+use crate::error::Error;
+use axum::Json;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -6,7 +7,7 @@ pub struct RootResponse {
     pub is_healthy: bool,
 }
 
-pub async fn naked() -> Result<Json<RootResponse>, StatusCode> {
+pub async fn naked() -> Result<Json<RootResponse>, Error> {
     // TODO: tie this to the sync status; behind the tip means unhealthy.
     Ok(Json(RootResponse { is_healthy: true }))
 }

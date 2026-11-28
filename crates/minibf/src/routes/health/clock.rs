@@ -1,6 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::{http::StatusCode, Json};
+use crate::error::Error;
+use axum::Json;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -18,7 +19,7 @@ impl Default for ClockResponse {
     }
 }
 
-pub async fn clock() -> Result<Json<ClockResponse>, StatusCode> {
+pub async fn clock() -> Result<Json<ClockResponse>, Error> {
     Ok(Json(ClockResponse::default()))
 }
 
@@ -26,6 +27,7 @@ pub async fn clock() -> Result<Json<ClockResponse>, StatusCode> {
 mod tests {
     use super::*;
     use crate::test_support::TestApp;
+    use axum::http::StatusCode;
 
     #[tokio::test]
     async fn health_clock_happy_path() {

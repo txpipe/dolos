@@ -3,6 +3,7 @@ use blockfrost_openapi::models::network_eras_inner::NetworkErasInner;
 use dolos_cardano::EraState;
 use dolos_core::{Domain, StateStore};
 
+use crate::error::Error;
 use crate::{
     mapping::{network::ChainModelBuilder, IntoModel},
     Facade,
@@ -10,7 +11,7 @@ use crate::{
 
 pub async fn eras<D: Domain>(
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<NetworkErasInner>>, StatusCode> {
+) -> Result<Json<Vec<NetworkErasInner>>, Error> {
     let genesis = domain.genesis();
     let tip = domain
         .get_tip_slot()

@@ -1,6 +1,5 @@
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
     Json,
 };
 use blockfrost_openapi::models::tx_content_delegations_inner::TxContentDelegationsInner;
@@ -12,11 +11,12 @@ use crate::{
 };
 
 use super::parse_tx_hash;
+use crate::error::Error;
 
 pub async fn by_hash_delegations<D>(
     Path(tx_hash): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<TxContentDelegationsInner>>, StatusCode>
+) -> Result<Json<Vec<TxContentDelegationsInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
@@ -31,7 +31,7 @@ where
         .with_network(network)
         .with_chain(chain);
 
-    tx.into_response()
+    Ok(tx.into_response()?)
 }
 
 #[cfg(test)]
@@ -39,6 +39,7 @@ mod tests {
     use super::*;
     use crate::routes::txs::testing::*;
     use crate::test_support::{TestApp, TestFault};
+    use axum::http::StatusCode;
 
     #[tokio::test]
     async fn txs_by_hash_delegations_happy_path() {

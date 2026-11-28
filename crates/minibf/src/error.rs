@@ -65,19 +65,19 @@ impl IntoResponse for Error {
         match self {
             Error::Pagination(pagination) => pagination.into_response(),
             Error::Code(status) => {
-                if matches!(status, StatusCode::NOT_FOUND) {
-                    (
-                        status,
-                        Json(ErrorBody::new(
-                            404,
-                            "Not Found",
-                            "The requested component has not been found.",
-                        )),
-                    )
-                        .into_response()
-                } else {
-                    status.into_response()
-                }
+                let reason = status.canonical_reason().unwrap_or("Error");
+
+                // the messages Blockfrost's API reference gives these statuses
+                let message = match status {
+                    StatusCode::BAD_REQUEST => "Backend did not understand your request.",
+                    StatusCode::NOT_FOUND => "The requested component has not been found.",
+                    StatusCode::INTERNAL_SERVER_ERROR => {
+                        "An unexpected response was received from the backend."
+                    }
+                    _ => reason,
+                };
+
+                (status, Json(ErrorBody::new(status.as_u16(), reason, message))).into_response()
             }
             Error::InvalidAddress => (
                 StatusCode::BAD_REQUEST,
@@ -290,5 +290,56 @@ impl From<PaginationError> for Error {
 impl From<StatusCode> for Error {
     fn from(value: StatusCode) -> Self {
         Self::Code(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body_util::BodyExt;
+
+    async fn rendered(error: Error) -> (StatusCode, serde_json::Value) {
+        let response = error.into_response();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+
+        (status, serde_json::from_slice(&body).expect("a JSON body"))
+    }
+
+    /// A bare status answers Blockfrost's error body, with the message its
+    /// API reference gives the status, or the status's reason.
+    #[tokio::test]
+    async fn a_bare_status_answers_a_blockfrost_body() {
+        for (status, error, message) in [
+            (
+                400,
+                "Bad Request",
+                "Backend did not understand your request.",
+            ),
+            (
+                404,
+                "Not Found",
+                "The requested component has not been found.",
+            ),
+            (
+                500,
+                "Internal Server Error",
+                "An unexpected response was received from the backend.",
+            ),
+            (503, "Service Unavailable", "Service Unavailable"),
+        ] {
+            let code = StatusCode::from_u16(status).unwrap();
+            let (answered, body) = rendered(Error::Code(code)).await;
+
+            assert_eq!(answered, code);
+            assert_eq!(
+                body,
+                serde_json::json!({
+                    "status_code": status,
+                    "error": error,
+                    "message": message,
+                })
+            );
+        }
     }
 }

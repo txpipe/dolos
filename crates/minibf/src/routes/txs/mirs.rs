@@ -1,6 +1,5 @@
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
     Json,
 };
 use blockfrost_openapi::models::tx_content_mirs_inner::TxContentMirsInner;
@@ -12,11 +11,12 @@ use crate::{
 };
 
 use super::parse_tx_hash;
+use crate::error::Error;
 
 pub async fn by_hash_mirs<D>(
     Path(tx_hash): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<TxContentMirsInner>>, StatusCode>
+) -> Result<Json<Vec<TxContentMirsInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
@@ -28,7 +28,7 @@ where
 
     let tx = TxModelBuilder::new(&raw, order)?.with_network(network);
 
-    tx.into_response()
+    Ok(tx.into_response()?)
 }
 
 #[cfg(test)]
@@ -36,6 +36,7 @@ mod tests {
     use super::*;
     use crate::routes::txs::testing::*;
     use crate::test_support::{TestApp, TestFault};
+    use axum::http::StatusCode;
 
     #[tokio::test]
     async fn txs_by_hash_mirs_happy_path() {
