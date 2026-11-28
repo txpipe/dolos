@@ -316,7 +316,12 @@ impl CardanoIndexDeltaBuilder {
                     self.add_datum(&datum);
                 }
 
-                if let Some(script_ref) = output.script_ref() {
+                #[allow(
+                    deprecated,
+                    reason = "Pallas 1.5 deprecates script_ref; moving to multi_era_script_ref is a separate change"
+                )]
+                let script_ref = output.script_ref();
+                if let Some(script_ref) = script_ref {
                     match script_ref {
                         ScriptRef::NativeScript(script) => {
                             self.add_script_hash(script.original_hash().to_vec());
@@ -334,7 +339,12 @@ impl CardanoIndexDeltaBuilder {
                 }
             }
 
-            for script in tx.native_scripts() {
+            #[allow(
+                deprecated,
+                reason = "Pallas 1.5 deprecates native_scripts; moving to multi_era_native_scripts is a separate change"
+            )]
+            let native_scripts = tx.native_scripts();
+            for script in native_scripts {
                 self.add_script_hash(script.original_hash().to_vec());
             }
             for script in tx.plutus_v1_scripts() {

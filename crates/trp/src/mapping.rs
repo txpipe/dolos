@@ -136,8 +136,12 @@ pub fn into_tx3_utxo(
     // compiler can read the reference script's Plutus language directly from
     // its tag. We must NOT store only the inner script body, which would drop
     // the language tag.
-    let script = parsed
-        .script_ref()
+    #[allow(
+        deprecated,
+        reason = "Pallas 1.5 deprecates script_ref; moving to multi_era_script_ref is a separate change"
+    )]
+    let script_ref = parsed.script_ref();
+    let script = script_ref
         .map(|script_ref| minicbor::to_vec(&script_ref))
         .transpose()
         .map_err(|e| tx3_resolver::Error::StoreError(e.to_string()))?

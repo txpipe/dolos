@@ -13,3 +13,6 @@ pub use dolos_core as core;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) mod test_logs;

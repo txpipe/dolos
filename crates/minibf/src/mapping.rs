@@ -451,6 +451,12 @@ impl<'a> IntoModel<TxContentUtxoOutputsInner> for UtxoOutputModelBuilder<'a> {
     type SortKey = u64;
 
     fn into_model(self) -> Result<TxContentUtxoOutputsInner, StatusCode> {
+        #[allow(
+            deprecated,
+            reason = "Pallas 1.5 deprecates script_ref; moving to multi_era_script_ref is a separate change"
+        )]
+        let script_ref = self.output.script_ref();
+
         let out = TxContentUtxoOutputsInner {
             address: self.output.address().into_model()?,
             amount: self
@@ -475,11 +481,7 @@ impl<'a> IntoModel<TxContentUtxoOutputsInner> for UtxoOutputModelBuilder<'a> {
                 })
                 .map(hex::encode),
             collateral: self.is_collateral,
-            reference_script_hash: self
-                .output
-                .script_ref()
-                .map(|h| h.into_model())
-                .transpose()?,
+            reference_script_hash: script_ref.map(|h| h.into_model()).transpose()?,
         };
 
         Ok(out)
@@ -496,6 +498,12 @@ impl<'a> IntoModel<AddressUtxoContentInner> for UtxoOutputModelBuilder<'a> {
     }
 
     fn into_model(self) -> Result<AddressUtxoContentInner, StatusCode> {
+        #[allow(
+            deprecated,
+            reason = "Pallas 1.5 deprecates script_ref; moving to multi_era_script_ref is a separate change"
+        )]
+        let script_ref = self.output.script_ref();
+
         let out = AddressUtxoContentInner {
             address: self.output.address().into_model()?,
             // source the tx_hash from the UTxO's own TxoRef (always present),
@@ -521,11 +529,7 @@ impl<'a> IntoModel<AddressUtxoContentInner> for UtxoOutputModelBuilder<'a> {
                     DatumOption::Data(x) => Some(minicbor::to_vec(&x.0).unwrap()),
                 })
                 .map(hex::encode),
-            reference_script_hash: self
-                .output
-                .script_ref()
-                .map(|h| h.into_model())
-                .transpose()?,
+            reference_script_hash: script_ref.map(|h| h.into_model()).transpose()?,
 
             // DEPRECATED
             tx_index: try_into_or_500!(self.txo_ref.1),
@@ -554,6 +558,12 @@ impl<'a> IntoModel<TxContentUtxoInputsInner> for UtxoInputModelBuilder<'a> {
         };
 
         if let Some(o) = self.as_output {
+            #[allow(
+                deprecated,
+                reason = "Pallas 1.5 deprecates script_ref; moving to multi_era_script_ref is a separate change"
+            )]
+            let script_ref = o.script_ref();
+
             out = TxContentUtxoInputsInner {
                 address: o.address().into_model()?,
                 amount: o
@@ -562,7 +572,7 @@ impl<'a> IntoModel<TxContentUtxoInputsInner> for UtxoInputModelBuilder<'a> {
                     .into_iter()
                     .filter(|x| x.unit == "lovelace" || !self.is_collateral)
                     .collect(),
-                reference_script_hash: o.script_ref().map(|h| h.into_model()).transpose()?,
+                reference_script_hash: script_ref.map(|h| h.into_model()).transpose()?,
                 data_hash: o.datum().map(|x| match x {
                     DatumOption::Hash(x) => x.to_string(),
                     DatumOption::Data(x) => x.original_hash().to_string(),
@@ -1254,8 +1264,13 @@ impl TxModelBuilder<'_> {
     ) -> Result<Option<Hash<28>>, StatusCode> {
         let index = redeemer.index() as usize;
         let tx = self.tx()?;
+        #[allow(
+            deprecated,
+            reason = "Pallas 1.5 deprecates tag; moving to multi_era_tag is a separate change"
+        )]
+        let tag = redeemer.tag();
 
-        match redeemer.tag() {
+        match tag {
             RedeemerTag::Spend => {
                 let inputs = tx.inputs_sorted_set();
                 let Some(input) = inputs.get(index) else {
@@ -1328,8 +1343,14 @@ impl TxModelBuilder<'_> {
 
         let fee = self.compute_fee(&units, prices)?;
 
+        #[allow(
+            deprecated,
+            reason = "Pallas 1.5 deprecates tag; moving to multi_era_tag is a separate change"
+        )]
+        let tag = redeemer.tag();
+
         let out = TxContentRedeemersInner {
-            purpose: match redeemer.tag() {
+            purpose: match tag {
                 RedeemerTag::Spend => Purpose::Spend,
                 RedeemerTag::Mint => Purpose::Mint,
                 RedeemerTag::Cert => Purpose::Cert,

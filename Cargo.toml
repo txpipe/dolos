@@ -119,6 +119,8 @@ pallas = { workspace = true }
 tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
 stats_alloc = "0.1"
 dolos-redb3 = { path = "crates/redb3" }
+# Paused time, for the accept loops' handshake deadline tests.
+tokio = { workspace = true, features = ["test-util"] }
 
 [build-dependencies]
 vergen-gitcl = "9.1.0"
@@ -207,7 +209,7 @@ readme = "README.md"
 authors = ["TxPipe <hello@txpipe.io>"]
 
 [workspace.dependencies]
-pallas = { version = "1.4.0", features = ["hardano", "phase2", "unstable"] }
+pallas = { version = "1.5.1", features = ["hardano", "phase2", "unstable"] }
 # pallas = { git = "https://github.com/txpipe/pallas.git", rev = "a7b5a86", features = ["hardano", "phase2", "unstable"] }
 # pallas = { path = "../pallas/pallas", features = ["hardano", "phase2", "unstable"] }
 
