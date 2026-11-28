@@ -205,6 +205,11 @@ pub trait CacheStore: Clone + Send + Sync + 'static {
     /// tier, so async code calls it from a blocking task.
     fn get(&self, namespace: &str, key: &[u8]) -> Option<Bytes>;
 
+    /// The entry under `key`, a stale tip-scoped one included, without a fill
+    /// to replace it: what a caller serves while it holds a rebuild back. May
+    /// read the disk tier, so async code calls it from a blocking task.
+    fn peek(&self, namespace: &str, key: &[u8]) -> Option<Bytes>;
+
     fn remove(&self, namespace: &str, key: &[u8]) -> Result<(), CacheError>;
 
     fn wipe(&self, namespace: &str) -> Result<(), CacheError>;
@@ -755,6 +760,15 @@ impl<D: CacheDiskTier> CacheStore for TieredCache<D> {
         match self.lookup_memory(&ns.spec, key) {
             Lookup::Fresh(value) => Some(value),
             Lookup::Stale(_) => None,
+            Lookup::Miss => self.lookup_disk(&ns, &Bytes::copy_from_slice(key)),
+        }
+    }
+
+    fn peek(&self, namespace: &str, key: &[u8]) -> Option<Bytes> {
+        let ns = self.namespace(namespace).ok()?;
+
+        match self.lookup_memory(&ns.spec, key) {
+            Lookup::Fresh(value) | Lookup::Stale(value) => Some(value),
             Lookup::Miss => self.lookup_disk(&ns, &Bytes::copy_from_slice(key)),
         }
     }
@@ -1500,6 +1514,24 @@ mod tests {
         wait_for_fill(&cache, "tip", b"key").await;
         assert_eq!(get("unused").await.unwrap(), "updated");
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn peek_serves_a_stale_entry_and_starts_no_fill() {
+        let cache = registered(
+            cache(),
+            CacheNamespace::tip_scoped("tip", 1, Duration::ZERO),
+        );
+
+        assert_eq!(cache.peek("tip", b"key"), None);
+        assert_eq!(cache.peek("unknown", b"key"), None);
+
+        let value = cache.get_or_fill("tip", b"key", || entry("initial", 1));
+        assert_eq!(value.await.unwrap(), "initial");
+
+        assert_eq!(cache.get("tip", b"key"), None);
+        assert_eq!(cache.peek("tip", b"key").unwrap(), "initial");
+        assert!(lock(&cache.inner.flights).is_empty());
     }
 
     #[tokio::test]

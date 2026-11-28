@@ -94,9 +94,11 @@ where
         .try_collect()
         .await?;
 
+    let cache = domain.inner.cache();
+
     let amount = futures_util::stream::iter(onchain)
         .map(|(entry, extras)| async move {
-            let extras = extras.with_registry().await?;
+            let extras = extras.with_registry(cache).await;
 
             Ok::<_, Error>(AddressContentExtendedAmountInner {
                 unit: entry.unit,
@@ -1077,6 +1079,98 @@ mod tests {
             for token in [&nameless, &undescribed] {
                 assert!(asked.contains(&unit_of(token)), "{asked:?}");
             }
+        }
+
+        /// Issue dolos#1247: the registry's answer for a unit is kept, a
+        /// registered entry and "not registered" alike, so repeated requests,
+        /// by either endpoint, ask it once per unit.
+        #[tokio::test]
+        async fn the_registry_is_asked_once_per_unit() {
+            let registered: Token = ([0x7e; 28], b"KEPT".to_vec());
+            let unregistered: Token = ([0x7e; 28], b"NONE".to_vec());
+
+            let (url, asked, server) = registry_at_its_metadata_path(vec![(
+                unit_of(&registered),
+                serde_json::json!({
+                    "name": { "value": "kept" },
+                    "description": { "value": "a registered token" },
+                    "decimals": { "value": 3 },
+                }),
+            )])
+            .await;
+
+            let app = app_holding(url, &[registered.clone(), unregistered.clone()]);
+
+            for _ in 0..2 {
+                let item = extended_of(&app).await;
+
+                for (token, decimals) in [(&registered, Some(3)), (&unregistered, None)] {
+                    let entry = item
+                        .amount
+                        .iter()
+                        .find(|x| x.unit == unit_of(token))
+                        .expect("the native token");
+                    assert_eq!(entry.decimals, decimals, "{}", entry.unit);
+                }
+
+                for (token, name) in [(&registered, "kept"), (&unregistered, "")] {
+                    let path = format!("/assets/{}", unit_of(token));
+                    let (status, bytes) = app.get_bytes(&path).await;
+                    assert_eq!(status, StatusCode::OK);
+
+                    let asset: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    let found = asset["metadata"]["name"].as_str().unwrap_or_default();
+                    assert_eq!(found, name, "{asset}");
+                }
+            }
+
+            server.abort();
+
+            // the address also holds the synthetic chain's own token
+            let asked = asked.lock().unwrap().clone();
+            let mut once = asked.clone();
+            once.sort();
+            once.dedup();
+            assert_eq!(once.len(), asked.len(), "{asked:?}");
+
+            for token in [&registered, &unregistered] {
+                assert!(asked.contains(&unit_of(token)), "{asked:?}");
+            }
+        }
+
+        /// A registry URL that ends in a slash still reaches
+        /// `/metadata/{unit}`, and the registry is asked for the subject in
+        /// lowercase, as it spells it, whatever spelling the request uses.
+        /// Blockfrost answers 404 for an asset spelt in uppercase, so that
+        /// request is held to asking nothing more, whatever it answers.
+        #[tokio::test]
+        async fn the_registry_is_asked_for_the_subject_as_it_spells_it() {
+            let native: Token = ([0x7e; 28], b"CASE".to_vec());
+
+            let (url, asked, server) = registry_at_its_metadata_path(vec![(
+                unit_of(&native),
+                serde_json::json!({
+                    "name": { "value": "cased" },
+                    "description": { "value": "a registered token" },
+                }),
+            )])
+            .await;
+
+            let app = app_holding(format!("{url}/"), std::slice::from_ref(&native));
+
+            let (status, bytes) = app
+                .get_bytes(&format!("/assets/{}", unit_of(&native)))
+                .await;
+            assert_eq!(status, StatusCode::OK);
+
+            let asset: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(asset["metadata"]["name"], "cased", "{asset}");
+
+            let uppercase = unit_of(&native).to_uppercase();
+            app.get_bytes(&format!("/assets/{uppercase}")).await;
+
+            server.abort();
+            assert_eq!(*asked.lock().unwrap(), [unit_of(&native)]);
         }
 
         /// Finding T1 of the fifth QA review of dolos#1524: a request asks the

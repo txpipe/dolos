@@ -243,6 +243,7 @@ impl<D: Domain> Namespaces<D> {
 pub fn register<D: Domain>(domain: &D) -> miette::Result<Namespaces<D>> {
     #[cfg(feature = "minibf")]
     {
+        dolos_minibf::register_token_registry_cache(domain.cache()).into_diagnostic()?;
         dolos_minibf::register_network_cache(domain.cache()).into_diagnostic()?;
         dolos_minibf::register_governance_caches(domain.cache());
     }
