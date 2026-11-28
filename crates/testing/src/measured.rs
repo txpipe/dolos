@@ -269,6 +269,10 @@ impl<Inner: ArchiveStore> ArchiveStore for MeasuredArchive<Inner> {
         Ok(tip)
     }
 
+    fn get_oldest_slot(&self) -> Result<Option<BlockSlot>, ArchiveError> {
+        self.inner.get_oldest_slot()
+    }
+
     fn prune_history(
         &self,
         max_slots: u64,

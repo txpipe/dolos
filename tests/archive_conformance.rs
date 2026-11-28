@@ -256,6 +256,29 @@ fn tip_and_first<B: Backend>() {
     assert_eq!(tip_body, fake_block(500));
 }
 
+/// The oldest slot follows the blocks held: none for an empty store, the
+/// lowest slot whatever order the blocks were written in, and the first one a
+/// prune keeps.
+fn the_oldest_slot_is_the_first_block_held<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    assert_eq!(store.get_oldest_slot().unwrap(), None);
+
+    let writer = store.start_writer().unwrap();
+    for slot in [432_100, 100, 864_100, 200] {
+        writer
+            .apply(&point(slot), &Arc::new(fake_block(slot)))
+            .unwrap();
+    }
+    writer.commit().unwrap();
+
+    assert_eq!(store.get_oldest_slot().unwrap(), Some(100));
+
+    // Tip is 864_100; keeping 500_000 slots prunes before 364_100.
+    assert!(store.prune_history(500_000, None, None).unwrap());
+    assert_eq!(store.get_oldest_slot().unwrap(), Some(432_100));
+}
+
 fn multiple_commits<B: Backend>() {
     let (store, _guard) = B::open();
 
@@ -2101,6 +2124,7 @@ macro_rules! full_suite {
                 undo_cross_segment,
                 range_iteration,
                 tip_and_first,
+                the_oldest_slot_is_the_first_block_held,
                 multiple_commits,
                 cross_segment_writes,
                 write_after_undo,

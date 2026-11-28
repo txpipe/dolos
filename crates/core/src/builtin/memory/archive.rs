@@ -758,6 +758,18 @@ impl ArchiveStore for MemoryArchiveStore {
         Ok(tip)
     }
 
+    fn get_oldest_slot(&self) -> Result<Option<BlockSlot>, ArchiveError> {
+        let tables = self.tables.read().map_err(|_| poisoned())?;
+
+        let oldest = tables
+            .blocks
+            .iter()
+            .find(|(_, bodies)| !bodies.is_empty())
+            .map(|(slot, _)| *slot);
+
+        Ok(oldest)
+    }
+
     fn prune_history(
         &self,
         max_slots: u64,
