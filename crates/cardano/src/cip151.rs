@@ -222,7 +222,7 @@ fn cose_witness_signs(witness: &Metadatum, pool_id: &Hash<28>, digest: &[u8]) ->
         return false;
     };
 
-    PublicKey::from(pub_key).verify(
+    PublicKey::from(pub_key).verify_strict(
         cose_sig_structure(protected, &payload),
         &Signature::from(signature),
     )
@@ -669,6 +669,37 @@ mod tests {
         assert!(is_signed_with(&typed(0)));
         assert!(!is_signed_with(&typed(1)));
         assert!(!is_signed_with(&typed(2)));
+    }
+
+    /// The signature of a registration's first COSE witness.
+    fn first_cose_signature(metadata: &Metadatum) -> [u8; 64] {
+        let items = as_map(metadata, "registration").unwrap();
+        let witnesses = as_array(lookup(items, 2).unwrap(), "witnesses").unwrap();
+        let witness = as_map(&witnesses[0], "witness").unwrap();
+        let sign1 = as_array(lookup(witness, 2).unwrap(), "cose_sign1").unwrap();
+
+        as_bytes(&sign1[3], "signature")
+            .unwrap()
+            .try_into()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_signature_with_an_identity_r_is_not_signed() {
+        let cold_key = signer::cold_key(1);
+        let witness = Witness {
+            identity_r: true,
+            ..Witness::by(&cold_key)
+        };
+        let pool = signer::pool_id(&cold_key);
+        let (_, metadata) = signer::registration_with(pool, 7, [0x57; 32], &witness).remove(0);
+
+        let signature = first_cose_signature(&metadata);
+        let mut identity = [0u8; 32];
+        identity[0] = 1;
+        assert_eq!(signature[..32], identity);
+
+        assert!(!is_signed_with(&witness));
     }
 
     #[test]

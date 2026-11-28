@@ -1,6 +1,7 @@
 //! CIP-151 calidus registrations for tests, signed the way cardano-signer
 //! signs one with a pool cold key (CIP-8, validation method 2).
 
+use curve25519_dalek::scalar::{clamp_integer, Scalar};
 use pallas::{
     codec::{minicbor, utils::Bytes},
     crypto::{
@@ -9,6 +10,8 @@ use pallas::{
     },
     ledger::primitives::{alonzo::Metadatum, Int},
 };
+
+use sha2::{Digest as _, Sha512};
 
 use dolos_cardano::cip151::CIP151_METADATA_LABEL;
 
@@ -69,6 +72,9 @@ pub struct Witness<'a> {
     pub kind: Option<i64>,
     /// The validation method the payload declares.
     pub validation_method: i64,
+    /// Sign with `R` set to the identity point, which plain Ed25519
+    /// verification accepts and the Cardano node's rules reject.
+    pub identity_r: bool,
 }
 
 impl<'a> Witness<'a> {
@@ -80,6 +86,7 @@ impl<'a> Witness<'a> {
             signs_digest_hash: false,
             kind: None,
             validation_method: 2,
+            identity_r: false,
         }
     }
 }
@@ -130,7 +137,12 @@ pub fn registration_with(
         .unwrap()
         .bytes(&signed)
         .unwrap();
-    let signature = witness.signer.sign(sig_structure.into_writer());
+    let sig_structure = sig_structure.into_writer();
+    let signature = if witness.identity_r {
+        identity_r_signature(witness.signer, &sig_structure).to_vec()
+    } else {
+        witness.signer.sign(&sig_structure).as_ref().to_vec()
+    };
 
     let cose_key = Metadatum::Map(
         vec![
@@ -153,11 +165,35 @@ pub fn registration_with(
             bytes(&protected),
             int(witness.hashed),
             bytes(&signed),
-            bytes(signature.as_ref()),
+            bytes(&signature),
         ]),
     ));
 
     entry(payload, vec![Metadatum::Map(entries.into())])
+}
+
+/// A signature of `message` by `signer` whose `R` is the identity point.
+/// With `S = k·a`, where `a` is the signer's secret scalar and
+/// `k = H(R ‖ A ‖ message)`, the check `[S]B = R + [k]A` holds.
+fn identity_r_signature(signer: &SecretKey, message: &[u8]) -> [u8; 64] {
+    // SAFETY: a test key; its bytes never leave this function.
+    let seed = unsafe { SecretKey::leak_into_bytes(signer.clone()) };
+    let expanded = Sha512::digest(seed);
+    let a = Scalar::from_bytes_mod_order(clamp_integer(expanded[..32].try_into().unwrap()));
+
+    let mut r = [0u8; 32];
+    r[0] = 1;
+    let k = Sha512::new()
+        .chain_update(r)
+        .chain_update(signer.public_key().as_ref())
+        .chain_update(message)
+        .finalize();
+    let s = Scalar::from_bytes_mod_order_wide(&k.into()) * a;
+
+    let mut signature = [0u8; 64];
+    signature[..32].copy_from_slice(&r);
+    signature[32..].copy_from_slice(s.as_bytes());
+    signature
 }
 
 /// A registration of `calidus_key` for `pool` with no witness.
@@ -208,4 +244,35 @@ fn int(value: i64) -> Metadatum {
 
 fn bytes(value: &[u8]) -> Metadatum {
     Metadatum::Bytes(Bytes::from(value.to_vec()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use curve25519_dalek::{edwards::CompressedEdwardsY, EdwardsPoint};
+
+    #[test]
+    fn an_identity_r_signature_meets_the_plain_verification_equation() {
+        let signer = cold_key(1);
+        let message = b"message";
+        let signature = identity_r_signature(&signer, message);
+        let (r, s) = signature.split_at(32);
+
+        let k = Sha512::new()
+            .chain_update(r)
+            .chain_update(signer.public_key().as_ref())
+            .chain_update(message)
+            .finalize();
+        let k = Scalar::from_bytes_mod_order_wide(&k.into());
+        let a = CompressedEdwardsY(signer.public_key().as_ref().try_into().unwrap())
+            .decompress()
+            .unwrap();
+        let r = CompressedEdwardsY(r.try_into().unwrap())
+            .decompress()
+            .unwrap();
+        let s = Scalar::from_canonical_bytes(s.try_into().unwrap()).unwrap();
+
+        assert_eq!(r, EdwardsPoint::default());
+        assert_eq!(EdwardsPoint::mul_base(&s), r + k * a);
+    }
 }
