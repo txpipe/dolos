@@ -41,9 +41,9 @@ A variable whose name starts with `DOLOS_` and contains `__` sets one key, overr
 | `upstream.peer_address` | `DOLOS_UPSTREAM__PEER_ADDRESS` |
 | `storage.path` | `DOLOS_STORAGE__PATH` |
 | `serve.minibf.listen_address` | `DOLOS_SERVE__MINIBF__LISTEN_ADDRESS` |
-| `storage.cache.admission.offchain-failures` | `DOLOS_STORAGE__CACHE__ADMISSION__OFFCHAIN-FAILURES` |
+| `storage.cache.admission.drep-offchain-failures` | `DOLOS_STORAGE__CACHE__ADMISSION__DREP-OFFCHAIN-FAILURES` |
 
-Shells refuse a variable name that contains `-`, so `export` and the `NAME=value dolos …` form both fail for a key like the last one. Set it with `env`, as in `env 'DOLOS_STORAGE__CACHE__ADMISSION__OFFCHAIN-FAILURES=500' dolos daemon`, or through an orchestrator's environment list, such as a Kubernetes `env` entry.
+Shells refuse a variable name that contains `-`, so `export` and the `NAME=value dolos …` form both fail for a key like the last one. Set it with `env`, as in `env 'DOLOS_STORAGE__CACHE__ADMISSION__DREP-OFFCHAIN-FAILURES=500' dolos daemon`, or through an orchestrator's environment list, such as a Kubernetes `env` entry.
 
 For example, with this file:
 
