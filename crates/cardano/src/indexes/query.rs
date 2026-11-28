@@ -489,7 +489,12 @@ where
             end_slot,
             |block| {
                 for tx in block.txs() {
-                    for script in tx.native_scripts() {
+                    #[allow(
+                        deprecated,
+                        reason = "Pallas 1.5 deprecates native_scripts; moving to multi_era_native_scripts is a separate change"
+                    )]
+                    let native_scripts = tx.native_scripts();
+                    for script in native_scripts {
                         if script.original_hash() == script_hash {
                             return Some(ScriptData {
                                 language: ScriptLanguage::Native,
@@ -526,7 +531,12 @@ where
                     }
 
                     for (_, output) in tx.produces() {
-                        if let Some(script_ref) = output.script_ref() {
+                        #[allow(
+                            deprecated,
+                            reason = "Pallas 1.5 deprecates script_ref; moving to multi_era_script_ref is a separate change"
+                        )]
+                        let script_ref = output.script_ref();
+                        if let Some(script_ref) = script_ref {
                             match script_ref {
                                 ScriptRef::NativeScript(script) => {
                                     if script.original_hash() == script_hash {

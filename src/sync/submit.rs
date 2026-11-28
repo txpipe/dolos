@@ -383,7 +383,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_offer_is_counted_until_the_peer_acknowledges_it() {
-        use pallas::network::facades::PeerServer;
+        use pallas::network::facades::{PeerServer, DEFAULT_HANDSHAKE_TIMEOUT};
         use tokio::net::TcpListener;
 
         const MAGIC: u64 = 2;
@@ -393,7 +393,10 @@ mod tests {
         let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
 
         let peer = tokio::spawn(async move {
-            let mut server = PeerServer::accept(&listener, MAGIC).await.unwrap();
+            let mut server =
+                PeerServer::accept_with_timeout(&listener, MAGIC, DEFAULT_HANDSHAKE_TIMEOUT)
+                    .await
+                    .unwrap();
             let txsub = server.txsubmission();
             txsub.wait_for_init().await.unwrap();
             txsub

@@ -6,6 +6,8 @@ use tracing::info;
 use crate::adapters::DomainAdapter;
 use crate::prelude::*;
 
+pub(crate) mod accept;
+
 #[cfg(feature = "grpc")]
 pub mod grpc;
 
