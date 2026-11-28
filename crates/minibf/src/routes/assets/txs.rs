@@ -147,7 +147,7 @@ mod tests {
     #[tokio::test]
     async fn assets_by_subject_txs_bad_request() {
         let app = TestApp::new();
-        for asset in invalid_assets() {
+        for asset in invalid_assets().into_iter().chain(odd_assets()) {
             let path = format!("/assets/{asset}/txs");
             assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
         }

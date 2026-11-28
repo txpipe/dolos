@@ -757,6 +757,23 @@ pub(crate) fn walks_reference_token(unit: &str) -> bool {
         || matches!(cip68_reference_from_unit(unit), Ok(Some(_)))
 }
 
+/// Gives the 404 of an asset the chain never saw for a subject of a valid
+/// length whose hex has an odd count of digits.
+///
+/// Blockfrost takes such a subject for a valid shape on `/assets/{asset}` and
+/// on `/assets/{asset}/history` only, and no asset has it. Each other route
+/// rejects it with 400, as [`decode_asset_subject`] does.
+pub(crate) fn odd_subject_not_found(subject: &str) -> Result<(), Error> {
+    let valid =
+        (56..=120).contains(&subject.len()) && subject.bytes().all(|c| c.is_ascii_hexdigit());
+
+    if valid && subject.len() % 2 == 1 {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    Ok(())
+}
+
 /// Decodes an asset subject: a 56 hex char policy id plus up to 64 hex chars
 /// of asset name. Blockfrost rejects any other shape with 400 before looking
 /// the asset up.
@@ -1357,6 +1374,39 @@ mod tests {
                     serde_json::to_value(expected_version).unwrap()
                 );
             }
+        }
+    }
+    /// The guard answers only for a subject that is valid but for its odd
+    /// count of digits. It leaves each other subject to the decoder.
+    #[test]
+    fn odd_subject_is_not_found_only_in_a_valid_shape() {
+        for subject in [
+            "f".repeat(57),
+            "F".repeat(119),
+            format!("{}aB1", "0".repeat(56)),
+        ] {
+            assert!(matches!(
+                odd_subject_not_found(&subject),
+                Err(Error::Code(StatusCode::NOT_FOUND))
+            ));
+            assert!(matches!(
+                decode_asset_subject(&subject),
+                Err(Error::InvalidAsset)
+            ));
+        }
+
+        for subject in ["f".repeat(56), "f".repeat(120)] {
+            assert!(odd_subject_not_found(&subject).is_ok());
+            assert!(decode_asset_subject(&subject).is_ok());
+        }
+
+        // too short, too long, and a character that is not a hex digit
+        for subject in ["f".repeat(55), "f".repeat(121), "z".repeat(57)] {
+            assert!(odd_subject_not_found(&subject).is_ok());
+            assert!(matches!(
+                decode_asset_subject(&subject),
+                Err(Error::InvalidAsset)
+            ));
         }
     }
 }

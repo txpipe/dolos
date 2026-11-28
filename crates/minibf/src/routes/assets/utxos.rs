@@ -80,7 +80,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        routes::assets::testing::{assert_status, invalid_assets, missing_asset},
+        routes::assets::testing::{assert_status, invalid_assets, missing_asset, odd_assets},
         test_support::{TestApp, TestFault},
     };
     use dolos_testing::synthetic::SyntheticBlockConfig;
@@ -451,7 +451,7 @@ mod tests {
     #[tokio::test]
     async fn assets_by_subject_utxos_bad_request() {
         let app = TestApp::new();
-        for asset in invalid_assets() {
+        for asset in invalid_assets().into_iter().chain(odd_assets()) {
             let path = format!("/assets/{asset}/utxos");
             assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
         }

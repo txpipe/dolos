@@ -5,7 +5,7 @@ use dolos_core::Domain;
 use crate::{
     error::Error,
     mapping::{
-        assets::{asset_json, load_asset_builder},
+        assets::{asset_json, load_asset_builder, odd_subject_not_found},
         direct_json::DirectJson,
     },
     Facade,
@@ -18,6 +18,8 @@ pub async fn by_subject<D>(
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
+    odd_subject_not_found(&unit)?;
+
     let budget = WalkBudget::new(domain.config.max_scan_items());
     let model = load_asset_builder(&domain, unit, &budget).await?;
 
@@ -326,6 +328,22 @@ mod tests {
         let app = TestApp::new();
         let path = format!("/assets/{}", missing_asset());
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    /// Blockfrost takes a subject with an odd count of hex digits for a valid
+    /// shape here. No asset has such a subject, so it is a 404, not a 400.
+    #[tokio::test]
+    async fn assets_by_subject_odd_subject_not_found() {
+        let app = TestApp::new();
+        let asset = app.vectors().asset_unit.as_str();
+
+        // the asset of the chain with one digit more and one digit less
+        let near = [format!("{asset}0"), asset[..asset.len() - 1].to_string()];
+
+        for subject in odd_assets().into_iter().chain(near) {
+            let path = format!("/assets/{subject}");
+            assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+        }
     }
 
     #[tokio::test]
