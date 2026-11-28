@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.0.0-beta.2] - 2026-11-28
+
+### 🚀 Features
+
+- *(health)* Keep a locked status file while daemon or serve runs (#1680)
+- *(health)* Answer liveness and readiness with `dolos health` (#1681)
+
+### 🐛 Bug Fixes
+
+- *(minibf)* Answer a from or to height past the tip with a page, not a 400 (#1673)
+- *(sync)* Notice a dead upstream while submit is idle (#1678)
+- *(minibf)* Uppercase asset ids (#1675)
+- *(minibf)* Odd length asset ids (#1676)
+
+### 📚 Documentation
+
+- *(minibf)* State Blockfrost conformance and the address-stats size at the beta.1 candidate (#1679)
+- *(health)* Add a health checks page with Kubernetes, systemd and Docker probe recipes (#1682)
+
 ## [2.0.0-beta.1] - 2026-11-23
 
 ### 🚀 Features
@@ -270,6 +289,10 @@ All notable changes to this project will be documented in this file.
 - *(build)* Keep only line tables in dev and test debuginfo (#1459)
 - *(fjall)* Pin fjall 3.1.13 (#1597)
 - *(changelog)* Regenerate with git-cliff (#1641)
+
+### Release
+
+- V2.0.0-beta.1
 
 ## [2.0.0-alpha.0] - 2026-09-11
 
