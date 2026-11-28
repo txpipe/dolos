@@ -13,6 +13,8 @@ rand = "0.9.1"
 hex = "0.4.3"
 tempfile = "3.20.0"
 bech32 = "0.9.1"
+curve25519-dalek = "4.1"
+sha2 = "0.10"
 crc32fast = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "sync", "time"] }
 tokio-stream = { workspace = true }
