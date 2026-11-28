@@ -11,8 +11,8 @@ use std::{collections::BTreeMap, sync::Arc};
 use dolos_cardano::{
     estart::EstartWorkUnit,
     final_rows::{newest_final_row, FinalRow as _},
-    CardanoWorkUnit, DRepExpiry, DRepKey, DRepRegistration, DRepState, EpochState, ProposalAction,
-    ProposalKey, ProposalState, VoteEntry,
+    CardanoWorkUnit, DRepExpiry, DRepKey, DRepRegistration, DRepState, EpochState, PParamValue,
+    PParamsSet, ProposalAction, ProposalKey, ProposalState, VoteEntry,
 };
 use dolos_core::{
     sync::execute_work_unit, ArchiveStore as _, BlockSlot, Domain, DomainError, EntityDelta as _,
@@ -51,7 +51,17 @@ fn proposal(byte: u8, ratified: Option<Epoch>, canceled: Option<Epoch>) -> Propo
         slot: 10 + u64::from(byte),
         tx: [byte; 32].into(),
         idx: u32::from(byte % 2),
-        action: ProposalAction::Info,
+        action: ProposalAction::ParamChange(match byte % 4 {
+            0 => PParamsSet::default(),
+            1 => PParamsSet::default().with(PParamValue::CostModelsUnknown(BTreeMap::new())),
+            2 => PParamsSet::default().with(PParamValue::CostModelsUnknown(BTreeMap::from([(
+                7,
+                vec![1, -2],
+            )]))),
+            _ => PParamsSet::default()
+                .with(PParamValue::CostModelsPlutusV1(vec![]))
+                .with(PParamValue::CostModelsUnknown(BTreeMap::new())),
+        }),
         max_epoch: Some(100),
         ratified_epoch: ratified,
         canceled_epoch: canceled,

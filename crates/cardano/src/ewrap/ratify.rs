@@ -418,18 +418,6 @@ fn pparams_update_drep_threshold(
     thresholds: &DRepVotingThresholds,
     update: &PParamsSet,
 ) -> RationalNumber {
-    // DATA-MODEL-WORKAROUND(dolos#1375): the ledger counts a named but
-    // empty cost-model map in the Technical group, and the frozen v2 model
-    // (decisions 0066/0069) stores no value for it. An empty set can only
-    // be that update: the ledger rejects an update naming no field, and
-    // `conway_to_pparamset` maps every other field to a value. Only Conway
-    // actions reach here (pre-Conway updates have no expiry bound). An
-    // empty map next to other fields is not covered; storing the presence
-    // on `ProposalState` at the next data-model change replaces this.
-    if update.is_empty() {
-        return thresholds.pp_technical_group.clone();
-    }
-
     let mut max = zero_threshold();
 
     for value in update.iter() {
@@ -1024,6 +1012,29 @@ mod tests {
         ProposalAction::ParamChange(PParamsSet::default().with(kind_value))
     }
 
+    #[test]
+    fn cost_models_are_technical_not_security_including_empty_sentinel() {
+        let input = base_input();
+        let run = run_state(&input);
+
+        for value in [
+            PParamValue::CostModelsPlutusV1(vec![1]),
+            PParamValue::CostModelsPlutusV2(vec![2]),
+            PParamValue::CostModelsPlutusV3(vec![3]),
+            PParamValue::CostModelsUnknown(BTreeMap::from([(7, vec![4])])),
+            PParamValue::CostModelsUnknown(BTreeMap::new()),
+        ] {
+            assert_eq!(pparam_drep_group(value.kind()), Some(DRepGroup::Technical));
+            assert!(!pparam_is_security(value.kind()));
+            let action = param_change(value);
+            assert_eq!(drep_threshold(&run, &action), Some(rational(58, 100)));
+            assert_eq!(spo_threshold(&run, &action), Some(zero_threshold()));
+        }
+
+        let absent = ProposalAction::ParamChange(PParamsSet::default());
+        assert_eq!(drep_threshold(&run, &absent), Some(zero_threshold()));
+    }
+
     // §5.3.1 — threshold resolution
 
     /// Each pparam group resolves to its own DRep threshold; an update
@@ -1074,58 +1085,6 @@ mod tests {
         }
         assert!(!pparam_is_security(PParamKind::MaxTxExUnits));
         assert!(!pparam_is_security(PParamKind::KeyDeposit));
-    }
-
-    /// An empty stored set is a named but empty cost-model map: it needs
-    /// the Technical DRep threshold, and no SPO vote (cost models are not
-    /// a security parameter).
-    #[test]
-    fn threshold_resolution_empty_param_change_is_technical() {
-        let input = base_input();
-        let run = run_state(&input);
-
-        let empty = ProposalAction::ParamChange(PParamsSet::default());
-
-        assert_eq!(drep_threshold(&run, &empty), Some(rational(58, 100)));
-        assert_eq!(spo_threshold(&run, &empty), Some(rational(0, 1)));
-
-        // the committee threshold is the committee's own, as for any update
-        assert_eq!(
-            committee_threshold(&input, &run, &empty),
-            committee_threshold(&input, &run, &param_change(PParamValue::MinFeeA(1)))
-        );
-    }
-
-    /// During bootstrap every DRep threshold is zero, the empty set's
-    /// Technical one included.
-    #[test]
-    fn threshold_resolution_empty_param_change_in_bootstrap() {
-        let input = base_input();
-        let mut bootstrap = run_state(&input);
-        bootstrap.pparams.set(PParamValue::ProtocolVersion((9, 0)));
-
-        let empty = ProposalAction::ParamChange(PParamsSet::default());
-
-        assert_eq!(drep_threshold(&bootstrap, &empty), Some(rational(0, 1)));
-        assert_eq!(spo_threshold(&bootstrap, &empty), Some(rational(0, 1)));
-    }
-
-    /// A non-empty set still resolves from the groups it touches alone:
-    /// the empty-set inference adds no Technical group to it.
-    #[test]
-    fn threshold_resolution_non_empty_param_change_unchanged() {
-        let input = base_input();
-        let run = run_state(&input);
-
-        let network = param_change(PParamValue::MaxBlockBodySize(1));
-        let governance = param_change(PParamValue::DrepDeposit(1));
-        let cost_model = param_change(PParamValue::CostModelsPlutusV3(vec![1]));
-
-        assert_eq!(drep_threshold(&run, &network), Some(rational(56, 100)));
-        assert_eq!(drep_threshold(&run, &governance), Some(rational(59, 100)));
-        assert_eq!(drep_threshold(&run, &cost_model), Some(rational(58, 100)));
-        assert_eq!(spo_threshold(&run, &network), Some(rational(65, 100)));
-        assert_eq!(spo_threshold(&run, &governance), Some(rational(0, 1)));
     }
 
     /// CC thresholds: no say on committee-purpose actions, none on Info,
